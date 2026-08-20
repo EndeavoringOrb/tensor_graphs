@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import os
 import argparse
+import os
+
 import numpy as np
 import torch
 from safetensors import safe_open
@@ -192,11 +193,11 @@ def print_table(rows, headers):
         for i, val in enumerate(row):
             col_widths[i] = max(col_widths[i], len(str(val)))
 
-    header_str = " | ".join(f"{str(h):<{col_widths[i]}}" for i, h in enumerate(headers))
+    header_str = " | ".join(f"{h!s:<{col_widths[i]}}" for i, h in enumerate(headers))
     print(header_str)
     print("-" * len(header_str))
     for row in rows:
-        print(" | ".join(f"{str(val):<{col_widths[i]}}" for i, val in enumerate(row)))
+        print(" | ".join(f"{val!s:<{col_widths[i]}}" for i, val in enumerate(row)))
 
 
 def main():

@@ -207,7 +207,7 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D(const std::vector<LogicalId> &inpu
 }
 
 REGISTER_KERNEL("JinaRMSNorm_F32_3D", 2, 2, matchJinaRMSNorm_F32_3D, runJinaRMSNorm_F32_3D,
-                refFactoryJinaRMSNorm_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryJinaRMSNorm_F32_3D, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

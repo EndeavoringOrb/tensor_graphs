@@ -1,9 +1,8 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 #include <cuda_runtime.h>
-#include <math_functions.h>
 
 __global__ void pow_f32_nd_kernel(const float *A, const float *B, float *Out, uint64_t n)
 {
@@ -25,6 +24,7 @@ inline bool matchPowF32_CUDA_ND(const std::vector<TensorNode> &inputs, const Ten
 
 inline void runPowF32_CUDA_ND(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     const float *B = static_cast<const float *>(ctx.inputs[1]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
@@ -36,7 +36,7 @@ inline void runPowF32_CUDA_ND(const KernelContext &ctx)
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    pow_f32_nd_kernel<<<numBlocks, blockSize>>>(A, B, Out, n);
+    pow_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, B, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -56,6 +56,6 @@ inline LogicalId refFactoryPowF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Pow_F32_ND_CUDA", 2, 2, matchPowF32_CUDA_ND, runPowF32_CUDA_ND, refFactoryPowF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Pow_F32_ND_CUDA", 2, 2, matchPowF32_CUDA_ND, runPowF32_CUDA_ND, refFactoryPowF32_ND_CUDA,{0,1}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

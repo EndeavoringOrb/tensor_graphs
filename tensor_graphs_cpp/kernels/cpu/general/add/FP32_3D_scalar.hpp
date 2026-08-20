@@ -65,6 +65,6 @@ inline LogicalId refFactoryAdd3D_Scalar(const std::vector<LogicalId> &inputs, Gr
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_Scalar", 2, 2, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar,
+REGISTER_KERNEL("Add_3D_Scalar", 2, 2, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {0},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1, 1}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

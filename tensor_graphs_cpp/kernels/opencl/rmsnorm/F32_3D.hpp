@@ -36,8 +36,6 @@ inline void runJinaRMSNorm_F32_3D_OpenCL(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue RMSNorm_OpenCL");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)
@@ -105,6 +103,6 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId
 }
 
 REGISTER_KERNEL("JinaRMSNorm_F32_3D_OpenCL", 2, 2, matchJinaRMSNorm_F32_3D_OpenCL, runJinaRMSNorm_F32_3D_OpenCL,
-                refFactoryJinaRMSNorm_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL),
-                {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}},
+                refFactoryJinaRMSNorm_F32_3D_OpenCL, {0}, MemSpace(1, HandleType::OPENCL),
+                {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}},
                 {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

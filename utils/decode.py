@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
-import sys
-import os
 import argparse
+import os
+import sys
 
 
-def load_tokenizer(model_name_or_path: str):
+def load_tokenizer(model_name_or_path: str | list[str] | tuple[str, ...]):
     """
     Attempts to load the tokenizer first using the standard 'transformers' library,
     and falls back to the native 'tokenizers' library if 'transformers' is not available.
-    Supports local paths as well as remote Hugging Face Hub repository IDs.
+    Supports local paths, remote Hugging Face Hub repository IDs, or lists of candidate paths.
     """
+    if isinstance(model_name_or_path, (list, tuple)):
+        last_err = None
+        for candidate in model_name_or_path:
+            try:
+                return load_tokenizer(candidate)
+            except Exception as e:
+                last_err = e
+        raise RuntimeError(
+            f"Could not load tokenizer from candidates '{model_name_or_path}': {last_err}"
+        )
+
     tokenizer = None
     tokenizer_type = None
 
-    # Method 1: Try using transformers (recommended for online model IDs)
-    try:
-        from transformers import AutoTokenizer
-
-        print(f"Loading '{model_name_or_path}' via transformers.AutoTokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        tokenizer_type = "transformers"
-        return tokenizer, tokenizer_type
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"Could not load via transformers: {e}")
-
-    # Method 2: Try using native tokenizers (fast Rust-backed library)
+    # Method 1: Try using native tokenizers (fast Rust-backed library)
     try:
         from tokenizers import Tokenizer
 
         print(f"Loading '{model_name_or_path}' via tokenizers.Tokenizer...")
 
-        # Check if model_name_or_path points to a local directory or file
         if os.path.exists(model_name_or_path):
             if os.path.isdir(model_name_or_path):
                 json_path = os.path.join(model_name_or_path, "tokenizer.json")
@@ -45,27 +42,31 @@ def load_tokenizer(model_name_or_path: str):
             else:
                 tokenizer = Tokenizer.from_file(model_name_or_path)
         else:
-            # Fallback to downloading directly from Hugging Face Hub
             tokenizer = Tokenizer.from_pretrained(model_name_or_path)
 
         tokenizer_type = "tokenizers"
+        return tokenizer, tokenizer_type
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"Could not load via tokenizers: {e}")
+
+    # Method 2: Try using transformers
+    try:
+        from transformers import AutoTokenizer
+
+        print(f"Loading '{model_name_or_path}' via transformers.AutoTokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer_type = "transformers"
         return tokenizer, tokenizer_type
     except ImportError:
         print(
             "Error: Neither 'transformers' nor 'tokenizers' libraries are installed.",
             file=sys.stderr,
         )
-        print(
-            "Please install at least one: 'pip install tokenizers' or 'pip install transformers'",
-            file=sys.stderr,
-        )
         sys.exit(1)
     except Exception as e:
-        print(
-            f"Failed to load tokenizer using native tokenizers library: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        raise RuntimeError(f"Failed to load tokenizer for '{model_name_or_path}': {e}")
 
 
 def parse_token_list(value: str) -> list[int]:
@@ -119,7 +120,7 @@ def main():
         output_text = tokenizer.decode(args.tokens)
         print(f"Tokens to decode: {args.tokens}")
         print(
-            f"Decoded Text: {repr(output_text)}"
+            f"Decoded Text: {output_text!r}"
         )  # repr() helps visually identify newlines (\n) or trailing spaces
     except Exception as e:
         print(f"Error decoding tokens: {e}", file=sys.stderr)
@@ -132,12 +133,12 @@ def main():
                 decoded_tok = tokenizer.decode([tok], skip_special_tokens=False)
             else:
                 decoded_tok = tokenizer.decode([tok], False)
-            print(f"  {tok} = {repr(decoded_tok)}")
+            print(f"  {tok} = {decoded_tok!r}")
         except Exception as e:
             print(f"  {tok} = <Error decoding: {e}>")
 
     # 5. Encode the test text
-    print(f"\nEncoding test text: {repr(args.text)}")
+    print(f"\nEncoding test text: {args.text!r}")
     try:
         encoded_obj = tokenizer.encode(args.text)
         # Check if the returned object has an .ids attribute (native Tokenizer)

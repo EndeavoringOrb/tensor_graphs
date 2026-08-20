@@ -25,6 +25,7 @@ struct Graph
 
     std::unordered_map<LogicalId, InputDataType> input_data_types;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<uint64_t, std::vector<LogicalId>> constantHashIndex;
 
     Graph()
     {
@@ -87,6 +88,25 @@ struct Graph
                        std::source_location loc = std::source_location::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
+        uint64_t dataHash = tg_hash::computeConstantHash(shape, dtype, dataPtr, sizeBytes);
+
+        auto it = constantHashIndex.find(dataHash);
+        if (it != constantHashIndex.end())
+        {
+            for (LogicalId candidateId : it->second)
+            {
+                auto stagingIt = constantStaging.find(candidateId);
+                if (stagingIt == constantStaging.end())
+                    continue;
+
+                const TensorNode &node = getNode(candidateId);
+                if (node.dtype == dtype && node.getShape() == shape && stagingIt->second->size() == sizeBytes &&
+                    (sizeBytes == 0 || std::memcmp(stagingIt->second->data(), dataPtr, sizeBytes) == 0))
+                {
+                    return candidateId;
+                }
+            }
+        }
 
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
@@ -95,10 +115,14 @@ struct Graph
         LogicalId id = node.id;
 
         auto buffer = std::make_shared<std::vector<uint8_t>>(sizeBytes);
-        std::memcpy(buffer->data(), dataPtr, sizeBytes);
+        if (sizeBytes > 0)
+        {
+            std::memcpy(buffer->data(), dataPtr, sizeBytes);
+        }
         constantStaging[id] = buffer;
 
         input_data_types[id] = InputDataType::CONSTANT;
+        constantHashIndex[dataHash].push_back(id);
 
         return id;
     }
@@ -236,7 +260,7 @@ struct Graph
         {
             std::stringstream ss;
             ss << "[Graph.sum] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
-            Error::throw_err(ss.str());
+            Error::throw_err(ss.str(), loc);
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::SUM, "", dtype, {id0, id1}, {}, {}, "", loc);
@@ -249,7 +273,7 @@ struct Graph
         {
             std::stringstream ss;
             ss << "[Graph.max] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
-            Error::throw_err(ss.str());
+            Error::throw_err(ss.str(), loc);
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::MAX, "", dtype, {id0, id1}, {}, {}, "", loc);
@@ -262,7 +286,7 @@ struct Graph
         {
             std::stringstream ss;
             ss << "[Graph.reshape] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
-            Error::throw_err(ss.str());
+            Error::throw_err(ss.str(), loc);
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::RESHAPE, "", dtype, {id0, id1}, {}, {}, "", loc);
@@ -576,7 +600,164 @@ struct Graph
         TensorNode &node = allocateNode(OpType::NOT, "", DType::BOOL, {id0}, {}, {}, "", loc);
         return node.id;
     }
+
+    LogicalId unpack(LogicalId id0, DType dtype, std::source_location loc = std::source_location::current())
+    {
+        TensorNode &node = allocateNode(OpType::UNPACK, "", dtype, {id0}, {}, {}, "", loc);
+        return node.id;
+    }
+
+    // Higher level stuff
+    LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis,
+                     std::source_location loc = std::source_location::current())
+    {
+        if (repeats <= 1)
+            return id;
+        int32_t r = repeats, a = axis;
+        return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32), loc);
+    }
+
+    LogicalId fill(const LogicalId scalar_id, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
+    {
+        std::vector<int32_t> shape_int(shape.begin(), shape.end());
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        return fill(scalar_id, shape_node, loc);
+    }
+
+    LogicalId fill(const float value, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
+    {
+        std::vector<int32_t> shape_int(shape.begin(), shape.end());
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        return fill(constant({1}, &value, DType::FLOAT32), shape_node, loc);
+    }
+
+    LogicalId fill(const int32_t value, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
+    {
+        std::vector<int32_t> shape_int(shape.begin(), shape.end());
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        return fill(constant({1}, &value, DType::INT32), shape_node, loc);
+    }
+
+    LogicalId reshape(LogicalId id, const std::vector<int32_t> &shape,
+                      std::source_location loc = std::source_location::current())
+    {
+        LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32);
+        return reshape(id, shape_node, loc);
+    }
+
+    LogicalId concat(std::vector<LogicalId> ids, uint32_t axis,
+                     std::source_location loc = std::source_location::current())
+    {
+        return concat(ids, constant({1}, &axis, DType::INT32), loc);
+    }
+
+    LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
+    {
+        // 1. Create a zero tensor with matching shape
+        LogicalId zeros = fill(0.0f, shape);
+
+        // 2. Element-wise comparison: (0 < scores) -> BOOL tensor
+        LogicalId is_positive = lt(zeros, scores);
+
+        // 3. Cast BOOL -> FLOAT32 (1.0f for true, 0.0f for false)
+        LogicalId mask_f32 = cast(is_positive, DType::FLOAT32);
+
+        // 4. Element-wise multiply: x * (x > 0)
+        LogicalId relu_scores = mul(scores, mask_f32);
+
+        return relu_scores;
+    }
+
+    LogicalId constant(const std::vector<int32_t> &vals)
+    {
+        return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32);
+    }
 };
+
+inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)
+{
+    // Pass 1: Perform an iterative post-order DFS to establish evaluation order.
+    std::vector<LogicalId> postOrder;
+    std::unordered_set<LogicalId> visited;
+
+    struct StackFrame
+    {
+        LogicalId id;
+        size_t childIdx;
+    };
+
+    std::vector<StackFrame> stack;
+
+    for (LogicalId r : rootIds)
+    {
+        if (visited.count(r))
+            continue;
+
+        visited.insert(r);
+        stack.push_back({r, 0});
+
+        while (!stack.empty())
+        {
+            LogicalId currId = stack.back().id;
+            size_t &childIdx = stack.back().childIdx;
+            const TensorNode &n = graph.getNode(currId);
+
+            if (childIdx < n.child_ids.size())
+            {
+                LogicalId childId = n.child_ids[childIdx++];
+                if (visited.insert(childId).second)
+                {
+                    stack.push_back({childId, 0});
+                }
+            }
+            else
+            {
+                postOrder.push_back(currId);
+                stack.pop_back();
+            }
+        }
+    }
+
+    // Pass 2: Iteratively compute hashes in post-order (leaves -> roots).
+    std::unordered_map<LogicalId, std::string> memo;
+
+    for (LogicalId id : postOrder)
+    {
+        const TensorNode &n = graph.getNode(id);
+        SHA256 sha;
+        sha.update(toString(n.opType));
+        sha.update(":");
+        for (auto s : n.getShape())
+        {
+            sha.update(std::to_string(s) + ",");
+        }
+        sha.update(":");
+        sha.update(toString(n.dtype));
+        if (graph.constantStaging.count(id))
+        {
+            sha.update(":");
+            sha.update(n.contentHash);
+        }
+        for (LogicalId pid : n.child_ids)
+        {
+            sha.update(":");
+            sha.update(memo.at(pid)); // Guaranteed to be computed already
+        }
+        memo[id] = sha.digest();
+    }
+
+    // Final Hash across all root nodes
+    SHA256 finalSha;
+    for (LogicalId r : rootIds)
+    {
+        finalSha.update(memo.at(r));
+    }
+    return finalSha.digest();
+}
 
 inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, LogicalId root2)
 {

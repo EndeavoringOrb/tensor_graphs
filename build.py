@@ -1,23 +1,22 @@
-# build.py
 import argparse
 import hashlib
 import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from tqdm import tqdm
 
 from rich.console import Console
 from rich.panel import Panel
+from tqdm import tqdm
 
 console = Console()
 
-# --- Path Constants ---
 ROOT_DIR = Path("tensor_graphs_cpp")
 GENERATED_DIR = ROOT_DIR / "generated"
 KERNELS_DIR = ROOT_DIR / "kernels"
@@ -25,22 +24,22 @@ KERNELS_DIR = ROOT_DIR / "kernels"
 CORE_DEPENDENCIES = [
     ROOT_DIR / "core" / "types.hpp",
     ROOT_DIR / "core" / "kernels.hpp",
-    ROOT_DIR / "core" / "graph.hpp",
 ]
 
 ALL_TARGETS = [
     "bench.cpp",
+    "chat.cpp",
     "embed.cpp",
     "main.cpp",
     "test.cpp",
     "write_ref_tensors.cpp",
+    "bindings.cpp",
 ]
 
 REGISTER_MACROS = [
     "REGISTER_REF_KERNEL",
     "REGISTER_REF_KERNEL_VIEW",
     "REGISTER_KERNEL",
-    "REGISTER_KERNEL_INPLACE",
     "REGISTER_KERNEL_VIEW",
 ]
 
@@ -54,25 +53,375 @@ LOG_LEVEL_MAP = {
 }
 
 
-# =============================================================================
-# 1. Configuration & Platform Detection
-# =============================================================================
+def strip_cpp_comments_and_strings(text: str) -> str:
+    """Replaces C++ comments and string/char literals with spaces, preserving newlines."""
+
+    def replacer(match):
+        s = match.group(0)
+        return "".join("\n" if c == "\n" else " " for c in s)
+
+    pattern = re.compile(
+        r'\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"|/\*.*?\*/|//[^\r\n]*',
+        re.DOTALL,
+    )
+    return pattern.sub(replacer, text)
+
+
+def extract_macro_call_args(content: str, paren_start: int) -> list[str]:
+    """Extracts top-level comma-separated arguments from a C++ macro call starting at opening parenthesis paren_start."""
+    idx = paren_start + 1
+    depth_paren = 1
+    depth_brace = 0
+    depth_bracket = 0
+    in_string = False
+    string_char = ""
+
+    current_arg = []
+    args = []
+
+    while idx < len(content) and depth_paren > 0:
+        ch = content[idx]
+
+        if in_string:
+            current_arg.append(ch)
+            if ch == string_char and content[idx - 1] != "\\":
+                in_string = False
+        elif ch in ('"', "'"):
+            in_string = True
+            string_char = ch
+            current_arg.append(ch)
+        elif ch == "(":
+            depth_paren += 1
+            current_arg.append(ch)
+        elif ch == ")":
+            depth_paren -= 1
+            if depth_paren > 0:
+                current_arg.append(ch)
+        elif ch == "{":
+            depth_brace += 1
+            current_arg.append(ch)
+        elif ch == "}":
+            depth_brace -= 1
+            current_arg.append(ch)
+        elif ch == "[":
+            depth_bracket += 1
+            current_arg.append(ch)
+        elif ch == "]":
+            depth_bracket -= 1
+            current_arg.append(ch)
+        elif ch == "," and depth_paren == 1 and depth_brace == 0 and depth_bracket == 0:
+            args.append("".join(current_arg).strip())
+            current_arg = []
+        else:
+            current_arg.append(ch)
+        idx += 1
+
+    if current_arg:
+        args.append("".join(current_arg).strip())
+
+    return args
+
+
+def find_vcvarsall() -> str:
+    """Locates Visual Studio vcvarsall.bat across standard installation directories."""
+    if "VCVARS_PATH" in os.environ and Path(os.environ["VCVARS_PATH"]).exists():
+        return os.environ["VCVARS_PATH"]
+
+    candidates = [
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return ""
+
+
+@dataclass
+class CompilerInfo:
+    path: str
+    kind: str  # "clang", "gcc", or "msvc"
+
+    @classmethod
+    def detect(cls) -> "CompilerInfo":
+        cxx_env = os.environ.get("CXX") or os.environ.get("CLANG_CXX")
+        if cxx_env and (shutil.which(cxx_env) or Path(cxx_env).exists()):
+            kind = "clang" if "clang" in Path(cxx_env).name.lower() else "gcc"
+            return cls(path=cxx_env, kind=kind)
+
+        which_clang = shutil.which("clang++")
+        if which_clang:
+            return cls(path=which_clang, kind="clang")
+
+        default_llvm = Path(r"C:\Program Files\LLVM\bin\clang++.exe")
+        if default_llvm.exists():
+            return cls(path=str(default_llvm), kind="clang")
+
+        which_gxx = shutil.which("g++")
+        if which_gxx:
+            return cls(path=which_gxx, kind="gcc")
+
+        which_cl = shutil.which("cl")
+        if which_cl:
+            return cls(path=which_cl, kind="msvc")
+
+        return cls(path="clang++", kind="clang")
+
+
+@dataclass
+class PlatformInfo:
+    os_name: str
+    machine: str
+    is_arm64: bool
+    is_python_arm64: bool
+    is_windows: bool
+    vcvars_path: str
+    cuda_path: str
+    opencl_sdk_path: str
+    compiler: CompilerInfo
+    has_cuda: bool
+    has_opencl: bool
+    cuda_inc_dir: str | None = None
+    cuda_lib_dir: str | None = None
+    opencl_inc_dir: str | None = None
+    opencl_lib_dir: str | None = None
+
+    @classmethod
+    def detect(cls) -> "PlatformInfo":
+        os_name = os.name
+        machine = platform.machine().lower()
+        is_windows = os_name == "nt"
+        is_arm64 = machine in ("aarch64", "arm64")
+
+        python_plat = sysconfig.get_platform().lower()
+        is_python_arm64 = "arm64" in python_plat or "aarch64" in python_plat
+
+        vcvars_path = find_vcvarsall()
+        compiler = CompilerInfo.detect()
+
+        which_nvcc = shutil.which("nvcc")
+        nvcc_cuda_dir = (
+            str(Path(which_nvcc).resolve().parent.parent) if which_nvcc else None
+        )
+
+        cuda_path = os.environ.get(
+            "CUDA_PATH",
+            os.environ.get(
+                "CUDA_HOME",
+                (
+                    nvcc_cuda_dir
+                    or (
+                        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0"
+                        if is_windows
+                        else "/usr/local/cuda"
+                    )
+                ),
+            ),
+        )
+        opencl_sdk_path = os.environ.get("OPENCL_SDK_ROOT", "./OpenCL-SDK/install")
+
+        has_cuda = False
+        cuda_inc_dir = None
+        cuda_lib_dir = None
+
+        cuda_inc_candidates = [
+            Path(cuda_path) / "include",
+            Path("/usr/local/cuda/include"),
+            Path("/opt/cuda/include"),
+            Path("/usr/include"),
+        ]
+        for inc_dir in cuda_inc_candidates:
+            if (inc_dir / "cuda_runtime.h").exists():
+                has_cuda = True
+                cuda_inc_dir = str(inc_dir)
+                break
+
+        if not has_cuda and (which_nvcc is not None or Path(cuda_path).exists()):
+            has_cuda = True
+            cuda_inc_dir = str(Path(cuda_path) / "include")
+
+        if has_cuda:
+            cuda_lib_candidates = [
+                Path(cuda_path) / ("lib/x64" if is_windows else "lib64"),
+                Path(cuda_path) / "lib",
+                Path("/usr/local/cuda/lib64"),
+                Path("/usr/local/cuda/lib"),
+                Path("/usr/lib/x86_64-linux-gnu"),
+            ]
+            for lib_dir in cuda_lib_candidates:
+                if lib_dir.exists():
+                    cuda_lib_dir = str(lib_dir)
+                    break
+
+        has_opencl = False
+        opencl_inc_dir = None
+        opencl_lib_dir = None
+
+        inc_candidates = [
+            Path(opencl_sdk_path) / "include",
+            Path(cuda_path) / "include",
+            Path("/usr/include"),
+            Path("/usr/local/include"),
+            Path("/usr/local/cuda/include"),
+            Path("/opt/cuda/include"),
+        ]
+
+        for env_var in ["CPATH", "CPLUS_INCLUDE_PATH", "INCLUDE"]:
+            if env_var in os.environ:
+                for p in os.environ[env_var].split(os.pathsep):
+                    if p.strip():
+                        inc_candidates.append(Path(p.strip()))
+
+        for inc_dir in inc_candidates:
+            if (inc_dir / "CL" / "cl.h").exists() or (
+                inc_dir / "OpenCL" / "cl.h"
+            ).exists():
+                has_opencl = True
+                opencl_inc_dir = str(inc_dir)
+                break
+
+        lib_candidates = [
+            Path(opencl_sdk_path) / "lib",
+            Path(opencl_sdk_path) / "lib64",
+            Path(cuda_path) / "lib64",
+            Path(cuda_path) / "lib",
+            Path(cuda_path) / "lib/x64",
+            Path("/usr/local/cuda/lib64"),
+            Path("/usr/lib/x86_64-linux-gnu"),
+            Path("/usr/lib64"),
+            Path("/usr/local/lib"),
+        ]
+
+        for env_var in ["LIBRARY_PATH", "LD_LIBRARY_PATH", "LIB"]:
+            if env_var in os.environ:
+                for p in os.environ[env_var].split(os.pathsep):
+                    if p.strip():
+                        lib_candidates.append(Path(p.strip()))
+
+        for lib_dir in lib_candidates:
+            if lib_dir.exists():
+                if any(lib_dir.glob("*OpenCL*")) or any(lib_dir.glob("*opencl*")):
+                    opencl_lib_dir = str(lib_dir)
+                    break
+
+        return cls(
+            os_name=os_name,
+            machine=machine,
+            is_arm64=is_arm64,
+            is_python_arm64=is_python_arm64,
+            is_windows=is_windows,
+            vcvars_path=vcvars_path,
+            cuda_path=cuda_path,
+            opencl_sdk_path=opencl_sdk_path,
+            compiler=compiler,
+            has_cuda=has_cuda,
+            has_opencl=has_opencl,
+            cuda_inc_dir=cuda_inc_dir,
+            cuda_lib_dir=cuda_lib_dir,
+            opencl_inc_dir=opencl_inc_dir,
+            opencl_lib_dir=opencl_lib_dir,
+        )
+
+
+def ensure_toolchain(platform_info: PlatformInfo) -> None:
+    if platform_info.is_windows:
+        has_compiler = (
+            shutil.which(platform_info.compiler.path) is not None
+            or Path(platform_info.compiler.path).exists()
+        )
+        if not has_compiler:
+            console.print(
+                "[yellow]No C++ compiler found. Installing LLVM via winget...[/yellow]"
+            )
+            try:
+                subprocess.run(
+                    [
+                        "winget",
+                        "install",
+                        "--id",
+                        "LLVM.LLVM",
+                        "-e",
+                        "--accept-source-agreements",
+                        "--accept-package-agreements",
+                    ],
+                    check=True,
+                )
+                llvm_bin = Path(r"C:\Program Files\LLVM\bin")
+                if llvm_bin.exists():
+                    os.environ["PATH"] = f"{llvm_bin};" + os.environ.get("PATH", "")
+                    platform_info.compiler = CompilerInfo(
+                        path=str(llvm_bin / "clang++.exe"), kind="clang"
+                    )
+                    console.print(
+                        "[bold green]LLVM/clang++ installed successfully![/bold green]"
+                    )
+            except Exception as e:
+                console.print(
+                    f"[bold red]Auto-installation of LLVM via winget failed: {e}[/bold red]\n"
+                    "[white]Please install LLVM or MinGW manually and add it to your PATH.[/white]"
+                )
+
+        vcvars = find_vcvarsall()
+        platform_info.vcvars_path = vcvars
+        platform_info.compiler = CompilerInfo.detect()
+    else:
+        has_compiler = (
+            shutil.which(platform_info.compiler.path) is not None
+            or shutil.which("clang++") is not None
+            or shutil.which("g++") is not None
+        )
+        if not has_compiler:
+            console.print(
+                "[yellow]No C++ compiler found. Attempting automatic installation...[/yellow]"
+            )
+            if shutil.which("apt-get"):
+                subprocess.run(
+                    "sudo apt-get update && sudo apt-get install -y clang build-essential",
+                    shell=True,
+                    check=False,
+                )
+            elif shutil.which("dnf"):
+                subprocess.run(
+                    ["sudo", "dnf", "install", "-y", "clang", "gcc-c++", "make"],
+                    check=False,
+                )
+            elif shutil.which("pacman"):
+                subprocess.run(
+                    ["sudo", "pacman", "-S", "--noconfirm", "clang", "base-devel"],
+                    check=False,
+                )
+            platform_info.compiler = CompilerInfo.detect()
 
 
 @dataclass
 class BuildConfig:
-    """Holds all compile and build pipeline configuration parameters."""
-
+    cuda_override: int | None = None
+    opencl_override: int | None = None
     use_cuda: bool = False
+    use_opencl: bool = False
     debug: bool = False
     profile: bool = False
     no_lint: bool = False
-    disable_opencl: bool = False
     log_level_str: str = "INFO"
     log_level_val: int = 1
-    targets: List[str] = field(default_factory=lambda: list(ALL_TARGETS))
+    targets: list[str] = field(default_factory=lambda: list(ALL_TARGETS))
 
-    def __post_init__(self):
+    def resolve_overrides(self, platform_info: PlatformInfo):
+        if self.cuda_override is not None:
+            self.use_cuda = bool(self.cuda_override)
+        else:
+            self.use_cuda = platform_info.has_cuda
+
+        if self.opencl_override is not None:
+            self.use_opencl = bool(self.opencl_override)
+        else:
+            self.use_opencl = platform_info.has_opencl
+
         level_upper = self.log_level_str.upper()
         self.log_level_val = LOG_LEVEL_MAP.get(level_upper, 1)
         self.log_level_str = level_upper
@@ -88,65 +437,7 @@ class BuildConfig:
             self.targets = list(ALL_TARGETS)
 
 
-@dataclass
-class PlatformInfo:
-    """Detects host operating system, architecture, and toolchain paths."""
-
-    os_name: str  # "nt" or "posix"
-    machine: str  # e.g. "x86_64", "arm64", "aarch64"
-    is_arm64: bool
-    is_windows: bool
-    vcvars_path: str
-    cuda_path: str
-    opencl_sdk_path: str
-    clang_cpp_path: str
-
-    @classmethod
-    def detect(cls) -> "PlatformInfo":
-        os_name = os.name
-        machine = platform.machine().lower()
-        is_windows = os_name == "nt"
-        is_arm64 = machine in ("aarch64", "arm64")
-
-        # Environment path resolution with sensible fallbacks
-        vcvars_path = os.environ.get(
-            "VCVARS_PATH",
-            r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
-        )
-        cuda_path = os.environ.get(
-            "CUDA_PATH",
-            (
-                r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0"
-                if is_windows
-                else "/usr/local/cuda"
-            ),
-        )
-        opencl_sdk_path = os.environ.get("OPENCL_SDK_ROOT", "./OpenCL-SDK/install")
-        clang_cpp_path = os.environ.get(
-            "CLANG_CXX",
-            r"C:\Program Files\LLVM\bin\clang++.exe" if is_windows else "clang++",
-        )
-
-        return cls(
-            os_name=os_name,
-            machine=machine,
-            is_arm64=is_arm64,
-            is_windows=is_windows,
-            vcvars_path=vcvars_path,
-            cuda_path=cuda_path,
-            opencl_sdk_path=opencl_sdk_path,
-            clang_cpp_path=clang_cpp_path,
-        )
-
-
-# =============================================================================
-# 2. Kernel Linter
-# =============================================================================
-
-
 class KernelLinter:
-    """Validates kernel match logic for redundant manual checks."""
-
     REDUNDANCY_PATTERNS = {
         r"inputs\.size\(\)": (
             "Input Count Check",
@@ -174,29 +465,72 @@ class KernelLinter:
         ),
     }
 
+    EGRAPH_MUTATION_PATTERNS = [
+        r"\baddOpToEGraph\b",
+        r"\baddFusedNode\b",
+        r"\bcopyTo\b",
+        r"\bcreateCacheInputNode\b",
+        r"\binjectPartialPath\b",
+        r"\b\.addEClass\b",
+        r"\b\.addENode\b",
+        r"\b\.merge\b",
+        r"\b\.rebuild\b",
+        r"\b\.getOrAddConstant\b",
+        r"\b\.addIntConst\b",
+    ]
+
     def _validate_kernel_file(self, file_path: Path):
         if not file_path.is_file() or file_path.suffix not in [".hpp", ".cu"]:
             return
         content = file_path.read_text(encoding="utf-8")
+        rel_path = file_path.relative_to(ROOT_DIR)
+        clean_content = strip_cpp_comments_and_strings(content)
 
-        reg_pattern = (
-            r"(REGISTER_[\w_]+)\s*\(\s*.*?\s*,\s*.*?\s*,\s*([\w_]+)\s*,.*?\)\s*;"
-        )
-        registrations = re.findall(reg_pattern, content, re.DOTALL)
+        macro_pattern = re.compile(r"\b(REGISTER_[\w_]+)\s*\(")
+        n_matches = 0
+        for match in macro_pattern.finditer(clean_content):
+            paren_start = match.end() - 1
+            args = extract_macro_call_args(clean_content, paren_start)
 
-        for _, match_func_name in registrations:
-            func_body_pattern = rf"bool\s+{match_func_name}\s*\([^{{]+\{{(.*?)\}}"
-            func_body_match = re.search(func_body_pattern, content, re.DOTALL)
+            if len(args) < 4:
+                continue
 
-            if func_body_match:
-                body = func_body_match.group(1)
+            match_func_name = args[3].strip()
+            if not re.match(r"^[a-zA-Z_]\w*$", match_func_name):
+                continue
+
+            func_def_pattern = re.compile(
+                r"\bbool\s+"
+                + re.escape(match_func_name)
+                + r"\s*\(([\s\S]*?)\)\s*(?:const\s*)?(?:noexcept\s*)?\{",
+                re.MULTILINE,
+            )
+            func_def_match = func_def_pattern.search(clean_content)
+
+            n_matches += 1
+            if func_def_match:
+                start_brace = func_def_match.end() - 1
+                brace_count = 1
+                end_idx = start_brace + 1
+                while end_idx < len(clean_content) and brace_count > 0:
+                    if clean_content[end_idx] == "{":
+                        brace_count += 1
+                    elif clean_content[end_idx] == "}":
+                        brace_count -= 1
+                    end_idx += 1
+
+                body = content[start_brace + 1 : end_idx - 1]
+                body_start = start_brace + 1
+
                 for pattern, (name, reason) in self.REDUNDANCY_PATTERNS.items():
-                    if re.search(pattern, body):
-                        rel_path = file_path.relative_to(ROOT_DIR)
+                    pat_match = re.search(pattern, body)
+                    if pat_match:
+                        match_pos = body_start + pat_match.start()
+                        line_num = content[:match_pos].count("\n") + 1
                         console.print(
                             Panel(
-                                f"[bold red]REDUNDANT LOGIC DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}[/cyan]\n\n"
-                                f"The match function [yellow]{match_func_name}[/yellow] contains a manual [bold]{name}[/bold].\n\n"
+                                f"[bold red]REDUNDANT LOGIC DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
+                                f"The match function [yellow]{match_func_name}[/yellow] contains a manual [bold]{name}[/bold] on line {line_num}.\n\n"
                                 f"[white]Reason:[/white] {reason}\n\n"
                                 f"[white]Fix:[/white] Remove the check from the C++ body. Use registration macro parameters.",
                                 title="Linter Violation",
@@ -204,27 +538,155 @@ class KernelLinter:
                             )
                         )
                         sys.exit(1)
+        if (not file_path.name.endswith("utils.hpp")) and (n_matches == 0):
+            console.print(
+                Panel(
+                    f"[bold red]KERNEL REGISTRATION DETECTION ERROR:[/bold red] no kernel registration found in [cyan]{ROOT_DIR / rel_path}[/cyan]",
+                    title="Linter Error",
+                    border_style="red",
+                )
+            )
 
-    VALIDATORS = [(ROOT_DIR / "kernels", _validate_kernel_file)]
+    def _validate_rewrite_file(self, file_path: Path):
+        if not file_path.is_file() or file_path.suffix not in [
+            ".hpp",
+            ".cu",
+            ".cpp",
+        ]:
+            return
+        content = file_path.read_text(encoding="utf-8")
+        clean_content = strip_cpp_comments_and_strings(content)
+
+        func_pattern = re.compile(
+            r"(?:inline\s+|virtual\s+|static\s+)*(?:void|bool|auto|EClassId|ExtractionResult|CompiledGraph|uint32_t|int|size_t|uint64_t)\s+([a-zA-Z_]\w*)\s*\(([\s\S]*?)\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?\{",
+            re.MULTILINE,
+        )
+
+        for match in func_pattern.finditer(clean_content):
+            func_name = match.group(1)
+            param_str = match.group(2)
+
+            if (
+                ";" in param_str
+                or "= 0" in match.group(0)
+                or "= default" in match.group(0)
+            ):
+                continue
+
+            start_brace = match.end() - 1
+
+            brace_count = 1
+            end_idx = start_brace + 1
+            while end_idx < len(clean_content) and brace_count > 0:
+                if clean_content[end_idx] == "{":
+                    brace_count += 1
+                elif clean_content[end_idx] == "}":
+                    brace_count -= 1
+                end_idx += 1
+
+            func_body = clean_content[start_brace + 1 : end_idx - 1]
+
+            mutation_matches = []
+            for pat in self.EGRAPH_MUTATION_PATTERNS:
+                for m in re.finditer(pat, func_body):
+                    mutation_matches.append(m.start())
+
+            if not mutation_matches:
+                continue
+
+            ref_param_match = re.search(r"\b(const\s+)?(EClass|ENode)\s*&", param_str)
+            if ref_param_match:
+                param_pos = match.start(2) + ref_param_match.start()
+                line_num = content[:param_pos].count("\n") + 1
+                rel_path = file_path.relative_to(ROOT_DIR)
+                console.print(
+                    Panel(
+                        f"[bold red]DANGLING REFERENCE HAZARD DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
+                        f"In function [yellow]{func_name}[/yellow] (line {line_num}):\n"
+                        f"Parameter [bold]{ref_param_match.group(0)}[/bold] is passed by reference in a function that mutates [bold]egraph[/bold].\n\n"
+                        f"[white]Reason:[/white] Modifying the egraph (via addOpToEGraph, addEClass, addENode, merge, etc.) "
+                        f"may cause the underlying std::vector in EGraph to reallocate, invalidating references to EClass or ENode.\n\n"
+                        f"[white]Fix:[/white] Pass EClass and ENode by value (e.g., 'const EClass' instead of 'const EClass &').",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+
+            depths = [0] * len(func_body)
+            curr_d = 1
+            for i, ch in enumerate(func_body):
+                if ch == "{":
+                    curr_d += 1
+                elif ch == "}":
+                    curr_d -= 1
+                depths[i] = curr_d
+
+            ref_patterns = [
+                r"\b(const\s+)?(EClass|ENode)\s*&\s*([a-zA-Z_]\w*)",
+                r"\b(const\s+)?auto\s*&\s*([a-zA-Z_]\w*)\s*=\s*.*?\b(getEClass|getENode|classes|enodes)\b",
+            ]
+
+            for ref_pat in ref_patterns:
+                for local_match in re.finditer(ref_pat, func_body):
+                    ref_start = local_match.start()
+                    ref_end = local_match.end()
+                    decl_depth = depths[ref_start]
+
+                    end_of_block = len(func_body)
+                    for i in range(ref_end, len(func_body)):
+                        if depths[i] < decl_depth:
+                            end_of_block = i
+                            break
+
+                    has_hazard = any(
+                        ref_end <= mut_pos < end_of_block
+                        for mut_pos in mutation_matches
+                    )
+
+                    if has_hazard:
+                        match_pos = (start_brace + 1) + ref_start
+                        line_num = content[:match_pos].count("\n") + 1
+                        rel_path = file_path.relative_to(ROOT_DIR)
+                        console.print(
+                            Panel(
+                                f"[bold red]DANGLING REFERENCE HAZARD DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
+                                f"In function [yellow]{func_name}[/yellow] (line {line_num}):\n"
+                                f"Local variable reference [bold]{local_match.group(0)}[/bold] is active while [bold]egraph[/bold] is mutated.\n\n"
+                                f"[white]Reason:[/white] Modifying the egraph (via addOpToEGraph, addEClass, addENode, merge, etc.) "
+                                f"may cause the underlying std::vector in EGraph to reallocate, invalidating references to EClass or ENode.\n\n"
+                                f"[white]Fix:[/white] Store EClass and ENode by value (e.g., 'const EClass cls = ...' instead of 'const EClass &cls = ...').",
+                                title="Linter Violation",
+                                border_style="red",
+                            )
+                        )
+                        sys.exit(1)
 
     def lint(self, config: BuildConfig):
         if config.no_lint:
             return
 
-        for val_idx, (dir, func) in enumerate(self.VALIDATORS):
-            with tqdm(list(dir.rglob("*")), desc=f"linting [{val_idx+1}/{len(self.VALIDATORS)}]") as pbar:
+        validators = [
+            (ROOT_DIR / "kernels", self._validate_kernel_file),
+            (ROOT_DIR / "core", self._validate_rewrite_file),
+        ]
+
+        for val_idx, (dir_path, func) in enumerate(validators):
+            if not dir_path.exists():
+                continue
+            files = [p for p in dir_path.rglob("*") if p.is_file()]
+            with tqdm(
+                files,
+                desc=f"linting [{val_idx + 1}/{len(validators)}]",
+            ) as pbar:
                 for path in pbar:
                     pbar.set_postfix_str(path.as_posix())
-                    self._validate_kernel_file(path)
-
-
-# =============================================================================
-# 3. Code Generation Pipeline
-# =============================================================================
+                    func(path)
 
 
 class CodeGenerator:
-    """Handles static code and header generation prior to compilation."""
+    def __init__(self, config: BuildConfig):
+        self.config = config
 
     @staticmethod
     def get_file_hash(filepath: Path) -> str:
@@ -273,9 +735,9 @@ class CodeGenerator:
         kernel_uids_json = GENERATED_DIR / "kernel_uids.json"
         kernel_uids_hpp = GENERATED_DIR / "kernel_uids.gen.hpp"
 
-        kernel_entries_cpu: List[Tuple[str, str]] = []
-        kernel_entries_cuda: List[Tuple[str, str]] = []
-        uid_info_map: Dict[str, Dict[str, str]] = {}
+        kernel_entries_cpu: list[tuple[str, str]] = []
+        kernel_entries_cuda: list[tuple[str, str]] = []
+        uid_info_map: dict[str, dict[str, str]] = {}
         hpp_lines = ["#pragma once\n", "#include <cstdint>\n\n"]
 
         kernel_files = sorted(
@@ -288,13 +750,19 @@ class CodeGenerator:
 
         for path in kernel_files:
             rel_path = path.relative_to(ROOT_DIR)
+            inc_path = rel_path.as_posix()
+
+            if not self.config.use_opencl and ("kernels/opencl" in inc_path.lower()):
+                continue
+            if not self.config.use_cuda and ("kernels/cuda" in inc_path.lower()):
+                continue
+
             file_hash = self.get_file_hash(path)
             combined_hash = hashlib.sha256(
                 (core_seed + file_hash).encode("utf-8")
             ).hexdigest()
             uid_hex = f"0x{combined_hash[:16]}"
             uid_val = f"{uid_hex}ULL"
-            inc_path = rel_path.as_posix()
 
             if path.suffix == ".hpp":
                 kernel_entries_cpu.append((inc_path, uid_val))
@@ -305,7 +773,7 @@ class CodeGenerator:
             try:
                 kcontent = path.read_text(encoding="utf-8", errors="ignore")
                 m_name = re.search(
-                    r'REGISTER_KERNEL(?:_INPLACE|_VIEW)?\s*\(\s*"([^"]+)"', kcontent
+                    r'REGISTER_KERNEL(?:_VIEW)?\s*\(\s*"([^"]+)"', kcontent
                 )
                 m_ref = re.search(
                     r"REGISTER_REF_KERNEL(?:_VIEW)?\s*\(\s*OpType::(\w+)", kcontent
@@ -363,7 +831,7 @@ class CodeGenerator:
         console.print(f"[dim]Build Context ID: 0x{ctx_hash[:16]}[/dim]")
 
     def _write_includes_file(
-        self, filepath: Path, entries: List[Tuple[str, str]], is_cu: bool
+        self, filepath: Path, entries: list[tuple[str, str]], is_cu: bool
     ) -> None:
         with open(filepath, "w", encoding="utf-8") as f:
             if not is_cu:
@@ -373,8 +841,7 @@ class CodeGenerator:
 
             for inc_path, uid in sorted(entries):
                 f.write(f"// --- {inc_path} ---\n")
-                for macro in REGISTER_MACROS:
-                    f.write(f"#undef {macro}\n")
+                f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
 
                 uid_str = f"KernelId{{{uid}}}"
                 f.write(
@@ -387,90 +854,138 @@ class CodeGenerator:
                     f"#define REGISTER_KERNEL(name, n_min, n_max, match, run, ref, ...) REGISTER_KERNEL_INTERNAL({uid_str}, name, n_min, n_max, match, run, ref, __VA_ARGS__)\n"
                 )
                 f.write(
-                    f"#define REGISTER_KERNEL_INPLACE(name, n_min, n_max, match, run, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid_str}, name, n_min, n_max, match, run, ref, __VA_ARGS__)\n"
-                )
-                f.write(
                     f"#define REGISTER_KERNEL_VIEW(name, n_min, n_max, match, ref, inferView, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid_str}, name, n_min, n_max, match, ref, inferView, __VA_ARGS__)\n"
                 )
                 f.write(f'#include "{inc_path}"\n\n')
 
             f.write("// --- Clean up macros ---\n")
-            for macro in REGISTER_MACROS:
-                f.write(f"#undef {macro}\n")
-
-
-# =============================================================================
-# 4. Toolchain & Compiler Driver
-# =============================================================================
+            f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
 
 
 class Toolchain:
-    """Assembles flags and executes compiler/linker invocations."""
-
     def __init__(self, config: BuildConfig, platform_info: PlatformInfo):
         self.config = config
         self.platform = platform_info
 
     def get_cxx_binary(self) -> str:
-        if self.platform.is_windows:
-            return f'"{self.platform.clang_cpp_path}"'
-        return "g++"
+        compiler_path = self.platform.compiler.path
+        if (
+            self.platform.is_windows
+            and " " in compiler_path
+            and not compiler_path.startswith('"')
+        ):
+            return f'"{compiler_path}"'
+        return compiler_path
 
     def get_nvcc_binary(self) -> str:
         return "nvcc"
 
-    def get_cxx_flags(self) -> List[str]:
-        flags = [f"-I{ROOT_DIR}", f"-DTG_LOG_LEVEL={self.config.log_level_val}"]
+    def get_cxx_flags(self, is_python_ext: bool = False) -> list[str]:
+        flags = [
+            f"-I{ROOT_DIR}",
+            "-std=c++20",
+            f"-DTG_LOG_LEVEL={self.config.log_level_val}",
+        ]
+        if self.platform.is_windows:
+            flags.append("-DNOMINMAX")
+
+        if self.config.use_opencl:
+            flags.append("-DTG_USE_OPENCL")
+            flags.append("-DCL_TARGET_OPENCL_VERSION=300")
+            if self.platform.opencl_inc_dir:
+                flags.append(f"-I{self.platform.opencl_inc_dir}")
+
+        target_arm64 = (
+            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
+        )
 
         if self.platform.is_windows:
-            if not self.config.use_cuda:
+            if target_arm64 and not self.config.use_cuda:
                 flags.extend(
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
                 )
 
-            opencl_inc = f"{self.platform.opencl_sdk_path}/include"
-            opencl_lib = f"{self.platform.opencl_sdk_path}/lib"
-            flags.extend(
-                [
-                    "-std=c++20",
-                    f"-I{opencl_inc}",
-                    f"-L{opencl_lib}",
-                    "-lOpenCL",
-                    "-DCL_TARGET_OPENCL_VERSION=310",
-                    "-v",
-                ]
-            )
             if self.config.debug:
-                flags.extend(["-g", "-O0", "-DDEBUG"])
+                flags.extend(["-g", "-O0", "-DTG_DEBUG"])
             else:
                 flags.append("-O3")
                 if self.config.profile:
-                    flags.extend(["-g", "-gcodeview", "-Wl,-debug"])
+                    flags.extend(["-g", "-gcodeview"])
         else:
-            flags.extend(["-std=c++20", "-lOpenCL"])
-            if self.platform.is_arm64:
+            if target_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
 
             if self.config.debug:
-                flags.extend(["-g", "-O0", "-DDEBUG", "-fno-omit-frame-pointer"])
+                flags.extend(["-g", "-O0", "-DTG_DEBUG", "-fno-omit-frame-pointer"])
             else:
                 flags.append("-O3")
 
         if self.config.use_cuda:
-            flags.append("-DUSE_CUDA")
-            cuda_inc = (
-                f'"{self.platform.cuda_path}\\include"'
-                if self.platform.is_windows
-                else f"-I{self.platform.cuda_path}/include"
+            flags.append("-DTG_USE_CUDA")
+            cuda_inc = self.platform.cuda_inc_dir or str(
+                Path(self.platform.cuda_path) / "include"
             )
-            flags.append(cuda_inc)
-
-        if self.config.disable_opencl:
-            flags.append("-DTG_DISABLE_OPENCL")
+            if Path(cuda_inc).exists():
+                flags.append(f"-I{cuda_inc}")
 
         return flags
 
-    def get_nvcc_flags(self) -> List[str]:
+    def get_pybind11_flags(self) -> tuple[list[str], list[str], str]:
+        py_includes = (
+            subprocess.check_output(
+                [sys.executable, "-m", "pybind11", "--includes"], text=True
+            )
+            .strip()
+            .split()
+        )
+
+        ext_suffix = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')",
+            ],
+            text=True,
+        ).strip()
+
+        inc_flags = list(py_includes)
+        link_flags = ["-shared"]
+
+        if self.platform.is_windows:
+            py_lib_dir_base = Path(sys.base_prefix) / "libs"
+            py_lib_dir_prefix = Path(sys.prefix) / "libs"
+            link_flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
+            py_version_nodot = f"{sys.version_info.major}{sys.version_info.minor}"
+            link_flags.append(f"-lpython{py_version_nodot}")
+        else:
+            inc_flags.append("-fPIC")
+
+        return [f for f in inc_flags if f], [f for f in link_flags if f], ext_suffix
+
+    def get_ld_flags(self, is_python_ext: bool = False) -> list[str]:
+        flags = []
+        if self.config.use_cuda:
+            if self.platform.cuda_lib_dir:
+                flags.append(f"-L{self.platform.cuda_lib_dir}")
+                if not self.platform.is_windows:
+                    flags.append(f"-Wl,-rpath,{self.platform.cuda_lib_dir}")
+            flags.append("-lcudart")
+
+        if self.config.use_opencl:
+            if self.platform.opencl_lib_dir:
+                flags.append(f"-L{self.platform.opencl_lib_dir}")
+                if not self.platform.is_windows:
+                    flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
+            flags.append("-lOpenCL")
+
+            if self.platform.is_windows and self.config.profile:
+                flags.append("-Wl,-debug")
+
+        if not is_python_ext and not self.config.use_cuda:
+            flags.extend(["-static"])
+        return flags
+
+    def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
             "-std=c++20",
@@ -479,30 +994,52 @@ class Toolchain:
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",
         ]
 
+        if not self.platform.is_windows:
+            flags.extend(["-Xcompiler", "-fPIC"])
+        else:
+            flags.append("-DNOMINMAX")
+
         if self.config.debug:
-            flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
+            flags.extend(["-g", "-G", "-O0", "-DTG_DEBUG"])
         else:
             flags.append("-O3")
 
+        target_arm64 = (
+            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
+        )
+
         if self.config.use_cuda:
-            flags.append("-DUSE_CUDA")
-            if not self.platform.is_windows and self.platform.is_arm64:
+            flags.append("-DTG_USE_CUDA")
+            if not self.platform.is_windows and target_arm64:
                 flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
-        if self.config.disable_opencl:
-            flags.append("-DTG_DISABLE_OPENCL")
+        if self.config.use_opencl:
+            flags.append("-DTG_USE_OPENCL")
 
         return flags
 
-    def run_cmd(self, cmd: List[str]) -> subprocess.CompletedProcess:
+    def run_cmd(
+        self, cmd: list[str], is_python_ext: bool = False
+    ) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
-        if self.platform.is_windows:
-            arch = "amd64" if self.config.use_cuda else "arm64"
+
+        if (
+            self.platform.is_windows
+            and self.platform.compiler.kind in ("clang", "msvc")
+            and self.platform.vcvars_path
+            and Path(self.platform.vcvars_path).exists()
+        ):
+            target_arm64 = (
+                self.platform.is_python_arm64
+                if is_python_ext
+                else self.platform.is_arm64
+            )
+            arch = "arm64" if (target_arm64 and not self.config.use_cuda) else "amd64"
             full_command = f'"{self.platform.vcvars_path}" {arch} && {cmd_str}'
         else:
             full_command = cmd_str
 
-        print(f"Running {full_command}")
+        console.print(f"[dim]Running:[/dim] [cyan]{full_command}[/cyan]")
         result = subprocess.run(
             full_command, capture_output=True, text=True, shell=True
         )
@@ -528,37 +1065,30 @@ class Toolchain:
         return result
 
 
-# =============================================================================
-# 5. Build Orchestrator
-# =============================================================================
-
-
 class BuildOrchestrator:
-    """Coordinates Lint -> CodeGen -> Compile -> Link phases."""
-
     def __init__(self, config: BuildConfig):
-        self.config = config
         self.platform = PlatformInfo.detect()
+        config.resolve_overrides(self.platform)
+        self.config = config
         self.toolchain = Toolchain(config, self.platform)
         self.linter = KernelLinter()
-        self.code_gen = CodeGenerator()
+        self.code_gen = CodeGenerator(config)
 
     def run(self) -> None:
+        ensure_toolchain(self.platform)
+
         console.print(
             f"\n[bold cyan]Starting Build [{'DEBUG' if self.config.debug else 'RELEASE'}] "
-            f"(Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda})...[/bold cyan]\n"
+            f"(Compiler: {self.platform.compiler.path} [{self.platform.compiler.kind}], Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda}, OpenCL: {self.config.use_opencl})...[/bold cyan]\n"
         )
 
-        # 1. Lint Phase
         self.linter.lint(self.config)
 
-        # 2. Code Generation Phase
         core_seed = self.code_gen.generate_core_seed()
         self.code_gen.generate_opencl_strings()
         self.code_gen.generate_kernel_includes(core_seed)
         self.code_gen.generate_build_context()
 
-        # 3. Compilation Phase
         self._compile_project()
 
     def _compile_project(self) -> None:
@@ -567,7 +1097,6 @@ class BuildOrchestrator:
 
         cuda_obj = str(GENERATED_DIR / f"cuda_kernels{obj_ext}")
 
-        # Step 3a: Compile CUDA Object if enabled
         if self.config.use_cuda:
             console.print("\n[bold blue]Compiling CUDA Kernels...[/bold blue]")
             cuda_src = str(GENERATED_DIR / "cuda_kernels.gen.cu")
@@ -576,21 +1105,38 @@ class BuildOrchestrator:
                 + self.toolchain.get_nvcc_flags()
                 + ["-c", cuda_src, "-o", cuda_obj]
             )
-
             res = self.toolchain.run_cmd(cmd)
             self._render_success_panel(res.stdout)
 
-        # Step 3b: Compile each target
         for main_file in self.config.targets:
             console.print(f"\n[bold blue]Compiling {main_file}...[/bold blue]")
             main_src = str(ROOT_DIR / main_file)
             target_stem = main_file.split(".")[0]
+
+            if main_file == "bindings.cpp":
+                py_inc_flags, py_link_flags, ext_suffix = (
+                    self.toolchain.get_pybind11_flags()
+                )
+                out_name = f"tensor_graphs{ext_suffix}"
+                extra_objs = [cuda_obj] if self.config.use_cuda else []
+                cmd = (
+                    [self.toolchain.get_cxx_binary()]
+                    + self.toolchain.get_cxx_flags(is_python_ext=True)
+                    + py_inc_flags
+                    + [main_src]
+                    + extra_objs
+                    + ["-o", out_name]
+                    + py_link_flags
+                    + self.toolchain.get_ld_flags(is_python_ext=True)
+                )
+                res = self.toolchain.run_cmd(cmd, is_python_ext=True)
+                self._render_success_panel(res.stdout)
+                continue
+
             out_name = f"tensor_graphs_cpp/{target_stem}{out_ext}"
 
             if self.config.use_cuda:
                 main_obj = str(GENERATED_DIR / f"{target_stem}{obj_ext}")
-
-                # Compile C++ source to object
                 cmd = (
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags()
@@ -598,30 +1144,22 @@ class BuildOrchestrator:
                 )
                 self.toolchain.run_cmd(cmd)
 
-                # Link objects via NVCC
-                cmd = [
-                    self.toolchain.get_nvcc_binary(),
-                    main_obj,
-                    cuda_obj,
-                    "-o",
-                    out_name,
-                ]
-                if self.platform.is_windows:
-                    opencl_lib = f"{self.platform.opencl_sdk_path}/lib"
-                    cmd.extend([f"-L{opencl_lib}", "-lOpenCL"])
-                else:
-                    cmd.append("-lOpenCL")
-
+                cmd = (
+                    [self.toolchain.get_cxx_binary()]
+                    + [main_obj, cuda_obj, "-o", out_name]
+                    + self.toolchain.get_cxx_flags()
+                    + self.toolchain.get_ld_flags()
+                )
                 if self.platform.is_windows and self.config.debug:
                     cmd.append("-g")
 
                 res = self.toolchain.run_cmd(cmd)
             else:
-                # Direct compile + link
                 cmd = (
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags()
                     + [main_src, "-o", out_name]
+                    + self.toolchain.get_ld_flags()
                 )
                 res = self.toolchain.run_cmd(cmd)
 
@@ -639,14 +1177,22 @@ class BuildOrchestrator:
         )
 
 
-# =============================================================================
-# 6. CLI Entry Point
-# =============================================================================
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="TensorGraph C++ Build System")
-    parser.add_argument("--cuda", action="store_true", help="Enable CUDA build")
+    parser.add_argument(
+        "--cuda",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Override CUDA support: 1 to enable, 0 to disable. Default: auto-detect",
+    )
+    parser.add_argument(
+        "--opencl",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Override OpenCL support: 1 to enable, 0 to disable. Default: auto-detect",
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -659,9 +1205,6 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-lint", action="store_true", help="Skip kernel validation checks"
-    )
-    parser.add_argument(
-        "--disable-opencl", action="store_true", help="Disable OpenCL backend"
     )
     parser.add_argument(
         "--log-level",
@@ -686,16 +1229,16 @@ def main() -> None:
     parser.add_argument(
         "--targets",
         nargs="+",
-        help="Specify which target C++ files to build (e.g. main, bench, test)",
+        help="Specify which target C++ files to build (e.g. main, bench, test, bindings)",
     )
     args = parser.parse_args()
 
     config = BuildConfig(
-        use_cuda=args.cuda,
+        cuda_override=args.cuda,
+        opencl_override=args.opencl,
         debug=args.debug,
         profile=args.profile,
         no_lint=args.no_lint,
-        disable_opencl=args.disable_opencl,
         log_level_str=args.log_level,
         targets=args.targets,
     )

@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -17,13 +18,72 @@ class ThreadPool
         return instance;
     }
 
+    void set_num_threads(uint32_t n)
+    {
+        if (n == 0)
+        {
+            n = std::max(1U, std::thread::hardware_concurrency());
+        }
+
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        if (n == num_threads_ && (threads.size() == n - 1 || n <= 1))
+            return;
+
+        stop = true;
+        condition.notify_all();
+        lock.unlock();
+
+        for (std::thread &worker : threads)
+        {
+            if (worker.joinable())
+                worker.join();
+        }
+
+        lock.lock();
+        threads.clear();
+        while (!tasks.empty())
+            tasks.pop();
+        stop = false;
+        num_threads_ = n;
+
+        if (num_threads_ > 1)
+        {
+            for (uint32_t i = 0; i < num_threads_ - 1; ++i)
+            {
+                threads.emplace_back([this] {
+                    while (true)
+                    {
+                        std::function<void()> task;
+                        {
+                            std::unique_lock<std::mutex> lock(this->queue_mutex);
+                            this->condition.wait(lock, [this] { return this->stop || !this->tasks.empty(); });
+                            if (this->stop && this->tasks.empty())
+                                return;
+                            task = std::move(this->tasks.front());
+                            this->tasks.pop();
+                        }
+                        task();
+                    }
+                });
+            }
+        }
+    }
+
+    uint32_t get_num_threads() const
+    {
+        return num_threads_;
+    }
+
     void parallel_for(uint32_t num_tasks, const std::function<void(uint32_t)> &task)
     {
         if (num_tasks == 0)
             return;
-        if (num_tasks == 1)
+        if (num_tasks == 1 || num_threads_ <= 1 || threads.empty())
         {
-            task(0);
+            for (uint32_t i = 0; i < num_tasks; ++i)
+            {
+                task(i);
+            }
             return;
         }
 
@@ -70,28 +130,7 @@ class ThreadPool
   private:
     ThreadPool() : stop(false)
     {
-        uint32_t num_threads = std::thread::hardware_concurrency();
-        if (num_threads == 0)
-            num_threads = 1;
-
-        for (uint32_t i = 0; i < num_threads - 1; ++i)
-        {
-            threads.emplace_back([this] {
-                while (true)
-                {
-                    std::function<void()> task;
-                    {
-                        std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        this->condition.wait(lock, [this] { return this->stop || !this->tasks.empty(); });
-                        if (this->stop && this->tasks.empty())
-                            return;
-                        task = std::move(this->tasks.front());
-                        this->tasks.pop();
-                    }
-                    task();
-                }
-            });
-        }
+        set_num_threads(0);
     }
 
     ~ThreadPool()
@@ -103,7 +142,8 @@ class ThreadPool
         condition.notify_all();
         for (std::thread &worker : threads)
         {
-            worker.join();
+            if (worker.joinable())
+                worker.join();
         }
     }
 
@@ -112,4 +152,15 @@ class ThreadPool
     std::mutex queue_mutex;
     std::condition_variable condition;
     bool stop;
+    uint32_t num_threads_;
 };
+
+inline void set_num_threads(uint32_t n)
+{
+    ThreadPool::get().set_num_threads(n);
+}
+
+inline uint32_t get_num_threads()
+{
+    return ThreadPool::get().get_num_threads();
+}

@@ -38,44 +38,6 @@ inline void tg_deserialize(BinaryReader &br, RefMetaEntry &val)
     br.read(val.shape);
 }
 
-inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)
-{
-    std::unordered_map<LogicalId, std::string> memo;
-    std::function<std::string(LogicalId)> hashNode = [&](LogicalId id) {
-        if (memo.count(id))
-            return memo[id];
-        const TensorNode &n = graph.getNode(id);
-        SHA256 sha;
-        sha.update(toString(n.opType));
-        sha.update(":");
-        for (auto s : n.getShape())
-        {
-            sha.update(std::to_string(s) + ",");
-        }
-        sha.update(":");
-        sha.update(toString(n.dtype));
-        if (graph.constantStaging.count(id))
-        {
-            sha.update(":");
-            sha.update(n.contentHash);
-        }
-        for (LogicalId pid : n.child_ids)
-        {
-            sha.update(":");
-            sha.update(hashNode(pid));
-        }
-        memo[id] = sha.digest();
-        return memo[id];
-    };
-
-    SHA256 finalSha;
-    for (LogicalId r : rootIds)
-    {
-        finalSha.update(hashNode(r));
-    }
-    return finalSha.digest();
-}
-
 class Repo
 {
     std::string metaPath;
@@ -85,6 +47,7 @@ class Repo
     std::ofstream dataOut;
     std::ofstream metaOut;
     mutable std::ifstream dataIn;
+    mutable std::mutex repoMtx;
     bool readOnly;
     bool valid = false;
 
@@ -152,6 +115,7 @@ class Repo
 
     std::vector<uint8_t> read(LogicalId logicalId) const
     {
+        std::lock_guard<std::mutex> lock(repoMtx);
         if (!has(logicalId))
             return {};
         const auto &e = entries.at(logicalId);
@@ -163,6 +127,7 @@ class Repo
 
     void write(LogicalId logicalId, const TensorView &view, const void *data, uint64_t sizeBytes)
     {
+        std::lock_guard<std::mutex> lock(repoMtx);
         if (readOnly || !valid)
             return;
         if (has(logicalId))

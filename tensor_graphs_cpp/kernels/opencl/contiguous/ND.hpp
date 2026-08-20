@@ -66,8 +66,6 @@ inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
     {
         Error::throw_err("OpenCL: Failed to enqueue Contiguous_OpenCL_ND");
     }
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryContiguous_OpenCL_ND(const std::vector<LogicalId> &inputs, Graph &graph)
@@ -76,9 +74,9 @@ inline LogicalId refFactoryContiguous_OpenCL_ND(const std::vector<LogicalId> &in
 }
 
 REGISTER_KERNEL("Contiguous_OpenCL_ND", 1, 1, matchContiguous_OpenCL_ND, runContiguous_OpenCL_ND,
-                refFactoryContiguous_OpenCL_ND, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
-                {DType::ANY},                       // Input DType
-                {{1024, 640}},                      // Dummy shape
-                {false},                            // Input does NOT require contiguity
-                {{MemSpace(1, HandleType::OPENCL)}} // Input backends
+                refFactoryContiguous_OpenCL_ND, {}, MemSpace(1, HandleType::OPENCL),
+                {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::ANY}, // Input DType
+                {{1024, 640}},                                        // Dummy shape
+                {false},                                              // Input does NOT require contiguity
+                {{MemSpace(1, HandleType::OPENCL)}}                   // Input backends
 );

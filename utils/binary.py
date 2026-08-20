@@ -1,7 +1,6 @@
 # File: utils/binary.py
-import torch
-import struct
 import os
+import struct
 
 OP_TYPES = [
     "INPUT",
@@ -40,17 +39,21 @@ OP_TYPES = [
     "FUSED",
 ]
 
-DTYPES = ["FLOAT32", "INT32", "INT64", "BF16", "BOOL", "ANY"]
+DTYPES = [
+    "FLOAT32",
+    "INT32",
+    "INT64",
+    "BF16",
+    "BOOL",
+    "ANY",
+    "INT8",
+    "E2M1_PACKED_INT8",
+    "E2M1",
+    "F8_E8M0",
+    "F8_E4M3",
+]
 BACKENDS = ["STORAGE", "CPU", "CUDA", "OPENCL"]
 STORAGE_TYPES = ["TRANSIENT", "PERSISTENT", "PINNED"]
-
-DTYPE_MAP = {
-    torch.float32: 0,  # FLOAT32
-    torch.int32: 1,  # INT32
-    torch.int64: 2,  # INT64
-    torch.bfloat16: 3,  # BF16
-    torch.bool: 4,  # BOOL
-}
 
 
 def make_enum_mapper(enum_list):
@@ -254,17 +257,19 @@ class BinaryReader:
         children = self.read_vector(self.read_u32)
         out_buffer = self.read_parallel_buffer()
         in_buffers = self.read_vector(self.read_parallel_buffer)
+        engines = self.read_vector(self.read_engine)
         debug_origin = self.read_string()
         return {
             "eclassId": eclass_id,
-            "nodeId": eclass_id,  # compatibility alias
+            "nodeId": eclass_id,
             "logicalId": logical_id,
             "kernelId": kernel_id,
-            "fullKernelId": kernel_id,  # compatibility alias
+            "fullKernelId": kernel_id,
             "children": children,
-            "inputNodeIds": children,  # compatibility alias
+            "inputNodeIds": children,
             "outBuffer": out_buffer,
             "inBuffers": in_buffers,
+            "engines": engines,
             "debugOrigin": debug_origin,
         }
 

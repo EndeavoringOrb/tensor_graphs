@@ -141,7 +141,7 @@ inline LogicalId refFactoryGemmaRMSNorm(const std::vector<LogicalId> &inputs, Gr
 }
 
 REGISTER_KERNEL("GemmaRMSNorm_F32_3D", 2, 2, matchGemmaRMSNormF32_3D, runGemmaRMSNormF32_3D, refFactoryGemmaRMSNorm,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 8, 2048}, {2048}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

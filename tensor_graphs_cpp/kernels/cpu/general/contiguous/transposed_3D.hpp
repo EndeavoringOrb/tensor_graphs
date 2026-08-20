@@ -98,5 +98,5 @@ inline LogicalId refFactoryContiguousTransposed3D(const std::vector<LogicalId> &
 }
 
 REGISTER_KERNEL("Contiguous_Transposed_3D", 1, 1, matchContiguousTransposed3D, runContiguousTransposed3D,
-                refFactoryContiguousTransposed3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryContiguousTransposed3D, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32}, {{256, 2048, 1024}}, {false}, {{MemSpace(1, HandleType::CPP)}});

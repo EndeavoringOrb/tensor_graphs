@@ -203,6 +203,6 @@ inline LogicalId refFactoryLayerNorm(const std::vector<LogicalId> &inputs, Graph
     return graph.mul(x_sub, inv_std_expanded);
 }
 
-REGISTER_KERNEL("LayerNorm", 1, 1, matchLayerNormF32_3D, runLayerNormF32_3D, refFactoryLayerNorm,
+REGISTER_KERNEL("LayerNorm", 1, 1, matchLayerNormF32_3D, runLayerNormF32_3D, refFactoryLayerNorm, {0},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 3072}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});

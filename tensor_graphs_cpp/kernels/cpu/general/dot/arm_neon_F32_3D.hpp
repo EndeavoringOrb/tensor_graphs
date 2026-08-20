@@ -139,7 +139,7 @@ inline LogicalId refFactoryDotF32_3D_Optimized(const std::vector<LogicalId> &inp
 
 // Register as a high-performance kernel instead of a reference kernel
 REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized,
-                refFactoryDotF32_3D_Optimized, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryDotF32_3D_Optimized, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

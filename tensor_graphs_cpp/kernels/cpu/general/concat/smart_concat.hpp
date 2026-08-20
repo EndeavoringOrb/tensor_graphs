@@ -66,7 +66,7 @@ inline LogicalId refSmartConcat(const std::vector<LogicalId> &inputs, Graph &gra
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Smart_Concat_F32", 2, UINT32_MAX, matchSmartConcat, runSmartConcat, refSmartConcat,
+REGISTER_KERNEL("Smart_Concat_F32", 2, UINT32_MAX, matchSmartConcat, runSmartConcat, refSmartConcat, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32},
                 {{1}, {1, 32, 1, 128}}, {false, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -82,18 +82,19 @@ struct BenchBuffer
 
         if (mem_space.type == HandleType::CUDA)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaError_t err = cudaMalloc(&devicePtr, bytes);
             if (err != cudaSuccess)
             {
                 Error::throw_err("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
             }
 #else
-            Error::throw_err("CUDA backend requested but USE_CUDA is not defined.");
+            Error::throw_err("CUDA backend requested but TG_USE_CUDA is not defined.");
 #endif
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
+#ifdef TG_USE_OPENCL
             OpenCLState::get().init();
             cl_context ctx = OpenCLState::get().context;
             if (!ctx)
@@ -108,6 +109,9 @@ struct BenchBuffer
                 Error::throw_err("clCreateBuffer failed to allocate memory of size " + std::to_string(bytes) +
                                  ". Error: " + std::to_string(err));
             }
+#else
+            Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
+#endif
         }
         else
         {
@@ -119,7 +123,7 @@ struct BenchBuffer
     {
         if (mem_space.type == HandleType::CUDA)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaError_t err = cudaMemcpy(devicePtr, hostData.data(), bytes, cudaMemcpyHostToDevice);
             if (err != cudaSuccess)
             {
@@ -129,6 +133,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
+#ifdef TG_USE_OPENCL
             if (clMem && !hostData.empty())
             {
                 cl_int err = clEnqueueWriteBuffer(OpenCLState::get().queue, clMem,
@@ -139,6 +144,9 @@ struct BenchBuffer
                     Error::throw_err("clEnqueueWriteBuffer failed with error: " + std::to_string(err));
                 }
             }
+#else
+            Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
+#endif
         }
     }
 
@@ -146,7 +154,7 @@ struct BenchBuffer
     {
         if (mem_space.type == HandleType::CUDA)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaError_t err = cudaMemcpy(hostData.data(), devicePtr, bytes, cudaMemcpyDeviceToHost);
             if (err != cudaSuccess)
             {
@@ -156,6 +164,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
+#ifdef TG_USE_OPENCL
             if (clMem && !hostData.empty())
             {
                 cl_int err = clEnqueueReadBuffer(OpenCLState::get().queue, clMem,
@@ -166,6 +175,9 @@ struct BenchBuffer
                     Error::throw_err("clEnqueueReadBuffer failed with error: " + std::to_string(err));
                 }
             }
+#else
+            Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
+#endif
         }
     }
 
@@ -175,17 +187,21 @@ struct BenchBuffer
         {
             if (mem_space.type == HandleType::CUDA)
             {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
                 cudaFree(devicePtr);
 #endif
             }
             else if (mem_space.type == HandleType::OPENCL)
             {
+#ifdef TG_USE_OPENCL
                 if (clMem)
                 {
                     clReleaseMemObject(clMem);
                     clMem = nullptr;
                 }
+#else
+                Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
+#endif
             }
             devicePtr = nullptr;
         }
@@ -322,21 +338,27 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
     return sf;
 }
 
-inline void synchronizeHandle(HandleType handle)
+inline void synchronizeHandle(HandleType handle) // TODO: merge with Synchronizer
 {
     if (handle == HandleType::CUDA)
     {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess)
         {
             Error::throw_err("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
         }
+#else
+        Error::throw_err("CUDA backend requested but TG_USE_CUDA is not defined.");
 #endif
     }
     else if (handle == HandleType::OPENCL)
     {
+#ifdef TG_USE_OPENCL
         clFinish(OpenCLState::get().queue);
+#else
+        Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
+#endif
     }
 }
 
@@ -353,6 +375,23 @@ struct PreparedKernel
     std::vector<TensorView> outViews;
     KernelContext ctx;
     StorageFiles sf;
+
+#ifdef TG_USE_CUDA
+    // Dedicated stream for benchmark/test runs (bypasses the Executor, which normally
+    // provides per-engine streams via KernelContext::cuda_streams).
+    cudaStream_t benchStream = nullptr;
+#endif
+
+    ~PreparedKernel()
+    {
+#ifdef TG_USE_CUDA
+        if (benchStream)
+        {
+            cudaStreamDestroy(benchStream);
+            benchStream = nullptr;
+        }
+#endif
+    }
 
     void prepare(const KernelEntry &kernel, const Record &r,
                  const std::vector<std::vector<uint8_t>> *explicitInputData = nullptr)
@@ -529,6 +568,45 @@ struct PreparedKernel
         {
             ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
         }
+
+#ifdef TG_USE_CUDA
+        // Benchmarking/testing environments bypass the Executor, so provide a valid CUDA
+        // stream here to ensure ctx.cuda_stream() does not throw an out-of-bounds error
+        // when CUDA kernels are run directly through PreparedKernel.
+        {
+            uint32_t cudaDevIdx = 0;
+            bool hasCuda = (r.output_mem_space.type == HandleType::CUDA);
+            if (hasCuda)
+                cudaDevIdx = r.output_mem_space.idx;
+            if (!hasCuda)
+            {
+                for (const auto &ms : r.input_mem_spaces)
+                {
+                    if (ms.type == HandleType::CUDA)
+                    {
+                        hasCuda = true;
+                        cudaDevIdx = ms.idx;
+                        break;
+                    }
+                }
+            }
+
+            if (hasCuda)
+            {
+                cudaSetDevice(cudaDevIdx);
+                if (!benchStream)
+                {
+                    cudaError_t err = cudaStreamCreateWithFlags(&benchStream, cudaStreamNonBlocking);
+                    if (err != cudaSuccess)
+                    {
+                        Error::throw_err("cudaStreamCreateWithFlags failed in PreparedKernel::prepare: " +
+                                         std::string(cudaGetErrorString(err)));
+                    }
+                }
+                ctx.cuda_streams.push_back(reinterpret_cast<void *>(benchStream));
+            }
+        }
+#endif
     }
 
     void updateStorageContext(const KernelEntry &kernel, const Record &r, int runIdx)
@@ -579,3 +657,204 @@ struct PreparedKernel
         }
     }
 };
+
+std::unordered_map<KernelId, std::vector<Record>> loadCallRecords(const std::string &path)
+{
+    std::unordered_map<KernelId, std::vector<Record>> records;
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open())
+        return records;
+
+    BinaryReader br(file);
+    while (file.peek() != EOF)
+    {
+        Record r;
+        br.read(r);
+        records[r.kernelId].push_back(std::move(r));
+    }
+    return records;
+}
+
+struct CacheFile
+{
+    uint32_t version = 0;
+    LogicalId rootId;
+    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::vector<CompiledGraph> compiledGraphs;
+    std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constants;
+    bool isValid = true;
+    std::string invalidReason;
+};
+
+inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernels = false)
+{
+    CacheFile cache;
+    if (cachePath.empty())
+    {
+        cache.isValid = false;
+        cache.invalidReason = "Cache path is empty";
+        return cache;
+    }
+
+    std::ifstream file(cachePath, std::ios::binary);
+    if (!file.is_open())
+    {
+        cache.isValid = false;
+        cache.invalidReason = "Could not open cache file: " + cachePath;
+        return cache;
+    }
+
+    BinaryReader br(file);
+    while (file.peek() != EOF)
+    {
+        uint8_t type = 0;
+        br.read(type);
+
+        if (type == 0) // Metadata
+        {
+            br.read(cache.version);
+            br.read(cache.rootId);
+            br.read(cache.selectedCachedNodes);
+        }
+        else if (type == 1) // Compiled Bucket
+        {
+            CompiledGraph cg;
+            br.read(cg);
+
+            if (validateKernels)
+            {
+                for (const auto &inst : cg.instructions)
+                {
+                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                    {
+                        cache.isValid = false;
+                        cache.invalidReason = "Invalid Kernel ID: " + toString(inst.kernel_id);
+                        break;
+                    }
+                }
+                if (!cache.isValid)
+                    break;
+            }
+            cache.compiledGraphs.push_back(std::move(cg));
+        }
+        else if (type == 2) // Constants
+        {
+            uint32_t count = 0;
+            br.read(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                LogicalId nodeId;
+                std::vector<uint8_t> data;
+                br.read(nodeId);
+                br.read(data);
+                cache.constants[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+            }
+        }
+        else
+        {
+            cache.isValid = false;
+            cache.invalidReason = "Unknown block type";
+            break;
+        }
+    }
+
+    return cache;
+}
+
+inline std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+{
+    std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
+    std::unordered_set<std::string> seen;
+
+    CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/false);
+    if (!cache.isValid)
+    {
+        std::cerr << "Warning: " << cache.invalidReason << std::endl;
+        return recordsByUid;
+    }
+
+    for (const auto &cg : cache.compiledGraphs)
+    {
+        for (const auto &inst : cg.instructions)
+        {
+            if (inst.kernel_id.value == 0 || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                continue;
+
+            Record r;
+            r.kernelId = inst.kernel_id;
+            r.buildContextId = BUILD_CONTEXT_ID;
+            r.hwTag = HW_TAG;
+            r.runTime = 0.0f;
+
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+            r.output_mem_space = kernel.output_mem_space;
+            r.engines = kernel.engines;
+
+            if (cg.nodeViews.count(inst.eclass_id))
+            {
+                const TensorView &outView = cg.nodeViews.at(inst.eclass_id);
+                r.outputShape = outView.getShape();
+                r.outputStrides = outView.strides;
+                r.outputDType = outView.dtype;
+            }
+
+            for (uint32_t i = 0; i < inst.children.size(); i++)
+            {
+                EClassId inId = inst.children[i];
+                if (!cg.nodeViews.count(inId))
+                    continue;
+
+                const TensorView &inView = cg.nodeViews.at(inId);
+                r.inputShapes.push_back(inView.getShape());
+                r.inputStrides.push_back(inView.strides);
+                r.inputDTypes.push_back(inView.dtype);
+
+                uint64_t ruleIdx = std::min(
+                    (uint64_t)i,
+                    static_cast<uint64_t>(kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1));
+                MemSpace ms = {1, HandleType::CPP};
+                if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
+                {
+                    ms = kernel.input_mem_spaces[ruleIdx];
+                }
+                r.input_mem_spaces.push_back(ms);
+
+                if (cg.has_logical_id(inId))
+                {
+                    LogicalId logicalId = cg.get_logical_id(inId);
+                    if (cg.constantStaging.count(EClassId{logicalId.value}))
+                    {
+                        r.inputConstants.push_back(*cg.constantStaging.at(EClassId{logicalId.value}));
+                    }
+                    else if (cg.constantStaging.count(inId))
+                    {
+                        r.inputConstants.push_back(*cg.constantStaging.at(inId));
+                    }
+                    else if (cache.constants.count(logicalId))
+                    {
+                        r.inputConstants.push_back(*cache.constants.at(logicalId));
+                    }
+                    else
+                    {
+                        r.inputConstants.push_back({});
+                    }
+                }
+                else if (cg.constantStaging.count(inId))
+                {
+                    r.inputConstants.push_back(*cg.constantStaging.at(inId));
+                }
+                else
+                {
+                    r.inputConstants.push_back({});
+                }
+            }
+
+            std::string sig = serializeToString(r);
+            if (seen.insert(sig).second)
+            {
+                recordsByUid[r.kernelId].push_back(r);
+            }
+        }
+    }
+    return recordsByUid;
+}

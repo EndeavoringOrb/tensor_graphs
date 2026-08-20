@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
-from flask import Flask, jsonify, request, render_template
+
+from flask import Flask, jsonify, render_template, request
 
 from utils.binary import load_cache_file
 
@@ -87,7 +88,7 @@ def load_file():
             }
         )
     except Exception as e:
-        return jsonify({"error": f"Failed to parse binary file: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to parse binary file: {e!s}"}), 500
 
 
 @app.get("/api/summary")

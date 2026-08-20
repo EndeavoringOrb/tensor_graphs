@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -50,6 +50,7 @@ inline bool matchIm2ColF32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
 }
 
 inline void runIm2ColF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *img = static_cast<const float *>(ctx.inputs[0]);
     int32_t kernel_size = *static_cast<const int32_t *>(ctx.inputs[1]);
     int32_t stride = *static_cast<const int32_t *>(ctx.inputs[2]);
@@ -70,7 +71,7 @@ inline void runIm2ColF32_CUDA_ND(const KernelContext &ctx) {
 
     int blockSize = 256;
     int numBlocks = (total_threads + blockSize - 1) / blockSize;
-    im2col_f32_nd_kernel<<<numBlocks, blockSize>>>(img, col, N, C, H, W, kernel_size, stride, padding, H_out, W_out);
+    im2col_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(img, col, N, C, H, W, kernel_size, stride, padding, H_out, W_out);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -89,6 +90,6 @@ inline LogicalId refFactoryIm2ColF32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.im2col(inputs[0], inputs[1], inputs[2], inputs[3]);
 }
 
-REGISTER_KERNEL("Im2Col_F32_ND_CUDA", 4, 4, matchIm2ColF32_CUDA_ND, runIm2ColF32_CUDA_ND, refFactoryIm2ColF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 3, 64, 64}, {1}, {1}, {1}}, {true, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Im2Col_F32_ND_CUDA", 4, 4, matchIm2ColF32_CUDA_ND, runIm2ColF32_CUDA_ND, refFactoryIm2ColF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 3, 64, 64}, {1}, {1}, {1}}, {true, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

@@ -66,7 +66,7 @@ inline LogicalId refQwenOuterProd(const std::vector<LogicalId> &inputs, Graph &g
 {
     return graph.dot(inputs[0], inputs[1]);
 }
-REGISTER_KERNEL("Qwen_OuterProd_NEON", 2, 2, matchQwenOuterProd, runQwenOuterProd, refQwenOuterProd,
+REGISTER_KERNEL("Qwen_OuterProd_NEON", 2, 2, matchQwenOuterProd, runQwenOuterProd, refQwenOuterProd, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{32, 128, 1}, {32, 1, 128}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

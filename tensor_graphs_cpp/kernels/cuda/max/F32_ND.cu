@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -25,6 +25,7 @@ inline bool matchMaxF32_CUDA_ND(const std::vector<TensorNode> &inputs, const Ten
 }
 
 inline void runMaxF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     int32_t axis = *static_cast<const int32_t *>(ctx.inputs[1]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
@@ -44,7 +45,7 @@ inline void runMaxF32_CUDA_ND(const KernelContext &ctx) {
     
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
-    max_f32_nd_kernel<<<numBlocks, blockSize>>>(A, Out, O, R, I);
+    max_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, O, R, I);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -63,6 +64,6 @@ inline LogicalId refFactoryMaxF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.max(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Max_F32_ND_CUDA", 2, 2, matchMaxF32_CUDA_ND, runMaxF32_CUDA_ND, refFactoryMaxF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Max_F32_ND_CUDA", 2, 2, matchMaxF32_CUDA_ND, runMaxF32_CUDA_ND, refFactoryMaxF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

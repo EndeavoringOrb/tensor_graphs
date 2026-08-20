@@ -21,20 +21,17 @@ class Executor
     {
         uint32_t nInst = compiled.instructions.size();
         bool disableTimer = true;
-#ifdef DEBUG
+#ifdef TG_DEBUG
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
 
-        // Restore bucket-local EGraph constants into the scratchpad
         std::unordered_set<EClassId> restored_constants;
         for (const auto &inst : compiled.instructions)
         {
             for (size_t i = 0; i < inst.children.size(); ++i)
             {
                 EClassId child = inst.children[i];
-
-                // If it has no LogicalId but exists in staging, it's an EGraph-generated constant
                 if (!compiled.has_logical_id(child) && compiled.constantStaging.count(child))
                 {
                     if (restored_constants.insert(child).second)
@@ -46,28 +43,44 @@ class Executor
                 }
             }
         }
-        std::cout << "restored " << std::to_string(restored_constants.size()) << " generated constants" << std::endl;
 
         Synchronizer sync;
 
         for (uint64_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
-
-            if (InterruptManager::isInterrupted())
-            {
-                std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
-                InterruptManager::cleanup();
-                std::exit(SIGINT);
-            }
-
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
-            EngineType current_engine = kernel.engines.empty() ? EngineType::CPU : kernel.engines[0].type;
 
-            sync.syncBefore(inst, current_engine);
+            const std::vector<Engine> &inst_engines = inst.engines;
+            const Engine &primary_engine = inst_engines[0];
+
+            sync.syncBefore(inst, inst_engines);
 
             KernelContext ctx;
+
+#ifdef TG_USE_CUDA
+            int primary_cuda_device = -1;
+
+            for (const Engine &eng : inst_engines)
+            {
+                if (eng.type == EngineType::CUDA_GPU || eng.type == EngineType::CUDA_DMA)
+                {
+                    // The first CUDA engine found becomes our target device for kernel execution
+                    if (primary_cuda_device == -1)
+                    {
+                        primary_cuda_device = static_cast<int>(eng.idx);
+                    }
+                    ctx.cuda_streams.push_back(reinterpret_cast<void *>(sync.getCudaStream(eng)));
+                }
+            }
+
+            // Set the device context exactly once if any CUDA engine is involved
+            if (primary_cuda_device != -1)
+            {
+                cudaSetDevice(primary_cuda_device);
+            }
+#endif
 
             for (uint64_t i = 0; i < inst.children.size(); ++i)
             {
@@ -85,7 +98,6 @@ class Executor
                 inBufObj->setupInput(ctx, inView, logical_id);
             }
 
-            const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             DeviceBuffer *outBufObj = memManager.getBuffer(inst.outBuffer.mem_space);
             if (!outBufObj)
                 Error::throw_err("Output DeviceBuffer not found");
@@ -97,12 +109,6 @@ class Executor
             }
             outBufObj->setupOutput(ctx, outView, logical_id);
 
-#ifdef DEBUG
-            Debug::checkValues(ctx.inputs, ctx.inViews,
-                               "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
-                                   toString(kernel));
-#endif
-
             bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
@@ -110,26 +116,26 @@ class Executor
                 issued_work = true;
             }
 
-            sync.markExecuted(inst, current_engine, issued_work);
-
-#ifdef DEBUG
-            sync.syncAll();
-
-            std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
-            Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
-                               "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
-                                   toString(kernel));
-#endif
+            sync.markExecuted(inst, inst_engines, issued_work);
 
             if (debugCallback)
             {
+                sync.syncEngines(inst_engines);
                 if (outBufObj->mem_space.type == HandleType::CPP)
                 {
                     debugCallback(logical_id, kernel_name, ctx, ctx.outputs[0]);
                 }
+#ifdef TG_USE_CUDA
+                else if (outBufObj->mem_space.type == HandleType::CUDA)
+                {
+                    std::vector<uint8_t> host_copy(countElements(outView) * getDTypeSize(outView.dtype));
+                    cudaSetDevice(outBufObj->mem_space.idx);
+                    cudaMemcpy(host_copy.data(), ctx.outputs[0], host_copy.size(), cudaMemcpyDeviceToHost);
+                    debugCallback(logical_id, kernel_name, ctx, host_copy.data());
+                }
+#endif
             }
 
-            // Cleanup Context
             for (const ParallelBuffer &inBuf : inst.inBuffers)
             {
                 memManager.getBuffer(inBuf.mem_space)->cleanupContext(ctx);
@@ -139,7 +145,6 @@ class Executor
             timer.tick();
         }
 
-        // Final synchronization to ensure all pending work is completed before returning to Python/User
         sync.syncAll();
     }
 };

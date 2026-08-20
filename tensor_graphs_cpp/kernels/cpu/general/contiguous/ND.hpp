@@ -145,5 +145,5 @@ inline LogicalId refFactoryFastContiguous_ND(const std::vector<LogicalId> &input
 }
 
 REGISTER_KERNEL("FastContiguous_ND", 1, 1, matchFastContiguous_ND, runFastContiguous_ND, refFactoryFastContiguous_ND,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false},
+                {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false},
                 {{MemSpace(1, HandleType::CPP)}});

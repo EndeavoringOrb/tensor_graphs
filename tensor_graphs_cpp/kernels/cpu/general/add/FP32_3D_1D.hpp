@@ -66,6 +66,6 @@ inline LogicalId refFactoryAdd3D_1D(const std::vector<LogicalId> &inputs, Graph 
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_1D", 2, 2, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D,
+REGISTER_KERNEL("Add_3D_1D", 2, 2, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D, {0},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

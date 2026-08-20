@@ -36,6 +36,6 @@ inline LogicalId refFactoryPowF32_1D(const std::vector<LogicalId> &inputs, Graph
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Pow_1D", 2, 2, matchPowF32_1D, runPowF32_1D, refFactoryPowF32_1D, MemSpace(1, HandleType::CPP),
+REGISTER_KERNEL("Pow_1D", 2, 2, matchPowF32_1D, runPowF32_1D, refFactoryPowF32_1D, {0, 1}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{2048}, {2048}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -1,9 +1,10 @@
 import os
+import shutil
+
 import torch
 import torch.nn.functional as F
-import shutil
+from binary import DTYPE_MAP, OP_TYPES, BinaryWriter
 from safetensors.torch import save_file
-from binary import OP_TYPES, DTYPE_MAP, BinaryWriter
 
 TEST_DIR = "tensor_graphs_cpp/tests"
 

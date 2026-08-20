@@ -121,7 +121,7 @@ inline LogicalId refFactoryJinaL2Norm_F32_2D(const std::vector<LogicalId> &input
 }
 
 REGISTER_KERNEL("JinaL2Norm_F32_2D", 1, 1, matchJinaL2Norm_F32_2D, runJinaL2Norm_F32_2D, refFactoryJinaL2Norm_F32_2D,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 768}}, {true},
+                {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 768}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

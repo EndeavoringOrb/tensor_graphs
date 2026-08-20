@@ -445,7 +445,7 @@ inline LogicalId refFactoryMoETopKFusedGEMM_StreamingStorage_v3(const std::vecto
 }
 
 REGISTER_KERNEL("MoE_TopK_FusedGEMM_Streaming_v3", 5, 5, matchMoETopKFusedGEMM_v3, runMoETopKFusedGEMM_v3,
-                refFactoryMoETopKFusedGEMM_StreamingStorage_v3, MemSpace(1, HandleType::CPP),
+                refFactoryMoETopKFusedGEMM_StreamingStorage_v3, {}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16, DType::BF16, DType::FLOAT32, DType::INT32},
                 {{1, 8, 2048}, {256, 1024, 2048}, {256, 2048, 512}, {1, 8, 256}, {1, 8, 8}},
                 {true, true, true, true, true},

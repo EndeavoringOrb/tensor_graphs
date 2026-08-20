@@ -63,6 +63,6 @@ inline LogicalId refFactoryExpND(const std::vector<LogicalId> &inputs, Graph &g)
     return g.pow(current_e, x);
 }
 
-REGISTER_KERNEL("Exp_ND_NEON", 1, 1, matchExpND_NEON, runExpND_NEON, refFactoryExpND, MemSpace(1, HandleType::CPP),
+REGISTER_KERNEL("Exp_ND_NEON", 1, 1, matchExpND_NEON, runExpND_NEON, refFactoryExpND, {0}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 256, 128}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});

@@ -1,4 +1,5 @@
 .venv
+.*venv
 *__pycache__
 repomix-output*.txt
 .coverage
@@ -42,6 +43,7 @@ clean.txt
 OpenCL-SDK
 analysis*.txt
 reference_tensors
+*.log
 
 # Profiling artifacts
 profile_output*
@@ -53,6 +55,7 @@ kernel_launches
 tensor_graphs_cpp/tests
 tensor_graphs_cpp/kernels/**/general/generated/*.failed
 kernel_bench/jobs_history.jsonl
+runs
 
 # Compiled binaries
 *.exe
@@ -63,6 +66,7 @@ kernel_bench/jobs_history.jsonl
 *.o
 *.pyd
 *.ilk
+*.lib
 
 # Generated C++ headers
 tensor_graphs_cpp/generated/

@@ -1,5 +1,21 @@
 #pragma once
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#ifdef TG_USE_OPENCL
 #include <CL/cl.h>
+#else
+typedef void *cl_platform_id;
+typedef void *cl_mem;
+typedef void *cl_context;
+typedef void *cl_command_queue;
+typedef void *cl_device_id;
+typedef int cl_int;
+typedef uint64_t cl_ulong;
+typedef uint32_t cl_uint;
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -20,6 +36,14 @@
 #include <vector>
 
 #include "core/serialization.hpp"
+
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
 using json = nlohmann::json;
 
 // TODO: split up into types/tensor_node.hpp, types/...
@@ -45,12 +69,18 @@ using json = nlohmann::json;
 #define TG_ARCH_X64
 #endif
 
+inline std::string toString(std::source_location loc)
+{
+    return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
+}
+
 namespace Error
 {
 template <typename T = std::runtime_error, typename... Args>
-[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
+[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args,
+                                   std::source_location loc = std::source_location::current())
 {
-    std::cerr << "\n[TensorGraph Error] " << msg << std::endl << std::flush;
+    std::cerr << "\n[TensorGraph Error] (" << toString(loc) << ") " << msg << std::endl << std::flush;
     throw T(msg, std::forward<Args>(args)...);
 }
 } // namespace Error
@@ -75,6 +105,7 @@ enum class OpType : uint32_t
     SLICE,
     CONCAT,
     CAST,
+    UNPACK,
     REPEAT,
     ARANGE,
     TRIU,
@@ -93,6 +124,24 @@ enum class OpType : uint32_t
     NOT,
 
     FUSED
+};
+
+// When you add a new DType, remember to update getDTypeSize and toString(DType
+// dtype)
+enum class DType : uint32_t
+{
+    FLOAT32,
+    INT32,
+    INT64,
+    BF16,
+    BOOL,
+    ANY,
+    INT8,
+    E2M1_PACKED_INT8,
+    E2M1,
+    F8_E8M0,
+    F8_E4M3,
+    _COUNT
 };
 
 struct BufferId
@@ -184,7 +233,8 @@ enum class EngineType : uint32_t
 {
     CPU,
     QUALCOMM_IGPU,
-    CUDA_GPU
+    CUDA_GPU,
+    CUDA_DMA
 };
 
 struct MemSpace
@@ -204,6 +254,66 @@ struct MemSpace
         return idx == other.idx && type == other.type;
     }
 };
+
+namespace tg_hash
+{
+inline uint64_t mix64(uint64_t x) noexcept
+{
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+inline void hashCombine(uint64_t &h, uint64_t v) noexcept
+{
+    h ^= mix64(v) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+}
+
+inline uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                                    DType dtype, const void *dataPtr, uint64_t sizeBytes) noexcept
+{
+    uint64_t h = static_cast<uint64_t>(dtype);
+
+    for (uint32_t s : shape)
+        hashCombine(h, static_cast<uint64_t>(s));
+
+    for (uint64_t s : strides)
+        hashCombine(h, s);
+
+    const uint8_t *ptr = static_cast<const uint8_t *>(dataPtr);
+    uint64_t i = 0;
+
+    for (; i + 8 <= sizeBytes; i += 8)
+    {
+        uint64_t val;
+        std::memcpy(&val, ptr + i, 8);
+        hashCombine(h, val);
+    }
+
+    if (i < sizeBytes)
+    {
+        uint64_t val = 0;
+        std::memcpy(&val, ptr + i, sizeBytes - i);
+        hashCombine(h, val);
+    }
+
+    return h;
+}
+
+inline uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                                    DType dtype, const std::vector<uint8_t> &data) noexcept
+{
+    return computeConstantHash(shape, strides, dtype, data.data(), data.size());
+}
+
+inline uint64_t computeConstantHash(const std::vector<uint32_t> &shape, DType dtype, const void *dataPtr,
+                                    uint64_t sizeBytes) noexcept
+{
+    static const std::vector<uint64_t> emptyStrides{};
+    return computeConstantHash(shape, emptyStrides, dtype, dataPtr, sizeBytes);
+}
+} // namespace tg_hash
 
 namespace std
 {
@@ -254,6 +364,7 @@ template <> struct hash<MemSpace>
         return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
     }
 };
+
 } // namespace std
 
 struct Engine
@@ -276,38 +387,52 @@ struct Engine
     }
 };
 
-// When you add a new DType, remember to update getDTypeSize and toString(DType
-// dtype)
-enum class DType : uint32_t
+namespace std
 {
-    FLOAT32,
-    INT32,
-    INT64,
-    BF16,
-    BOOL,
-    ANY,
-    _COUNT
+template <> struct hash<Engine>
+{
+    uint64_t operator()(const Engine &eng) const noexcept
+    {
+        return std::hash<uint32_t>()(eng.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(eng.type)) << 1);
+    }
 };
+} // namespace std
 
-inline uint64_t getDTypeSize(DType dtype)
+inline uint32_t getDTypeNBits(DType dtype)
 {
     switch (dtype)
     {
     case DType::FLOAT32:
-        return 4;
+        return 32;
     case DType::INT32:
-        return 4;
+        return 32;
     case DType::INT64:
-        return 8;
+        return 64;
     case DType::BF16:
-        return 2;
+        return 16;
     case DType::BOOL:
-        return 1;
+        return 8;
     case DType::ANY:
         return 0;
+    case DType::INT8:
+        return 8;
+    case DType::E2M1_PACKED_INT8:
+        return 8;
+    case DType::E2M1:
+        return 4;
+    case DType::F8_E8M0:
+        return 8;
+    case DType::F8_E4M3:
+        return 8;
     default:
-        Error::throw_err("Unknown DType size");
+        Error::throw_err("Unknown DType bits");
     }
+}
+
+inline uint64_t getDTypeSize(DType dtype)
+{
+    uint32_t bits = getDTypeNBits(dtype);
+    return (bits + 7) / 8;
 }
 
 struct ParallelBuffer
@@ -464,8 +589,9 @@ inline uint64_t countElements(const TensorView &view)
 
 struct GraphPatternCacheKey
 {
-    OpType pOpType;
-    std::string pOpName;
+    OpType pRootOpType;
+    std::string pRootOpName;
+    std::string patternHash;
     bool reference_only;
     bool ignore_output_mem_space;
     bool ignore_input_mem_spaces;
@@ -479,8 +605,8 @@ struct GraphPatternCacheKey
 
     bool operator==(const GraphPatternCacheKey &o) const
     {
-        if (pOpType != o.pOpType || pOpName != o.pOpName || reference_only != o.reference_only ||
-            ignore_output_mem_space != o.ignore_output_mem_space ||
+        if (pRootOpType != o.pRootOpType || pRootOpName != o.pRootOpName || patternHash != o.patternHash ||
+            reference_only != o.reference_only || ignore_output_mem_space != o.ignore_output_mem_space ||
             ignore_input_mem_spaces != o.ignore_input_mem_spaces || ignore_engines != o.ignore_engines)
             return false;
         if (inputs.size() != o.inputs.size())
@@ -511,11 +637,13 @@ template <> struct hash<GraphPatternCacheKey>
     uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
     {
         uint64_t h = 0;
-        auto combine = [&](uint64_t val) { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+        auto combine = [&](uint64_t val) { tg_hash::hashCombine(h, val); };
 
-        combine(static_cast<uint64_t>(k.pOpType));
-        if (!k.pOpName.empty())
-            combine(std::hash<std::string>()(k.pOpName));
+        combine(static_cast<uint64_t>(k.pRootOpType));
+        if (!k.pRootOpName.empty())
+            combine(std::hash<std::string>()(k.pRootOpName));
+        if (!k.patternHash.empty())
+            combine(std::hash<std::string>()(k.patternHash));
         combine(static_cast<uint64_t>(k.reference_only));
         combine(static_cast<uint64_t>(k.ignore_output_mem_space));
         combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
@@ -880,6 +1008,16 @@ inline std::string toString(DType dtype)
         return "BOOL";
     case DType::ANY:
         return "ANY";
+    case DType::INT8:
+        return "I8";
+    case DType::E2M1_PACKED_INT8:
+        return "E2M1_PACKED_I8";
+    case DType::E2M1:
+        return "E2M1";
+    case DType::F8_E8M0:
+        return "F8_E8M0";
+    case DType::F8_E4M3:
+        return "F8_E4M3";
     default:
         return "UNKNOWN_DTYPE";
     }
@@ -887,14 +1025,27 @@ inline std::string toString(DType dtype)
 
 inline DType fromString(const std::string &str)
 {
-    for (uint32_t i = 0; i < static_cast<uint32_t>(DType::_COUNT); ++i)
-    {
-        DType dtype = static_cast<DType>(i);
-        if (toString(dtype) == str)
-            return dtype;
-    }
-    Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for
-                                               // that instead of generic runtime_error
+    if (str == "F32")
+        return DType::FLOAT32;
+    if (str == "I32")
+        return DType::INT32;
+    if (str == "I64")
+        return DType::INT64;
+    if (str == "BF16")
+        return DType::BF16;
+    if (str == "BOOL")
+        return DType::BOOL;
+    if (str == "I8")
+        return DType::INT8;
+    if (str == "E2M1")
+        return DType::E2M1;
+    if (str == "E2M1_PACKED_I8")
+        return DType::E2M1_PACKED_INT8;
+    if (str == "F8_E8M0")
+        return DType::F8_E8M0;
+    if (str == "F8_E4M3")
+        return DType::F8_E4M3;
+    Error::throw_err("Unknown dtype: " + str);
 }
 
 inline std::string toString(OpType op) // TODO: make build.py check that each op has a case here
@@ -935,6 +1086,8 @@ inline std::string toString(OpType op) // TODO: make build.py check that each op
         return "CONCAT";
     case OpType::CAST:
         return "CAST";
+    case OpType::UNPACK:
+        return "UNPACK";
     case OpType::REPEAT:
         return "REPEAT";
     case OpType::ARANGE:
@@ -1001,6 +1154,8 @@ inline std::string toString(EngineType engine)
         return "CUDA_GPU";
     case EngineType::QUALCOMM_IGPU:
         return "QUALCOMM_IGPU";
+    case EngineType::CUDA_DMA:
+        return "CUDA_DMA";
     default:
         return "UNKNOWN_ENGINE";
     }
@@ -1251,6 +1406,7 @@ struct OpInstruction
     std::vector<EClassId> children;
     ParallelBuffer outBuffer;
     std::vector<ParallelBuffer> inBuffers;
+    std::vector<Engine> engines;
     std::string debugOrigin;
 };
 
@@ -1442,6 +1598,7 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
     bw.write(val.children);
     bw.write(val.outBuffer);
     bw.write(val.inBuffers);
+    bw.write(val.engines);
     bw.write(val.debugOrigin);
 }
 
@@ -1453,6 +1610,7 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
     br.read(val.children);
     br.read(val.outBuffer);
     br.read(val.inBuffers);
+    br.read(val.engines);
     br.read(val.debugOrigin);
 }
 
@@ -1509,27 +1667,33 @@ struct KernelContext
     std::vector<int> fd;
     std::vector<cl_mem> cl_inputs;
     std::vector<cl_mem> cl_outputs;
+    std::vector<void *> cuda_streams;
 
-    KernelContext()
-    {
-    }
+    KernelContext() = default;
+
     KernelContext(const std::vector<const void *> &_inputs, const std::vector<void *> &_outputs,
-                  const std::vector<TensorView> &_inViews, const std::vector<TensorView> &_outViews)
-        : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews)
+                  const std::vector<TensorView> &_inViews, const std::vector<TensorView> &_outViews,
+                  const std::vector<void *> &_cuda_streams = {})
+        : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews), cuda_streams(_cuda_streams)
     {
-        for (int i = 0; i < inputs.size(); i++)
+        for (size_t i = 0; i < inputs.size(); i++)
         {
             fd.push_back(-1);
             cl_inputs.push_back(nullptr);
         }
-        for (int i = 0; i < outputs.size(); i++)
+        for (size_t i = 0; i < outputs.size(); i++)
         {
             cl_outputs.push_back(nullptr);
         }
     }
-};
 
-inline std::string toString(std::source_location loc)
-{
-    return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
-}
+    void *cuda_stream(size_t idx = 0) const
+    {
+        if (idx >= cuda_streams.size())
+        {
+            Error::throw_err("KernelContext::cuda_stream index out of bounds: requested " + std::to_string(idx) +
+                             ", but size is " + std::to_string(cuda_streams.size()));
+        }
+        return cuda_streams[idx];
+    }
+};

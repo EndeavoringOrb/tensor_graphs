@@ -380,7 +380,7 @@ def print_graph(
             )
 
             # Add Output buffer row
-            shape_str = f"{out_dtype}{str(out_shape)}"
+            shape_str = f"{out_dtype}{out_shape!s}"
             out_ms_idx = out_buf.get("memSpaceIdx", "?")
             out_ms_type = out_buf.get("memSpaceType", "?")
             out_start = out_buf.get("start", "?")
@@ -405,7 +405,7 @@ def print_graph(
                 c_shape = c_view.get("shape", [])
                 c_strides = c_view.get("strides", [])
                 c_dtype = c_view.get("dtype", "?")
-                c_shape_str = f"{c_dtype}{str(c_shape)}"
+                c_shape_str = f"{c_dtype}{c_shape!s}"
 
                 c_buf = in_bufs[c_idx] if c_idx < len(in_bufs) else {}
                 c_ms_idx = c_buf.get("memSpaceIdx", "?")

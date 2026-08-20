@@ -1,15 +1,16 @@
+import argparse
 import json
 import struct
-import argparse
-from tqdm import tqdm
 from pathlib import Path
+
 from huggingface_hub import (
     HfApi,
-    hf_hub_download,
-    get_token,
     ModelInfo,
     get_safetensors_metadata,
+    get_token,
+    hf_hub_download,
 )
+from tqdm import tqdm
 
 
 def format_size(size_bytes):
@@ -57,49 +58,20 @@ def serialize_safetensors_header(file_metadata) -> bytes:
     return header_size_bytes + json_bytes
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Download Hugging Face model metadata and headers of .safetensors files.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "repo_id",
-        type=str,
-        help="Hugging Face repository ID (e.g., Qwen/Qwen3.6-35B-A3B)",
-    )
-    parser.add_argument(
-        "--dir",
-        type=str,
-        default="models_meta",
-        help="Base directory to save the model",
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default="main",
-        help="Model revision / branch / commit hash",
-    )
-    parser.add_argument(
-        "--download-other-files",
-        action="store_true",
-        help="Fully download non-safetensors metadata files (configs, tokenizers, etc.)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Perform a dry run without saving files or downloading actual data",
-    )
-    args = parser.parse_args()
-
+def download_model_meta(
+    repo_id: str,
+    base_dir: str = "models",
+    revision: str = "main",
+    download_other_files: bool = True,
+    dry_run: bool = False,
+):
     token = get_token()
     api = HfApi(token=token)
 
-    print(
-        f"Retrieving file list and metadata for '{args.repo_id}' ({args.revision})..."
-    )
+    print(f"Retrieving file list and metadata for '{repo_id}' ({revision})...")
     repo_info = api.repo_info(
-        repo_id=args.repo_id,
-        revision=args.revision,
+        repo_id=repo_id,
+        revision=revision,
         files_metadata=True,
         token=token,
     )
@@ -108,7 +80,7 @@ def main():
     files = [s.rfilename for s in siblings]
     file_sizes = {s.rfilename: (s.size or 0) for s in siblings}
 
-    local_dir = Path(args.dir) / args.repo_id
+    local_dir = Path(base_dir) / repo_id
     print(f"Target local directory: {local_dir}")
     print(f"Found {len(files)} files in repository.")
 
@@ -119,21 +91,19 @@ def main():
     print(f"  - .safetensors files (headers only): {len(safetensors_files)}")
     print(
         f"  - Other files (full download): {len(other_files)} "
-        f"{'(will be downloaded)' if args.download_other_files else '(will be skipped)'}"
+        f"{'(will be downloaded)' if download_other_files else '(will be skipped)'}"
     )
-    to_process_files = safetensors_files + (
-        other_files if args.download_other_files else []
-    )
+    to_process_files = safetensors_files + (other_files if download_other_files else [])
 
     # Fetch metadata for all safetensors files upfront in a single call
     safetensors_metadata = None
     if safetensors_files:
         print("Fetching safetensors metadata...")
         safetensors_metadata = get_safetensors_metadata(
-            args.repo_id, revision=args.revision, token=token
+            repo_id, revision=revision, token=token
         )
 
-    if args.dry_run:
+    if dry_run:
         print("\n--- DRY RUN ACTIVE: No files will be modified or fully downloaded ---")
 
     total_downloaded_bytes = 0
@@ -163,7 +133,7 @@ def main():
             header_bytes = serialize_safetensors_header(file_meta)
             size_bytes = len(header_bytes)
 
-            if args.dry_run:
+            if dry_run:
                 tqdm.write(
                     f"[DRY RUN] Would generate {file_type}: {filename} "
                     f"({format_size(size_bytes)})"
@@ -176,17 +146,17 @@ def main():
                 )
         else:
             size_bytes = file_sizes.get(filename, 0)
-            if args.dry_run:
+            if dry_run:
                 tqdm.write(
                     f"[DRY RUN] Would download {file_type}: {filename} "
                     f"({format_size(size_bytes)})"
                 )
             else:
                 hf_hub_download(
-                    repo_id=args.repo_id,
+                    repo_id=repo_id,
                     filename=filename,
                     local_dir=local_dir,
-                    revision=args.revision,
+                    revision=revision,
                     token=token,
                 )
                 size_bytes = local_path.stat().st_size
@@ -197,8 +167,51 @@ def main():
         total_downloaded_bytes += size_bytes
 
     print("\nDownload process completed.")
-    status_label = "simulated download" if args.dry_run else "downloaded"
+    status_label = "simulated download" if dry_run else "downloaded"
     print(f"Total {status_label} size: {format_size(total_downloaded_bytes)}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download Hugging Face model metadata and headers of .safetensors files.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "repo_id",
+        type=str,
+        help="Hugging Face repository ID (e.g., Qwen/Qwen3.6-35B-A3B)",
+    )
+    parser.add_argument(
+        "--dir",
+        type=str,
+        default="models",
+        help="Base directory to save the model",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default="main",
+        help="Model revision / branch / commit hash",
+    )
+    parser.add_argument(
+        "--download-other-files",
+        action="store_true",
+        help="Fully download non-safetensors metadata files (configs, tokenizers, etc.)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Perform a dry run without saving files or downloading actual data",
+    )
+    args = parser.parse_args()
+
+    download_model_meta(
+        repo_id=args.repo_id,
+        base_dir=args.dir,
+        revision=args.revision,
+        download_other_files=args.download_other_files,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

@@ -18,8 +18,14 @@ dependencies = [
     "torch",
     "safetensors",
     "hf_xet",
+    "transformers>=4.57.6",
     "rich>=15.0.0",
     "ruff>=0.16.1",
+    "flask>=3.1.3",
+    "pydantic>=2.13.4",
+    "pybind11>=3.0.4",
+    "psutil>=7.2.2",
+    "matplotlib>=3.9.4",
 ]
 
 [tool.setuptools.packages.find]

@@ -46,7 +46,7 @@ inline LogicalId refFactoryDivND_Fast(const std::vector<LogicalId> &inputs, Grap
     return graph.div(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Div_ND_NEON_Threaded", 2, 2, matchDivF32_ND_Fast, runDivF32_ND_Fast, refFactoryDivND_Fast,
+REGISTER_KERNEL("Div_ND_NEON_Threaded", 2, 2, matchDivF32_ND_Fast, runDivF32_ND_Fast, refFactoryDivND_Fast, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 24, 1536, 1536}, {1, 24, 1536, 1536}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

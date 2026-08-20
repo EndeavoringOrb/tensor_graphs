@@ -462,7 +462,7 @@ inline LogicalId refFactoryDotF32_3D_N64(const std::vector<LogicalId> &inputs, G
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_CPU_Neon_N64", 2, 2, matchDotF32_3D_N64, runDotF32_3D_N64, refFactoryDotF32_3D_N64,
+REGISTER_KERNEL("Dot_F32_3D_CPU_Neon_N64", 2, 2, matchDotF32_3D_N64, runDotF32_3D_N64, refFactoryDotF32_3D_N64, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 8, 8}, {1, 8, 64}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

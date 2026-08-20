@@ -1,7 +1,8 @@
-from pydantic import GetCoreSchemaHandler
-from pydantic_core import core_schema
-from pydantic.dataclasses import dataclass
 from enum import Enum
+
+from pydantic import GetCoreSchemaHandler
+from pydantic.dataclasses import dataclass
+from pydantic_core import core_schema
 
 
 def prefixed_enum[E: Enum](cls: type[E]):

@@ -27,8 +27,6 @@ inline void runSoftmaxF32_4D_OpenCL(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Softmax_4D_OpenCL");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactorySoftmax4D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)
@@ -62,5 +60,6 @@ inline LogicalId refFactorySoftmax4D_OpenCL(const std::vector<LogicalId> &inputs
 }
 
 REGISTER_KERNEL("Softmax_4D_OpenCL", 1, 1, matchSoftmaxF32_4D_OpenCL, runSoftmaxF32_4D_OpenCL,
-                refFactorySoftmax4D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
-                {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true}, {{MemSpace(1, HandleType::OPENCL)}});
+                refFactorySoftmax4D_OpenCL, {0}, MemSpace(1, HandleType::OPENCL),
+                {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true},
+                {{MemSpace(1, HandleType::OPENCL)}});

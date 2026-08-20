@@ -54,14 +54,6 @@ class Qwen3_6_35B_A3B_Model
     LogicalId eps_fp32;
     LogicalId half_fp32;
 
-    LogicalId repeat_ax(LogicalId id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return id;
-        int32_t r = repeats, a = axis;
-        return g.repeat(id, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
-    }
-
   public:
     Qwen3_6_35B_A3B_Model(Qwen3_6_35B_A3B_Config config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
                           const std::string &weight_path)
@@ -80,39 +72,17 @@ class Qwen3_6_35B_A3B_Model
         return g.cast(raw_weight, DType::FLOAT32);
     }
 
-    LogicalId repeat_3d_axis(LogicalId tensor_id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return tensor_id;
-        int32_t rep[] = {(int32_t)repeats};
-        LogicalId rep_node = g.constant({1}, rep, DType::INT32);
-        int32_t ax[] = {(int32_t)axis};
-        LogicalId ax_node = g.constant({1}, ax, DType::INT32);
-        return g.repeat(tensor_id, rep_node, ax_node);
-    }
-
-    LogicalId repeat_4d_axis(LogicalId tensor_id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return tensor_id;
-        int32_t rep[] = {(int32_t)repeats};
-        LogicalId rep_node = g.constant({1}, rep, DType::INT32);
-        int32_t ax[] = {(int32_t)axis};
-        LogicalId ax_node = g.constant({1}, ax, DType::INT32);
-        return g.repeat(tensor_id, rep_node, ax_node);
-    }
-
     LogicalId expand_scalar_to_3d(LogicalId scalar_id, uint32_t dim0, uint32_t dim1, uint32_t dim2)
     {
         int32_t shape_3d[] = {1, 1, 1};
         LogicalId shape_3d_node = g.constant({3}, shape_3d, DType::INT32);
         LogicalId out = g.reshape(scalar_id, shape_3d_node);
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = g.repeat(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = g.repeat(out, dim1, 1);
         if (dim2 > 1)
-            out = repeat_3d_axis(out, dim2, 2);
+            out = g.repeat(out, dim2, 2);
         return out;
     }
 
@@ -128,13 +98,13 @@ class Qwen3_6_35B_A3B_Model
         int32_t sh4[] = {1, 1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({4}, sh4, DType::INT32));
         if (d0 > 1)
-            out = repeat_4d_axis(out, d0, 0);
+            out = g.repeat(out, d0, 0);
         if (d1 > 1)
-            out = repeat_4d_axis(out, d1, 1);
+            out = g.repeat(out, d1, 1);
         if (d2 > 1)
-            out = repeat_4d_axis(out, d2, 2);
+            out = g.repeat(out, d2, 2);
         if (d3 > 1)
-            out = repeat_4d_axis(out, d3, 3);
+            out = g.repeat(out, d3, 3);
         return out;
     }
 
@@ -142,7 +112,7 @@ class Qwen3_6_35B_A3B_Model
     {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh1[] = {1};
-        return repeat_3d_axis(g.reshape(node, g.constant({1}, sh1, DType::INT32)), d0, 0);
+        return g.repeat(g.reshape(node, g.constant({1}, sh1, DType::INT32)), d0, 0);
     }
 
     LogicalId expand_1d_to_3d(LogicalId vec_id, uint32_t vec_len, uint32_t dim0, uint32_t dim1)
@@ -151,9 +121,9 @@ class Qwen3_6_35B_A3B_Model
         LogicalId shape_3d_node = g.constant({3}, shape_3d, DType::INT32);
         LogicalId out = g.reshape(vec_id, shape_3d_node);
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = g.repeat(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = g.repeat(out, dim1, 1);
         return out;
     }
 
@@ -194,7 +164,7 @@ class Qwen3_6_35B_A3B_Model
         int32_t axis_val = -1;
         LogicalId axis_node = g.constant({1}, &axis_val, DType::INT32);
         LogicalId max_scores = g.max(scores, axis_node);
-        LogicalId max_expanded = repeat_3d_axis(max_scores, dim_size, 2);
+        LogicalId max_expanded = g.repeat(max_scores, dim_size, 2);
         LogicalId shifted_scores = g.add(scores, g.neg(max_expanded));
 
         float e_val = 2.718281828459045f;
@@ -202,7 +172,7 @@ class Qwen3_6_35B_A3B_Model
         LogicalId exp_scores = g.pow(e_node, shifted_scores);
 
         LogicalId sum_exp = g.sum(exp_scores, axis_node);
-        LogicalId sum_exp_expanded = repeat_3d_axis(sum_exp, dim_size, 2);
+        LogicalId sum_exp_expanded = g.repeat(sum_exp, dim_size, 2);
 
         return g.div(exp_scores, sum_exp_expanded);
     }
@@ -225,7 +195,7 @@ class Qwen3_6_35B_A3B_Model
         LogicalId std = g.pow(mean_sq_plus_eps, sqrt_node);
         LogicalId one_node = expand_scalar_to_3d(one_fp32, dim0, seq_len, 1);
         LogicalId inv_std = g.div(one_node, std);
-        LogicalId inv_std_expanded = repeat_3d_axis(inv_std, dim_size, 2);
+        LogicalId inv_std_expanded = g.repeat(inv_std, dim_size, 2);
         LogicalId x_norm = g.mul(x_id, inv_std_expanded);
         LogicalId weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
 
@@ -245,12 +215,12 @@ class Qwen3_6_35B_A3B_Model
         LogicalId mean_sq = g.div(sum_sq, expand_scalar_to_3d((float)dims, 1, cur_seq_len, 1));
         LogicalId var = g.add(mean_sq, expand_scalar_to_3d(1e-6f, 1, cur_seq_len, 1));
         LogicalId std = g.pow(var, expand_scalar_to_3d(0.5f, 1, cur_seq_len, 1));
-        LogicalId inv_std = repeat_ax(g.div(expand_scalar_to_3d(1.0f, 1, cur_seq_len, 1), std), dims, 2);
+        LogicalId inv_std = g.repeat(g.div(expand_scalar_to_3d(1.0f, 1, cur_seq_len, 1), std), dims, 2);
         LogicalId x_norm = g.mul(x, inv_std);
 
         LogicalId w = weight(w_path, w_name);
         int32_t sh3[] = {1, 1, (int32_t)dims};
-        LogicalId w_exp = repeat_ax(g.reshape(w, g.constant({3}, sh3, DType::INT32)), cur_seq_len, 1);
+        LogicalId w_exp = g.repeat(g.reshape(w, g.constant({3}, sh3, DType::INT32)), cur_seq_len, 1);
 
         LogicalId x_norm_scaled = g.mul(x_norm, w_exp);
 
@@ -312,13 +282,13 @@ class Qwen3_6_35B_A3B_Model
             // [seq_len] → [1, seq_len, 1], repeat on axis 2 → [1, seq_len, half_dim]
             int32_t pos_shape[] = {1, seq_len_i, 1};
             LogicalId pos_col = g.reshape(pos_1d, g.constant({3}, pos_shape, DType::INT32));
-            LogicalId pos_expanded = repeat_3d_axis(pos_col, half_dim_i, 2);
+            LogicalId pos_expanded = g.repeat(pos_col, half_dim_i, 2);
 
             // [half_dim] → [1, 1, half_dim], repeat on axis 1 → [1, seq_len,
             // half_dim]
             int32_t freq_shape[] = {1, 1, half_dim_i};
             LogicalId freq_row = g.reshape(inv_freq, g.constant({3}, freq_shape, DType::INT32));
-            LogicalId freq_expanded = repeat_3d_axis(freq_row, seq_len_i, 1);
+            LogicalId freq_expanded = g.repeat(freq_row, seq_len_i, 1);
 
             return g.mul(pos_expanded, freq_expanded); // [1, seq_len, half_dim]
         };
@@ -408,8 +378,8 @@ class Qwen3_6_35B_A3B_Model
         LogicalId rotated = g.concat({neg_x_second, x_first}, g.constant({1}, &ax2, DType::INT32));
 
         // -------- 4. Broadcast cos/sin over the head axis --------
-        LogicalId cos_expanded = repeat_3d_axis(cos_id, n_groups, 0);
-        LogicalId sin_expanded = repeat_3d_axis(sin_id, n_groups, 0);
+        LogicalId cos_expanded = g.repeat(cos_id, n_groups, 0);
+        LogicalId sin_expanded = g.repeat(sin_id, n_groups, 0);
 
         // -------- 5. Apply rotation: out = x_rope * cos + rotated * sin --------
         LogicalId term1 = g.mul(x_rope, cos_expanded);
@@ -442,8 +412,8 @@ class Qwen3_6_35B_A3B_Model
         LogicalId neg_inf_node = g.constant({1}, &neg_inf_val, DType::FLOAT32);
         int32_t neg_inf_shape[] = {1, 1};
         LogicalId neg_inf_reshaped = g.reshape(neg_inf_node, g.constant({2}, neg_inf_shape, DType::INT32));
-        LogicalId neg_inf_expanded = repeat_3d_axis(neg_inf_reshaped, seq_len, 0);
-        neg_inf_expanded = repeat_3d_axis(neg_inf_expanded, seq_len, 1);
+        LogicalId neg_inf_expanded = g.repeat(neg_inf_reshaped, seq_len, 0);
+        neg_inf_expanded = g.repeat(neg_inf_expanded, seq_len, 1);
         LogicalId scaled_mask = g.mul(triu_mask, neg_inf_expanded);
         int32_t final_shape[] = {1, (int32_t)seq_len, (int32_t)seq_len};
         return g.reshape(scaled_mask, g.constant({3}, final_shape, DType::INT32));
@@ -575,12 +545,12 @@ class Qwen3_6_35B_A3B_Model
         k_t = g.contiguous(k_t);
 
         LogicalId scores = g.dot(scaled_q, k_t);
-        LogicalId mask_expanded = repeat_3d_axis(mask_id, cfg.attn_n_q_heads, 0);
+        LogicalId mask_expanded = g.repeat(mask_id, cfg.attn_n_q_heads, 0);
         scores = g.add(scores, mask_expanded);
 
         int32_t axis_val = -1;
         LogicalId max_scores = g.max(scores, g.constant({1}, &axis_val, DType::INT32));
-        max_scores = repeat_3d_axis(max_scores, seq_len, 2);
+        max_scores = g.repeat(max_scores, seq_len, 2);
         LogicalId shifted_scores = g.add(scores, g.neg(max_scores));
 
         float e_val = 2.718281828459045f;
@@ -589,7 +559,7 @@ class Qwen3_6_35B_A3B_Model
         LogicalId exp_scores = g.pow(e_node, shifted_scores);
 
         LogicalId sum_exp = g.sum(exp_scores, g.constant({1}, &axis_val, DType::INT32));
-        sum_exp = repeat_3d_axis(sum_exp, seq_len, 2);
+        sum_exp = g.repeat(sum_exp, seq_len, 2);
 
         LogicalId probs = g.div(exp_scores, sum_exp);
         LogicalId context = g.dot(probs, v);
@@ -729,10 +699,10 @@ class Qwen3_6_35B_A3B_Model
                                            g.constant({3}, we3, DType::INT32), g.constant({3}, w_steps, DType::INT32))),
                       w_reshape);
 
-        LogicalId w0_exp = repeat_3d_axis(w0, seq_len, 2);
-        LogicalId w1_exp = repeat_3d_axis(w1, seq_len, 2);
-        LogicalId w2_exp = repeat_3d_axis(w2, seq_len, 2);
-        LogicalId w3_exp = repeat_3d_axis(w3, seq_len, 2);
+        LogicalId w0_exp = g.repeat(w0, seq_len, 2);
+        LogicalId w1_exp = g.repeat(w1, seq_len, 2);
+        LogicalId w2_exp = g.repeat(w2, seq_len, 2);
+        LogicalId w3_exp = g.repeat(w3, seq_len, 2);
 
         LogicalId term0 = g.mul(padded_t3, w0_exp);
         LogicalId term1 = g.mul(padded_t2, w1_exp);
@@ -772,7 +742,7 @@ class Qwen3_6_35B_A3B_Model
 
         int32_t ba_reshape_shape[] = {1, 1, (int32_t)cfg.linear_n_v_heads};
         LogicalId dt_bias_3d =
-            repeat_3d_axis(g.reshape(dt_bias, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
+            g.repeat(g.reshape(dt_bias, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
         LogicalId a_plus_dt_bias = g.add(a, dt_bias_3d);
 
         LogicalId exp_x = g.pow(expand_scalar_to_3d(2.7182818f, 1, seq_len, cfg.linear_n_v_heads), a_plus_dt_bias);
@@ -781,7 +751,7 @@ class Qwen3_6_35B_A3B_Model
 
         LogicalId A_log_exp = g.pow(expand_scalar_to_1d(2.7182818f, cfg.linear_n_v_heads), A_log);
         LogicalId A_log_exp_3d =
-            repeat_3d_axis(g.reshape(A_log_exp, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
+            g.repeat(g.reshape(A_log_exp, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
         LogicalId decay_g = g.mul(g.neg(A_log_exp_3d), softplus_x);
         LogicalId decay_alpha = g.pow(expand_scalar_to_3d(2.7182818f, 1, seq_len, cfg.linear_n_v_heads), decay_g);
 
@@ -839,10 +809,9 @@ class Qwen3_6_35B_A3B_Model
         LogicalId q_sum = g.sum(q_sq, g.constant({1}, &ax_neg1, DType::INT32));
         LogicalId q_std = g.pow(g.add(q_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)),
                                 expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
-        LogicalId q_norm =
-            g.mul(q_heads_exp,
-                  repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std),
-                                 (int32_t)cfg.linear_head_dim, 3));
+        LogicalId q_norm = g.mul(
+            q_heads_exp, g.repeat(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std),
+                                  (int32_t)cfg.linear_head_dim, 3));
 
         float scale_factor = 1.0f / std::sqrt((float)cfg.linear_head_dim);
         q_norm = g.mul(q_norm, expand_scalar_to_4d(scale_factor, 1, (int32_t)cfg.linear_n_v_heads, seq_len,
@@ -852,10 +821,9 @@ class Qwen3_6_35B_A3B_Model
         LogicalId k_sum = g.sum(k_sq, g.constant({1}, &ax_neg1, DType::INT32));
         LogicalId k_std = g.pow(g.add(k_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)),
                                 expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
-        LogicalId k_norm =
-            g.mul(k_heads_exp,
-                  repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std),
-                                 (int32_t)cfg.linear_head_dim, 3));
+        LogicalId k_norm = g.mul(
+            k_heads_exp, g.repeat(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std),
+                                  (int32_t)cfg.linear_head_dim, 3));
 
         // 5. Gated Delta Rule Recurrence Loop
         int32_t s_shape[] = {(int32_t)cfg.linear_n_v_heads, (int32_t)cfg.linear_head_dim, (int32_t)cfg.linear_head_dim};
@@ -903,7 +871,7 @@ class Qwen3_6_35B_A3B_Model
 
             // 2. Compute error and delta correction
             LogicalId err = g.add(v_t_flat, g.neg(kv_mem));
-            LogicalId b_t_exp = repeat_3d_axis(b_t_flat, (int32_t)cfg.linear_head_dim, 2);
+            LogicalId b_t_exp = g.repeat(b_t_flat, (int32_t)cfg.linear_head_dim, 2);
             LogicalId delta = g.mul(err, b_t_exp);
 
             // 3. Compute outer product k^T ⊗ delta
@@ -912,8 +880,8 @@ class Qwen3_6_35B_A3B_Model
             LogicalId outer_prod = g.contiguous(g.dot(k_t_t, delta));
 
             // 4. Apply decay AND write in one expression: S = g*S + outer
-            LogicalId a_t_exp = repeat_3d_axis(repeat_3d_axis(a_t_flat, (int32_t)cfg.linear_head_dim, 1),
-                                               (int32_t)cfg.linear_head_dim, 2);
+            LogicalId a_t_exp =
+                g.repeat(g.repeat(a_t_flat, (int32_t)cfg.linear_head_dim, 1), (int32_t)cfg.linear_head_dim, 2);
             S = g.add(g.mul(S, a_t_exp), outer_prod);
 
             // 5. Read output from the fully updated state
@@ -1008,7 +976,7 @@ class Qwen3_6_35B_A3B_Model
         // 2. Expand selected_experts to [1, S, K, E]
         int32_t sh4_sel[] = {1, (int32_t)S, (int32_t)K, 1};
         LogicalId sel_reshaped = g.reshape(selected_experts, g.constant({4}, sh4_sel, DType::INT32));
-        LogicalId sel_expanded = g.contiguous(repeat_ax(sel_reshaped, E, 3));
+        LogicalId sel_expanded = g.contiguous(g.repeat(sel_reshaped, E, 3));
 
         // 3. Generate Expert Range: [1, S, K, E]
         int32_t arange_start = 0, arange_stop = (int32_t)E, arange_step = 1;
@@ -1017,7 +985,7 @@ class Qwen3_6_35B_A3B_Model
                      g.constant({1}, &arange_step, DType::INT32));
         int32_t sh4_range[] = {1, 1, 1, (int32_t)E};
         LogicalId range_reshaped = g.reshape(range_1d, g.constant({4}, sh4_range, DType::INT32));
-        LogicalId range_expanded = g.contiguous(repeat_ax(repeat_ax(range_reshaped, S, 1), K, 2));
+        LogicalId range_expanded = g.contiguous(g.repeat(g.repeat(range_reshaped, S, 1), K, 2));
 
         // 4. Compare elementwise and cast to float
         LogicalId mask_bool = g.eq(sel_expanded, range_expanded);
@@ -1033,7 +1001,7 @@ class Qwen3_6_35B_A3B_Model
         LogicalId gated_probs = g.mul(router_probs, router_mask); // [1, S, E]
         int32_t axis = -1;
         LogicalId row_sum = g.sum(gated_probs, g.constant({1}, &axis, DType::INT32)); // [1, S, 1]
-        row_sum = g.contiguous(repeat_ax(row_sum, cfg.n_experts, 2));
+        row_sum = g.contiguous(g.repeat(row_sum, cfg.n_experts, 2));
         LogicalId normalized_probs = g.div(gated_probs, row_sum);
 
         // --- Step 1: Expand Input X to [E, S, H] ---
@@ -1134,7 +1102,7 @@ class Qwen3_6_35B_A3B_Model
         LogicalId den = g.add(one_node, exp_neg_seg);
         LogicalId seg_sigmoid = g.div(one_node, den);
 
-        LogicalId seg_expanded = repeat_3d_axis(seg_sigmoid, cfg.hidden_size, 2);
+        LogicalId seg_expanded = g.repeat(seg_sigmoid, cfg.hidden_size, 2);
         LogicalId shared_out_gated = g.mul(shared_out, seg_expanded);
 
         return g.add(routed_out, shared_out_gated);

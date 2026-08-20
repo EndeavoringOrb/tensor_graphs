@@ -135,13 +135,14 @@
         <!-- Main Timeline Visualizer Area -->
         <main class="main-content card">
             <div class="main-header">
-                <div class="section-title">Schedule Comparison Timeline</div>
-                <div class="legend">
-                    <span class="legend-item"><span class="legend-dot op-INPUT"></span> INPUT</span>
-                    <span class="legend-item"><span class="legend-dot op-ADD"></span> ADD</span>
-                    <span class="legend-item"><span class="legend-dot op-MUL"></span> MUL</span>
-                    <span class="legend-item"><span class="legend-dot op-COPYTO"></span> COPYTO</span>
-                    <span class="legend-item"><span class="legend-dot op-SQRT"></span> SQRT</span>
+                <div class="main-header-left">
+                    <div class="section-title">Schedule Comparison Timeline</div>
+                    <div class="legend"></div>
+                </div>
+                <div class="zoom-control-group">
+                    <label for="zoomRange">Zoom: <span id="zoomVal">100%</span></label>
+                    <input type="range" id="zoomRange" min="20" max="500" value="100" step="10" title="Horizontal Zoom">
+                    <button id="zoomResetBtn" class="btn btn-secondary btn-xs" title="Reset Zoom">Reset</button>
                 </div>
             </div>
 

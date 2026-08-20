@@ -308,9 +308,10 @@ struct ShapePropagator
                 ss << "[ShapePropagator.inferShape] nodeId=" + toString(nodeId) + " DOT requires equal ranks. Got "
                    << r0 << " (" + toString(s0) + ") and " << r1
                    << " (" + toString(s1) +
-                          "). Implicit broadcasting is disabled; use explicit "
+                          "). Implicit broadcasting is not supported; use explicit "
                           "reshape "
-                          "to align ranks.";
+                          "to align ranks. debugOrigin=" +
+                          graph.getNode(nodeId).debugOrigin;
                 Error::throw_err(ss.str());
             }
 
@@ -477,6 +478,7 @@ struct ShapePropagator
                 out_shape[i] = target_dims[i];
             }
             graph.getNode(nodeId).setShape(out_shape);
+            graph.getNode(nodeId).strides.assign(out_shape.size(), 0);
             break;
         }
         case OpType::IM2COL: {
@@ -559,6 +561,25 @@ struct ShapePropagator
                     new_shape.push_back(s0[i]);
             }
             graph.getNode(nodeId).setShape(new_shape);
+            break;
+        }
+        case OpType::UNPACK: {
+            auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
+            DType in_dtype = graph.getNode(graph.getNode(nodeId).child_ids[0]).dtype;
+            DType out_dtype = graph.getNode(nodeId).dtype;
+            uint32_t in_bits = getDTypeNBits(in_dtype);
+            uint32_t out_bits = getDTypeNBits(out_dtype);
+            if (in_bits % out_bits != 0)
+            {
+                Error::throw_err("UNPACK requires input bits to be divisible by output bits.");
+            }
+            uint32_t factor = in_bits / out_bits;
+            std::vector<uint32_t> out_shape = s0;
+            if (!out_shape.empty())
+            {
+                out_shape.back() *= factor;
+            }
+            graph.getNode(nodeId).setShape(out_shape);
             break;
         }
         case OpType::FUSED:
@@ -1497,6 +1518,7 @@ struct ShapePropagator
         case OpType::ARANGE:
         case OpType::FILL:
         case OpType::IM2COL:
+        case OpType::UNPACK: // TODO: make more conservative
             return forwardFull(node, graph, parentRegions);
         case OpType::SLICE:
             return forwardSlice(node, graph, parentRegions);
@@ -1579,6 +1601,7 @@ struct ShapePropagator
         case OpType::ARANGE:
         case OpType::FILL:
         case OpType::IM2COL:
+        case OpType::UNPACK: // TODO: make more conservative
             return backwardFull(node, graph, outputRegions);
         case OpType::SLICE:
             return backwardSlice(node, graph, outputRegions);

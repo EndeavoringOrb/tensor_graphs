@@ -206,6 +206,11 @@ struct EGraph
         return getOrAddConstant(shape, strides, dtype, bytes);
     }
 
+    EClassId addIntConst(const std::vector<int32_t> &vals)
+    {
+        return getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
+    }
+
     EClassId addEClass(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
                        MemSpace mem_space)
     {
@@ -299,7 +304,7 @@ struct EGraph
         if (ufSize[ra.value] < ufSize[rb.value])
             std::swap(ra, rb);
 
-#ifdef DEBUG
+#ifdef TG_DEBUG
         if (classes[ra.value].shape != classes[rb.value].shape)
         {
             Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra.value].shape) + ", " +
@@ -341,6 +346,17 @@ struct EGraph
             nodeToEClass[enodeId.value] = ra;
         }
         classes[rb.value].enodes.clear();
+    }
+
+    uint32_t getNumUniqueENodes() const
+    {
+        uint32_t count = 0;
+        // hashcons only stores canonical, deduplicated nodes
+        for (const auto &kv : hashcons)
+        {
+            count += kv.second.size();
+        }
+        return count;
     }
 
     void rebuild()
@@ -399,7 +415,7 @@ struct EGraph
                 bucket.push_back(currentEnodeId);
             }
         }
-#ifdef DEBUG
+#ifdef TG_DEBUG
         std::cout << "[EGraph.rebuild] Found " << nDupes << " duplicate enodes" << std::endl;
 #endif
 

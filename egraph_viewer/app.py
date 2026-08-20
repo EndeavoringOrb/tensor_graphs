@@ -1,7 +1,8 @@
-import os
 import json
+import os
 import struct
-from flask import Flask, render_template, jsonify, request, send_from_directory
+
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
 app = Flask(__name__)
 EGRAPHS_DIR = "egraphs"

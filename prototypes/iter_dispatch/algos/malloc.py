@@ -1,10 +1,10 @@
 from collections import defaultdict
 
-from .iter_dispatch import (
-    iter_dispatch_orders,
-    graphs,
-)
 from .bufferize import Buffer, bufferize, overlaps
+from .iter_dispatch import (
+    graphs,
+    iter_dispatch_orders,
+)
 
 
 def get_min_height(unallocated: list[Buffer], allocated: list[Buffer]):

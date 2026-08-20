@@ -157,9 +157,10 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
 
         TensorView outViewContig = makeView(node);
         TensorNode outNodeC = node;
-        auto refs_c = KernelRegistry::get().findMatchingKernels(node.opType, node.opName, inputNodes, outNodeC, true,
-                                                                MemSpace{1, HandleType::CPP}, {},
-                                                                {Engine{0, EngineType::CPU}}, false, true, false, true);
+        bool ignore_in_ms = (node.opType != OpType::COPY_TO);
+        auto refs_c = KernelRegistry::get().findMatchingKernels(
+            node.opType, node.opName, inputNodes, outNodeC, true, MemSpace{1, HandleType::CPP}, {},
+            {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
 
         if (refs_c.empty())
         {

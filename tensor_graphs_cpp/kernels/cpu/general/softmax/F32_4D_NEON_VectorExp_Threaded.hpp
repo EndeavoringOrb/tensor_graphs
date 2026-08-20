@@ -243,7 +243,7 @@ inline LogicalId refFactorySoftmax4D_VectorExp(const std::vector<LogicalId> &inp
 }
 
 REGISTER_KERNEL("Softmax_4D_VectorExp_Threaded", 1, 1, matchSoftmaxF32_4D_VectorExp_Threaded,
-                runSoftmaxF32_4D_VectorExp_Threaded, refFactorySoftmax4D_VectorExp, MemSpace(1, HandleType::CPP),
+                runSoftmaxF32_4D_VectorExp_Threaded, refFactorySoftmax4D_VectorExp, {0}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});
 

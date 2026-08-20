@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "core/types.hpp"
@@ -62,6 +62,7 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
  */
 void runDotF32_3D_CUDA(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     const float *B = static_cast<const float *>(ctx.inputs[1]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
@@ -76,7 +77,7 @@ void runDotF32_3D_CUDA(const KernelContext &ctx)
                 (uint32_t)((M + threads.y - 1) / threads.y),
                 (uint32_t)B_count);
 
-    dot_f32_3d_kernel<<<blocks, threads>>>(A, B, Out, B_count, M, K, N);
+    dot_f32_3d_kernel<<<blocks, threads, 0, stream>>>(A, B, Out, B_count, M, K, N);
 
     // Check for launch errors
     cudaError_t err = cudaGetLastError();
@@ -104,7 +105,7 @@ inline LogicalId refFactoryDotF32_3D_CUDA(const std::vector<LogicalId> &inputs, 
  * Inputs: 2
  * Backend: CUDA
  */
-REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
+REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
     {DType::FLOAT32, DType::FLOAT32},
     {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 

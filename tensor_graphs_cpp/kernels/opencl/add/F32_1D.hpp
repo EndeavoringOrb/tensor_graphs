@@ -32,8 +32,6 @@ inline void runAddF32_OpenCL_1D(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Add_F32_1D");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryAddF32_1D_OpenCL(const std::vector<LogicalId> &inputs, Graph &graph)
@@ -42,6 +40,6 @@ inline LogicalId refFactoryAddF32_1D_OpenCL(const std::vector<LogicalId> &inputs
 }
 
 REGISTER_KERNEL("Add_F32_1D_OpenCL", 2, 2, matchAddF32_OpenCL_1D, runAddF32_OpenCL_1D, refFactoryAddF32_1D_OpenCL,
-                MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                {0, 1}, MemSpace(1, HandleType::OPENCL), {Engine(1, EngineType::QUALCOMM_IGPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true},
                 {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

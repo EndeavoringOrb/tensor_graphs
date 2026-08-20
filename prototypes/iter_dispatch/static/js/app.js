@@ -1,11 +1,17 @@
 let currentGraphOrders = [];
 let orderAIndex = 0;
 let orderBIndex = 0;
+let currentZoomPercent = 100;
+
+// Track renderers registered for viewport canvas rendering
+let activeTrackRenderers = [];
+let renderScheduled = false;
 
 const graphSelect = document.getElementById('graphSelect');
 const vizContainer = document.getElementById('vizContainer');
 const nav = document.getElementById('navigation');
 const graphStatsPanel = document.getElementById('graphStatsPanel');
+const scrollContainer = document.querySelector('.timeline-container-scroll');
 
 // Inspector DOM Panel Elements
 const detailsPanel = document.getElementById('detailsPanel');
@@ -25,8 +31,141 @@ const nextBtnA = document.getElementById('nextBtnA');
 const prevBtnB = document.getElementById('prevBtnB');
 const nextBtnB = document.getElementById('nextBtnB');
 
+// Zoom controls
+const zoomRange = document.getElementById('zoomRange');
+const zoomVal = document.getElementById('zoomVal');
+const zoomResetBtn = document.getElementById('zoomResetBtn');
+
+// Known OP colors palette (Hex format for high performance Canvas fills)
+const KNOWN_OP_COLORS = {
+    'INPUT': { bg: '#f1f5f9', text: '#475569', border: '#cbd5e1' },
+    'ADD': { bg: '#eff6ff', text: '#1d4ed8', border: '#bfdbfe' },
+    'MUL': { bg: '#faf5ff', text: '#6d28d9', border: '#e9d5ff' },
+    'COPYTO': { bg: '#fffbeb', text: '#b45309', border: '#fde047' },
+    'COPY_TO': { bg: '#fffbeb', text: '#b45309', border: '#fde047' },
+    'SQRT': { bg: '#fdf2f8', text: '#be185d', border: '#fbcfe8' },
+    'DOT': { bg: '#f0fdf4', text: '#15803d', border: '#bbf7d0' },
+    'CONCAT': { bg: '#fff7ed', text: '#c2410c', border: '#fed7aa' },
+    'RESHAPE': { bg: '#f0f9ff', text: '#0369a1', border: '#bae6fd' },
+    'PERMUTE': { bg: '#f5f3ff', text: '#7c3aed', border: '#ddd6fe' },
+    'SLICE': { bg: '#fef2f2', text: '#b91c1c', border: '#fecaca' },
+    'GATHER': { bg: '#ecfdf5', text: '#047857', border: '#a7f3d0' },
+    'CAST': { bg: '#fdf4ff', text: '#a21caf', border: '#f5d0fe' },
+    'MAX': { bg: '#fef1f2', text: '#be123c', border: '#ffe4e6' },
+    'SUM': { bg: '#f0fdfa', text: '#0f766e', border: '#99f6e4' }
+};
+
+function getOpColor(op) {
+    const cleanOp = op ? op.replace('Op.', '').trim() : 'UNKNOWN';
+    if (KNOWN_OP_COLORS[cleanOp]) {
+        return KNOWN_OP_COLORS[cleanOp];
+    }
+    let hash = 0;
+    for (let i = 0; i < cleanOp.length; i++) {
+        hash = cleanOp.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const hue = Math.abs(hash) % 360;
+    return {
+        bg: `hsl(${hue}, 80%, 96%)`,
+        text: `hsl(${hue}, 70%, 30%)`,
+        border: `hsl(${hue}, 60%, 80%)`
+    };
+}
+
+function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+function renderLegend(orders) {
+    const legendContainer = document.querySelector('.legend');
+    if (!legendContainer) return;
+
+    const uniqueOps = new Set();
+    orders.forEach(orderObj => {
+        orderObj.schedule.forEach(task => uniqueOps.add(task.op));
+    });
+
+    legendContainer.innerHTML = '';
+    Array.from(uniqueOps).sort().forEach(op => {
+        const color = getOpColor(op);
+        const item = document.createElement('span');
+        item.className = 'legend-item';
+
+        const dot = document.createElement('span');
+        dot.className = 'legend-dot';
+        dot.style.backgroundColor = color.text;
+
+        item.appendChild(dot);
+        item.appendChild(document.createTextNode(` ${op}`));
+        legendContainer.appendChild(item);
+    });
+}
+
 /**
- * Handles fetching graph payload and setting up application states.
+ * Binary search to find starting index in items sorted by start time.
+ */
+function findStartIndex(items, targetTime) {
+    let low = 0;
+    let high = items.length - 1;
+    let ans = 0;
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (items[mid].end >= targetTime) {
+            ans = mid;
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+    return ans;
+}
+
+/**
+ * Dynamic Tick interval calculation for high-performance scale markers.
+ */
+function getNiceTickInterval(rawInterval) {
+    if (rawInterval <= 0) return 1;
+    const exponent = Math.floor(Math.log10(rawInterval));
+    const fraction = rawInterval / Math.pow(10, exponent);
+    let niceFraction;
+    if (fraction <= 1.5) niceFraction = 1;
+    else if (fraction <= 3) niceFraction = 2;
+    else if (fraction <= 7) niceFraction = 5;
+    else niceFraction = 10;
+    return niceFraction * Math.pow(10, exponent);
+}
+
+/**
+ * Canvas drawing helpers.
+ */
+function drawRoundedRect(ctx, x, y, width, height, radius) {
+    if (width < 2 * radius) radius = width / 2;
+    if (height < 2 * radius) radius = height / 2;
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + width, y, x + width, y + height, radius);
+    ctx.arcTo(x + width, y + height, x, y + height, radius);
+    ctx.arcTo(x, y + height, x, y, radius);
+    ctx.arcTo(x, y, x + width, y, radius);
+    ctx.closePath();
+}
+
+function getTruncatedText(ctx, text, maxWidth) {
+    if (maxWidth <= 10) return '';
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    let ellipsis = '…';
+    let truncated = text;
+    while (truncated.length > 0 && ctx.measureText(truncated + ellipsis).width > maxWidth) {
+        truncated = truncated.substring(0, truncated.length - 1);
+    }
+    return truncated ? truncated + ellipsis : '';
+}
+
+/**
+ * Fetches graph payload and parses ordered nodes into pre-sorted arrays.
  */
 async function loadGraphData(name) {
     if (!name) return;
@@ -34,13 +173,11 @@ async function loadGraphData(name) {
         const resp = await fetch(`/api/graph/${encodeURIComponent(name)}`);
         const data = await resp.json();
 
-        // Map the serialized JSON strings from the new API format into JS objects
         currentGraphOrders = data.orders.map(orderObj => {
-            const parsedNodes = orderObj.ordered.map(str => JSON.parse(str));
-            const parsedBuffers = orderObj.buffers.map(str => JSON.parse(str));
-            const parsedAllocated = orderObj.allocated.map(str => JSON.parse(str));
+            const parsedNodes = orderObj.ordered.map(item => typeof item === 'string' ? JSON.parse(item) : item);
+            const parsedBuffers = orderObj.buffers.map(item => typeof item === 'string' ? JSON.parse(item) : item);
+            const parsedAllocated = orderObj.allocated.map(item => typeof item === 'string' ? JSON.parse(item) : item);
 
-            // Reconstruct buffer-to-node association to resolve node names for allocations
             const bufferIdxToNode = {};
             let bufferCount = 0;
             parsedNodes.forEach(node => {
@@ -57,25 +194,30 @@ async function loadGraphData(name) {
             // Map parsed nodes to scheduled tasks
             const schedule = parsedNodes.map(node => {
                 const opName = node.op ? node.op.replace('Op.', '') : 'INPUT';
-                const engineKey = node.engine ? `Engine(idx=${node.engine.idx}, engine_type=${node.engine.engine_type})` : 'Engine(idx=0, engine_type=EngineType.CPU)';
+                const engineKey = typeof node.engine === 'string'
+                    ? node.engine
+                    : (node.engine ? `Engine(idx=${node.engine.idx}, engine_type=${node.engine.engine_type})` : 'Engine(idx=0, engine_type=EngineType.CPU)');
+                const duration = node.duration !== undefined ? node.duration : (node.cost !== undefined ? node.cost : 1);
+                const start = node.start !== undefined ? node.start : node.birth;
+
                 return {
                     name: node.name,
                     op: opName,
-                    start: node.birth,
-                    end: node.birth + node.cost,
-                    duration: node.cost,
+                    start: start,
+                    end: start + duration,
+                    duration: duration,
                     engine: engineKey,
                     size: node.size
                 };
-            });
+            }).sort((a, b) => a.start - b.start);
 
-            // Map parsed buffers to the raw buffer structure
+            // Map parsed buffers
             const buffers = parsedBuffers.map(buf => {
                 const node = bufferIdxToNode[buf.idx];
-                const nodeName = node ? node.name : `Buf ${buf.idx}`;
-                const opName = node ? node.op.replace('Op.', '') : 'INPUT';
-                const memSpaceIdx = buf.mem_space ? buf.mem_space.idx : 0;
-                const memSpaceHandle = buf.mem_space && buf.mem_space.handle_type ? buf.mem_space.handle_type.replace('Handle.', '') : '';
+                const nodeName = buf.node_name || (node ? node.name : `Buf ${buf.idx}`);
+                const opName = buf.op ? buf.op.replace('Op.', '') : (node && node.op ? node.op.replace('Op.', '') : 'INPUT');
+                const memSpaceIdx = buf.mem_space_idx !== undefined ? buf.mem_space_idx : (buf.mem_space ? buf.mem_space.idx : 1);
+                const memSpaceHandle = buf.mem_space_handle || (buf.mem_space && buf.mem_space.handle_type ? String(buf.mem_space.handle_type).replace('Handle.', '') : 'CPP');
 
                 return {
                     idx: buf.idx,
@@ -88,15 +230,15 @@ async function loadGraphData(name) {
                     mem_space_idx: memSpaceIdx,
                     mem_space_handle: memSpaceHandle
                 };
-            });
+            }).sort((a, b) => a.start - b.start);
 
-            // Map parsed allocated buffers to the allocated block structure
+            // Map parsed allocated buffers
             const allocated = parsedAllocated.map(buf => {
                 const node = bufferIdxToNode[buf.idx];
-                const nodeName = node ? node.name : `Buf ${buf.idx}`;
-                const opName = node ? node.op.replace('Op.', '') : 'INPUT';
-                const memSpaceIdx = buf.mem_space ? buf.mem_space.idx : 0;
-                const memSpaceHandle = buf.mem_space && buf.mem_space.handle_type ? buf.mem_space.handle_type.replace('Handle.', '') : '';
+                const nodeName = buf.node_name || (node ? node.name : `Buf ${buf.idx}`);
+                const opName = buf.op ? buf.op.replace('Op.', '') : (node && node.op ? node.op.replace('Op.', '') : 'INPUT');
+                const memSpaceIdx = buf.mem_space_idx !== undefined ? buf.mem_space_idx : (buf.mem_space ? buf.mem_space.idx : 1);
+                const memSpaceHandle = buf.mem_space_handle || (buf.mem_space && buf.mem_space.handle_type ? String(buf.mem_space.handle_type).replace('Handle.', '') : 'CPP');
 
                 return {
                     idx: buf.idx,
@@ -109,7 +251,7 @@ async function loadGraphData(name) {
                     mem_space_idx: memSpaceIdx,
                     mem_space_handle: memSpaceHandle
                 };
-            });
+            }).sort((a, b) => a.start - b.start);
 
             return {
                 schedule: schedule,
@@ -118,40 +260,32 @@ async function loadGraphData(name) {
             };
         });
 
-        // Show control panels
         graphStatsPanel.classList.remove('hidden');
         nav.classList.remove('hidden');
 
-        // Calculate statistics and set default selections
+        renderLegend(currentGraphOrders);
         calculateStats();
-
-        // Render both schedules
         renderComparison();
     } catch (e) {
         console.error("Error fetching execution schedules: ", e);
     }
 }
 
-// Automatically load on dropdown modifications
-graphSelect.addEventListener('change', (e) => {
-    loadGraphData(e.target.value);
-});
+// Event Listeners
+graphSelect.addEventListener('change', (e) => loadGraphData(e.target.value));
 
-// Select order dropdown event listeners
 selectOrderA.addEventListener('change', (e) => {
     orderAIndex = parseInt(e.target.value);
     updateCostBadges();
     renderComparison();
 });
 
-// Select order dropdown event listeners
 selectOrderB.addEventListener('change', (e) => {
     orderBIndex = parseInt(e.target.value);
     updateCostBadges();
     renderComparison();
 });
 
-// Step navigation buttons
 prevBtnA.addEventListener('click', () => {
     if (orderAIndex > 0) {
         orderAIndex--;
@@ -188,12 +322,48 @@ nextBtnB.addEventListener('click', () => {
     }
 });
 
-/**
- * Strips verbose Python class names down to a cleaner format.
- */
+// Zoom Event Listeners
+if (zoomRange) {
+    zoomRange.addEventListener('input', (e) => {
+        currentZoomPercent = parseInt(e.target.value, 10);
+        if (zoomVal) zoomVal.textContent = `${currentZoomPercent}%`;
+        renderComparison();
+    });
+}
+
+if (zoomResetBtn) {
+    zoomResetBtn.addEventListener('click', () => {
+        currentZoomPercent = 100;
+        if (zoomRange) zoomRange.value = 100;
+        if (zoomVal) zoomVal.textContent = '100%';
+        renderComparison();
+    });
+}
+
+if (scrollContainer) {
+    scrollContainer.addEventListener('scroll', () => {
+        requestViewportRender();
+    }, { passive: true });
+}
+
+window.addEventListener('resize', () => {
+    requestViewportRender();
+});
+
+function requestViewportRender() {
+    if (!renderScheduled) {
+        renderScheduled = true;
+        window.requestAnimationFrame(() => {
+            renderVisibleTrackViewports();
+            renderScheduled = false;
+        });
+    }
+}
+
 function formatEngineName(rawName) {
+    if (typeof rawName !== 'string') return { name: String(rawName), sub: '' };
     const idxMatch = rawName.match(/idx=(\d+)/);
-    const typeMatch = rawName.match(/EngineType\.(\w+)/);
+    const typeMatch = rawName.match(/engine_type=(?:EngineType\.)?(\w+)/i) || rawName.match(/EngineType\.(\w+)/i);
     if (idxMatch && typeMatch) {
         const idx = idxMatch[1];
         const type = typeMatch[1].replace('_', ' ');
@@ -205,10 +375,6 @@ function formatEngineName(rawName) {
     return { name: rawName, sub: '' };
 }
 
-/**
- * Calculates graph-wide statistics (highest/lowest costs)
- * and defaults order selection indexes to that pair.
- */
 function calculateStats() {
     if (!currentGraphOrders || currentGraphOrders.length === 0) return;
 
@@ -235,19 +401,15 @@ function calculateStats() {
     const statWorstOrder = document.getElementById('statWorstOrder');
 
     statTotalOrders.textContent = currentGraphOrders.length;
-    statBestOrder.textContent = `Order ${minIdx + 1} (Cost: ${minCost})`;
-    statWorstOrder.textContent = `Order ${maxIdx + 1} (Cost: ${maxCost})`;
+    statBestOrder.textContent = `Order ${minIdx + 1} (Cost: ${minCost.toFixed(2)})`;
+    statWorstOrder.textContent = `Order ${maxIdx + 1} (Cost: ${maxCost.toFixed(2)})`;
 
-    // Default to lowest and highest cost orders
     orderAIndex = minIdx;
     orderBIndex = maxIdx;
 
     populateDropdowns(minIdx, maxIdx);
 }
 
-/**
- * Populates dropdown lists with available orders
- */
 function populateDropdowns(defaultA, defaultB) {
     selectOrderA.innerHTML = '';
     selectOrderB.innerHTML = '';
@@ -258,12 +420,12 @@ function populateDropdowns(defaultA, defaultB) {
 
         const optionA = document.createElement('option');
         optionA.value = idx;
-        optionA.textContent = `Order ${idx + 1} (Cost: ${cost})`;
+        optionA.textContent = `Order ${idx + 1} (Cost: ${cost.toFixed(2)})`;
         selectOrderA.appendChild(optionA);
 
         const optionB = document.createElement('option');
         optionB.value = idx;
-        optionB.textContent = `Order ${idx + 1} (Cost: ${cost})`;
+        optionB.textContent = `Order ${idx + 1} (Cost: ${cost.toFixed(2)})`;
         selectOrderB.appendChild(optionB);
     });
 
@@ -273,9 +435,6 @@ function populateDropdowns(defaultA, defaultB) {
     updateCostBadges();
 }
 
-/**
- * Updates quick cost stats displayed on selector boxes
- */
 function updateCostBadges() {
     const costAElement = document.getElementById('totalCostA');
     const costBElement = document.getElementById('totalCostB');
@@ -289,13 +448,10 @@ function updateCostBadges() {
     const costA = scheduleA && scheduleA.length > 0 ? Math.max(...scheduleA.map(t => t.end)) : 0;
     const costB = scheduleB && scheduleB.length > 0 ? Math.max(...scheduleB.map(t => t.end)) : 0;
 
-    costAElement.textContent = costA;
-    costBElement.textContent = costB;
+    costAElement.textContent = costA.toFixed(2);
+    costBElement.textContent = costB.toFixed(2);
 }
 
-/**
- * Syncs the pager button states based on current selection index boundaries.
- */
 function updateButtonStates() {
     prevBtnA.disabled = (orderAIndex === 0);
     nextBtnA.disabled = (orderAIndex === currentGraphOrders.length - 1);
@@ -303,11 +459,9 @@ function updateButtonStates() {
     nextBtnB.disabled = (orderBIndex === currentGraphOrders.length - 1);
 }
 
-/**
- * Renders both chosen schedules aligned horizontally inside the timeline panel.
- */
 function renderComparison() {
     vizContainer.innerHTML = '';
+    activeTrackRenderers = [];
 
     const orderAObj = currentGraphOrders[orderAIndex];
     const orderBObj = currentGraphOrders[orderBIndex];
@@ -323,40 +477,35 @@ function renderComparison() {
     const allocatedA = orderAObj.allocated;
     const allocatedB = orderBObj.allocated;
 
-    // Determine the common timeline scale max value across both schedules
     const maxTimeA = scheduleA.length > 0 ? Math.max(...scheduleA.map(t => t.end)) : 0;
     const maxTimeB = scheduleB.length > 0 ? Math.max(...scheduleB.map(t => t.end)) : 0;
     const commonMaxTime = Math.max(maxTimeA, maxTimeB, 1);
 
-    // Pixel scaling factor
-    const scale = 50;
+    // Adaptive pixel scale factor multiplied by horizontal zoom factor
+    const baseScale = commonMaxTime > 0 ? Math.max(10, Math.min(100, 1200 / commonMaxTime)) : 50;
+    const scale = baseScale * (currentZoomPercent / 100);
 
-    // Render Schedule A Block
     const blockA = document.createElement('div');
     blockA.className = 'schedule-block schedule-block-a';
     renderScheduleInto(blockA, scheduleA, buffersA, allocatedA, orderAIndex, commonMaxTime, scale, 'A');
     vizContainer.appendChild(blockA);
 
-    // Separator line
     const divider = document.createElement('div');
     divider.className = 'schedule-divider';
     vizContainer.appendChild(divider);
 
-    // Render Schedule B Block
     const blockB = document.createElement('div');
     blockB.className = 'schedule-block schedule-block-b';
     renderScheduleInto(blockB, scheduleB, buffersB, allocatedB, orderBIndex, commonMaxTime, scale, 'B');
     vizContainer.appendChild(blockB);
+
+    requestViewportRender();
 }
 
-/**
- * Injects ruler, grids, timeline lanes, and malloc memory blocks into a container.
- */
 function renderScheduleInto(container, order, buffers, allocated, orderIndex, maxTime, scale, blockLabel) {
-    // Calculate the physical layout width needed for the timeline
-    const timelineWidthStr = (maxTime * scale) + 'px';
+    const timelineWidthPx = Math.ceil(maxTime * scale);
+    const timelineWidthStr = timelineWidthPx + 'px';
 
-    // Block Title Row
     const headerRow = document.createElement('div');
     headerRow.className = 'schedule-block-header';
 
@@ -372,12 +521,11 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
 
     const costValue = document.createElement('span');
     costValue.className = `order-cost-val cost-${blockLabel.toLowerCase()}`;
-    costValue.textContent = cost;
+    costValue.textContent = cost.toFixed(2);
     headerRow.appendChild(costValue);
 
     container.appendChild(headerRow);
 
-    // Block Timings Canvas
     const blockBody = document.createElement('div');
     blockBody.className = 'schedule-block-body';
 
@@ -392,7 +540,7 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
 
     const engines = [...new Set(order.map(t => t.engine))].sort();
 
-    // 1. Build Time Ruler row
+    // 1. Time Ruler Row
     const rulerRow = document.createElement('div');
     rulerRow.className = 'ruler-row';
 
@@ -405,37 +553,17 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
     rulerTicks.style.width = timelineWidthStr;
     rulerTicks.style.flexShrink = '0';
 
-    // Scale boundaries depending on time sizes
-    const tickInterval = maxTime > 30 ? 5 : (maxTime > 15 ? 2 : 1);
-
-    for (let t = 0; t <= maxTime; t += tickInterval) {
-        const tick = document.createElement('div');
-        tick.className = 'ruler-tick';
-        tick.style.left = (t * scale) + 'px';
-        tick.textContent = t;
-        rulerTicks.appendChild(tick);
-    }
     rulerRow.appendChild(rulerTicks);
     blockBody.appendChild(rulerRow);
 
-    // 2. Build aligned backing gridline overlay
-    const gridOverlay = document.createElement('div');
-    gridOverlay.className = 'time-grid-overlay';
+    registerTrackRenderer({
+        type: 'ruler',
+        container: rulerTicks,
+        maxTime: maxTime,
+        scale: scale
+    });
 
-    for (let t = 0; t <= maxTime; t += tickInterval) {
-        const gridLine = document.createElement('div');
-        gridLine.style.position = 'absolute';
-        gridLine.style.left = (t * scale) + 'px';
-        gridLine.style.top = '0';
-        gridLine.style.bottom = '0';
-        gridLine.style.width = '1px';
-        gridLine.style.backgroundColor = '#e2e8f0';
-        gridLine.style.zIndex = '1';
-        gridOverlay.appendChild(gridLine);
-    }
-    blockBody.appendChild(gridOverlay);
-
-    // 3. Populate physical hardware track rows
+    // 2. Hardware Track Rows
     engines.forEach(engName => {
         const row = document.createElement('div');
         row.className = 'engine-row';
@@ -458,50 +586,39 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
         timeline.style.width = timelineWidthStr;
         timeline.style.flexShrink = '0';
 
+        const canvas = document.createElement('canvas');
+        canvas.className = 'track-canvas';
+        timeline.appendChild(canvas);
+
         const engineTasks = order.filter(t => t.engine === engName);
-        engineTasks.forEach(task => {
-            const bar = document.createElement('div');
 
-            const isZero = task.duration === 0;
-            const barWidth = isZero ? 24 : (task.duration * scale);
-            const offsetLeft = task.start * scale;
+        const renderer = {
+            type: 'engine',
+            container: timeline,
+            canvas: canvas,
+            ctx: canvas.getContext('2d'),
+            data: engineTasks,
+            scale: scale,
+            rowHeight: 72,
+            extra: { formatted: formatted },
+            hoveredItem: null
+        };
 
-            bar.className = `task-bar op-${task.op}`;
-            if (isZero) {
-                bar.classList.add('task-zero-duration');
-            }
-
-            bar.style.left = offsetLeft + 'px';
-            bar.style.width = barWidth + 'px';
-            bar.textContent = task.name;
-
-            bar.title = `${task.name} (${task.op}): Time ${task.start}-${task.end} (duration: ${task.duration})`;
-
-            // Connect task properties on hover directly to detailsPanel Inspector
-            bar.addEventListener('mouseenter', () => {
-                showInspector(task, formatted);
-            });
-            bar.addEventListener('mouseleave', () => {
-                hideInspector();
-            });
-
-            timeline.appendChild(bar);
-        });
+        setupHoverInteractivity(renderer);
+        registerTrackRenderer(renderer);
 
         row.appendChild(label);
         row.appendChild(timeline);
         blockBody.appendChild(row);
     });
 
-    // 4. Populate Logical Memory Tracks (lifetimes)
+    // 3. Logical Memory Tracks
     if (buffers && buffers.length > 0) {
-        // Section Header for logical lifetimes
         const memSectionHeader = document.createElement('div');
         memSectionHeader.className = 'mem-section-header';
         memSectionHeader.innerHTML = '<span>Logical Buffer Lifetimes (Active Spans)</span>';
         blockBody.appendChild(memSectionHeader);
 
-        // Group by memory space index
         const memSpaces = [...new Set(buffers.map(b => b.mem_space_idx))].sort();
 
         memSpaces.forEach(memIdx => {
@@ -530,36 +647,24 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
             memTimeline.style.width = timelineWidthStr;
             memTimeline.style.flexShrink = '0';
 
-            const numBufs = spaceBuffers.length;
-            spaceBuffers.forEach((buf, bIdx) => {
-                const bar = document.createElement('div');
-                bar.className = `mem-buffer-bar op-${buf.op}`;
+            const canvas = document.createElement('canvas');
+            canvas.className = 'track-canvas';
+            memTimeline.appendChild(canvas);
 
-                const barWidth = (buf.end - buf.start) * scale;
-                const offsetLeft = buf.start * scale;
+            const renderer = {
+                type: 'logical',
+                container: memTimeline,
+                canvas: canvas,
+                ctx: canvas.getContext('2d'),
+                data: spaceBuffers,
+                scale: scale,
+                rowHeight: 110,
+                extra: { spaceName, handleName, numBufs: spaceBuffers.length },
+                hoveredItem: null
+            };
 
-                bar.style.left = offsetLeft + 'px';
-                bar.style.width = barWidth + 'px';
-
-                // Stacking them vertically based on count
-                const pctHeight = 100 / numBufs;
-                const pctBottom = bIdx * pctHeight;
-
-                bar.style.height = `calc(${pctHeight}% - 4px)`;
-                bar.style.bottom = `calc(${pctBottom}% + 2px)`;
-
-                bar.innerHTML = `<span class="mem-buffer-label">${buf.node_name}</span>`;
-                bar.title = `Buffer ${buf.idx} (${buf.node_name}): Active ${buf.start}-${buf.end}, Size: ${buf.size}`;
-
-                bar.addEventListener('mouseenter', () => {
-                    showMemInspector(buf, spaceName, handleName);
-                });
-                bar.addEventListener('mouseleave', () => {
-                    hideInspector();
-                });
-
-                memTimeline.appendChild(bar);
-            });
+            setupHoverInteractivity(renderer);
+            registerTrackRenderer(renderer);
 
             row.appendChild(label);
             row.appendChild(memTimeline);
@@ -567,8 +672,7 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
         });
     }
 
-    // 5. Populate Physical Memory Tracks (allocated offsets)
-    // Section Header for physical allocation layout
+    // 4. Physical Memory Layout (Allocated Offsets)
     const physSectionHeader = document.createElement('div');
     physSectionHeader.className = 'mem-section-header';
     physSectionHeader.innerHTML = '<span>Physical Memory Allocation Layout (malloc offsets)</span>';
@@ -603,55 +707,26 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
             memTimeline.style.width = timelineWidthStr;
             memTimeline.style.flexShrink = '0';
 
-            // Calculate dynamic Y scaling boundary (max offset + size)
-            const maxOffsetAndSize = Math.max(...spaceBuffers.map(b => b.offset + b.size), 1);
+            const canvas = document.createElement('canvas');
+            canvas.className = 'track-canvas';
+            memTimeline.appendChild(canvas);
 
-            // Draw Y-axis guideline gridlines and numeric step ticks
-            for (let y = 0; y <= maxOffsetAndSize; y++) {
-                const line = document.createElement('div');
-                line.className = 'mem-offset-gridline';
-                line.style.bottom = `${(y / maxOffsetAndSize) * 100}%`;
-                memTimeline.appendChild(line);
+            const maxOffsetAndSize = Math.max(...spaceBuffers.map(b => (b.offset >= 0 ? b.offset : 0) + b.size), 1);
 
-                if (y < maxOffsetAndSize) {
-                    const tickText = document.createElement('span');
-                    tickText.className = 'mem-offset-tick-text';
-                    tickText.textContent = `O: ${y}`;
-                    tickText.style.bottom = `${(y / maxOffsetAndSize) * 100 + 1}%`;
-                    memTimeline.appendChild(tickText);
-                }
-            }
+            const renderer = {
+                type: 'physical',
+                container: memTimeline,
+                canvas: canvas,
+                ctx: canvas.getContext('2d'),
+                data: spaceBuffers,
+                scale: scale,
+                rowHeight: 110,
+                extra: { spaceName, handleName, maxOffsetAndSize },
+                hoveredItem: null
+            };
 
-            // Draw buffers inside 2D space
-            spaceBuffers.forEach(buf => {
-                const bar = document.createElement('div');
-                bar.className = `mem-buffer-bar op-${buf.op}`;
-
-                const barWidth = (buf.end - buf.start) * scale;
-                const offsetLeft = buf.start * scale;
-
-                bar.style.left = offsetLeft + 'px';
-                bar.style.width = barWidth + 'px';
-
-                // Percentage height & vertical positioning
-                const pctHeight = (buf.size / maxOffsetAndSize) * 100;
-                const pctBottom = (buf.offset / maxOffsetAndSize) * 100;
-
-                bar.style.height = `calc(${pctHeight}% - 4px)`;
-                bar.style.bottom = `calc(${pctBottom}% + 2px)`;
-
-                bar.innerHTML = `<span class="mem-buffer-label">${buf.node_name}</span>`;
-                bar.title = `Buffer ${buf.idx} (${buf.node_name}): Active ${buf.start}-${buf.end}, Offset: ${buf.offset}, Size: ${buf.size}`;
-
-                bar.addEventListener('mouseenter', () => {
-                    showMemInspector(buf, spaceName, handleName);
-                });
-                bar.addEventListener('mouseleave', () => {
-                    hideInspector();
-                });
-
-                memTimeline.appendChild(bar);
-            });
+            setupHoverInteractivity(renderer);
+            registerTrackRenderer(renderer);
 
             row.appendChild(label);
             row.appendChild(memTimeline);
@@ -667,11 +742,354 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
     container.appendChild(blockBody);
 }
 
+function registerTrackRenderer(renderer) {
+    activeTrackRenderers.push(renderer);
+}
+
+/**
+ * Main viewport view update pass. Executes fast binary range rendering on canvas.
+ */
+function renderVisibleTrackViewports() {
+    if (!scrollContainer) return;
+
+    const scrollLeft = scrollContainer.scrollLeft;
+    const viewportWidth = scrollContainer.clientWidth || 1200;
+    const dpr = window.devicePixelRatio || 1;
+
+    activeTrackRenderers.forEach(track => {
+        if (track.type === 'ruler') {
+            renderRulerTicks(track, scrollLeft, viewportWidth);
+            return;
+        }
+
+        const canvas = track.canvas;
+        const ctx = track.ctx;
+        const scale = track.scale;
+        const rowHeight = track.rowHeight;
+
+        canvas.style.left = scrollLeft + 'px';
+        canvas.style.width = viewportWidth + 'px';
+        canvas.style.height = rowHeight + 'px';
+
+        canvas.width = Math.floor(viewportWidth * dpr);
+        canvas.height = Math.floor(rowHeight * dpr);
+
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, viewportWidth, rowHeight);
+
+        const tMin = Math.max(0, scrollLeft / scale);
+        const tMax = (scrollLeft + viewportWidth) / scale;
+
+        // Draw track vertical gridlines
+        const tickInterval = getNiceTickInterval((viewportWidth / 10) / scale);
+        const firstTick = Math.floor(tMin / tickInterval) * tickInterval;
+
+        ctx.strokeStyle = '#f1f5f9';
+        ctx.lineWidth = 1;
+
+        for (let t = firstTick; t <= tMax; t += tickInterval) {
+            const gx = t * scale - scrollLeft;
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, rowHeight);
+            ctx.stroke();
+        }
+
+        // Draw track items using binary search filtering
+        const startIdx = findStartIndex(track.data, tMin);
+        let lastPixelX = -1;
+
+        if (track.type === 'engine') {
+            for (let i = startIdx; i < track.data.length; i++) {
+                const task = track.data[i];
+                if (task.start > tMax) break;
+
+                const isZero = task.duration === 0;
+                const barW = isZero ? 24 : Math.max(task.duration * scale, 2);
+                const drawX = isZero ? (task.start * scale - scrollLeft - 12) : (task.start * scale - scrollLeft);
+                const drawY = 16;
+                const drawH = 40;
+
+                // Canvas pixel binning optimization
+                if (!isZero && barW < 1.5) {
+                    const currentPixelX = Math.floor(drawX);
+                    if (currentPixelX === lastPixelX) continue;
+                    lastPixelX = currentPixelX;
+                }
+
+                const color = getOpColor(task.op);
+                const isHovered = (task === track.hoveredItem);
+
+                if (isZero) {
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(drawX, drawY, barW, drawH);
+                    ctx.save();
+                    ctx.setLineDash([3, 3]);
+                    ctx.strokeStyle = isHovered ? '#0f172a' : '#94a3b8';
+                    ctx.lineWidth = isHovered ? 2 : 1;
+                    ctx.strokeRect(drawX, drawY, barW, drawH);
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = color.bg;
+                    drawRoundedRect(ctx, drawX, drawY, barW, drawH, 4);
+                    ctx.fill();
+
+                    ctx.strokeStyle = isHovered ? '#0f172a' : color.border;
+                    ctx.lineWidth = isHovered ? 2.5 : 1;
+                    ctx.stroke();
+
+                    if (barW > 25) {
+                        ctx.fillStyle = color.text;
+                        ctx.font = '700 11px Inter, -apple-system, sans-serif';
+                        const text = getTruncatedText(ctx, task.name, barW - 10);
+                        if (text) {
+                            ctx.fillText(text, drawX + 6, drawY + 24);
+                        }
+                    }
+                }
+            }
+        } else if (track.type === 'logical') {
+            const numBufs = track.extra.numBufs;
+            const pctHeight = 1 / numBufs;
+
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > tMax) break;
+
+                const bIdx = i % numBufs;
+                const drawX = buf.start * scale - scrollLeft;
+                const drawW = Math.max((buf.end - buf.start) * scale, 2);
+
+                const boxH = Math.max((rowHeight * pctHeight) - 4, 4);
+                const boxY = rowHeight - ((bIdx + 1) * rowHeight * pctHeight) + 2;
+
+                if (drawW < 1.5) {
+                    const currentPixelX = Math.floor(drawX);
+                    if (currentPixelX === lastPixelX) continue;
+                    lastPixelX = currentPixelX;
+                }
+
+                const color = getOpColor(buf.op);
+                const isHovered = (buf === track.hoveredItem);
+
+                ctx.fillStyle = color.bg;
+                drawRoundedRect(ctx, drawX, boxY, drawW, boxH, 3);
+                ctx.fill();
+
+                ctx.strokeStyle = isHovered ? '#0f172a' : color.border;
+                ctx.lineWidth = isHovered ? 2.5 : 1;
+                ctx.stroke();
+
+                if (drawW > 25 && boxH > 14) {
+                    ctx.fillStyle = color.text;
+                    ctx.font = '700 10px Inter, -apple-system, sans-serif';
+                    const text = getTruncatedText(ctx, buf.node_name, drawW - 8);
+                    if (text) {
+                        ctx.fillText(text, drawX + 4, boxY + boxH / 2 + 3);
+                    }
+                }
+            }
+        } else if (track.type === 'physical') {
+            const maxOffsetAndSize = track.extra.maxOffsetAndSize;
+
+            // Draw Y-axis guideline gridlines
+            const numYGridlines = 4;
+            const yStep = maxOffsetAndSize / numYGridlines;
+
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(203, 213, 225, 0.7)';
+            ctx.font = '600 9px Inter, -apple-system, sans-serif';
+            ctx.fillStyle = '#94a3b8';
+
+            for (let k = 0; k <= numYGridlines; k++) {
+                const yVal = Math.round(k * yStep);
+                const canvasY = rowHeight - (yVal / maxOffsetAndSize) * rowHeight;
+                ctx.beginPath();
+                ctx.moveTo(0, canvasY);
+                ctx.lineTo(viewportWidth, canvasY);
+                ctx.stroke();
+
+                if (k < numYGridlines) {
+                    ctx.fillText(`O: ${formatBytes(yVal)}`, 6, canvasY - 2);
+                }
+            }
+            ctx.restore();
+
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > tMax) break;
+
+                const bufOffset = buf.offset >= 0 ? buf.offset : 0;
+                const pctHeight = buf.size / maxOffsetAndSize;
+                const pctBottom = bufOffset / maxOffsetAndSize;
+
+                const boxH = Math.max(pctHeight * rowHeight - 4, 4);
+                const boxY = rowHeight - (pctBottom + pctHeight) * rowHeight + 2;
+                const drawX = buf.start * scale - scrollLeft;
+                const drawW = Math.max((buf.end - buf.start) * scale, 2);
+
+                if (drawW < 1.5) {
+                    const currentPixelX = Math.floor(drawX);
+                    if (currentPixelX === lastPixelX) continue;
+                    lastPixelX = currentPixelX;
+                }
+
+                const color = getOpColor(buf.op);
+                const isHovered = (buf === track.hoveredItem);
+
+                ctx.fillStyle = color.bg;
+                drawRoundedRect(ctx, drawX, boxY, drawW, boxH, 3);
+                ctx.fill();
+
+                ctx.strokeStyle = isHovered ? '#0f172a' : color.border;
+                ctx.lineWidth = isHovered ? 2.5 : 1;
+                ctx.stroke();
+
+                if (drawW > 25 && boxH > 14) {
+                    ctx.fillStyle = color.text;
+                    ctx.font = '700 10px Inter, -apple-system, sans-serif';
+                    const text = getTruncatedText(ctx, buf.node_name, drawW - 8);
+                    if (text) {
+                        ctx.fillText(text, drawX + 4, boxY + boxH / 2 + 3);
+                    }
+                }
+            }
+        }
+
+        ctx.restore();
+    });
+}
+
+function renderRulerTicks(track, scrollLeft, viewportWidth) {
+    const scale = track.scale;
+    const tMin = Math.max(0, scrollLeft / scale);
+    const tMax = (scrollLeft + viewportWidth) / scale;
+
+    const tickInterval = getNiceTickInterval((viewportWidth / 10) / scale);
+    const firstTick = Math.floor(tMin / tickInterval) * tickInterval;
+
+    track.container.innerHTML = '';
+
+    for (let t = firstTick; t <= tMax && t <= track.maxTime; t += tickInterval) {
+        const tick = document.createElement('div');
+        tick.className = 'ruler-tick';
+        tick.style.left = (t * scale) + 'px';
+        tick.textContent = Number.isInteger(t) ? t : t.toFixed(1);
+        track.container.appendChild(tick);
+    }
+}
+
+/**
+ * Pointer event tracking for canvas item hover and Inspector updates.
+ */
+function setupHoverInteractivity(track) {
+    const container = track.container;
+
+    container.addEventListener('mousemove', (e) => {
+        const rect = container.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const scale = track.scale;
+        const hoverTime = mouseX / scale;
+
+        let foundItem = null;
+
+        if (track.type === 'engine') {
+            const startIdx = findStartIndex(track.data, hoverTime - 10);
+            for (let i = startIdx; i < track.data.length; i++) {
+                const task = track.data[i];
+                if (task.start > hoverTime + 10) break;
+
+                const isZero = task.duration === 0;
+                const startX = isZero ? (task.start * scale - 12) : (task.start * scale);
+                const endX = isZero ? (task.start * scale + 12) : (task.end * scale);
+
+                if (mouseX >= startX && mouseX <= endX && mouseY >= 16 && mouseY <= 56) {
+                    foundItem = task;
+                    break;
+                }
+            }
+        } else if (track.type === 'logical') {
+            const numBufs = track.extra.numBufs;
+            const pctHeight = 1 / numBufs;
+            const rowHeight = track.rowHeight;
+
+            const startIdx = findStartIndex(track.data, hoverTime - 10);
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > hoverTime + 10) break;
+
+                const bIdx = i % numBufs;
+                const startX = buf.start * scale;
+                const endX = buf.end * scale;
+                const boxH = Math.max((rowHeight * pctHeight) - 4, 4);
+                const boxY = rowHeight - ((bIdx + 1) * rowHeight * pctHeight) + 2;
+
+                if (mouseX >= startX && mouseX <= endX && mouseY >= boxY && mouseY <= boxY + boxH) {
+                    foundItem = buf;
+                    break;
+                }
+            }
+        } else if (track.type === 'physical') {
+            const maxOffsetAndSize = track.extra.maxOffsetAndSize;
+            const rowHeight = track.rowHeight;
+
+            const startIdx = findStartIndex(track.data, hoverTime - 10);
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > hoverTime + 10) break;
+
+                const bufOffset = buf.offset >= 0 ? buf.offset : 0;
+                const pctHeight = buf.size / maxOffsetAndSize;
+                const pctBottom = bufOffset / maxOffsetAndSize;
+
+                const boxH = Math.max(pctHeight * rowHeight - 4, 4);
+                const boxY = rowHeight - (pctBottom + pctHeight) * rowHeight + 2;
+                const startX = buf.start * scale;
+                const endX = buf.end * scale;
+
+                if (mouseX >= startX && mouseX <= endX && mouseY >= boxY && mouseY <= boxY + boxH) {
+                    foundItem = buf;
+                    break;
+                }
+            }
+        }
+
+        if (foundItem !== track.hoveredItem) {
+            track.hoveredItem = foundItem;
+            container.style.cursor = foundItem ? 'pointer' : 'default';
+
+            if (foundItem) {
+                if (track.type === 'engine') {
+                    showInspector(foundItem, track.extra.formatted);
+                } else {
+                    showMemInspector(foundItem, track.extra.spaceName, track.extra.handleName);
+                }
+            }
+
+            requestViewportRender();
+        }
+    });
+
+    container.addEventListener('mouseleave', () => {
+        if (track.hoveredItem) {
+            track.hoveredItem = null;
+            container.style.cursor = 'default';
+            requestViewportRender();
+        }
+    });
+}
+
 function showInspector(task, engineDetails) {
     detailsPanel.classList.remove('hidden');
 
+    const color = getOpColor(task.op);
     inspectOp.className = 'inspect-badge';
-    inspectOp.classList.add(`op-${task.op}`);
+    inspectOp.style.backgroundColor = color.bg;
+    inspectOp.style.color = color.text;
+    inspectOp.style.borderColor = color.border;
     inspectOp.textContent = task.op;
 
     inspectName.textContent = `Node: ${task.name}`;
@@ -683,21 +1101,19 @@ function showInspector(task, engineDetails) {
 function showMemInspector(buf, spaceName, handleName) {
     detailsPanel.classList.remove('hidden');
 
+    const color = getOpColor(buf.op);
     inspectOp.className = 'inspect-badge';
-    inspectOp.classList.add(`op-${buf.op}`);
+    inspectOp.style.backgroundColor = color.bg;
+    inspectOp.style.color = color.text;
+    inspectOp.style.borderColor = color.border;
     inspectOp.textContent = buf.op;
 
     inspectName.textContent = `Buffer: ${buf.node_name}`;
     inspectEngine.textContent = `${spaceName} (${handleName})`;
     inspectInterval.textContent = `Active: ${buf.start} → ${buf.end}`;
-    inspectDuration.textContent = `Offset: ${buf.offset} | Size: ${buf.size}`;
+    inspectDuration.textContent = `Offset: ${formatBytes(buf.offset >= 0 ? buf.offset : 0)} | Size: ${formatBytes(buf.size)}`;
 }
 
-function hideInspector() {
-    // Keep last hovered item details displayed to avoid jittery page reflows
-}
-
-// Initial execution load
 if (graphSelect && graphSelect.value) {
     loadGraphData(graphSelect.value);
 }

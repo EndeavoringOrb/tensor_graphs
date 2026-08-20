@@ -1,22 +1,24 @@
 # File: kernel_bench/app.py
-from flask import Flask, jsonify, request, render_template
 import re
 import struct
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from collections import defaultdict
+
+from flask import Flask, jsonify, render_template, request
+
 from .jobs import (
-    create_job,
-    jobs,
-    load_job_history,
-    get_hw_info,
-    start_worker,
-    PROJECT_ROOT,
     KERNELS_DIR,
+    PROJECT_ROOT,
     BinaryReader,
-    save_report,
-    load_reports,
+    create_job,
+    get_hw_info,
+    jobs,
     load_cache_file,
+    load_job_history,
+    load_reports,
+    save_report,
+    start_worker,
 )
 
 app = Flask(__name__)

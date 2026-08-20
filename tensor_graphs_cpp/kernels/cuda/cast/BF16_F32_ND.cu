@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -20,6 +20,7 @@ inline bool matchCastBF16_F32_CUDA_ND(const std::vector<TensorNode> &inputs, con
 }
 
 inline void runCastBF16_F32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const uint16_t *A = static_cast<const uint16_t *>(ctx.inputs[0]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
 
@@ -29,7 +30,7 @@ inline void runCastBF16_F32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    cast_bf16_f32_nd_kernel<<<numBlocks, blockSize>>>(A, Out, n);
+    cast_bf16_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -48,6 +49,6 @@ inline LogicalId refFactoryCastBF16_F32_ND_CUDA(const std::vector<LogicalId> &in
     return graph.cast(inputs[0], DType::FLOAT32);
 }
 
-REGISTER_KERNEL("Cast_BF16_F32_ND_CUDA", 1, 1, matchCastBF16_F32_CUDA_ND, runCastBF16_F32_CUDA_ND, refFactoryCastBF16_F32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BF16}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Cast_BF16_F32_ND_CUDA", 1, 1, matchCastBF16_F32_CUDA_ND, runCastBF16_F32_CUDA_ND, refFactoryCastBF16_F32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BF16}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

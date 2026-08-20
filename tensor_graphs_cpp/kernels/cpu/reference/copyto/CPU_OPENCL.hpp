@@ -5,6 +5,8 @@
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 
+#ifdef TG_USE_OPENCL
+
 inline bool matchCopy_CPU_OpenCL(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     return inputs[0].getShape() == output.getShape() && inputs[0].strides == output.strides &&
@@ -24,7 +26,7 @@ inline void runCopy_CPU_OpenCL(const KernelContext &ctx)
         return;
 
     cl_int err = clEnqueueWriteBuffer(OpenCLState::get().queue, dst_device_buf,
-                                      CL_TRUE, // Blocking write
+                                      CL_FALSE, // Non-blocking write
                                       0, size_bytes, src_host_ptr, 0, nullptr, nullptr);
 
     if (err != CL_SUCCESS)
@@ -35,3 +37,5 @@ inline void runCopy_CPU_OpenCL(const KernelContext &ctx)
 
 REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopy_CPU_OpenCL, runCopy_CPU_OpenCL, MemSpace(1, HandleType::OPENCL),
                     {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+
+#endif

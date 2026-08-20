@@ -85,6 +85,6 @@ inline LogicalId refFactoryDotTransposedBF16(const std::vector<LogicalId> &input
 }
 
 REGISTER_KERNEL("Dot_Transposed_BF16", 2, 2, matchDotTransposedBF16, runDotTransposedBF16, refFactoryDotTransposedBF16,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16},
+                {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16},
                 {{1, 8, 640}, {256, 640}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

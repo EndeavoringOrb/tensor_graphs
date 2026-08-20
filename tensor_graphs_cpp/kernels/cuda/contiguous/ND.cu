@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -83,6 +83,7 @@ inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const
  */
 inline void runContiguous_CUDA_ND(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
     uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
 
@@ -103,7 +104,7 @@ inline void runContiguous_CUDA_ND(const KernelContext &ctx)
     int blockSize = 256;
     uint32_t gridSize = (uint32_t)((numElements + blockSize - 1) / blockSize);
 
-    ContiguousCUDA::contiguous_kernel<<<gridSize, blockSize>>>(src, dst, numElements, elemSize, p);
+    ContiguousCUDA::contiguous_kernel<<<gridSize, blockSize, 0, stream>>>(src, dst, numElements, elemSize, p);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -122,7 +123,7 @@ inline LogicalId refFactoryContiguous_CUDA_ND(const std::vector<LogicalId> &inpu
 }
 
 // Register as a named general kernel for CUDA
-REGISTER_KERNEL("Contiguous_CUDA_ND", 1, 1, matchContiguous_CUDA_ND, runContiguous_CUDA_ND, refFactoryContiguous_CUDA_ND, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
+REGISTER_KERNEL("Contiguous_CUDA_ND", 1, 1, matchContiguous_CUDA_ND, runContiguous_CUDA_ND, refFactoryContiguous_CUDA_ND,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
                 {DType::ANY},     // Input DType
                 {{1024, 640}},    // Dummy shape
                 {false},          // Input does NOT require contiguity (that's the point of this kernel)

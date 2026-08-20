@@ -9,10 +9,7 @@
 
 inline bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
 {
-    ParallelBuffer x = a, y = b;
-    if (y.start < x.start)
-        std::swap(x, y);
-    return y.start <= x.end;
+    return std::max(a.start, b.start) <= std::min(a.end, b.end);
 }
 
 inline std::string toString(const std::vector<uint32_t> &shape)

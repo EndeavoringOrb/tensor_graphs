@@ -222,7 +222,7 @@ inline LogicalId refFactoryJinaSiluMulNeg_F32_3D(const std::vector<LogicalId> &i
 }
 
 REGISTER_KERNEL("JinaSiluMulNeg_F32_3D", 1, 1, matchJinaSiluMulNeg_F32_3D, runJinaSiluMulNeg_F32_3D,
-                refFactoryJinaSiluMulNeg_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryJinaSiluMulNeg_F32_3D, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32}, {{1, 1024, 3072}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

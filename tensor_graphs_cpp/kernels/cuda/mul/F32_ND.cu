@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -19,6 +19,7 @@ inline bool matchMulF32_CUDA_ND(const std::vector<TensorNode> &inputs, const Ten
 }
 
 inline void runMulF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     const float *B = static_cast<const float *>(ctx.inputs[1]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
@@ -29,7 +30,7 @@ inline void runMulF32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    mul_f32_nd_kernel<<<numBlocks, blockSize>>>(A, B, Out, n);
+    mul_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, B, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -48,6 +49,6 @@ inline LogicalId refFactoryMulF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_F32_ND_CUDA", 2, 2, matchMulF32_CUDA_ND, runMulF32_CUDA_ND, refFactoryMulF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Mul_F32_ND_CUDA", 2, 2, matchMulF32_CUDA_ND, runMulF32_CUDA_ND, refFactoryMulF32_ND_CUDA,{0,1}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

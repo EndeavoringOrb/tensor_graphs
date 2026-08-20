@@ -17,10 +17,9 @@
 #include "generated/build_context.gen.hpp"
 
 // TODO: make hardware detection better
-#if defined(USE_CUDA)
+#if defined(TG_USE_CUDA)
 #define HW_TAG "CUDA_Enabled"
 #else
-// Determine OS String
 #if defined(TG_OS_WINDOWS)
 #define PLAT_OS_STR "Windows"
 #elif defined(TG_OS_MACOS)
@@ -31,7 +30,6 @@
 #define PLAT_OS_STR "UnknownOS"
 #endif
 
-// Determine Arch String
 #if defined(TG_ARCH_ARM64)
 #define PLAT_ARCH_STR "ARM64"
 #elif defined(TG_ARCH_X64)
@@ -42,10 +40,6 @@
 
 #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
-
-// Uncomment the following line to enable logging calls to
-// `benchmarks/calls.bin`
-#define TENSOR_GRAPHS_LOG_COST_CALLS
 
 struct Record
 {
@@ -250,10 +244,21 @@ struct CostModel
     std::ofstream callFile;
     std::mutex logMtx;
     bool doneWarning = false;
+    bool enableLogging = false;
 
-    CostModel()
+    CostModel(bool logCalls = true) : enableLogging(logCalls)
     {
-#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
+        if (enableLogging)
+        {
+            initLogging();
+        }
+    }
+
+    void initLogging()
+    {
+        if (callFile.is_open())
+            return;
+
         const std::string path = "benchmarks/calls.bin";
         std::filesystem::create_directories(std::filesystem::path(path).parent_path());
         {
@@ -273,7 +278,15 @@ struct CostModel
         callFile.open(path, std::ios::app | std::ios::binary);
         if (!callFile.is_open())
             std::cerr << "Failed to open " << path << " for appending.\n";
-#endif
+    }
+
+    void setLogging(bool enable)
+    {
+        enableLogging = enable;
+        if (enableLogging)
+        {
+            initLogging();
+        }
     }
 
     void log_call(KernelId kernelId, const std::vector<uint32_t> &outShape, const std::vector<uint64_t> &outStrides,
@@ -281,6 +294,9 @@ struct CostModel
                   const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
                   const std::vector<std::vector<uint8_t>> &inConstants)
     {
+        if (!enableLogging)
+            return;
+
         Record r;
         r.kernelId = kernelId;
         r.buildContextId = BUILD_CONTEXT_ID;
@@ -335,7 +351,6 @@ struct CostModel
         features.push_back(1.0); // Bias
 
         double outElements = static_cast<double>(countElements(outShape));
-
         double inElements = 0.0;
         for (const auto &s : inShapes)
             inElements += static_cast<double>(countElements(s));
@@ -343,7 +358,6 @@ struct CostModel
         features.push_back(outElements);
         features.push_back(inElements);
 
-        // Expand per input details
         for (uint64_t i = 0; i < inShapes.size(); ++i)
         {
             double elements = static_cast<double>(countElements(inShapes[i]));
@@ -448,12 +462,10 @@ struct CostModel
 
         BinaryReader br(file);
         uint32_t total = 0, valid = 0;
-        ProgressTimer timer(0, "loading records");
         std::unordered_map<ModelKey, std::vector<Record>, ModelKeyHash> recordsByKey;
 
         while (file.peek() != EOF)
         {
-            timer.tick();
             Record r;
             br.read(r);
             total++;
@@ -486,9 +498,8 @@ struct CostModel
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
         {
-#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
             log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
-#endif
+
             if (!doneWarning)
             {
                 std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
@@ -497,7 +508,6 @@ struct CostModel
             return std::numeric_limits<float>::infinity();
         }
 
-        // Exact match short-circuit
         for (const auto &r : it->second)
         {
             if (r.inputShapes == inShapes && r.outputShape == outShape && r.inputStrides == inStrides &&
@@ -508,9 +518,7 @@ struct CostModel
             }
         }
 
-#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
-#endif
 
         ModelKey mk = {kernelId, inShapes.size()};
         auto modelIt = models.find(mk);

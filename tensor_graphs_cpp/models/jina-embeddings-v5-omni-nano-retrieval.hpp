@@ -225,14 +225,6 @@ class JinaV5OmniNanoRetrievalModel
     // -------------------------------------------------------------------------
     // Shape / repeat helpers
     // -------------------------------------------------------------------------
-    LogicalId repeat_ax(LogicalId id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return id;
-        int32_t r = repeats, a = axis;
-        return g.repeat(id, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
-    }
-
     LogicalId repeat_3d_axis(LogicalId tensor_id, uint32_t repeats, uint32_t axis)
     {
         if (repeats <= 1)
@@ -510,8 +502,8 @@ class JinaV5OmniNanoRetrievalModel
         int32_t ax = 3;
         LogicalId rotated = g.concat({g.neg(x2), x1}, g.constant({1}, &ax, DType::INT32));
 
-        LogicalId cos_exp = repeat_ax(cos, n_groups, 1);
-        LogicalId sin_exp = repeat_ax(sin, n_groups, 1);
+        LogicalId cos_exp = g.repeat(cos, n_groups, 1);
+        LogicalId sin_exp = g.repeat(sin, n_groups, 1);
         return g.add(g.mul(x, cos_exp), g.mul(rotated, sin_exp));
     }
 
@@ -538,9 +530,9 @@ class JinaV5OmniNanoRetrievalModel
                    DType::FLOAT32);
 
         int32_t sh_col[] = {(int32_t)S, 1};
-        LogicalId pos_col = repeat_ax(g.reshape(pos, g.constant({2}, sh_col, DType::INT32)), head_dim / 2, 1);
+        LogicalId pos_col = g.repeat(g.reshape(pos, g.constant({2}, sh_col, DType::INT32)), head_dim / 2, 1);
         int32_t sh_row[] = {1, (int32_t)head_dim / 2};
-        LogicalId freq_row = repeat_ax(g.reshape(inv_freq, g.constant({2}, sh_row, DType::INT32)), S, 0);
+        LogicalId freq_row = g.repeat(g.reshape(inv_freq, g.constant({2}, sh_row, DType::INT32)), S, 0);
 
         LogicalId angles_half = g.mul(pos_col, freq_row);
         int32_t ax = 1;
@@ -597,10 +589,10 @@ class JinaV5OmniNanoRetrievalModel
 
         int32_t sh_col[] = {(int32_t)grid_h, 1};
         LogicalId h_col2d = g.reshape(h_arr, g.constant({2}, sh_col, DType::INT32));
-        LogicalId h_pos_2d = g.contiguous(repeat_ax(h_col2d, grid_w, 1)); // (grid_h, grid_w)
+        LogicalId h_pos_2d = g.contiguous(g.repeat(h_col2d, grid_w, 1)); // (grid_h, grid_w)
         int32_t sh_row[] = {1, (int32_t)grid_w};
         LogicalId w_row2d = g.reshape(w_arr, g.constant({2}, sh_row, DType::INT32));
-        LogicalId w_pos_2d = g.contiguous(repeat_ax(w_row2d, grid_h, 0)); // (grid_h, grid_w)
+        LogicalId w_pos_2d = g.contiguous(g.repeat(w_row2d, grid_h, 0)); // (grid_h, grid_w)
 
         int32_t sh_S[] = {(int32_t)S};
         LogicalId h_pos = g.reshape(h_pos_2d, g.constant({1}, sh_S, DType::INT32)); // (S,)
@@ -613,13 +605,13 @@ class JinaV5OmniNanoRetrievalModel
         int32_t sh_1_q[] = {1, (int32_t)quarter};
         h_pos_2d = g.reshape(h_pos, g.constant({2}, sh_S_1, DType::INT32));
         LogicalId invf_2d = g.reshape(inv_freq, g.constant({2}, sh_1_q, DType::INT32));
-        LogicalId h_pos_exp = repeat_ax(h_pos_2d, quarter, 1);
-        LogicalId invf_h_exp = repeat_ax(invf_2d, S, 0);
+        LogicalId h_pos_exp = g.repeat(h_pos_2d, quarter, 1);
+        LogicalId invf_h_exp = g.repeat(invf_2d, S, 0);
         LogicalId angles_h = g.mul(h_pos_exp, invf_h_exp); // (S, quarter)
 
         w_pos_2d = g.reshape(w_pos, g.constant({2}, sh_S_1, DType::INT32));
-        LogicalId w_pos_exp = repeat_ax(w_pos_2d, quarter, 1);
-        LogicalId invf_w_exp = repeat_ax(invf_2d, S, 0);   // SAME inv_freq
+        LogicalId w_pos_exp = g.repeat(w_pos_2d, quarter, 1);
+        LogicalId invf_w_exp = g.repeat(invf_2d, S, 0);    // SAME inv_freq
         LogicalId angles_w = g.mul(w_pos_exp, invf_w_exp); // (S, quarter)
 
         // ---- angles = cat([angles_h, angles_w], -1)  (S, half)

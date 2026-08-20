@@ -16,7 +16,7 @@
 #include <float.h>
 #endif
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -43,8 +43,9 @@ namespace fs = std::filesystem;
 std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 {
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
-#ifdef USE_CUDA
-    bufferSizes[MemSpace{2, HandleType::CUDA}] = 24ULL * 1024 * 1024 * 1024;
+#ifdef TG_USE_CUDA
+    LOG(INFO) << "ADDING CUDA MEMCAP";
+    bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
     {
@@ -56,7 +57,7 @@ std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 const float *sync_output_to_host(const float *device_ptr, uint64_t num_elements, std::vector<float> &host_buffer)
 {
     const float *output_ptr = device_ptr;
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
     cudaPointerAttributes attrs;
     if (cudaPointerGetAttributes(&attrs, device_ptr) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
     {
@@ -215,6 +216,7 @@ int main(int argc, char *argv[])
     parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
     parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
+    parser.add_option({"--sort-enodes"}, "Sort order for enodes in extraction (cost or height).", "cost");
     parser.add_positional("model", "Name of the target model (gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.");
 

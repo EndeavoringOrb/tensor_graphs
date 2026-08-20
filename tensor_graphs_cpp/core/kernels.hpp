@@ -1,5 +1,4 @@
 #pragma once
-#include <CL/cl.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -97,7 +96,9 @@ struct KernelEntry
     bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output, MemSpace output_mem_space = {},
                  const std::vector<MemSpace> &input_mem_spaces = {}, const std::vector<Engine> &engines = {},
                  bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false,
-                 bool ignore_engines = false, bool ignore_input_contig = false) const
+                 bool ignore_engines = false, bool ignore_input_contig = false,
+                 std::vector<Engine> *out_mapped_engines = nullptr,
+                 std::vector<MemSpace> *out_mapped_input_mem_spaces = nullptr) const
     {
         // 1. Check number of inputs
         if (inputs.size() < min_num_inputs || inputs.size() > max_num_inputs)
@@ -117,58 +118,173 @@ struct KernelEntry
         }
 
         // 3 & 4. Check memory space topology.
-        //
-        // output_mem_space / input_mem_spaces on a KernelEntry are LOCAL to this
-        // registration: their numeric value carries no meaning on its own. Two
-        // slots that share a local idx must resolve to the SAME actual MemSpace;
-        // two slots with different local idxs must resolve to DIFFERENT actual
-        // MemSpaces. This lets a kernel registration pick any idxs it likes
-        // without coordinating with other kernels or with however many real
-        // devices of a given HandleType happen to exist at runtime.
-        if (!ignore_output_mem_space || !ignore_input_mem_spaces)
-        {
-            std::unordered_map<MemSpace, MemSpace> localToActual;
-            std::unordered_map<MemSpace, MemSpace> actualToLocal;
+        std::unordered_map<MemSpace, MemSpace> localToActualMem;
+        std::unordered_map<MemSpace, MemSpace> actualToLocalMem;
 
-            auto reconcile = [&](const MemSpace &local, const MemSpace &actual) {
-                if (local.type != actual.type)
-                    return false;
-
-                auto [fwdIt, fwdInserted] = localToActual.try_emplace(local, actual);
-                if (!fwdInserted && !(fwdIt->second == actual))
-                    return false; // same local idx resolved two different ways
-
-                auto [bwdIt, bwdInserted] = actualToLocal.try_emplace(actual, local);
-                if (!bwdInserted && !(bwdIt->second == local))
-                    return false; // two different local idxs collapsed onto one actual space
-
-                return true;
-            };
-
-            if (!ignore_output_mem_space && !reconcile(this->output_mem_space, output_mem_space))
-            {
+        auto reconcileMem = [&](const MemSpace &local, const MemSpace &actual) {
+            if (local.type != actual.type)
                 return false;
-            }
 
-            if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
+            auto [fwdIt, fwdInserted] = localToActualMem.try_emplace(local, actual);
+            if (!fwdInserted && !(fwdIt->second == actual))
+                return false; // same local idx resolved two different ways
+
+            auto [bwdIt, bwdInserted] = actualToLocalMem.try_emplace(actual, local);
+            if (!bwdInserted && !(bwdIt->second == local))
+                return false; // two different local idxs collapsed onto one actual space
+
+            return true;
+        };
+
+        if (!ignore_output_mem_space && output_mem_space.type != HandleType::STORAGE)
+        {
+            if (!reconcileMem(this->output_mem_space, output_mem_space))
+                return false;
+        }
+
+        if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
+        {
+            for (uint64_t i = 0; i < inputs.size(); ++i)
             {
-                for (uint64_t i = 0; i < inputs.size(); ++i)
+                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
+                if (i < input_mem_spaces.size())
                 {
-                    uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
-                    if (i >= input_mem_spaces.size())
-                        return false;
-                    if (!reconcile(this->input_mem_spaces[ruleIdx], input_mem_spaces[i]))
+                    if (!reconcileMem(this->input_mem_spaces[ruleIdx], input_mem_spaces[i]))
                         return false;
                 }
             }
         }
 
-        // 5. Check engines
-        if (!ignore_engines && !this->engines.empty())
+        // 5. Check engine topology and perform local-to-actual engine mapping
+        std::unordered_map<Engine, Engine> localToActualEngine;
+        std::unordered_map<Engine, Engine> actualToLocalEngine;
+
+        auto reconcileEngine = [&](const Engine &local, const Engine &actual) {
+            if (local.type != actual.type)
+                return false;
+
+            auto [fwdIt, fwdInserted] = localToActualEngine.try_emplace(local, actual);
+            if (!fwdInserted && !(fwdIt->second == actual))
+                return false;
+
+            auto [bwdIt, bwdInserted] = actualToLocalEngine.try_emplace(actual, local);
+            if (!bwdInserted && !(bwdIt->second == local))
+                return false;
+
+            return true;
+        };
+
+        if (!ignore_engines && !this->engines.empty() && !engines.empty())
         {
-            if (this->engines != engines)
+            if (this->engines.size() != engines.size())
             {
                 return false;
+            }
+
+            for (uint64_t i = 0; i < this->engines.size(); ++i)
+            {
+                if (!reconcileEngine(this->engines[i], engines[i]))
+                    return false;
+            }
+        }
+
+        // Correlate unmapped local engines with reconciled memory spaces
+        for (const auto &local_eng : this->engines)
+        {
+            if (localToActualEngine.find(local_eng) == localToActualEngine.end())
+            {
+                if (local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA)
+                {
+                    MemSpace local_cuda_ms{local_eng.idx, HandleType::CUDA};
+                    auto it = localToActualMem.find(local_cuda_ms);
+                    if (it != localToActualMem.end())
+                    {
+                        Engine actual_eng{it->second.idx, local_eng.type, {it->second}};
+                        reconcileEngine(local_eng, actual_eng);
+                    }
+                    else if (!ignore_output_mem_space && output_mem_space.type == HandleType::CUDA)
+                    {
+                        Engine actual_eng{output_mem_space.idx, local_eng.type, {output_mem_space}};
+                        reconcileEngine(local_eng, actual_eng);
+                    }
+                }
+                else if (local_eng.type == EngineType::CPU)
+                {
+                    Engine actual_eng{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}};
+                    reconcileEngine(local_eng, actual_eng);
+                }
+                else if (local_eng.type == EngineType::QUALCOMM_IGPU)
+                {
+                    MemSpace local_cl_ms{local_eng.idx, HandleType::OPENCL};
+                    auto it = localToActualMem.find(local_cl_ms);
+                    if (it != localToActualMem.end())
+                    {
+                        Engine actual_eng{it->second.idx, EngineType::QUALCOMM_IGPU, {it->second}};
+                        reconcileEngine(local_eng, actual_eng);
+                    }
+                }
+            }
+        }
+
+        // Populate mapped engines output
+        if (out_mapped_engines)
+        {
+            out_mapped_engines->clear();
+            for (const auto &local_eng : this->engines)
+            {
+                auto it = localToActualEngine.find(local_eng);
+                if (it != localToActualEngine.end())
+                {
+                    out_mapped_engines->push_back(it->second);
+                }
+                else if ((local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA) &&
+                         !ignore_output_mem_space && output_mem_space.type == HandleType::CUDA)
+                {
+                    out_mapped_engines->push_back(Engine{output_mem_space.idx, local_eng.type, {output_mem_space}});
+                }
+                else
+                {
+                    out_mapped_engines->push_back(local_eng);
+                }
+            }
+            if (out_mapped_engines->empty())
+            {
+                if (output_mem_space.type == HandleType::CUDA)
+                    out_mapped_engines->push_back(
+                        Engine{output_mem_space.idx, EngineType::CUDA_GPU, {output_mem_space}});
+                else
+                    out_mapped_engines->push_back(Engine{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}});
+            }
+        }
+
+        // Populate mapped input memory spaces output
+        if (out_mapped_input_mem_spaces)
+        {
+            out_mapped_input_mem_spaces->clear();
+            for (uint64_t i = 0; i < inputs.size(); ++i)
+            {
+                if (this->input_mem_spaces.empty())
+                {
+                    out_mapped_input_mem_spaces->push_back(output_mem_space);
+                }
+                else
+                {
+                    uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
+                    MemSpace local_in = this->input_mem_spaces[ruleIdx];
+                    auto it = localToActualMem.find(local_in);
+                    if (it != localToActualMem.end())
+                    {
+                        out_mapped_input_mem_spaces->push_back(it->second);
+                    }
+                    else if (local_in.type == HandleType::CUDA && output_mem_space.type == HandleType::CUDA)
+                    {
+                        out_mapped_input_mem_spaces->push_back(output_mem_space);
+                    }
+                    else
+                    {
+                        out_mapped_input_mem_spaces->push_back(local_in);
+                    }
+                }
             }
         }
 
@@ -246,6 +362,7 @@ class KernelRegistry
         return instance;
     }
 
+    mutable std::mutex patternCacheMtx;
     mutable std::unordered_map<GraphPatternCacheKey, std::vector<KernelId>> patternCache;
 
     void setReferenceOnly(bool refOnly)
@@ -314,16 +431,17 @@ class KernelRegistry
         return matches;
     }
 
-    std::vector<KernelId> findMatchingKernelsByPattern(
-        const Graph &patternGraph, LogicalId patternRootId, const std::vector<TensorNode> &inputs,
-        const TensorNode &output, bool reference_only = false, MemSpace output_mem_space = {},
-        const std::vector<MemSpace> &input_mem_spaces = {}, const std::vector<Engine> &engines = {},
-        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_engines = false,
-        bool ignore_input_contig = false) const
+    std::vector<KernelId> findMatchingKernelsByPatternHash(
+        const Graph &patternGraph, LogicalId patternRootId, const std::string &patternHash,
+        const std::vector<TensorNode> &inputs, const TensorNode &output, bool reference_only = false,
+        MemSpace output_mem_space = {}, const std::vector<MemSpace> &input_mem_spaces = {},
+        const std::vector<Engine> &engines = {}, bool ignore_output_mem_space = false,
+        bool ignore_input_mem_spaces = false, bool ignore_engines = false, bool ignore_input_contig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
         GraphPatternCacheKey key{rootNode.opType,
                                  rootNode.opName,
+                                 patternHash,
                                  reference_only,
                                  ignore_output_mem_space,
                                  ignore_input_mem_spaces,
@@ -334,18 +452,38 @@ class KernelRegistry
                                  inputs,
                                  output};
 
-        auto it = patternCache.find(key);
-        if (it != patternCache.end())
         {
-            return it->second;
+            std::lock_guard<std::mutex> lock(patternCacheMtx);
+            auto it = patternCache.find(key);
+            if (it != patternCache.end())
+            {
+                return it->second;
+            }
         }
 
         std::vector<KernelId> matches = _findMatchingKernelsByPattern(
             patternGraph, patternRootId, inputs, output, reference_only, output_mem_space, input_mem_spaces, engines,
             ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines, ignore_input_contig);
 
-        patternCache[key] = matches;
+        {
+            std::lock_guard<std::mutex> lock(patternCacheMtx);
+            patternCache[key] = matches;
+        }
         return matches;
+    }
+
+    std::vector<KernelId> findMatchingKernelsByPattern(
+        const Graph &patternGraph, LogicalId patternRootId, const std::vector<TensorNode> &inputs,
+        const TensorNode &output, bool reference_only = false, MemSpace output_mem_space = {},
+        const std::vector<MemSpace> &input_mem_spaces = {}, const std::vector<Engine> &engines = {},
+        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_engines = false,
+        bool ignore_input_contig = false) const
+    {
+        std::string patternHash = computeGraphHash(patternGraph, {patternRootId});
+        return findMatchingKernelsByPatternHash(patternGraph, patternRootId, patternHash, inputs, output,
+                                                reference_only, output_mem_space, input_mem_spaces, engines,
+                                                ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines,
+                                                ignore_input_contig);
     }
 
     void registerKernel(KernelId uid, OpType op, const std::string &opName, uint32_t min_num_inputs,
@@ -417,6 +555,11 @@ class KernelRegistry
         return entries.find(uid) != entries.end();
     }
 
+    uint64_t nKernels() const
+    {
+        return entries.size();
+    }
+
   private:
     std::unordered_map<KernelId, KernelEntry> entries;
     bool reference_only_mode = false;
@@ -426,10 +569,11 @@ struct KernelRegistrar
 {
     KernelRegistrar(KernelId uid, OpType op, const std::string &opName, uint32_t min_num_inputs,
                     uint32_t max_num_inputs, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                    const std::vector<uint32_t> &safe_inplace_idxs, bool is_view, bool isReference,
-                    InferViewFunc inferView, const MemSpace output_mem_space, const std::vector<Engine> &engines,
-                    const std::vector<DType> &dtypes = {}, const std::vector<std::vector<uint32_t>> &dummyShapes = {},
-                    const std::vector<bool> &contiguous = {}, const std::vector<MemSpace> &input_mem_spaces = {})
+                    const std::vector<uint32_t> &safe_inplace_idxs, const MemSpace output_mem_space,
+                    const std::vector<Engine> &engines, const std::vector<DType> &dtypes = {},
+                    const std::vector<std::vector<uint32_t>> &dummyShapes = {},
+                    const std::vector<bool> &contiguous = {}, const std::vector<MemSpace> &input_mem_spaces = {},
+                    bool is_view = false, bool isReference = false, InferViewFunc inferView = nullptr)
     {
         KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory,
                                              safe_inplace_idxs, is_view, isReference, inferView, output_mem_space,
@@ -446,29 +590,22 @@ struct KernelRegistrar
 #ifndef REGISTER_KERNEL
 #define REGISTER_KERNEL(opName, n_min, n_max, match, run, refFactory, ...)
 #endif
-#ifndef REGISTER_KERNEL_INPLACE
-#define REGISTER_KERNEL_INPLACE(opName, n_min, n_max, match, run, refFactory, ...)
-#endif
 #ifndef REGISTER_KERNEL_VIEW
 #define REGISTER_KERNEL_VIEW(opName, n_min, n_max, match, ref, inferView, ...)
 #endif
 
 #define REGISTER_REF_KERNEL_INTERNAL(uid, op, n_min, n_max, match, run, ...)                                           \
-    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, false, true, nullptr,  \
-                                            __VA_ARGS__)
+    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, __VA_ARGS__, false,    \
+                                            true, nullptr)
 
 #define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, n_min, n_max, match, inferView, ...)                                \
-    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, true, true,  \
-                                                  inferView, __VA_ARGS__)
+    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, __VA_ARGS__, \
+                                                  true, true, inferView)
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                               \
     static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory,    \
-                                                  {}, false, false, nullptr, __VA_ARGS__)
-
-#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                       \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory,    \
-                                                  {0}, false, false, nullptr, __VA_ARGS__)
+                                                  __VA_ARGS__)
 
 #define REGISTER_KERNEL_VIEW_INTERNAL(uid, opName, n_min, n_max, match, refFactory, inferView, ...)                    \
     static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr,      \
-                                                        refFactory, {}, true, false, inferView, __VA_ARGS__)
+                                                        refFactory, {}, __VA_ARGS__, true, false, inferView)

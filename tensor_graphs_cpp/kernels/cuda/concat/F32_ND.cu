@@ -1,4 +1,4 @@
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -24,6 +24,7 @@ inline bool matchConcatF32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
 }
 
 inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     float *Out = static_cast<float *>(ctx.outputs[0]);
     int32_t axis = *static_cast<const int32_t *>(ctx.inputs[0]);
     
@@ -45,7 +46,7 @@ inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
         uint64_t total = O * C_in * I;
         if (total > 0) {
             int numBlocks = (total + blockSize - 1) / blockSize;
-            concat_f32_nd_kernel<<<numBlocks, blockSize>>>(A, Out, O, C_in, C_out, I, c_offset);
+            concat_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, O, C_in, C_out, I, c_offset);
         }
         c_offset += C_in;
     }
@@ -69,6 +70,6 @@ inline LogicalId refFactoryConcatF32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, UINT32_MAX, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1024}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, UINT32_MAX, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1024}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

@@ -11,7 +11,7 @@
     --primary-hover: #2563eb;
     --primary-light: #eff6ff;
 
-    /* Operations Theme Colors (Pill designs with matching crisp borders) */
+    /* Operations Theme Colors */
     --color-input-bg: #f1f5f9;
     --color-input-text: #475569;
     --color-input-border: #cbd5e1;
@@ -382,6 +382,7 @@ body {
     padding: 2px 6px;
     border-radius: 4px;
     text-transform: uppercase;
+    border: 1px solid transparent;
 }
 
 #inspectName {
@@ -416,7 +417,7 @@ body {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    gap: 12px;
+    gap: 16px;
     border-bottom: 1px solid var(--border-color);
     padding-bottom: 16px;
     margin-bottom: 20px;
@@ -427,6 +428,38 @@ body {
         flex-direction: row;
         align-items: center;
     }
+}
+
+.main-header-left {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.zoom-control-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #475569;
+    background-color: #f8fafc;
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+}
+
+.zoom-control-group label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.zoom-control-group input[type="range"] {
+    width: 140px;
+    cursor: pointer;
+    accent-color: var(--primary);
 }
 
 .legend {
@@ -460,17 +493,6 @@ body {
     position: relative;
     padding-bottom: 10px;
     min-width: max-content;
-}
-
-/* Dynamic Alignment Gridlines overlay */
-.time-grid-overlay {
-    position: absolute;
-    top: 40px;
-    bottom: 0;
-    left: 140px;
-    right: 0;
-    pointer-events: none;
-    z-index: 1;
 }
 
 /* Time Ruler Header Row */
@@ -557,94 +579,11 @@ body {
     flex-grow: 1;
 }
 
-/* Interactive Pill-style Task Bars */
-.task-bar {
+.track-canvas {
     position: absolute;
-    height: 40px;
-    top: 16px;
-    border-radius: var(--radius-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.75rem;
-    font-weight: 700;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    padding: 0 8px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-    cursor: pointer;
-    transition: transform 0.1s ease, box-shadow 0.1s ease;
-    z-index: 2;
-}
-
-.task-bar:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-    z-index: 5;
-}
-
-/* Pill Colors based on Operational Type */
-.op-INPUT {
-    background: var(--color-input-bg);
-    color: var(--color-input-text);
-    border: 1px solid var(--color-input-border);
-}
-
-.op-ADD {
-    background: var(--color-add-bg);
-    color: var(--color-add-text);
-    border: 1px solid var(--color-add-border);
-}
-
-.op-MUL {
-    background: var(--color-mul-bg);
-    color: var(--color-mul-text);
-    border: 1px solid var(--color-mul-border);
-}
-
-.op-COPYTO {
-    background: var(--color-copyto-bg);
-    color: var(--color-copyto-text);
-    border: 1px solid var(--color-copyto-border);
-}
-
-.op-SQRT {
-    background: var(--color-sqrt-bg);
-    color: var(--color-sqrt-text);
-    border: 1px solid var(--color-sqrt-border);
-}
-
-/* Legend dot matching */
-.legend-dot.op-INPUT {
-    background: var(--color-input-text);
-}
-
-.legend-dot.op-ADD {
-    background: var(--color-add-text);
-}
-
-.legend-dot.op-MUL {
-    background: var(--color-mul-text);
-}
-
-.legend-dot.op-COPYTO {
-    background: var(--color-copyto-text);
-}
-
-.legend-dot.op-SQRT {
-    background: var(--color-sqrt-text);
-}
-
-/* Styling for Instant/Zero Duration Event Bars */
-.task-zero-duration {
-    background: repeating-linear-gradient(45deg,
-            #f8fafc,
-            #f8fafc 4px,
-            #e2e8f0 4px,
-            #e2e8f0 8px);
-    border: 1px dashed #94a3b8;
-    color: #475569;
+    top: 0;
+    left: 0;
+    pointer-events: auto;
 }
 
 /* Schedule Comparison Blocks & Separators */
@@ -722,20 +661,6 @@ body {
     display: none !important;
 }
 
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(4px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-/* (Add these rules towards the bottom of your static/css/style.css file) */
-
 /* Memory Allocation Canvas Layout Styling */
 .mem-section-header {
     font-size: 0.7rem;
@@ -789,60 +714,4 @@ body {
     border-radius: var(--radius-sm);
     border: 1px solid #e2e8f0;
     overflow: hidden;
-}
-
-/* Background Guidelines for Memory Offsets */
-.mem-offset-gridline {
-    position: absolute;
-    left: 0;
-    right: 0;
-    height: 1px;
-    border-bottom: 1px dashed #cbd5e1;
-    opacity: 0.35;
-    pointer-events: none;
-    z-index: 1;
-}
-
-.mem-offset-tick-text {
-    position: absolute;
-    left: 6px;
-    font-size: 0.55rem;
-    color: #94a3b8;
-    font-weight: 700;
-    z-index: 3;
-    pointer-events: none;
-    background-color: rgba(248, 250, 252, 0.85);
-    padding: 0 2px;
-    border-radius: 2px;
-}
-
-/* Buffer Allocations Blocks */
-.mem-buffer-bar {
-    position: absolute;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.7rem;
-    font-weight: 700;
-    overflow: hidden;
-    padding: 0 4px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    cursor: pointer;
-    transition: transform 0.1s ease, box-shadow 0.1s ease, filter 0.1s;
-    z-index: 2;
-}
-
-.mem-buffer-bar:hover {
-    transform: translateY(-1px) scale(1.005);
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    filter: brightness(0.97);
-    z-index: 5;
-}
-
-.mem-buffer-label {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    pointer-events: none;
 }

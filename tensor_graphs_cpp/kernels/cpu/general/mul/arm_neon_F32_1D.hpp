@@ -32,7 +32,7 @@ inline LogicalId refFactoryMul1D_NEON(const std::vector<LogicalId> &inputs, Grap
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_1D_NEON", 2, 2, matchMulF32_1D_NEON, runMulF32_1D_NEON, refFactoryMul1D_NEON,
+REGISTER_KERNEL("Mul_1D_NEON", 2, 2, matchMulF32_1D_NEON, runMulF32_1D_NEON, refFactoryMul1D_NEON, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{2048}, {2048}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

@@ -12,97 +12,9 @@
 #include "core/loaders/loader.hpp"
 #include "core/types.hpp"
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
-#include <CL/cl.h>
-
-struct OpenCLState
-{
-    cl_context context = nullptr;
-    cl_command_queue queue = nullptr;
-    cl_device_id device = nullptr;
-    bool initialized = false;
-
-    void init()
-    {
-        if (initialized)
-            return;
-        cl_uint numPlatforms = 0;
-        clGetPlatformIDs(0, nullptr, &numPlatforms);
-        if (numPlatforms == 0)
-            return;
-        std::vector<cl_platform_id> platforms(numPlatforms);
-        clGetPlatformIDs(numPlatforms, platforms.data(), nullptr);
-
-        for (auto plat : platforms)
-        {
-            cl_uint numDevices = 0;
-            clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices);
-            if (numDevices > 0)
-            {
-                std::vector<cl_device_id> devices(numDevices);
-                clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);
-                device = devices[0];
-                break;
-            }
-        }
-        if (device)
-        {
-            cl_int err;
-            context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
-            queue = clCreateCommandQueueWithProperties(context, device, nullptr, &err);
-            initialized = true;
-        }
-    }
-
-    static OpenCLState &get()
-    {
-        static OpenCLState instance;
-        return instance;
-    }
-};
-
-struct DeviceBuffer;
-
-struct InterruptManager
-{
-    static inline std::vector<DeviceBuffer *> buffers;
-    static inline std::mutex mtx;
-    static inline volatile sig_atomic_t g_interrupted = 0;
-
-    static void registerBuffer(DeviceBuffer *buf)
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        buffers.push_back(buf);
-    }
-    static void unregisterBuffer(DeviceBuffer *buf)
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        auto it = std::find(buffers.begin(), buffers.end(), buf);
-        if (it != buffers.end())
-            buffers.erase(it);
-    }
-    static void cleanup();
-    static void handleSigInt(int signum)
-    {
-        std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
-        g_interrupted = 1;
-    }
-    static bool isInterrupted()
-    {
-        return g_interrupted != 0;
-    }
-    static void hook()
-    {
-        static bool hooked = false;
-        if (!hooked)
-        {
-            std::signal(SIGINT, handleSigInt);
-            hooked = true;
-        }
-    }
-};
 
 struct DeviceBuffer
 {
@@ -168,12 +80,9 @@ struct CppBuffer : public DeviceBuffer
 
     CppBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
     {
-        InterruptManager::registerBuffer(this);
-        InterruptManager::hook();
     }
     ~CppBuffer() override
     {
-        InterruptManager::unregisterBuffer(this);
         freeArena();
     }
     void init() override
@@ -215,47 +124,52 @@ struct CppBuffer : public DeviceBuffer
     }
 };
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 struct CudaBuffer : public DeviceBuffer
 {
     uint8_t *arena_ptr = nullptr;
 
     CudaBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
     {
-        InterruptManager::registerBuffer(this);
-        InterruptManager::hook();
     }
     ~CudaBuffer() override
     {
-        InterruptManager::unregisterBuffer(this);
         freeArena();
     }
     void init() override
     {
+        cudaSetDevice(mem_space.idx);
         if (HardwareCaps::get().has_unified_memory)
         {
             cudaError_t err = cudaMallocManaged(&arena_ptr, sizeBytes);
             if (err != cudaSuccess)
-                Error::throw_err("cudaMallocManaged failed");
+                Error::throw_err("cudaMallocManaged failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 cudaGetErrorString(err));
         }
         else
         {
             cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
             if (err != cudaSuccess)
-                Error::throw_err("cudaMalloc failed");
+                Error::throw_err("cudaMalloc failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 cudaGetErrorString(err));
         }
     }
     void freeArena() override
     {
         if (arena_ptr)
         {
+            cudaSetDevice(mem_space.idx);
             cudaFree(arena_ptr);
             arena_ptr = nullptr;
         }
     }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {
-        Error::throw_err("writeInput is not supported on CudaBuffer");
+        cudaSetDevice(mem_space.idx);
+        cudaError_t err = cudaMemcpy(arena_ptr + offset, data, size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess)
+            Error::throw_err("cudaMemcpy HostToDevice failed on device " + std::to_string(mem_space.idx) + ": " +
+                             cudaGetErrorString(err));
     }
     void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
@@ -265,7 +179,6 @@ struct CudaBuffer : public DeviceBuffer
         ctx.fd.push_back(-1);
         ctx.cl_inputs.push_back(nullptr);
     }
-
     void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
@@ -283,18 +196,16 @@ struct CudaBuffer : public DeviceBuffer
 };
 #endif
 
+#ifdef TG_USE_OPENCL
 struct OpenCLBuffer : public DeviceBuffer
 {
     cl_mem arena_ptr_cl_mem = nullptr;
 
     OpenCLBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
     {
-        InterruptManager::registerBuffer(this);
-        InterruptManager::hook();
     }
     ~OpenCLBuffer() override
     {
-        InterruptManager::unregisterBuffer(this);
         freeArena();
     }
     void init() override
@@ -401,14 +312,19 @@ struct OpenCLBuffer : public DeviceBuffer
         return nullptr;
     }
 };
+#endif // TG_USE_OPENCL
 
 struct MemoryManager
 {
     std::unordered_map<MemSpace, std::unique_ptr<DeviceBuffer>> buffers;
 
-    MemoryManager(std::unordered_map<MemSpace, uint64_t> bufferSizes)
+    MemoryManager(std::unordered_map<MemSpace, uint64_t> bufferSizes = {})
     {
-        // Register default storage buffer space
+        if (bufferSizes.empty())
+        {
+            bufferSizes = System::get().getBufferSizes();
+        }
+
         buffers[MemSpace{0, HandleType::STORAGE}] =
             std::make_unique<StorageBuffer>(MemSpace{0, HandleType::STORAGE}, 0);
 
@@ -427,14 +343,18 @@ struct MemoryManager
             }
             else if (ms.type == HandleType::OPENCL)
             {
+#ifdef TG_USE_OPENCL
                 buffers[ms] = std::make_unique<OpenCLBuffer>(ms, size);
+#else
+                Error::throw_err("OPENCL requested but TG_USE_OPENCL not defined");
+#endif
             }
             else if (ms.type == HandleType::CUDA)
             {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
                 buffers[ms] = std::make_unique<CudaBuffer>(ms, size);
 #else
-                Error::throw_err("CUDA requested but USE_CUDA not defined");
+                Error::throw_err("CUDA requested but TG_USE_CUDA not defined");
 #endif
             }
         }
@@ -484,13 +404,3 @@ struct MemoryManager
         return sizes;
     }
 };
-
-inline void InterruptManager::cleanup()
-{
-    std::lock_guard<std::mutex> lock(mtx);
-    for (auto *buf : buffers)
-    {
-        buf->freeArena();
-    }
-    buffers.clear();
-}

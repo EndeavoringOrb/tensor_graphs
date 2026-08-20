@@ -54,6 +54,6 @@ inline LogicalId refFactoryMul3D_Scalar_Threaded(const std::vector<LogicalId> &i
 }
 
 REGISTER_KERNEL("Mul_3D_Scalar_Threaded", 2, 2, matchMulFP32_3D_Scalar_Threaded, runMulFP32_3D_Scalar_Threaded,
-                refFactoryMul3D_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryMul3D_Scalar_Threaded, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -2,9 +2,10 @@
 import argparse
 import json
 import os
-from collections import defaultdict
-from binary import load_cache_file
 import re
+from collections import defaultdict
+
+from utils.binary import load_cache_file
 
 
 def load_uids_from_cpp():

@@ -366,7 +366,7 @@ int main(int argc, char *argv[])
     // -----------------------------------------------------------------------
     // TODO: make this and getDefaultBufferSizes load from some common place
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 16ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
@@ -512,7 +512,7 @@ int main(int argc, char *argv[])
 
                 // 4. Copy embedding back
                 float host_output[EMBEDDING_DIM];
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
                 cudaPointerAttributes attrs;
                 if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
                     attrs.type == cudaMemoryTypeDevice)
@@ -639,7 +639,7 @@ int main(int argc, char *argv[])
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
         float host_output[EMBEDDING_DIM];
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
         cudaPointerAttributes attrs;
         if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
         {

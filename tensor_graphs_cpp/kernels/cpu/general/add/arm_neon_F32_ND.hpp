@@ -72,7 +72,7 @@ inline LogicalId refFactoryAddND_NEON(const std::vector<LogicalId> &inputs, Grap
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Add_ND_NEON", 2, 2, matchAddF32_ND_NEON, runAddF32_ND_NEON, refFactoryAddND_NEON,
+REGISTER_KERNEL("Add_ND_NEON", 2, 2, matchAddF32_ND_NEON, runAddF32_ND_NEON, refFactoryAddND_NEON, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 32, 512, 512}, {1, 32, 512, 512}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

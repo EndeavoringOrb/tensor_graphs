@@ -34,7 +34,7 @@ inline LogicalId refFactoryAddNC_F32_ND(const std::vector<LogicalId> &inputs, Gr
     return graph.add(id0, id1);
 }
 
-REGISTER_KERNEL("Add_NC_F32_ND", 2, 2, matchAddNC_F32_ND, runAddNC_F32_ND, refFactoryAddNC_F32_ND,
+REGISTER_KERNEL("Add_NC_F32_ND", 2, 2, matchAddNC_F32_ND, runAddNC_F32_ND, refFactoryAddNC_F32_ND, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1, 1}, {1, 1, 1}}, {false, false},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

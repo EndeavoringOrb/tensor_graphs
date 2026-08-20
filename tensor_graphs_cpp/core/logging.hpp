@@ -7,6 +7,10 @@
 #include <sstream>
 #include <string>
 
+#ifdef ERROR
+#undef ERROR
+#endif
+
 // Numeric representations for log levels
 #define LOG_LEVEL_DEBUG 0
 #define LOG_LEVEL_INFO 1
@@ -55,13 +59,11 @@ inline const char *logLevelToString(LogLevel level)
 class LogMessage
 {
   public:
-    // std::source_location::current() automatically captures call site location
     LogMessage(LogLevel level, std::source_location loc = std::source_location::current()) : level_(level)
     {
         stream_ << "[" << logLevelToString(level) << "] " << loc.file_name() << ":" << loc.line() << " - ";
     }
 
-    // Destructor flushes the complete line when statement ends at the semicolon
     ~LogMessage()
     {
         stream_ << "\n";
@@ -109,8 +111,6 @@ class LogMessage
 
 } // namespace tg_log
 
-// Macro short-circuits logging at compile-time/run-time if below TG_LOG_LEVEL threshold.
-// Uses a 1-pass for-loop to safely avoid dangling-else syntax bugs in if/else blocks.
 #define LOG(level)                                                                                                     \
     for (bool _tg_log_cond = (LOG_LEVEL_##level >= TG_LOG_LEVEL); _tg_log_cond; _tg_log_cond = false)                  \
     ::tg_log::LogMessage(::LogLevel::level)

@@ -234,7 +234,7 @@ inline LogicalId refFactoryZeroStrideBroadcast_ND(const std::vector<LogicalId> &
 }
 
 REGISTER_KERNEL("ZeroStrideBroadcast_ND", 1, 1, matchZeroStrideBroadcast_ND, runZeroStrideBroadcast_ND,
-                refFactoryZeroStrideBroadcast_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryZeroStrideBroadcast_ND, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON
