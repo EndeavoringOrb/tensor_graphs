@@ -12,8 +12,9 @@
 #include "core/egraph.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/ops/ops.hpp"
 #include "core/repo.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 
 inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpace dst, const TensorNode &node,
                                                             const std::vector<Engine> &engines)
@@ -140,72 +141,9 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
     {
         pInputs.push_back(pGraph.input(in.getShape(), in.dtype));
     }
-    LogicalId pRoot;
-    if (op == OpType::SLICE)
-        pRoot = pGraph.slice(pInputs[0], pInputs[1], pInputs[2], pInputs[3]);
-    else if (op == OpType::CONTIGUOUS)
-        pRoot = pGraph.contiguous(pInputs[0]);
-    else if (op == OpType::ADD)
-        pRoot = pGraph.add(pInputs[0], pInputs[1]);
-    else if (op == OpType::MUL)
-        pRoot = pGraph.mul(pInputs[0], pInputs[1]);
-    else if (op == OpType::DIVIDE)
-        pRoot = pGraph.div(pInputs[0], pInputs[1]);
-    else if (op == OpType::POWER)
-        pRoot = pGraph.pow(pInputs[0], pInputs[1]);
-    else if (op == OpType::SIN)
-        pRoot = pGraph.sin(pInputs[0]);
-    else if (op == OpType::COS)
-        pRoot = pGraph.cos(pInputs[0]);
-    else if (op == OpType::NEGATE)
-        pRoot = pGraph.neg(pInputs[0]);
-    else if (op == OpType::CAST)
-        pRoot = pGraph.cast(pInputs[0], dtype);
-    else if (op == OpType::DOT)
-        pRoot = pGraph.dot(pInputs[0], pInputs[1]);
-    else if (op == OpType::COPY_TO)
-        pRoot = pGraph._copyto(pInputs[0]);
-    else if (op == OpType::SCATTER)
-        pRoot = pGraph.scatter(pInputs[0], pInputs[1], pInputs[2], pInputs[3], pInputs[4]);
-    else if (op == OpType::RESHAPE)
-        pRoot = pGraph.reshape(pInputs[0], pInputs[1]);
-    else if (op == OpType::PERMUTE)
-        pRoot = pGraph.permute(pInputs[0], pInputs[1]);
-    else if (op == OpType::CONCAT)
-    {
-        std::vector<LogicalId> concatIns;
-        for (uint64_t i = 1; i < pInputs.size(); ++i)
-            concatIns.push_back(pInputs[i]);
-        pRoot = pGraph.concat(concatIns, pInputs[0]);
-    }
-    else if (op == OpType::REPEAT)
-        pRoot = pGraph.repeat(pInputs[0], pInputs[1], pInputs[2]);
-    else if (op == OpType::ARANGE)
-        pRoot = pGraph.arange(pInputs[0], pInputs[1], pInputs[2]);
-    else if (op == OpType::TRIU)
-        pRoot = pGraph.triu(pInputs[0], pInputs[1]);
-    else if (op == OpType::GATHER)
-        pRoot = pGraph.gather(pInputs[0], pInputs[1]);
-    else if (op == OpType::FILL)
-        pRoot = pGraph.fill(pInputs[0], pInputs[1]);
-    else if (op == OpType::IM2COL)
-        pRoot = pGraph.im2col(pInputs[0], pInputs[1], pInputs[2], pInputs[3]);
-    else if (op == OpType::SUM)
-        pRoot = pGraph.sum(pInputs[0], pInputs[1]);
-    else if (op == OpType::MAX)
-        pRoot = pGraph.max(pInputs[0], pInputs[1]);
-    else if (op == OpType::ARGMAX)
-        pRoot = pGraph.argmax(pInputs[0], pInputs[1], pInputs[2]);
-    else if (op == OpType::LT)
-        pRoot = pGraph.lt(pInputs[0], pInputs[1]);
-    else if (op == OpType::EQ)
-        pRoot = pGraph.eq(pInputs[0], pInputs[1]);
-    else if (op == OpType::AND)
-        pRoot = pGraph.logical_and(pInputs[0], pInputs[1]);
-    else if (op == OpType::OR)
-        pRoot = pGraph.logical_or(pInputs[0], pInputs[1]);
-    else if (op == OpType::NOT)
-        pRoot = pGraph.logical_not(pInputs[0]);
+
+    const auto &traits = getOpTraits(op);
+    LogicalId pRoot = traits.buildPattern ? traits.buildPattern(pGraph, pInputs, dtype) : LogicalId();
 
     if (pRoot != LogicalId())
     {
@@ -214,9 +152,7 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
         if (matches.empty())
         {
             std::stringstream ss;
-            ss << "\n[addOpToEGraph] No matching kernel found for the given "
-                  "configuration at "
-               << toString(loc) << "\n"
+            ss << "\n[addOpToEGraph] No matching kernel found for the given configuration at " << toString(loc) << "\n"
                << "  Operation:       " << toString(op) << "\n"
                << "  Target MemSpace: " << toString(mem_space) << "\n"
                << "  Expected Output: "
@@ -623,35 +559,6 @@ struct FusionRule : public Rule
         }
     }
 
-    static bool isStructuralConstant(OpType op, uint64_t inputIdx, uint64_t numInputs)
-    {
-        if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
-            return true;
-        if (op == OpType::RESHAPE && inputIdx == 1)
-            return true;
-        if (op == OpType::PERMUTE && inputIdx == 1)
-            return true;
-        if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
-            return true;
-        if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
-            return true;
-        if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
-            return true;
-        if (op == OpType::CONCAT && inputIdx == 0)
-            return true;
-        if (op == OpType::TRIU && inputIdx == 1)
-            return true;
-        if (op == OpType::FILL && inputIdx == 1)
-            return true;
-        if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
-            return true;
-        if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
-            return true;
-        if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
-            return true;
-        return false;
-    }
-
     static bool matchPatternClass(EClassId eClassIdx, const EGraph &egraph, LogicalId patternId, const Pattern &pattern,
                                   std::unordered_map<LogicalId, EClassId> &binding,
                                   const std::unordered_set<EClassId> &protectedEClasses,
@@ -772,7 +679,7 @@ struct FusionRule : public Rule
 
         for (uint64_t i = 0; i < eNode.getChildren().size(); ++i)
         {
-            bool childIgnoreConst = isStructuralConstant(eNode.getOpType(), i, eNode.getChildren().size());
+            bool childIgnoreConst = isConstant(eNode.getOpType(), i, eNode.getChildren().size());
             if (!matchPatternClass(eNode.getChildren()[i], egraph, pNode.child_ids[i], pattern, binding,
                                    protectedEClasses, childIgnoreConst))
             {
@@ -1066,10 +973,7 @@ struct SlicePushDownElementwise : public Rule
                 {
                     const ENode &opNode = egraph.getENode(srcNodeIdx);
                     OpType op = opNode.getOpType();
-                    if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
-                          op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST ||
-                          op == OpType::LT || op == OpType::EQ || op == OpType::AND || op == OpType::OR ||
-                          op == OpType::NOT))
+                    if (!isElementwise(opNode.getOpType()))
                         continue;
 
                     bool hasBroadcastChild = false;
@@ -1141,10 +1045,7 @@ struct SlicePushDownElementwise : public Rule
             {
                 const ENode opNode = egraph.getENode(srcNodeIdx);
                 OpType op = opNode.getOpType();
-                if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
-                      op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST ||
-                      op == OpType::LT || op == OpType::EQ || op == OpType::AND || op == OpType::OR ||
-                      op == OpType::NOT))
+                if (!isElementwise(op))
                 {
                     continue;
                 }
@@ -1592,36 +1493,13 @@ struct FlattenElementwise : public Rule
         return "FlattenElementwise";
     }
 
-    static bool isSupportedOp(OpType op)
-    {
-        switch (op)
-        {
-        case OpType::ADD:
-        case OpType::MUL:
-        case OpType::DIVIDE:
-        case OpType::POWER:
-        case OpType::SIN:
-        case OpType::COS:
-        case OpType::NEGATE:
-        case OpType::CAST:
-        case OpType::LT:
-        case OpType::EQ:
-        case OpType::AND:
-        case OpType::OR:
-        case OpType::NOT:
-            return true;
-        default:
-            return false;
-        }
-    }
-
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         const EGraph &egraph = ctx.egraph;
         if (eNodeIdx >= egraph.getENodes().size())
             return false;
         const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (!isSupportedOp(enode.getOpType()))
+        if (!isElementwise(enode.getOpType()))
             return false;
         if (visited.count(eNodeIdx))
             return false;

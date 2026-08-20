@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/plan/validators/validator.hpp
 #pragma once
 
 #include <string>

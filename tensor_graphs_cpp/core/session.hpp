@@ -16,7 +16,7 @@
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
 #include "core/repo.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
@@ -326,7 +326,7 @@ struct Session
         }
 
         std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
-        preallocateLogicalBuffers(bestCachedNodes, preallocatedBuffers);
+        planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
 
         std::cout << "[Session.ensureCacheCoverage] Planning buckets with " << bestCachedNodes.size()
                   << " cached nodes across physical cores..." << std::endl;
@@ -358,95 +358,6 @@ struct Session
         }
 
         persistCache();
-    }
-
-    void preallocateLogicalBuffers(const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-                                   std::unordered_map<LogicalId, ParallelBuffer> &out) const
-    {
-        // TODO: deduplicate or something, this is adding way too many buffers
-        out.clear();
-
-        struct PreAllocEntry
-        {
-            LogicalId logicalId;
-            MemSpace memSpace;
-            std::vector<uint32_t> shape;
-            DType dtype;
-        };
-        std::vector<PreAllocEntry> entries;
-
-        MemSpace storage = MemSpace{0, HandleType::STORAGE};
-        MemSpace ram = MemSpace{1, HandleType::CPP};
-
-        for (const auto &pair : graph.nodes)
-        {
-            const TensorNode &node = pair.second;
-            if (node.opType != OpType::INPUT)
-                continue;
-
-            auto idtIt = graph.input_data_types.find(node.id);
-            if (idtIt != graph.input_data_types.end() && idtIt->second == InputDataType::STORAGE)
-                continue;
-
-            entries.push_back({node.id, ram, node.getShape(), node.dtype});
-        }
-
-        for (const auto &kv : cachedNodes)
-        {
-            LogicalId logicalId = kv.first;
-            MemSpace ms = kv.second;
-            if (!graph.hasNode(logicalId))
-                continue;
-            const TensorNode &node = graph.getNode(logicalId);
-            bool alreadyAdded = false;
-            for (const auto &e : entries)
-            {
-                if (e.logicalId == logicalId)
-                {
-                    alreadyAdded = true;
-                    break;
-                }
-            }
-            if (alreadyAdded)
-                continue;
-            entries.push_back({logicalId, ms, node.getShape(), node.dtype});
-        }
-
-        std::sort(entries.begin(), entries.end(),
-                  [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.logicalId < b.logicalId; });
-
-        std::unordered_map<MemSpace, uint64_t> cursor;
-        BufferId nextId{0};
-        for (const auto &e : entries)
-        {
-            if (e.memSpace == storage)
-                continue;
-
-            uint64_t size_bytes = getSizeBytes(e.shape, e.dtype);
-            if (size_bytes == 0)
-                continue;
-            size_bytes = (size_bytes + 4095) & ~4095ULL;
-
-            uint64_t offset = cursor[e.memSpace];
-            cursor[e.memSpace] = offset + size_bytes;
-
-            ParallelBuffer buf;
-            buf.id = nextId++;
-            buf.mem_space = e.memSpace;
-            buf.size = size_bytes;
-            buf.start = 0;
-            buf.end = std::numeric_limits<uint32_t>::max();
-            buf.offset = static_cast<int64_t>(offset);
-            out[e.logicalId] = std::move(buf);
-        }
-
-        std::cout << "[Session.preallocateLogicalBuffers] Pre-allocated " << out.size() << " INPUT/CACHE buffers.";
-        for (const auto &kv : cursor)
-        {
-            std::cout << " MemSpace(idx=" << kv.first.idx << ",type=" << static_cast<int>(kv.first.type)
-                      << ") reserved=" << kv.second << " bytes.";
-        }
-        std::cout << std::endl;
     }
 
     const uint32_t getBestGraphIdx(const Bucket &bucket) const

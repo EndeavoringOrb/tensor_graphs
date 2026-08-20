@@ -23,7 +23,7 @@
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 struct ENodeInfo

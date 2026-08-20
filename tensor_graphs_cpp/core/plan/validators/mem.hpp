@@ -25,7 +25,7 @@
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
@@ -148,8 +148,6 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
     return curr;
 }
 
-// tensor_graphs_cpp/core/plan/validators/mem.hpp
-
 struct BufferizeIterator
 {
     const std::vector<EClassId> &ordered;
@@ -166,7 +164,7 @@ struct BufferizeIterator
     bool is_done = false;
     bool first_yield = true;
     std::vector<int> state;
-    std::vector<std::vector<uint32_t>> choice_orders; // Changed to uint32_t to match SearchDelegate::order_bufferize
+    std::vector<std::vector<uint32_t>> choice_orders;
     std::unordered_map<EClassId, EClassId> inplace_alias;
 
     BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,

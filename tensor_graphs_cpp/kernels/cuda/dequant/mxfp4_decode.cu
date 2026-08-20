@@ -5,7 +5,7 @@
 #include <vector>
 #include "core/types.hpp"
 #include "core/kernels.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 
 namespace MXFP4CUDA {
 
