@@ -535,10 +535,10 @@ struct Planner
                 ss << "  " << name << ": " << count << " matches\n";
             }
             ss << "Total Matches: " << nMatches;
-            LOG(L_DEBUG) << ss.str();
+            LOG(DEBUG) << ss.str();
             if (!changed)
             {
-                LOG(L_INFO) << ss.str();
+                LOG(INFO) << ss.str();
             }
             timer.tick();
         }
@@ -935,7 +935,7 @@ struct Planner
         }
 
         const uint64_t numClasses = egraph.getClasses().size();
-        LOG(L_INFO) << "numClasses=" << numClasses;
+        LOG(INFO) << "numClasses=" << numClasses;
 
         if (delegate)
         {
@@ -994,11 +994,11 @@ struct Planner
         ProgressTimer timer(max_iters, "extracting graphs");
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
-        LOG(L_INFO) << "entering loop";
+        LOG(INFO) << "entering loop";
 
         while (remaining_iters-- > 0)
         {
-#ifdef DEBUG
+#ifdef TG_DEBUG
             std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
             if (max_iters - (remaining_iters + 1) > 0)
             {
@@ -1015,7 +1015,7 @@ struct Planner
                 timer.tick();
                 continue;
             }
-            LOG(L_DEBUG) << "got selection";
+            LOG(DEBUG) << "got selection";
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
 
@@ -1063,7 +1063,7 @@ struct Planner
                     best_order = order;
                     best_buffers = buffers;
                     best_eclass_to_buf = eclass_to_buf;
-                    LOG(L_INFO) << "new best cost " << best_cost;
+                    LOG(INFO) << "new best cost " << best_cost;
                 }
                 if (stopOnFirstValid || single_engine)
                 {
@@ -1126,16 +1126,16 @@ struct Planner
                 if (best_conflict_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
-                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                                 << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
-                                 << " (path index " << best_conflict_pos << ") to resolve OOM.";
+                    LOG(DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                               << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
+                               << " (path index " << best_conflict_pos << ") to resolve OOM.";
                 }
                 else if (max_conflict_path_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
-                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                                 << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
-                                 << " (path index " << max_conflict_path_pos << ")";
+                    LOG(DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                               << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
+                               << " (path index " << max_conflict_path_pos << ")";
                 }
             }
 

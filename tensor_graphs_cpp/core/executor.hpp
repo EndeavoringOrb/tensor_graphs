@@ -21,7 +21,7 @@ class Executor
     {
         uint32_t nInst = compiled.instructions.size();
         bool disableTimer = true;
-#ifdef DEBUG
+#ifdef TG_DEBUG
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);

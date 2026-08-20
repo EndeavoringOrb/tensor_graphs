@@ -554,7 +554,7 @@ struct BufferizeIterator
 static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                    std::vector<ParallelBuffer> &allocated, std::shared_ptr<SearchDelegate> delegate = nullptr)
 {
-    LOG(L_INFO) << "malloc " + std::to_string(unallocated.size());
+    LOG(INFO) << "malloc " + std::to_string(unallocated.size());
     ProgressTimer t(0, "malloc", false, true);
     if (unallocated.empty())
         return true;
@@ -623,7 +623,7 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
     {
         if (k % 100 == 0)
         {
-            LOG(L_INFO) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
+            LOG(INFO) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
         }
 
         if (k == N)
@@ -795,7 +795,7 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
             if (current_mem > static_cast<int64_t>(mem_cap))
             {
                 overflow = ev.buffer_id;
-                LOG(L_INFO) << "[check_peak_memory] OOM error at idx=" << ev.time << std::endl;
+                LOG(INFO) << "[check_peak_memory] OOM error at idx=" << ev.time << std::endl;
                 return false;
             }
         }
@@ -1023,8 +1023,8 @@ struct MemValidator : public ISelectionValidator
                     alloc_ok = false;
                     failed_ms = ms;
                     failed_reduced_cap = reduced_cap;
-                    LOG(L_INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")"
-                                << std::endl;
+                    LOG(INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")"
+                              << std::endl;
                     break;
                 }
 

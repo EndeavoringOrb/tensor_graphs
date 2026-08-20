@@ -39,14 +39,14 @@ struct DispatchIterator
                      const std::vector<ENodeInfo> &enode_infos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
         : egraph(_egraph), delegate(_delegate)
     {
-        LOG(L_DEBUG) << "initializing dispatch iterator";
+        LOG(DEBUG) << "initializing dispatch iterator";
         initOrderState(selection_map, enode_infos);
     }
 
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
-        LOG(L_DEBUG) << "getNextDispatchOrder";
+        LOG(DEBUG) << "getNextDispatchOrder";
         if (is_done)
             return false;
 
@@ -470,7 +470,7 @@ struct Extractor
 
     bool getNextSelection()
     {
-        LOG(L_DEBUG) << "getNextSelection";
+        LOG(DEBUG) << "getNextSelection";
         while (!to_process.empty())
         {
             EClassId current = to_process.back();
@@ -658,7 +658,7 @@ struct Extractor
 
     void ascend()
     {
-        LOG(L_DEBUG) << "ascend";
+        LOG(DEBUG) << "ascend";
         bool skip_increment = (target_backtrack_eclass != EClassId{UINT32_MAX});
 
         while (!path.empty())
@@ -672,7 +672,7 @@ struct Extractor
 
             if (skip_increment && current == target_backtrack_eclass)
             {
-                LOG(L_DEBUG) << "skipped back to path size " << std::to_string(path.size()) << std::endl;
+                LOG(DEBUG) << "skipped back to path size " << std::to_string(path.size()) << std::endl;
                 skip_increment = false;
             }
 
