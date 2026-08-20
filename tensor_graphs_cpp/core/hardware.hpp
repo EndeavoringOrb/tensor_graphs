@@ -13,8 +13,8 @@
 #include <vector>
 
 #include "core/common/thread_pool.hpp"
-#include "core/types.hpp"
 #include "core/logging.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_OS_WINDOWS)
 #include <windows.h>
@@ -198,7 +198,7 @@ struct HardwareCaps
         return instance;
     }
 
-private:
+  private:
     void probe()
     {
 #if defined(TG_HAS_NEON)
@@ -310,7 +310,7 @@ struct System
         return caps.num_cuda_devices;
     }
 
-private:
+  private:
     void detect()
     {
         caps = HardwareCaps::get();
@@ -402,10 +402,12 @@ private:
 #endif
         std::cout << "[System] Initialized with " << mem_spaces.size() << " MemSpaces and " << engines.size()
                   << " Engines.\n";
-        for (auto &mem_space : mem_spaces) {
+        for (auto &mem_space : mem_spaces)
+        {
             LOG(L_INFO) << "  " << mem_space;
         }
-        for (auto &engine : engines) {
+        for (auto &engine : engines)
+        {
             LOG(L_INFO) << "  " << engine;
         }
     }

@@ -1406,6 +1406,7 @@ struct OpInstruction
     std::vector<EClassId> children;
     ParallelBuffer outBuffer;
     std::vector<ParallelBuffer> inBuffers;
+    std::vector<Engine> engines;
     std::string debugOrigin;
 };
 
@@ -1597,6 +1598,7 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
     bw.write(val.children);
     bw.write(val.outBuffer);
     bw.write(val.inBuffers);
+    bw.write(val.engines);
     bw.write(val.debugOrigin);
 }
 
@@ -1608,6 +1610,7 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
     br.read(val.children);
     br.read(val.outBuffer);
     br.read(val.inBuffers);
+    br.read(val.engines);
     br.read(val.debugOrigin);
 }
 
@@ -1688,8 +1691,8 @@ struct KernelContext
     {
         if (idx >= cuda_streams.size())
         {
-            Error::throw_err("KernelContext::cuda_stream index out of bounds: requested " +
-                             std::to_string(idx) + ", but size is " + std::to_string(cuda_streams.size()));
+            Error::throw_err("KernelContext::cuda_stream index out of bounds: requested " + std::to_string(idx) +
+                             ", but size is " + std::to_string(cuda_streams.size()));
         }
         return cuda_streams[idx];
     }

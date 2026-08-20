@@ -348,7 +348,7 @@ struct CostModel
                                         const std::vector<uint64_t> &outStrides, const DType &outDType) const
     {
         std::vector<double> features;
-        features.push_back(1.0);
+        features.push_back(1.0); // Bias
 
         double outElements = static_cast<double>(countElements(outShape));
         double inElements = 0.0;
@@ -498,10 +498,8 @@ struct CostModel
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
         {
-            if (enableLogging)
-            {
-                log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
-            }
+            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
+
             if (!doneWarning)
             {
                 std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
@@ -520,10 +518,7 @@ struct CostModel
             }
         }
 
-        if (enableLogging)
-        {
-            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
-        }
+        log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
 
         ModelKey mk = {kernelId, inShapes.size()};
         auto modelIt = models.find(mk);

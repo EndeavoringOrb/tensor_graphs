@@ -99,7 +99,8 @@ class Synchronizer
                     continue;
 
 #ifdef TG_USE_CUDA
-                bool writer_is_cuda = (writer_engine.type == EngineType::CUDA_GPU || writer_engine.type == EngineType::CUDA_DMA);
+                bool writer_is_cuda =
+                    (writer_engine.type == EngineType::CUDA_GPU || writer_engine.type == EngineType::CUDA_DMA);
 
                 if (writer_is_cuda)
                 {

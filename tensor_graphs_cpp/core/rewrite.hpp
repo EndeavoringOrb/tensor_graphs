@@ -469,7 +469,7 @@ struct FusionRule : public Rule
                     pattern.graph, pattern.rootId, inputNodes, outputNode, false, target_ms, {}, {}, true,
                     ignoreInputMemSpaces, true, true);
 
-            for (KernelId uid : kernelMatches) // TODO: only add the fastest one?
+                for (KernelId uid : kernelMatches) // TODO: only add the fastest one?
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
                     std::vector<Engine> mapped_engines;

@@ -383,9 +383,7 @@ def main():
     parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--resample-graph-every", type=int, default=None)
     parser.add_argument("--compile-decode-buckets", action="store_true", default=None)
-    parser.add_argument(
-        "--log-cost-calls", action="store_true", default=None
-    )
+    parser.add_argument("--log-cost-calls", action="store_true", default=None)
     parser.add_argument("--c-puct", type=float, default=None)
     parser.add_argument("--base-noise", type=float, default=None)
     parser.add_argument("--min-noise", type=float, default=None)

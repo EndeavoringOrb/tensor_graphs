@@ -198,7 +198,6 @@ struct CudaBuffer : public DeviceBuffer
 };
 #endif
 
-
 #ifdef TG_USE_OPENCL
 struct OpenCLBuffer : public DeviceBuffer
 {

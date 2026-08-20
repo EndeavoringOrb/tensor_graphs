@@ -1254,6 +1254,38 @@ struct Planner
             compiled.nodeViews[eclass_id] =
                 TensorView(enode.getShape(), final_offset_bytes, final_strides, enode.getDType());
 
+            // Resolve actual engines mapped for this instruction using kernel.matches
+            if (kernel_ptr)
+            {
+                std::vector<TensorNode> dummyInputs(inst.children.size());
+                std::vector<MemSpace> in_mem_spaces(inst.children.size());
+                for (size_t i = 0; i < inst.children.size(); ++i)
+                {
+                    const auto &view = compiled.nodeViews.at(inst.children[i]);
+                    dummyInputs[i].setShape(view.getShape());
+                    dummyInputs[i].strides = view.strides;
+                    dummyInputs[i].dtype = view.dtype;
+                    in_mem_spaces[i] = inst.inBuffers[i].mem_space;
+                }
+                TensorNode dummyOutput;
+                const auto &outView = compiled.nodeViews.at(eclass_id);
+                dummyOutput.setShape(outView.getShape());
+                dummyOutput.strides = outView.strides;
+                dummyOutput.dtype = outView.dtype;
+
+                kernel_ptr->matches(dummyInputs, dummyOutput, inst.outBuffer.mem_space, in_mem_spaces, {}, false, false,
+                                    true, true, &inst.engines);
+            }
+
+            if (inst.engines.empty())
+            {
+                // TODO: this is hacky
+                if (inst.outBuffer.mem_space.type == HandleType::CUDA)
+                    inst.engines.push_back(Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU});
+                else
+                    inst.engines.push_back(Engine{0, EngineType::CPU});
+            }
+
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
             {
                 compiled.instructions.push_back(inst);
