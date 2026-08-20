@@ -22,7 +22,7 @@ class TrainConfig:
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     num_simulations: int = 10
-    level_simulations: list = dataclasses.field(default_factory=lambda: [1, 2, 2, 1])
+    level_simulations: list = dataclasses.field(default_factory=lambda: [1, 1, 1, 1])
     replay_buffer_size: int = 100_000
     batch_size: int = 64
     save_interval: int = 100
@@ -85,6 +85,29 @@ class TrainConfig:
         data = json.loads(p.read_text(encoding="utf-8"))
         return cls.from_dict(data)
 
+DEFAULT_MODEL_PATHS = {
+    "gemma-3-270m": "models/google/gemma-3-270m",
+    "qwen-3.6-35b-a3b": "models/Qwen/Qwen3.6-35B-A3B",
+    "krea": "models/krea/Krea-2-Turbo/krea.safetensors",
+    "krea-2-turbo": "models/krea/Krea-2-Turbo/krea.safetensors",
+    "krea-2-turbo-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
+    "vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
+    "qwen-image-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
+    "qwen-image-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
+    "qwen3-vl": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
+    "qwen3-vl-bf16": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
+    "qwen3vl": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
+    "qwen3vl_4b_bf16": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
+    "deepseek-v4": "models/deepseek-ai/DeepSeek-V4",
+}
+
+
+def get_default_model_path(model_name: str) -> str:
+    norm = model_name.lower().replace("_", "-")
+    for k, v in DEFAULT_MODEL_PATHS.items():
+        if k.lower().replace("_", "-") == norm:
+            return v
+    return f"models/{model_name}"
 
 # ==============================================================================
 # GRAPH PROVIDER & GENERATOR
@@ -213,9 +236,19 @@ class ModelGraphProvider:
         self, config: TrainConfig, episode: int = 0
     ) -> tensor_graphs.SaturatedEGraphContext:
         if self._cached_context is None:
+            model_path = self.model_path
+            if (
+                not model_path
+                or (
+                    model_path == "models/google/gemma-3-270m"
+                    and self.model_name != "gemma-3-270m"
+                )
+            ):
+                model_path = get_default_model_path(self.model_name)
+
             self._cached_context = tensor_graphs.build_and_saturate_egraph(
                 self.model_name,
-                self.model_path,
+                model_path,
                 config.log_cost_calls,
                 config.compile_decode_buckets,
             )

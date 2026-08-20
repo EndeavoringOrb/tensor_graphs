@@ -20,6 +20,7 @@ from train_shared import (
     create_server_socket,
     recv_msg,
     send_msg,
+    get_default_model_path
 )
 
 torch.set_float32_matmul_precision("high")
@@ -439,6 +440,18 @@ def main():
         default=0,
         help="C++ threads for graph operations (default: auto)",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model name to train on (e.g. gemma-3-270m, qwen-3.6-35b-a3b, krea, vae, qwen3-vl-bf16)",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Path to model file or directory",
+    )
 
     args = parser.parse_args()
     if args.threads > 0:
@@ -470,6 +483,12 @@ def main():
     config.d_model = args.d_model
     config.nhead = args.nhead
     config.num_layers = args.num_layers
+    if args.model is not None:
+        config.model_name = args.model
+        if args.model_path is None:
+            config.model_path = get_default_model_path(args.model)
+    if args.model_path is not None:
+        config.model_path = args.model_path
 
     config.save(config_file)
 

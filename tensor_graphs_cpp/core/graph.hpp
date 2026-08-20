@@ -676,6 +676,61 @@ struct Graph
     {
         return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32);
     }
+
+    LogicalId sum(LogicalId id0, int32_t axis, std::source_location loc = std::source_location::current())
+    {
+        return sum(id0, constant({1}, &axis, DType::INT32), loc);
+    }
+
+    LogicalId max(LogicalId id0, int32_t axis, std::source_location loc = std::source_location::current())
+    {
+        return max(id0, constant({1}, &axis, DType::INT32), loc);
+    }
+
+    LogicalId permute(LogicalId id0, const std::vector<int32_t> &dims,
+                      std::source_location loc = std::source_location::current())
+    {
+        LogicalId dims_node = constant({(uint32_t)dims.size()}, dims.data(), DType::INT32);
+        return permute(id0, dims_node, loc);
+    }
+
+    LogicalId slice(LogicalId id0, const std::vector<int32_t> &starts, const std::vector<int32_t> &ends,
+                    const std::vector<int32_t> &steps = {}, std::source_location loc = std::source_location::current())
+    {
+        std::vector<int32_t> actual_steps = steps;
+        if (actual_steps.empty())
+        {
+            actual_steps.assign(starts.size(), 1);
+        }
+        LogicalId st_node = constant({(uint32_t)starts.size()}, starts.data(), DType::INT32);
+        LogicalId en_node = constant({(uint32_t)ends.size()}, ends.data(), DType::INT32);
+        LogicalId step_node = constant({(uint32_t)actual_steps.size()}, actual_steps.data(), DType::INT32);
+        return slice(id0, st_node, en_node, step_node, loc);
+    }
+
+    LogicalId arange(int32_t start, int32_t stop, int32_t step = 1,
+                     std::source_location loc = std::source_location::current())
+    {
+        LogicalId st_node = constant({1}, &start, DType::INT32);
+        LogicalId sp_node = constant({1}, &stop, DType::INT32);
+        LogicalId step_node = constant({1}, &step, DType::INT32);
+        return arange(st_node, sp_node, step_node, loc);
+    }
+
+    LogicalId triu(LogicalId id0, int32_t k = 0, std::source_location loc = std::source_location::current())
+    {
+        LogicalId k_node = constant({1}, &k, DType::INT32);
+        return triu(id0, k_node, loc);
+    }
+
+    LogicalId im2col(LogicalId input_id, int32_t kernel_size, int32_t stride, int32_t padding,
+                 std::source_location loc = std::source_location::current())
+    {
+        LogicalId k_id = constant({1}, &kernel_size, DType::INT32);
+        LogicalId s_id = constant({1}, &stride, DType::INT32);
+        LogicalId p_id = constant({1}, &padding, DType::INT32);
+        return im2col(input_id, k_id, s_id, p_id, loc);
+    }
 };
 
 inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)

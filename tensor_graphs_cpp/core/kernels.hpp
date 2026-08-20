@@ -237,11 +237,10 @@ struct KernelEntry
                 {
                     out_mapped_engines->push_back(it->second);
                 }
-                else if ((local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA) && !ignore_output_mem_space &&
-                         output_mem_space.type == HandleType::CUDA)
+                else if ((local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA) &&
+                         !ignore_output_mem_space && output_mem_space.type == HandleType::CUDA)
                 {
-                    out_mapped_engines->push_back(
-                        Engine{output_mem_space.idx, local_eng.type, {output_mem_space}});
+                    out_mapped_engines->push_back(Engine{output_mem_space.idx, local_eng.type, {output_mem_space}});
                 }
                 else
                 {

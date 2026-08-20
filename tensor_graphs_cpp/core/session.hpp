@@ -225,8 +225,36 @@ struct Session
     {
         plan(doSaturate);
 
-        std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
-        memManager.init();
+        // Compute exact peak allocation size required per MemSpace across all compiled graphs
+        std::unordered_map<MemSpace, uint64_t> peakSizes;
+        for (const CompiledGraph &g : cachedGraphs)
+        {
+            for (const auto &inst : g.instructions)
+            {
+                if (inst.outBuffer.mem_space.type != HandleType::STORAGE && inst.outBuffer.offset >= 0)
+                {
+                    uint64_t extent = static_cast<uint64_t>(inst.outBuffer.offset) + inst.outBuffer.size;
+                    peakSizes[inst.outBuffer.mem_space] = std::max(peakSizes[inst.outBuffer.mem_space], extent);
+                }
+                for (const auto &inBuf : inst.inBuffers)
+                {
+                    if (inBuf.mem_space.type != HandleType::STORAGE && inBuf.offset >= 0)
+                    {
+                        uint64_t extent = static_cast<uint64_t>(inBuf.offset) + inBuf.size;
+                        peakSizes[inBuf.mem_space] = std::max(peakSizes[inBuf.mem_space], extent);
+                    }
+                }
+            }
+        }
+
+        std::cout << "[Session.compile] Materializing exact peak memory arenas..." << std::endl;
+        for (const auto &pair : peakSizes)
+        {
+            std::cout << "  - " << pair.first << ": " << pair.second << " bytes ("
+                      << (pair.second / (1024.0 * 1024.0)) << " MB)" << std::endl;
+        }
+
+        memManager.init(peakSizes);
 
         std::unordered_set<LogicalId> written;
         for (const CompiledGraph &g : cachedGraphs)
@@ -363,7 +391,6 @@ struct Session
     void preallocateLogicalBuffers(const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                    std::unordered_map<LogicalId, ParallelBuffer> &out) const
     {
-        // TODO: deduplicate or something, this is adding way too many buffers
         out.clear();
 
         struct PreAllocEntry

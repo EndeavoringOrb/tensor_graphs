@@ -27,6 +27,7 @@ from train_shared import (
     get_graph_provider,
     recv_msg,
     send_msg,
+    get_default_model_path
 )
 
 
@@ -383,9 +384,7 @@ def main():
     parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--resample-graph-every", type=int, default=None)
     parser.add_argument("--compile-decode-buckets", action="store_true", default=None)
-    parser.add_argument(
-        "--log-cost-calls", action="store_true", default=None
-    )
+    parser.add_argument("--log-cost-calls", action="store_true", default=None)
     parser.add_argument("--c-puct", type=float, default=None)
     parser.add_argument("--base-noise", type=float, default=None)
     parser.add_argument("--min-noise", type=float, default=None)
@@ -490,6 +489,13 @@ def main():
         if args.device is not None
         else ("cuda" if torch.cuda.is_available() else "cpu")
     )
+
+    if args.model is not None:
+        config.model_name = args.model
+        if args.model_path is None:
+            config.model_path = get_default_model_path(args.model)
+    if args.model_path is not None:
+        config.model_path = args.model_path
 
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")

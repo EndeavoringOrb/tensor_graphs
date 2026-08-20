@@ -70,7 +70,8 @@ class Executor
             dummyOutput.dtype = outView.dtype;
 
             std::vector<Engine> inst_engines;
-            kernel.matches(dummyInputs, dummyOutput, inst.outBuffer.mem_space, in_mem_spaces, {}, false, false, true, true, &inst_engines);
+            kernel.matches(dummyInputs, dummyOutput, inst.outBuffer.mem_space, in_mem_spaces, {}, false, false, true,
+                           true, &inst_engines);
             if (inst_engines.empty())
             {
                 if (inst.outBuffer.mem_space.type == HandleType::CUDA)
@@ -94,7 +95,8 @@ class Executor
                     ctx.cuda_streams.push_back(reinterpret_cast<void *>(sync.getCudaStream(eng)));
                 }
             }
-            if (!inst_engines.empty() && (primary_engine.type == EngineType::CUDA_GPU || primary_engine.type == EngineType::CUDA_DMA))
+            if (!inst_engines.empty() &&
+                (primary_engine.type == EngineType::CUDA_GPU || primary_engine.type == EngineType::CUDA_DMA))
             {
                 cudaSetDevice(primary_engine.idx);
             }

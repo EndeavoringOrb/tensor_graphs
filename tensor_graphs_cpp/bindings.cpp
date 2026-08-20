@@ -9,6 +9,9 @@
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "models/deepseek-v4-flash.hpp"
+#include "models/qwen-image-vae.hpp"
+#include "models/krea-2-turbo.hpp"
+#include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
 
 namespace py = pybind11;
@@ -266,6 +269,252 @@ class LLMSession
     }
 };
 
+class Krea2Session
+{
+    // Text encoder (Qwen3-VL) components
+    std::unique_ptr<MemoryManager> te_mem;
+    std::unique_ptr<Graph> te_g;
+    std::unique_ptr<Repo> te_repo;
+    std::unique_ptr<Session> te_session;
+    LogicalId teInputIdsId;
+    LogicalId teOutputId;
+
+    // DiT session components
+    std::unique_ptr<MemoryManager> mem;
+    std::unique_ptr<Graph> g;
+    std::unique_ptr<Repo> repo;
+    std::unique_ptr<Session> session;
+    LogicalId latentInputId;
+    LogicalId timestepInputId;
+    LogicalId textInputId;
+    LogicalId velocityOutputId;
+
+    // VAE decoder session components
+    std::unique_ptr<MemoryManager> vae_mem;
+    std::unique_ptr<Graph> vae_g;
+    std::unique_ptr<Repo> vae_repo;
+    std::unique_ptr<Session> vae_session;
+    LogicalId vaeLatentInputId;
+    LogicalId vaeImageOutputId;
+
+    Krea2TurboConfig cfg;
+    Krea2TurboVAEConfig vae_cfg;
+    Qwen3VLConfig te_cfg;
+
+  public:
+    Krea2Session(const std::string &model_path, const std::string &text_encoder_path = "",
+                 const std::string &vae_path = "", uint32_t height = 1024, uint32_t width = 1024,
+                 uint32_t text_seq_len = 128, std::shared_ptr<SearchDelegate> delegate = nullptr,
+                 float min_compile_time = 0.0f, const std::string &cache_file = "", bool disable_caching = false,
+                 uint32_t threads = 0)
+        : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg()
+    {
+        if (threads > 0)
+        {
+            set_num_threads(threads);
+        }
+
+        std::unordered_map<MemSpace, uint64_t> bufferSizes = {
+            {MemSpace{1, HandleType::CPP}, 32ULL * 1024 * 1024 * 1024}};
+#ifdef TG_USE_CUDA
+        bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
+#endif
+        if (HardwareCaps::get().has_opencl)
+        {
+            bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
+        }
+
+        // --- 1. Build and compile Qwen3-VL Text Encoder graph ---
+        std::string actual_te_path = text_encoder_path;
+        if (actual_te_path.empty())
+        {
+            if (std::filesystem::exists(model_path + "/text_encoder"))
+                actual_te_path = model_path + "/text_encoder";
+            else if (std::filesystem::exists(model_path + "/text_encoders"))
+                actual_te_path = model_path + "/text_encoders";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_bf16.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b_bf16.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_fp8_scaled.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b_fp8_scaled.safetensors";
+            else
+                actual_te_path = model_path;
+        }
+
+        te_mem = std::make_unique<MemoryManager>(bufferSizes);
+        te_g = std::make_unique<Graph>();
+
+        teInputIdsId = te_g->input({1, cfg.text_seq_len}, DType::INT32);
+        Qwen3VLModel te_model(te_cfg, cfg.text_seq_len, *te_g, *te_mem, actual_te_path);
+        teOutputId = te_model.build_graph(teInputIdsId);
+
+        std::string te_gHash = computeGraphHash(*te_g, {teOutputId});
+        te_repo = std::make_unique<Repo>("benchmarks/repo_qwen3-vl-4b", te_gHash, true);
+
+        std::string te_cache = "dirty_region_caches/qwen3-vl-4b-seq" + std::to_string(cfg.text_seq_len) + ".bin";
+
+        te_session = std::make_unique<Session>(*te_g, *te_mem, teOutputId, te_cache, 0, te_repo.get(),
+                                               disable_caching, min_compile_time, delegate);
+        te_session->compile(true);
+
+        // --- 2. Build and compile DiT Transformer graph ---
+        std::string actual_dit_path = model_path;
+        if (std::filesystem::exists(model_path + "/turbo.safetensors"))
+            actual_dit_path = model_path + "/turbo.safetensors";
+        else if (std::filesystem::exists(model_path + "/krea2_turbo_fp8_scaled.safetensors"))
+            actual_dit_path = model_path + "/krea2_turbo_fp8_scaled.safetensors";
+        else if (std::filesystem::exists(model_path + "/transformer"))
+            actual_dit_path = model_path + "/transformer";
+
+        mem = std::make_unique<MemoryManager>(bufferSizes);
+        g = std::make_unique<Graph>();
+
+        latentInputId = g->input({1, cfg.latent_channels, cfg.latent_h, cfg.latent_w}, DType::FLOAT32);
+        timestepInputId = g->input({1}, DType::FLOAT32);
+        textInputId = g->input({1, cfg.text_seq_len, cfg.text_num_layers, cfg.text_dim}, DType::FLOAT32);
+
+        Krea2TurboModel model(cfg, *g, *mem, actual_dit_path);
+        velocityOutputId = model.build_graph(latentInputId, timestepInputId, textInputId);
+
+        std::string gHash = computeGraphHash(*g, {velocityOutputId});
+        repo = std::make_unique<Repo>("benchmarks/repo_krea-2-turbo", gHash, true);
+
+        std::string actual_cache = cache_file;
+        if (actual_cache.empty())
+        {
+            std::filesystem::create_directories("dirty_region_caches");
+            actual_cache =
+                "dirty_region_caches/krea-2-turbo-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";
+        }
+
+        session = std::make_unique<Session>(*g, *mem, velocityOutputId, actual_cache, 0, repo.get(), disable_caching,
+                                            min_compile_time, delegate);
+        session->compile(true);
+
+        // --- 3. Build and compile VAE Decoder graph ---
+        std::string actual_vae_path = vae_path;
+        if (actual_vae_path.empty())
+        {
+            if (std::filesystem::exists(model_path + "/vae"))
+                actual_vae_path = model_path + "/vae";
+            else if (std::filesystem::exists(model_path + "/qwen_image_vae.safetensors"))
+                actual_vae_path = model_path + "/qwen_image_vae.safetensors";
+            else
+                actual_vae_path = model_path;
+        }
+
+        vae_mem = std::make_unique<MemoryManager>(bufferSizes);
+        vae_g = std::make_unique<Graph>();
+
+        vaeLatentInputId =
+            vae_g->input({1, vae_cfg.latent_channels, vae_cfg.latent_h, vae_cfg.latent_w}, DType::FLOAT32);
+
+        Krea2TurboVAEModel vae_model(vae_cfg, *vae_g, *vae_mem, actual_vae_path);
+        vaeImageOutputId = vae_model.build_graph(vaeLatentInputId);
+
+        std::string vae_gHash = computeGraphHash(*vae_g, {vaeImageOutputId});
+        vae_repo = std::make_unique<Repo>("benchmarks/repo_qwen-image-vae", vae_gHash, true);
+
+        std::string vae_cache =
+            "dirty_region_caches/qwen-image-vae-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";
+
+        vae_session = std::make_unique<Session>(*vae_g, *vae_mem, vaeImageOutputId, vae_cache, 0, vae_repo.get(),
+                                                disable_caching, min_compile_time, delegate);
+        vae_session->compile(true);
+    }
+
+    std::vector<float> encode_text(const std::vector<int32_t> &token_ids)
+    {
+        std::vector<int32_t> padded_tokens = token_ids;
+        if (padded_tokens.size() < cfg.text_seq_len)
+        {
+            padded_tokens.resize(cfg.text_seq_len, 0);
+        }
+        else if (padded_tokens.size() > cfg.text_seq_len)
+        {
+            padded_tokens.resize(cfg.text_seq_len);
+        }
+
+        te_session->writeInput(teInputIdsId, padded_tokens.data(), cfg.text_seq_len * sizeof(int32_t));
+
+        Bucket b;
+        const float *device_output = static_cast<const float *>(te_session->run(b));
+
+        uint64_t num_output_elements = 1ULL * cfg.text_seq_len * cfg.text_num_layers * cfg.text_dim;
+        std::vector<float> host_output(num_output_elements);
+
+#ifdef TG_USE_CUDA
+        cudaPointerAttributes attrs;
+        if (cudaPointerGetAttributes(&attrs, device_output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+        {
+            cudaMemcpy(host_output.data(), device_output, num_output_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+        else
+#endif
+        {
+            std::memcpy(host_output.data(), device_output, num_output_elements * sizeof(float));
+        }
+
+        return host_output;
+    }
+
+    std::vector<float> predict_velocity(const std::vector<float> &latent_data, float timestep,
+                                        const std::vector<float> &text_data)
+    {
+        session->writeInput(latentInputId, latent_data.data(), latent_data.size() * sizeof(float));
+        float t_val = timestep;
+        session->writeInput(timestepInputId, &t_val, sizeof(float));
+        session->writeInput(textInputId, text_data.data(), text_data.size() * sizeof(float));
+
+        Bucket b;
+        const float *device_output = static_cast<const float *>(session->run(b));
+
+        uint64_t num_output_elements = 1ULL * cfg.latent_channels * cfg.latent_h * cfg.latent_w;
+        std::vector<float> host_output(num_output_elements);
+
+#ifdef TG_USE_CUDA
+        cudaPointerAttributes attrs;
+        if (cudaPointerGetAttributes(&attrs, device_output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+        {
+            cudaMemcpy(host_output.data(), device_output, num_output_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+        else
+#endif
+        {
+            std::memcpy(host_output.data(), device_output, num_output_elements * sizeof(float));
+        }
+
+        return host_output;
+    }
+
+    std::vector<float> decode_latent(const std::vector<float> &latent_data)
+    {
+        vae_session->writeInput(vaeLatentInputId, latent_data.data(), latent_data.size() * sizeof(float));
+
+        Bucket b;
+        const float *device_output = static_cast<const float *>(vae_session->run(b));
+
+        uint64_t num_pixels = 1ULL * vae_cfg.in_channels * cfg.height * cfg.width;
+        std::vector<float> host_output(num_pixels);
+
+#ifdef TG_USE_CUDA
+        cudaPointerAttributes attrs;
+        if (cudaPointerGetAttributes(&attrs, device_output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+        {
+            cudaMemcpy(host_output.data(), device_output, num_pixels * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+        else
+#endif
+        {
+            std::memcpy(host_output.data(), device_output, num_pixels * sizeof(float));
+        }
+
+        return host_output;
+    }
+};
+
+
 PYBIND11_MODULE(tensor_graphs, m)
 {
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
@@ -487,4 +736,16 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_caching") = false, py::arg("threads") = 0)
         .def("generate_step", &LLMSession::generate_step);
+
+    py::class_<Krea2Session>(m, "Krea2Session")
+        .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
+                      std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t>(),
+             py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
+             py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128,
+             py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
+             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0)
+        .def("encode_text", &Krea2Session::encode_text, py::arg("token_ids"))
+        .def("predict_velocity", &Krea2Session::predict_velocity, py::arg("latent_data"), py::arg("timestep"),
+             py::arg("text_data"))
+        .def("decode_latent", &Krea2Session::decode_latent, py::arg("latent_data"));
 }

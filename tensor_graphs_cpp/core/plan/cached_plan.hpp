@@ -103,7 +103,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
 
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 32ULL * 1024 * 1024 * 1024}};
 #ifdef TG_USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
 #endif
@@ -116,48 +116,169 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
 
     uint32_t max_seq_len = 8;
     ModelGraphRoots roots;
-    if (model_name == "gemma-3-270m")
+    if (model_name == "gemma-3-270m" || model_name == "gemma")
     {
         roots = build_gemma_graph(ctx->graph, *ctx->mem, model_path, max_seq_len);
         ctx->vocab_size = Gemma3ModelConfig().vocab_size;
+        ctx->rootId = roots.roots[0];
+        ctx->inputIdsId = roots.inputs[0];
+        ctx->max_seq_len = max_seq_len;
+
+        if (compile_decode_buckets)
+        {
+            for (uint32_t i = 0; i < max_seq_len; ++i)
+            {
+                Bucket b;
+                Region inR;
+                inR.region = {{0, 1}, {i, i + 1}};
+                b.inputDirtyRegions[ctx->inputIdsId] = {inR};
+
+                Region outR;
+                outR.region = {{0, 1}, {i, i + 1}, {0, ctx->vocab_size}};
+                b.outputNeededRegion = {outR};
+                ctx->buckets.push_back(b);
+            }
+        }
+        Bucket fullB;
+        Region fullIn;
+        fullIn.region = {{0, 1}, {0, max_seq_len}};
+        fullB.inputDirtyRegions[ctx->inputIdsId] = {fullIn};
+        Region fullOut;
+        fullOut.region = {{0, 1}, {0, max_seq_len}, {0, ctx->vocab_size}};
+        fullB.outputNeededRegion = {fullOut};
+        ctx->buckets.push_back(fullB);
     }
-    else if (model_name == "qwen-3.6-35b-a3b")
+    else if (model_name == "qwen-3.6-35b-a3b" || model_name == "qwen")
     {
         roots = build_qwen_graph(ctx->graph, *ctx->mem, model_path, max_seq_len);
         ctx->vocab_size = Qwen3_6_35B_A3B_Config().vocab_size;
+        ctx->rootId = roots.roots[0];
+        ctx->inputIdsId = roots.inputs[0];
+        ctx->max_seq_len = max_seq_len;
+
+        if (compile_decode_buckets)
+        {
+            for (uint32_t i = 0; i < max_seq_len; ++i)
+            {
+                Bucket b;
+                Region inR;
+                inR.region = {{0, 1}, {i, i + 1}};
+                b.inputDirtyRegions[ctx->inputIdsId] = {inR};
+
+                Region outR;
+                outR.region = {{0, 1}, {i, i + 1}, {0, ctx->vocab_size}};
+                b.outputNeededRegion = {outR};
+                ctx->buckets.push_back(b);
+            }
+        }
+        Bucket fullB;
+        Region fullIn;
+        fullIn.region = {{0, 1}, {0, max_seq_len}};
+        fullB.inputDirtyRegions[ctx->inputIdsId] = {fullIn};
+        Region fullOut;
+        fullOut.region = {{0, 1}, {0, max_seq_len}, {0, ctx->vocab_size}};
+        fullB.outputNeededRegion = {fullOut};
+        ctx->buckets.push_back(fullB);
+    }
+    else if (model_name == "krea" || model_name == "krea-2-turbo" || model_name == "krea2-turbo" || model_name == "krea2")
+    {
+        std::string actual_path = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/krea.safetensors"))
+                actual_path = model_path + "/krea.safetensors";
+            else if (std::filesystem::exists(model_path + "/turbo.safetensors"))
+                actual_path = model_path + "/turbo.safetensors";
+            else if (std::filesystem::exists(model_path + "/krea2_turbo_fp8_scaled.safetensors"))
+                actual_path = model_path + "/krea2_turbo_fp8_scaled.safetensors";
+            else if (std::filesystem::exists(model_path + "/transformer"))
+                actual_path = model_path + "/transformer";
+        }
+        roots = build_krea2_graph(ctx->graph, *ctx->mem, actual_path, 1024, 1024, 128);
+        ctx->rootId = roots.roots[0];
+        ctx->inputIdsId = roots.inputs[0];
+        ctx->max_seq_len = 128;
+
+        LogicalId latentId = roots.inputs[0];
+        LogicalId timestepId = roots.inputs[1];
+        LogicalId textId = roots.inputs[2];
+        LogicalId velocityOut = roots.roots[0];
+
+        if (compile_decode_buckets)
+        {
+            // Diffusion step bucket: text embedding is static/cached, latent + timestep are dirty
+            Bucket stepB;
+            stepB.inputDirtyRegions[latentId] = {makeFull(ctx->graph.getNode(latentId).getShape())};
+            stepB.inputDirtyRegions[timestepId] = {makeFull(ctx->graph.getNode(timestepId).getShape())};
+            stepB.outputNeededRegion = {makeFull(ctx->graph.getNode(velocityOut).getShape())};
+            ctx->buckets.push_back(stepB);
+        }
+
+        Bucket fullB;
+        fullB.inputDirtyRegions[latentId] = {makeFull(ctx->graph.getNode(latentId).getShape())};
+        fullB.inputDirtyRegions[timestepId] = {makeFull(ctx->graph.getNode(timestepId).getShape())};
+        fullB.inputDirtyRegions[textId] = {makeFull(ctx->graph.getNode(textId).getShape())};
+        fullB.outputNeededRegion = {makeFull(ctx->graph.getNode(velocityOut).getShape())};
+        ctx->buckets.push_back(fullB);
+    }
+    else if (model_name == "vae" || model_name == "krea-2-turbo-vae" || model_name == "krea-vae" ||
+             model_name == "krea2-vae" || model_name == "qwen-image-vae")
+    {
+        std::string actual_path = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/vae"))
+                actual_path = model_path + "/vae";
+            else if (std::filesystem::exists(model_path + "/qwen_image_vae.safetensors"))
+                actual_path = model_path + "/qwen_image_vae.safetensors";
+        }
+        roots = build_krea2_vae_graph(ctx->graph, *ctx->mem, actual_path, 1024, 1024);
+        ctx->rootId = roots.roots[0];
+        ctx->inputIdsId = roots.inputs[0];
+        ctx->max_seq_len = 0;
+
+        LogicalId latentId = roots.inputs[0];
+        LogicalId imageOut = roots.roots[0];
+
+        Bucket fullB;
+        fullB.inputDirtyRegions[latentId] = {makeFull(ctx->graph.getNode(latentId).getShape())};
+        fullB.outputNeededRegion = {makeFull(ctx->graph.getNode(imageOut).getShape())};
+        ctx->buckets.push_back(fullB);
+    }
+    else if (model_name == "qwen3-vl" || model_name == "qwen3-vl-bf16" || model_name == "qwen3vl" ||
+             model_name == "qwen3vl-bf16" || model_name == "qwen3vl_4b_bf16" || model_name == "qwen3-vl-4b-bf16")
+    {
+        std::string actual_path = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/text_encoder"))
+                actual_path = model_path + "/text_encoder";
+            else if (std::filesystem::exists(model_path + "/text_encoders"))
+                actual_path = model_path + "/text_encoders";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_bf16.safetensors"))
+                actual_path = model_path + "/qwen3vl_4b_bf16.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b.safetensors"))
+                actual_path = model_path + "/qwen3vl_4b.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_fp8_scaled.safetensors"))
+                actual_path = model_path + "/qwen3vl_4b_fp8_scaled.safetensors";
+        }
+        roots = build_qwen3_vl_graph(ctx->graph, *ctx->mem, actual_path, 128);
+        ctx->rootId = roots.roots[0];
+        ctx->inputIdsId = roots.inputs[0];
+        ctx->max_seq_len = 128;
+
+        LogicalId inputIds = roots.inputs[0];
+        LogicalId textEmbOut = roots.roots[0];
+
+        Bucket fullB;
+        fullB.inputDirtyRegions[inputIds] = {makeFull(ctx->graph.getNode(inputIds).getShape())};
+        fullB.outputNeededRegion = {makeFull(ctx->graph.getNode(textEmbOut).getShape())};
+        ctx->buckets.push_back(fullB);
     }
     else
     {
         Error::throw_err("Unsupported model for E-Graph caching: " + model_name);
     }
-
-    ctx->rootId = roots.roots[0];
-    ctx->inputIdsId = roots.inputs[0];
-    ctx->max_seq_len = max_seq_len;
-
-    if (compile_decode_buckets)
-    {
-        for (uint32_t i = 0; i < max_seq_len; ++i)
-        {
-            Bucket b;
-            Region inR;
-            inR.region = {{0, 1}, {i, i + 1}};
-            b.inputDirtyRegions[ctx->inputIdsId] = {inR};
-
-            Region outR;
-            outR.region = {{0, 1}, {i, i + 1}, {0, ctx->vocab_size}};
-            b.outputNeededRegion = {outR};
-            ctx->buckets.push_back(b);
-        }
-    }
-    Bucket fullB;
-    Region fullIn;
-    fullIn.region = {{0, 1}, {0, max_seq_len}};
-    fullB.inputDirtyRegions[ctx->inputIdsId] = {fullIn};
-    Region fullOut;
-    fullOut.region = {{0, 1}, {0, max_seq_len}, {0, ctx->vocab_size}};
-    fullB.outputNeededRegion = {fullOut};
-    ctx->buckets.push_back(fullB);
 
     std::vector<LogicalId> topo = topologicalSort(roots.roots, ctx->graph);
 

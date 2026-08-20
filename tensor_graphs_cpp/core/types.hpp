@@ -1688,8 +1688,8 @@ struct KernelContext
     {
         if (idx >= cuda_streams.size())
         {
-            Error::throw_err("KernelContext::cuda_stream index out of bounds: requested " +
-                             std::to_string(idx) + ", but size is " + std::to_string(cuda_streams.size()));
+            Error::throw_err("KernelContext::cuda_stream index out of bounds: requested " + std::to_string(idx) +
+                             ", but size is " + std::to_string(cuda_streams.size()));
         }
         return cuda_streams[idx];
     }

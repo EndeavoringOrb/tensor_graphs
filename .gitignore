@@ -26,6 +26,7 @@ tensor_graphs_cpp/bench.exe
 tensor_graphs_cpp/test.exe
 hwinfo*.txt
 *.png
+prompt.txt
 **/*.png
 node_modules
 package.json

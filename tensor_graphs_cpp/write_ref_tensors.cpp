@@ -240,13 +240,25 @@ int main(int argc, char *argv[])
     std::cout << "Building " << model << " Graph for Reference Tensors..." << std::endl;
     ModelGraphRoots roots;
 
-    if (model == "gemma-3-270m")
+    if (model == "gemma-3-270m" || model == "gemma")
     {
         roots = build_gemma_graph(g, mem, model_path, max_seq_len);
     }
-    else if (model == "qwen-3.6-35b-a3b")
+    else if (model == "qwen-3.6-35b-a3b" || model == "qwen")
     {
         roots = build_qwen_graph(g, mem, model_path, max_seq_len);
+    }
+    else if (model == "krea" || model == "krea-2-turbo" || model == "krea2-turbo" || model == "krea2")
+    {
+        roots = build_krea2_graph(g, mem, model_path);
+    }
+    else if (model == "vae" || model == "krea-2-turbo-vae" || model == "krea-vae" || model == "krea2-vae" || model == "qwen-image-vae")
+    {
+        roots = build_krea2_vae_graph(g, mem, model_path);
+    }
+    else if (model == "qwen3-vl" || model == "qwen3-vl-bf16" || model == "qwen3vl" || model == "qwen3vl-bf16" || model == "qwen3vl_4b_bf16")
+    {
+        roots = build_qwen3_vl_graph(g, mem, model_path);
     }
     else
     {

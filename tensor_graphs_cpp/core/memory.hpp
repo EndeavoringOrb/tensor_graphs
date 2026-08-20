@@ -1,8 +1,10 @@
 #pragma once
+#include <algorithm>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -29,6 +31,7 @@ struct DeviceBuffer
     virtual ~DeviceBuffer() = default;
 
     virtual void init() = 0;
+    virtual void resize(uint64_t newSizeBytes) = 0;
     virtual void freeArena() = 0;
     virtual void write(uint64_t offset, const void *data, uint64_t size) = 0;
 
@@ -48,6 +51,10 @@ struct StorageBuffer : public DeviceBuffer
     }
     void init() override
     {
+    }
+    void resize(uint64_t newSizeBytes) override
+    {
+        sizeBytes = newSizeBytes;
     }
     void freeArena() override
     {
@@ -89,9 +96,18 @@ struct CppBuffer : public DeviceBuffer
     }
     void init() override
     {
-        cpu_arena.resize(sizeBytes + 4096);
+        if (arena_ptr)
+            return;
+        uint64_t allocSize = std::max<uint64_t>(4096ULL, sizeBytes);
+        cpu_arena.resize(allocSize + 4096);
         uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
         arena_ptr = reinterpret_cast<uint8_t *>((ptr + 4095) & ~4095ULL);
+    }
+    void resize(uint64_t newSizeBytes) override
+    {
+        freeArena();
+        sizeBytes = std::max<uint64_t>(4096ULL, (newSizeBytes + 4095) & ~4095ULL);
+        init();
     }
     void freeArena() override
     {
@@ -100,10 +116,14 @@ struct CppBuffer : public DeviceBuffer
     }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {
+        if (!arena_ptr)
+            init();
         std::memcpy(arena_ptr + offset, data, size);
     }
     void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (!arena_ptr)
+            init();
         TensorView v = view;
         ctx.inViews.push_back(v);
         ctx.inputs.push_back(arena_ptr + v.offset);
@@ -112,6 +132,8 @@ struct CppBuffer : public DeviceBuffer
     }
     void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (!arena_ptr)
+            init();
         TensorView v = view;
         ctx.outViews.push_back(v);
         ctx.outputs.push_back(arena_ptr + v.offset);
@@ -140,21 +162,30 @@ struct CudaBuffer : public DeviceBuffer
     }
     void init() override
     {
+        if (arena_ptr)
+            return;
+        uint64_t allocSize = std::max<uint64_t>(4096ULL, sizeBytes);
         cudaSetDevice(mem_space.idx);
         if (HardwareCaps::get().has_unified_memory)
         {
-            cudaError_t err = cudaMallocManaged(&arena_ptr, sizeBytes);
+            cudaError_t err = cudaMallocManaged(&arena_ptr, allocSize);
             if (err != cudaSuccess)
                 Error::throw_err("cudaMallocManaged failed for device " + std::to_string(mem_space.idx) + ": " +
                                  cudaGetErrorString(err));
         }
         else
         {
-            cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
+            cudaError_t err = cudaMalloc(&arena_ptr, allocSize);
             if (err != cudaSuccess)
                 Error::throw_err("cudaMalloc failed for device " + std::to_string(mem_space.idx) + ": " +
                                  cudaGetErrorString(err));
         }
+    }
+    void resize(uint64_t newSizeBytes) override
+    {
+        freeArena();
+        sizeBytes = std::max<uint64_t>(4096ULL, (newSizeBytes + 4095) & ~4095ULL);
+        init();
     }
     void freeArena() override
     {
@@ -167,6 +198,8 @@ struct CudaBuffer : public DeviceBuffer
     }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {
+        if (!arena_ptr)
+            init();
         cudaSetDevice(mem_space.idx);
         cudaError_t err = cudaMemcpy(arena_ptr + offset, data, size, cudaMemcpyHostToDevice);
         if (err != cudaSuccess)
@@ -175,6 +208,8 @@ struct CudaBuffer : public DeviceBuffer
     }
     void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (!arena_ptr)
+            init();
         TensorView v = view;
         ctx.inViews.push_back(v);
         ctx.inputs.push_back(arena_ptr + v.offset);
@@ -183,6 +218,8 @@ struct CudaBuffer : public DeviceBuffer
     }
     void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (!arena_ptr)
+            init();
         TensorView v = view;
         ctx.outViews.push_back(v);
         ctx.outputs.push_back(arena_ptr + v.offset);
@@ -198,7 +235,6 @@ struct CudaBuffer : public DeviceBuffer
 };
 #endif
 
-
 #ifdef TG_USE_OPENCL
 struct OpenCLBuffer : public DeviceBuffer
 {
@@ -213,12 +249,21 @@ struct OpenCLBuffer : public DeviceBuffer
     }
     void init() override
     {
+        if (arena_ptr_cl_mem)
+            return;
+        uint64_t allocSize = std::max<uint64_t>(4096ULL, sizeBytes);
         OpenCLState::get().init();
         cl_context ctx = OpenCLState::get().context;
         cl_int err;
-        arena_ptr_cl_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeBytes, nullptr, &err);
+        arena_ptr_cl_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, allocSize, nullptr, &err);
         if (err != CL_SUCCESS)
             Error::throw_err("clCreateBuffer failed");
+    }
+    void resize(uint64_t newSizeBytes) override
+    {
+        freeArena();
+        sizeBytes = std::max<uint64_t>(4096ULL, (newSizeBytes + 4095) & ~4095ULL);
+        init();
     }
     void freeArena() override
     {
@@ -234,6 +279,8 @@ struct OpenCLBuffer : public DeviceBuffer
     }
     void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (!arena_ptr_cl_mem)
+            init();
         TensorView v = view;
         ctx.inViews.push_back(v);
         ctx.inputs.push_back(nullptr);
@@ -267,6 +314,8 @@ struct OpenCLBuffer : public DeviceBuffer
     }
     void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (!arena_ptr_cl_mem)
+            init();
         TensorView v = view;
         ctx.outViews.push_back(v);
         ctx.outputs.push_back(nullptr);
@@ -363,8 +412,30 @@ struct MemoryManager
         }
     }
 
-    void init()
+    void resizeBuffer(MemSpace ms, uint64_t newSizeBytes)
     {
+        auto it = buffers.find(ms);
+        if (it != buffers.end() && it->second)
+        {
+            it->second->resize(newSizeBytes);
+        }
+        else
+        {
+            Error::throw_err("Buffer not initialized for resize in MemSpace(idx=" + std::to_string(ms.idx) +
+                             ", type=" + toString(ms.type) + ")");
+        }
+    }
+
+    void init(const std::unordered_map<MemSpace, uint64_t> &peakSizes = {})
+    {
+        for (const auto &pair : peakSizes)
+        {
+            auto it = buffers.find(pair.first);
+            if (it != buffers.end() && it->second)
+            {
+                it->second->resize(pair.second);
+            }
+        }
         for (auto &pair : buffers)
         {
             if (pair.second)
