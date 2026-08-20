@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -94,6 +95,67 @@ inline void tg_deserialize(BinaryReader &br, Record &val)
     br.read(val.engines);
     br.read(val.input_mem_spaces);
     br.read(val.runTime);
+}
+
+struct WorkloadMetrics
+{
+    double flops = 0.0;
+    double bytesRead = 0.0;
+    double bytesWritten = 0.0;
+};
+
+inline WorkloadMetrics computeWorkload(OpType opType, const std::string &opName,
+                                      const std::vector<std::vector<uint32_t>> &inShapes,
+                                      const std::vector<DType> &inDTypes,
+                                      const std::vector<uint32_t> &outShape,
+                                      DType outDType)
+{
+    WorkloadMetrics m;
+    m.bytesWritten = static_cast<double>(countElements(outShape) * getDTypeSize(outDType));
+    for (size_t i = 0; i < inShapes.size(); ++i)
+    {
+        DType dt = (i < inDTypes.size()) ? inDTypes[i] : DType::FLOAT32;
+        m.bytesRead += static_cast<double>(countElements(inShapes[i]) * getDTypeSize(dt));
+    }
+
+    bool isDot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
+                 (opName.find("dot") != std::string::npos) || (opName.find("linear") != std::string::npos);
+
+    if (isDot)
+    {
+        if (inShapes.size() >= 2 && !inShapes[0].empty() && !inShapes[1].empty())
+        {
+            const auto &s0 = inShapes[0];
+            const auto &s1 = inShapes[1];
+            uint64_t B = 1;
+            if (s0.size() == 4)
+                B = static_cast<uint64_t>(s0[0]) * s0[1];
+            else if (s0.size() == 3)
+                B = s0[0];
+
+            uint64_t M = (s0.size() >= 2) ? s0[s0.size() - 2] : 1;
+            uint64_t K = s0.back();
+            uint64_t N = s1.back();
+            m.flops = 2.0 * static_cast<double>(B * M * N * K);
+        }
+        else
+        {
+            m.flops = 2.0 * static_cast<double>(countElements(outShape));
+        }
+    }
+    else if (opType == OpType::SUM || opType == OpType::MAX || opType == OpType::ARGMAX)
+    {
+        if (!inShapes.empty())
+            m.flops = static_cast<double>(countElements(inShapes[0]));
+        else
+            m.flops = static_cast<double>(countElements(outShape));
+    }
+    else
+    {
+        m.flops = static_cast<double>(countElements(outShape));
+    }
+
+    return m;
 }
 
 struct CostModel
@@ -214,26 +276,82 @@ struct CostModel
         std::vector<double> weights;
         std::vector<double> scale;
         bool valid = false;
-        double fallbackTime = 0.0;
-        double fallbackElements = 1.0;
+        Record singleRecord;
+        bool hasSingleRecord = false;
+        OpType opType = OpType::INPUT;
+        std::string opName = "";
 
-        float predict(const std::vector<double> &features, uint64_t targetElements) const
+        float predict(const std::vector<double> &features, const WorkloadMetrics &targetW,
+                      const std::vector<std::vector<uint32_t>> &inShapes, const std::vector<DType> &inDTypes,
+                      const std::vector<uint32_t> &outShape, DType outDType) const
         {
             if (valid && weights.size() == features.size())
             {
-                double y = 0.0;
-                for (uint64_t i = 0; i < weights.size(); ++i)
+                double log_y = 0.0;
+                for (size_t i = 0; i < weights.size(); ++i)
                 {
                     double val = features[i];
-                    if (scale[i] > 0)
+                    if (scale[i] > 0.0)
                         val /= scale[i];
-                    y += weights[i] * val;
+                    log_y += weights[i] * val;
                 }
+                log_y = std::clamp(log_y, -13.8, 20.0);
+                double y = std::exp(log_y);
                 return static_cast<float>(std::max(1e-6, y));
             }
-            // Linear Fallback
-            if (fallbackElements > 0)
-                return static_cast<float>(fallbackTime * (static_cast<double>(targetElements) / fallbackElements));
+
+            if (hasSingleRecord)
+            {
+                WorkloadMetrics refW =
+                    computeWorkload(opType, opName, singleRecord.inputShapes, singleRecord.inputDTypes,
+                                    singleRecord.outputShape, singleRecord.outputDType);
+                double refTime = std::max(1e-6, static_cast<double>(singleRecord.runTime));
+                double ratio = 1.0;
+
+                bool isDot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
+                             (opName.find("dot") != std::string::npos) ||
+                             (opName.find("linear") != std::string::npos);
+
+                if (isDot)
+                {
+                    if (refW.flops > 0.0 && targetW.flops > 0.0)
+                    {
+                        ratio = targetW.flops / refW.flops;
+                    }
+                    else
+                    {
+                        double refBytes = refW.bytesRead + refW.bytesWritten;
+                        double targetBytes = targetW.bytesRead + targetW.bytesWritten;
+                        ratio = (refBytes > 0.0) ? (targetBytes / refBytes) : 1.0;
+                    }
+                }
+                else if (opType == OpType::SUM || opType == OpType::MAX || opType == OpType::ARGMAX)
+                {
+                    double refInElems =
+                        singleRecord.inputShapes.empty() ? 1.0 : countElements(singleRecord.inputShapes[0]);
+                    double targetInElems = inShapes.empty() ? 1.0 : countElements(inShapes[0]);
+                    ratio = (refInElems > 0.0) ? (targetInElems / refInElems) : 1.0;
+                }
+                else
+                {
+                    double refBytes = refW.bytesRead + refW.bytesWritten;
+                    double targetBytes = targetW.bytesRead + targetW.bytesWritten;
+                    if (refBytes > 0.0 && targetBytes > 0.0)
+                    {
+                        ratio = targetBytes / refBytes;
+                    }
+                    else
+                    {
+                        double refOut = countElements(singleRecord.outputShape);
+                        double targetOut = countElements(outShape);
+                        ratio = (refOut > 0.0) ? (targetOut / refOut) : 1.0;
+                    }
+                }
+
+                double y = refTime * ratio;
+                return static_cast<float>(std::max(1e-6, y));
+            }
+
             return 1e-6f;
         }
     };
@@ -270,7 +388,7 @@ struct CostModel
                 {
                     Record r;
                     br.read(r);
-                    r.runTime = 0.0f; // normalize for hash
+                    r.runTime = 0.0f;
                     loggedCalls.insert(std::hash<std::string>{}(serializeToString(r)));
                 }
             }
@@ -342,35 +460,40 @@ struct CostModel
         }
     }
 
-    std::vector<double> extractFeatures(const std::vector<std::vector<uint32_t>> &inShapes,
+    std::vector<double> extractFeatures(const WorkloadMetrics &w,
+                                        const std::vector<std::vector<uint32_t>> &inShapes,
                                         const std::vector<std::vector<uint64_t>> &inStrides,
                                         const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
                                         const std::vector<uint64_t> &outStrides, const DType &outDType) const
     {
         std::vector<double> features;
-        features.push_back(1.0);
+        features.push_back(1.0); // Bias / intercept
+
+        features.push_back(std::log(std::max(1.0, w.flops)));
+        features.push_back(std::log(std::max(1.0, w.bytesRead)));
+        features.push_back(std::log(std::max(1.0, w.bytesWritten)));
 
         double outElements = static_cast<double>(countElements(outShape));
         double inElements = 0.0;
         for (const auto &s : inShapes)
             inElements += static_cast<double>(countElements(s));
 
-        features.push_back(outElements);
-        features.push_back(inElements);
+        features.push_back(std::log(std::max(1.0, outElements)));
+        features.push_back(std::log(std::max(1.0, inElements)));
 
         for (uint64_t i = 0; i < inShapes.size(); ++i)
         {
             double elements = static_cast<double>(countElements(inShapes[i]));
             double bytes = elements * getDTypeSize(inDTypes[i]);
             bool contig = isContiguous(inStrides[i], inShapes[i]);
-            features.push_back(bytes);
+            features.push_back(std::log(std::max(1.0, bytes)));
             features.push_back(contig ? 1.0 : 0.0);
         }
 
         double elements = static_cast<double>(countElements(outShape));
         double bytes = elements * getDTypeSize(outDType);
         bool contig = isContiguous(outStrides, outShape);
-        features.push_back(bytes);
+        features.push_back(std::log(std::max(1.0, bytes)));
         features.push_back(contig ? 1.0 : 0.0);
 
         return features;
@@ -379,12 +502,17 @@ struct CostModel
     void fitModel(const ModelKey &mk, const std::vector<Record> &recs)
     {
         LinearModel model;
+        if (KernelRegistry::get().hasKernel(mk.kernelId))
+        {
+            const auto &entry = KernelRegistry::get().getKernel(mk.kernelId);
+            model.opType = entry.opType;
+            model.opName = entry.opName;
+        }
 
         if (!recs.empty())
         {
-            model.fallbackTime = recs[0].runTime;
-            uint64_t e = countElements(recs[0].outputShape);
-            model.fallbackElements = e > 0 ? static_cast<double>(e) : 1.0;
+            model.singleRecord = recs[0];
+            model.hasSingleRecord = true;
         }
 
         if (recs.size() < 2)
@@ -394,7 +522,9 @@ struct CostModel
         }
 
         int K = static_cast<int>(recs.size());
-        auto sample_feat = extractFeatures(recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
+        auto sample_w = computeWorkload(model.opType, model.opName, recs[0].inputShapes, recs[0].inputDTypes,
+                                        recs[0].outputShape, recs[0].outputDType);
+        auto sample_feat = extractFeatures(sample_w, recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
                                            recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
         int D = static_cast<int>(sample_feat.size());
 
@@ -405,22 +535,24 @@ struct CostModel
 
         for (int i = 0; i < K; ++i)
         {
-            auto feat = extractFeatures(recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
+            auto w = computeWorkload(model.opType, model.opName, recs[i].inputShapes, recs[i].inputDTypes,
+                                     recs[i].outputShape, recs[i].outputDType);
+            auto feat = extractFeatures(w, recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
                                         recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
             for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
             {
                 X(i, j) = feat[j];
                 model.scale[j] = std::max(model.scale[j], std::abs(feat[j]));
             }
-            Y(i, 0) = recs[i].runTime;
+            double target_time = std::max(1e-6, static_cast<double>(recs[i].runTime));
+            Y(i, 0) = std::log(target_time);
         }
 
-        // Apply Scaling to prevent double precision loss inside the square matrices
         for (int i = 0; i < K; ++i)
         {
             for (int j = 0; j < D; ++j)
             {
-                if (model.scale[j] > 0)
+                if (model.scale[j] > 0.0)
                 {
                     X(i, j) /= model.scale[j];
                 }
@@ -431,7 +563,6 @@ struct CostModel
         Matrix XtX = multiply(Xt, X);
         Matrix XtY = multiply(Xt, Y);
 
-        // Standard Ridge regularization
         double lambda = 1e-2;
         for (int i = 0; i < D; ++i)
         {
@@ -525,15 +656,31 @@ struct CostModel
             log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
         }
 
+        OpType opType = OpType::INPUT;
+        std::string opName = "";
+        if (KernelRegistry::get().hasKernel(kernelId))
+        {
+            const auto &entry = KernelRegistry::get().getKernel(kernelId);
+            opType = entry.opType;
+            opName = entry.opName;
+        }
+
+        WorkloadMetrics targetW = computeWorkload(opType, opName, inShapes, inDTypes, outShape, outDType);
+
         ModelKey mk = {kernelId, inShapes.size()};
         auto modelIt = models.find(mk);
         if (modelIt != models.end())
         {
-            auto features = extractFeatures(inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-            uint64_t targetElements = countElements(outShape);
-            return modelIt->second.predict(features, targetElements);
+            auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+            return modelIt->second.predict(features, targetW, inShapes, inDTypes, outShape, outDType);
         }
 
-        return std::numeric_limits<float>::infinity();
+        LinearModel fallbackModel;
+        fallbackModel.singleRecord = it->second[0];
+        fallbackModel.hasSingleRecord = true;
+        fallbackModel.opType = opType;
+        fallbackModel.opName = opName;
+        auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+        return fallbackModel.predict(features, targetW, inShapes, inDTypes, outShape, outDType);
     }
 };
