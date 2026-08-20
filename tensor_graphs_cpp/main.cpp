@@ -44,7 +44,7 @@ std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 {
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
 #ifdef TG_USE_CUDA
-    LOG(L_INFO) << "ADDING CUDA MEMCAP";
+    LOG(INFO) << "ADDING CUDA MEMCAP";
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
@@ -104,7 +104,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
         *activeGraphOut = &g;
     }
 
-    LOG(L_INFO) << "Building " << model_name << " Graph...";
+    LOG(INFO) << "Building " << model_name << " Graph...";
     auto roots = builder(g, mem, model_path, max_seq_len);
     LogicalId logits_id = roots.roots[0];
     LogicalId inputIdsId = roots.inputs[0];

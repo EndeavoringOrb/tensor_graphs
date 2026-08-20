@@ -906,7 +906,7 @@ class Toolchain:
                 )
 
             if self.config.debug:
-                flags.extend(["-g", "-O0", "-DDEBUG"])
+                flags.extend(["-g", "-O0", "-DTG_DEBUG"])
             else:
                 flags.append("-O3")
                 if self.config.profile:
@@ -916,7 +916,7 @@ class Toolchain:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
 
             if self.config.debug:
-                flags.extend(["-g", "-O0", "-DDEBUG", "-fno-omit-frame-pointer"])
+                flags.extend(["-g", "-O0", "-DTG_DEBUG", "-fno-omit-frame-pointer"])
             else:
                 flags.append("-O3")
 
@@ -1000,7 +1000,7 @@ class Toolchain:
             flags.append("-DNOMINMAX")
 
         if self.config.debug:
-            flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
+            flags.extend(["-g", "-G", "-O0", "-DTG_DEBUG"])
         else:
             flags.append("-O3")
 

@@ -567,7 +567,6 @@ class KernelRegistry
 
 struct KernelRegistrar
 {
-    // Single unified constructor
     KernelRegistrar(KernelId uid, OpType op, const std::string &opName, uint32_t min_num_inputs,
                     uint32_t max_num_inputs, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
                     const std::vector<uint32_t> &safe_inplace_idxs, const MemSpace output_mem_space,

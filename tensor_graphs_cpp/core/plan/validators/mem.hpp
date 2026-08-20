@@ -25,7 +25,7 @@
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
@@ -148,8 +148,6 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
     return curr;
 }
 
-// tensor_graphs_cpp/core/plan/validators/mem.hpp
-
 struct BufferizeIterator
 {
     const std::vector<EClassId> &ordered;
@@ -166,7 +164,7 @@ struct BufferizeIterator
     bool is_done = false;
     bool first_yield = true;
     std::vector<int> state;
-    std::vector<std::vector<uint32_t>> choice_orders; // Changed to uint32_t to match SearchDelegate::order_bufferize
+    std::vector<std::vector<uint32_t>> choice_orders;
     std::unordered_map<EClassId, EClassId> inplace_alias;
 
     BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,
@@ -554,7 +552,7 @@ struct BufferizeIterator
 static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                    std::vector<ParallelBuffer> &allocated, std::shared_ptr<SearchDelegate> delegate = nullptr)
 {
-    LOG(L_INFO) << "malloc " + std::to_string(unallocated.size());
+    LOG(INFO) << "malloc " + std::to_string(unallocated.size());
     ProgressTimer t(0, "malloc", false, true);
     if (unallocated.empty())
         return true;
@@ -623,7 +621,7 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
     {
         if (k % 100 == 0)
         {
-            LOG(L_INFO) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
+            LOG(INFO) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
         }
 
         if (k == N)
@@ -795,7 +793,7 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
             if (current_mem > static_cast<int64_t>(mem_cap))
             {
                 overflow = ev.buffer_id;
-                LOG(L_INFO) << "[check_peak_memory] OOM error at idx=" << ev.time << std::endl;
+                LOG(INFO) << "[check_peak_memory] OOM error at idx=" << ev.time << std::endl;
                 return false;
             }
         }
@@ -1023,8 +1021,8 @@ struct MemValidator : public ISelectionValidator
                     alloc_ok = false;
                     failed_ms = ms;
                     failed_reduced_cap = reduced_cap;
-                    LOG(L_INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")"
-                                << std::endl;
+                    LOG(INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")"
+                              << std::endl;
                     break;
                 }
 

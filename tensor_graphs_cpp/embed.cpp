@@ -53,7 +53,7 @@
 #include "core/misc.hpp"
 #include "core/repo.hpp"
 #include "core/session.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
 #include "generated/kernels_all.gen.hpp"

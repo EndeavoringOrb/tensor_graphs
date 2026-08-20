@@ -560,7 +560,7 @@ struct CostModel
                                         const DType &outDType) const
     {
         std::vector<double> features;
-        features.push_back(1.0); // Bias / intercept
+        features.push_back(1.0); // Bias
 
         // 1. Compute & algorithmic intensity
         features.push_back(std::log(std::max(1.0, w.flops)));
@@ -726,10 +726,8 @@ struct CostModel
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
         {
-            if (enableLogging)
-            {
-                log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
-            }
+            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
+
             if (!doneWarning)
             {
                 std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;

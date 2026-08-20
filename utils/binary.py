@@ -20,6 +20,7 @@ OP_TYPES = [
     "SLICE",
     "CONCAT",
     "CAST",
+    "UNPACK",
     "REPEAT",
     "ARANGE",
     "TRIU",
@@ -257,17 +258,19 @@ class BinaryReader:
         children = self.read_vector(self.read_u32)
         out_buffer = self.read_parallel_buffer()
         in_buffers = self.read_vector(self.read_parallel_buffer)
+        engines = self.read_vector(self.read_engine)
         debug_origin = self.read_string()
         return {
             "eclassId": eclass_id,
-            "nodeId": eclass_id,  # compatibility alias
+            "nodeId": eclass_id,
             "logicalId": logical_id,
             "kernelId": kernel_id,
-            "fullKernelId": kernel_id,  # compatibility alias
+            "fullKernelId": kernel_id,
             "children": children,
-            "inputNodeIds": children,  # compatibility alias
+            "inputNodeIds": children,
             "outBuffer": out_buffer,
             "inBuffers": in_buffers,
+            "engines": engines,
             "debugOrigin": debug_origin,
         }
 

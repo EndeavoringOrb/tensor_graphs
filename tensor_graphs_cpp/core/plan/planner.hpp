@@ -20,12 +20,13 @@
 #include "core/kernels.hpp"
 #include "core/logging.hpp"
 #include "core/misc.hpp"
+#include "core/ops/ops.hpp"
 #include "core/plan/extractor.hpp"
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/cycle.hpp"
 #include "core/plan/validators/mem.hpp"
 #include "core/rewrite.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 struct ExtractionResult
@@ -535,10 +536,10 @@ struct Planner
                 ss << "  " << name << ": " << count << " matches\n";
             }
             ss << "Total Matches: " << nMatches;
-            LOG(L_DEBUG) << ss.str();
+            LOG(DEBUG) << ss.str();
             if (!changed)
             {
-                LOG(L_INFO) << ss.str();
+                LOG(INFO) << ss.str();
             }
             timer.tick();
         }
@@ -644,34 +645,6 @@ struct Planner
                                              bool strictCache)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
-
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
-            if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
-                return true;
-            if (op == OpType::RESHAPE && inputIdx == 1)
-                return true;
-            if (op == OpType::PERMUTE && inputIdx == 1)
-                return true;
-            if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
-                return true;
-            if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
-                return true;
-            if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
-                return true;
-            if (op == OpType::CONCAT && inputIdx == 0)
-                return true;
-            if (op == OpType::TRIU && inputIdx == 1)
-                return true;
-            if (op == OpType::FILL && inputIdx == 1)
-                return true;
-            if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
-                return true;
-            if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
-                return true;
-            if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
-                return true;
-            return false;
-        };
 
         ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
@@ -782,7 +755,7 @@ struct Planner
                                 const TensorNode &n = pair.second;
                                 for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
                                 {
-                                    if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
+                                    if (isConstant(n.opType, p_idx, n.child_ids.size()))
                                     {
                                         int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
                                         if (kernel.min_num_inputs != kernel.max_num_inputs)
@@ -812,7 +785,7 @@ struct Planner
                     }
                     else
                     {
-                        needed = isConstantNeeded(enode.getOpType(), j, enode.getChildren().size());
+                        needed = isConstant(enode.getOpType(), j, enode.getChildren().size());
                     }
 
                     if (needed && egraph.constantStaging.count(canonChild))
@@ -935,7 +908,7 @@ struct Planner
         }
 
         const uint64_t numClasses = egraph.getClasses().size();
-        LOG(L_INFO) << "numClasses=" << numClasses;
+        LOG(INFO) << "numClasses=" << numClasses;
 
         if (delegate)
         {
@@ -994,11 +967,11 @@ struct Planner
         ProgressTimer timer(max_iters, "extracting graphs");
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
-        LOG(L_INFO) << "entering loop";
+        LOG(INFO) << "entering loop";
 
         while (remaining_iters-- > 0)
         {
-#ifdef DEBUG
+#ifdef TG_DEBUG
             std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
             if (max_iters - (remaining_iters + 1) > 0)
             {
@@ -1015,7 +988,7 @@ struct Planner
                 timer.tick();
                 continue;
             }
-            LOG(L_DEBUG) << "got selection";
+            LOG(DEBUG) << "got selection";
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
 
@@ -1063,7 +1036,7 @@ struct Planner
                     best_order = order;
                     best_buffers = buffers;
                     best_eclass_to_buf = eclass_to_buf;
-                    LOG(L_INFO) << "new best cost " << best_cost;
+                    LOG(INFO) << "new best cost " << best_cost;
                 }
                 if (stopOnFirstValid || single_engine)
                 {
@@ -1126,16 +1099,16 @@ struct Planner
                 if (best_conflict_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
-                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                                 << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
-                                 << " (path index " << best_conflict_pos << ") to resolve OOM.";
+                    LOG(DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                               << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
+                               << " (path index " << best_conflict_pos << ") to resolve OOM.";
                 }
                 else if (max_conflict_path_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
-                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                                 << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
-                                 << " (path index " << max_conflict_path_pos << ")";
+                    LOG(DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                               << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
+                               << " (path index " << max_conflict_path_pos << ")";
                 }
             }
 
@@ -1253,6 +1226,38 @@ struct Planner
 
             compiled.nodeViews[eclass_id] =
                 TensorView(enode.getShape(), final_offset_bytes, final_strides, enode.getDType());
+
+            // Resolve actual engines mapped for this instruction using kernel.matches
+            if (kernel_ptr)
+            {
+                std::vector<TensorNode> dummyInputs(inst.children.size());
+                std::vector<MemSpace> in_mem_spaces(inst.children.size());
+                for (size_t i = 0; i < inst.children.size(); ++i)
+                {
+                    const auto &view = compiled.nodeViews.at(inst.children[i]);
+                    dummyInputs[i].setShape(view.getShape());
+                    dummyInputs[i].strides = view.strides;
+                    dummyInputs[i].dtype = view.dtype;
+                    in_mem_spaces[i] = inst.inBuffers[i].mem_space;
+                }
+                TensorNode dummyOutput;
+                const auto &outView = compiled.nodeViews.at(eclass_id);
+                dummyOutput.setShape(outView.getShape());
+                dummyOutput.strides = outView.strides;
+                dummyOutput.dtype = outView.dtype;
+
+                kernel_ptr->matches(dummyInputs, dummyOutput, inst.outBuffer.mem_space, in_mem_spaces, {}, false, false,
+                                    true, true, &inst.engines);
+            }
+
+            if (inst.engines.empty())
+            {
+                // TODO: this is hacky
+                if (inst.outBuffer.mem_space.type == HandleType::CUDA)
+                    inst.engines.push_back(Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU});
+                else
+                    inst.engines.push_back(Engine{0, EngineType::CPU});
+            }
 
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
             {

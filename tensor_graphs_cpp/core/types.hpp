@@ -1048,85 +1048,6 @@ inline DType fromString(const std::string &str)
     Error::throw_err("Unknown dtype: " + str);
 }
 
-inline std::string toString(OpType op) // TODO: make build.py check that each op has a case here
-{
-    switch (op)
-    {
-    case OpType::INPUT:
-        return "INPUT";
-    case OpType::CACHE:
-        return "CACHE";
-    case OpType::ADD:
-        return "ADD";
-    case OpType::MUL:
-        return "MUL";
-    case OpType::DIVIDE:
-        return "DIVIDE";
-    case OpType::DOT:
-        return "DOT";
-    case OpType::SIN:
-        return "SIN";
-    case OpType::COS:
-        return "COS";
-    case OpType::NEGATE:
-        return "NEGATE";
-    case OpType::POWER:
-        return "POWER";
-    case OpType::SUM:
-        return "SUM";
-    case OpType::MAX:
-        return "MAX";
-    case OpType::RESHAPE:
-        return "RESHAPE";
-    case OpType::PERMUTE:
-        return "PERMUTE";
-    case OpType::SLICE:
-        return "SLICE";
-    case OpType::CONCAT:
-        return "CONCAT";
-    case OpType::CAST:
-        return "CAST";
-    case OpType::UNPACK:
-        return "UNPACK";
-    case OpType::REPEAT:
-        return "REPEAT";
-    case OpType::ARANGE:
-        return "ARANGE";
-    case OpType::TRIU:
-        return "TRIU";
-    case OpType::GATHER:
-        return "GATHER";
-    case OpType::FILL:
-        return "FILL";
-    case OpType::COPY_TO:
-        return "COPY_TO";
-    case OpType::IM2COL:
-        return "IM2COL";
-    case OpType::CONTIGUOUS:
-        return "CONTIGUOUS";
-    case OpType::SCATTER:
-        return "SCATTER";
-    case OpType::LOG:
-        return "LOG";
-    case OpType::ARGMAX:
-        return "ARGMAX";
-    case OpType::LT:
-        return "LT";
-    case OpType::EQ:
-        return "EQ";
-    case OpType::AND:
-        return "AND";
-    case OpType::OR:
-        return "OR";
-    case OpType::NOT:
-        return "NOT";
-    case OpType::FUSED:
-        return "FUSED";
-    default:
-        return "UNKNOWN_OP";
-    }
-}
-
 inline std::string toString(HandleType handle)
 {
     switch (handle)
@@ -1209,10 +1130,6 @@ inline std::ostream &operator<<(std::ostream &os, BufferId id)
 inline std::ostream &operator<<(std::ostream &os, DType dtype)
 {
     return os << toString(dtype);
-}
-inline std::ostream &operator<<(std::ostream &os, OpType op)
-{
-    return os << toString(op);
 }
 inline std::ostream &operator<<(std::ostream &os, HandleType handle_type)
 {
@@ -1406,6 +1323,7 @@ struct OpInstruction
     std::vector<EClassId> children;
     ParallelBuffer outBuffer;
     std::vector<ParallelBuffer> inBuffers;
+    std::vector<Engine> engines;
     std::string debugOrigin;
 };
 
@@ -1597,6 +1515,7 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
     bw.write(val.children);
     bw.write(val.outBuffer);
     bw.write(val.inBuffers);
+    bw.write(val.engines);
     bw.write(val.debugOrigin);
 }
 
@@ -1608,6 +1527,7 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
     br.read(val.children);
     br.read(val.outBuffer);
     br.read(val.inBuffers);
+    br.read(val.engines);
     br.read(val.debugOrigin);
 }
 

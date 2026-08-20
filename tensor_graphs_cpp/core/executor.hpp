@@ -21,7 +21,7 @@ class Executor
     {
         uint32_t nInst = compiled.instructions.size();
         bool disableTimer = true;
-#ifdef DEBUG
+#ifdef TG_DEBUG
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
@@ -52,34 +52,7 @@ class Executor
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
-            // Dynamically resolve actual engines mapped for this instruction
-            std::vector<TensorNode> dummyInputs(inst.children.size());
-            std::vector<MemSpace> in_mem_spaces(inst.children.size());
-            for (size_t i = 0; i < inst.children.size(); ++i)
-            {
-                const auto &view = compiled.nodeViews.at(inst.children[i]);
-                dummyInputs[i].setShape(view.getShape());
-                dummyInputs[i].strides = view.strides;
-                dummyInputs[i].dtype = view.dtype;
-                in_mem_spaces[i] = inst.inBuffers[i].mem_space;
-            }
-            TensorNode dummyOutput;
-            const auto &outView = compiled.nodeViews.at(inst.eclass_id);
-            dummyOutput.setShape(outView.getShape());
-            dummyOutput.strides = outView.strides;
-            dummyOutput.dtype = outView.dtype;
-
-            std::vector<Engine> inst_engines;
-            kernel.matches(dummyInputs, dummyOutput, inst.outBuffer.mem_space, in_mem_spaces, {}, false, false, true,
-                           true, &inst_engines);
-            if (inst_engines.empty())
-            {
-                if (inst.outBuffer.mem_space.type == HandleType::CUDA)
-                    inst_engines.push_back(Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU});
-                else
-                    inst_engines.push_back(Engine{0, EngineType::CPU});
-            }
-
+            const std::vector<Engine> &inst_engines = inst.engines;
             const Engine &primary_engine = inst_engines[0];
 
             sync.syncBefore(inst, inst_engines);
@@ -87,18 +60,25 @@ class Executor
             KernelContext ctx;
 
 #ifdef TG_USE_CUDA
+            int primary_cuda_device = -1;
+
             for (const Engine &eng : inst_engines)
             {
                 if (eng.type == EngineType::CUDA_GPU || eng.type == EngineType::CUDA_DMA)
                 {
-                    cudaSetDevice(eng.idx);
+                    // The first CUDA engine found becomes our target device for kernel execution
+                    if (primary_cuda_device == -1)
+                    {
+                        primary_cuda_device = static_cast<int>(eng.idx);
+                    }
                     ctx.cuda_streams.push_back(reinterpret_cast<void *>(sync.getCudaStream(eng)));
                 }
             }
-            if (!inst_engines.empty() &&
-                (primary_engine.type == EngineType::CUDA_GPU || primary_engine.type == EngineType::CUDA_DMA))
+
+            // Set the device context exactly once if any CUDA engine is involved
+            if (primary_cuda_device != -1)
             {
-                cudaSetDevice(primary_engine.idx);
+                cudaSetDevice(primary_cuda_device);
             }
 #endif
 

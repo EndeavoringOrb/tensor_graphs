@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/plan/validators/cycle.hpp
 #pragma once
 #include <unordered_map>
 #include <vector>

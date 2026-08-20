@@ -304,7 +304,7 @@ struct EGraph
         if (ufSize[ra.value] < ufSize[rb.value])
             std::swap(ra, rb);
 
-#ifdef DEBUG
+#ifdef TG_DEBUG
         if (classes[ra.value].shape != classes[rb.value].shape)
         {
             Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra.value].shape) + ", " +
@@ -415,7 +415,7 @@ struct EGraph
                 bucket.push_back(currentEnodeId);
             }
         }
-#ifdef DEBUG
+#ifdef TG_DEBUG
         std::cout << "[EGraph.rebuild] Found " << nDupes << " duplicate enodes" << std::endl;
 #endif
 

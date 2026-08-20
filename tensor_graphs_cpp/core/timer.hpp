@@ -4,7 +4,7 @@
 
 #define DEBUG_TIMING
 
-#ifdef DEBUG_TIMING
+#ifdef TG_DEBUG_TIMING
 
 struct ProgressTimer
 {

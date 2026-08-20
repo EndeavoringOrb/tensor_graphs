@@ -14,7 +14,7 @@
 
 #include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 namespace Debug
@@ -105,7 +105,7 @@ inline void checkValues(const std::vector<const void *> &out_ptrs, const std::ve
             {
                 outReg.region.push_back({c, c + 1});
             }
-            std::vector<std::vector<Region>> inRegions = prop.backwardElementwise(in_ptrs.size(), {outReg});
+            std::vector<std::vector<Region>> inRegions = backwardElementwise(in_ptrs.size(), {outReg});
 
             msg += "\n  Relevant Input Values:";
             for (size_t in_i = 0; in_i < in_ptrs.size(); ++in_i)
