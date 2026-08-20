@@ -16,7 +16,7 @@
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
 #include "core/repo.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)

@@ -3,7 +3,7 @@
 #include <vector>
 
 #include "core/kernels.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)

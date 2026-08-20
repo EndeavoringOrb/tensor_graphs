@@ -21,7 +21,7 @@
 #include "core/misc.hpp"
 #include "core/plan/planner.hpp"
 #include "core/session.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "generated/kernels_all.gen.hpp"
 
 void fillRandom(void *ptr, uint64_t elements, DType dtype)

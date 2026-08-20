@@ -20,6 +20,7 @@ OP_TYPES = [
     "SLICE",
     "CONCAT",
     "CAST",
+    "UNPACK",
     "REPEAT",
     "ARANGE",
     "TRIU",

@@ -20,12 +20,13 @@
 #include "core/kernels.hpp"
 #include "core/logging.hpp"
 #include "core/misc.hpp"
+#include "core/ops/ops.hpp"
 #include "core/plan/extractor.hpp"
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/cycle.hpp"
 #include "core/plan/validators/mem.hpp"
 #include "core/rewrite.hpp"
-#include "core/shapes.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
 struct ExtractionResult
@@ -645,34 +646,6 @@ struct Planner
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
-            if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
-                return true;
-            if (op == OpType::RESHAPE && inputIdx == 1)
-                return true;
-            if (op == OpType::PERMUTE && inputIdx == 1)
-                return true;
-            if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
-                return true;
-            if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
-                return true;
-            if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
-                return true;
-            if (op == OpType::CONCAT && inputIdx == 0)
-                return true;
-            if (op == OpType::TRIU && inputIdx == 1)
-                return true;
-            if (op == OpType::FILL && inputIdx == 1)
-                return true;
-            if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
-                return true;
-            if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
-                return true;
-            if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
-                return true;
-            return false;
-        };
-
         ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
         {
@@ -782,7 +755,7 @@ struct Planner
                                 const TensorNode &n = pair.second;
                                 for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
                                 {
-                                    if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
+                                    if (isConstant(n.opType, p_idx, n.child_ids.size()))
                                     {
                                         int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
                                         if (kernel.min_num_inputs != kernel.max_num_inputs)
@@ -812,7 +785,7 @@ struct Planner
                     }
                     else
                     {
-                        needed = isConstantNeeded(enode.getOpType(), j, enode.getChildren().size());
+                        needed = isConstant(enode.getOpType(), j, enode.getChildren().size());
                     }
 
                     if (needed && egraph.constantStaging.count(canonChild))
