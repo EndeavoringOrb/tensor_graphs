@@ -27,12 +27,14 @@ struct UnpackOp
         graph.getNode(nodeId).setShape(out_shape);
     }
 
+    // TODO: tighten
     static std::vector<Region> forwardRegion(const TensorNode &node, const Graph &graph,
                                              const std::vector<std::vector<Region>> &parentRegions)
     {
         return forwardFull(node, graph, parentRegions);
     }
 
+    // TODO: tighten
     static std::vector<std::vector<Region>> backwardRegion(const TensorNode &node, const Graph &graph,
                                                            const std::vector<Region> &outputRegions)
     {
