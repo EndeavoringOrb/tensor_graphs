@@ -16,8 +16,6 @@
 #include <cuda_runtime.h>
 #endif
 
-struct DeviceBuffer;
-
 struct DeviceBuffer
 {
     MemSpace mem_space;
