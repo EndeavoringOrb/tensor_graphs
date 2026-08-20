@@ -17,7 +17,6 @@
 #include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
 
-// TODO: make hardware detection better
 #if defined(TG_USE_CUDA)
 #define HW_TAG "CUDA_Enabled"
 #else
@@ -158,6 +157,54 @@ inline WorkloadMetrics computeWorkload(OpType opType, const std::string &opName,
     return m;
 }
 
+inline double getInnerContigElements(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+{
+    if (shape.empty() || strides.empty() || shape.size() != strides.size())
+        return 1.0;
+    uint64_t contig = 1;
+    uint64_t expectedStride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
+    {
+        if (shape[i] <= 1)
+            continue;
+        if (strides[i] == expectedStride)
+        {
+            contig *= shape[i];
+            expectedStride *= shape[i];
+        }
+        else
+        {
+            break;
+        }
+    }
+    return static_cast<double>(std::max<uint64_t>(1, contig));
+}
+
+inline double getUniqueElements(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+{
+    if (shape.empty())
+        return 1.0;
+    uint64_t count = 1;
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i < strides.size() && strides[i] == 0 && shape[i] > 1)
+            continue;
+        count *= shape[i];
+    }
+    return static_cast<double>(std::max<uint64_t>(1, count));
+}
+
+inline uint32_t getEffectiveRank(const std::vector<uint32_t> &shape)
+{
+    uint32_t nonTrivial = 0;
+    for (uint32_t d : shape)
+    {
+        if (d > 1)
+            nonTrivial++;
+    }
+    return std::max<uint32_t>(1, nonTrivial);
+}
+
 struct CostModel
 {
     struct ModelKey
@@ -282,8 +329,12 @@ struct CostModel
         std::string opName = "";
 
         float predict(const std::vector<double> &features, const WorkloadMetrics &targetW,
-                      const std::vector<std::vector<uint32_t>> &inShapes, const std::vector<DType> &inDTypes,
-                      const std::vector<uint32_t> &outShape, DType outDType) const
+                      const std::vector<std::vector<uint32_t>> &inShapes,
+                      const std::vector<std::vector<uint64_t>> &inStrides,
+                      const std::vector<DType> &inDTypes,
+                      const std::vector<uint32_t> &outShape,
+                      const std::vector<uint64_t> &outStrides,
+                      DType outDType) const
         {
             if (valid && weights.size() == features.size())
             {
@@ -345,6 +396,46 @@ struct CostModel
                         double refOut = countElements(singleRecord.outputShape);
                         double targetOut = countElements(outShape);
                         ratio = (refOut > 0.0) ? (targetOut / refOut) : 1.0;
+                    }
+
+                    // Rank & indexing arithmetic penalty adjustment
+                    double refEffRank = getEffectiveRank(singleRecord.outputShape);
+                    double tgtEffRank = getEffectiveRank(outShape);
+                    if (refEffRank > 0 && tgtEffRank > 0 && refEffRank != tgtEffRank)
+                    {
+                        ratio *= (0.4 + 0.6 * (tgtEffRank / refEffRank));
+                    }
+
+                    // Stride penalty adjustment for copy/elementwise kernels
+                    if (!inShapes.empty() && !singleRecord.inputShapes.empty() &&
+                        !inStrides.empty() && !singleRecord.inputStrides.empty())
+                    {
+                        double refInnerContig = getInnerContigElements(singleRecord.inputShapes[0], singleRecord.inputStrides[0]);
+                        double tgtInnerContig = getInnerContigElements(inShapes[0], inStrides[0]);
+
+                        bool refInnerZero = !singleRecord.inputStrides[0].empty() &&
+                                            singleRecord.inputStrides[0].back() == 0 &&
+                                            singleRecord.inputShapes[0].back() > 1;
+                        bool tgtInnerZero = !inStrides[0].empty() &&
+                                            inStrides[0].back() == 0 &&
+                                            inShapes[0].back() > 1;
+
+                        if (tgtInnerZero && !refInnerZero)
+                        {
+                            ratio *= std::max(2.0, std::log2(std::max(2.0, (double)inShapes[0].back())));
+                        }
+                        else if (!tgtInnerZero && refInnerZero)
+                        {
+                            ratio /= std::max(2.0, std::log2(std::max(2.0, (double)singleRecord.inputShapes[0].back())));
+                        }
+                        else if (refInnerContig > 1.0 && tgtInnerContig <= 1.0)
+                        {
+                            ratio *= 4.0;
+                        }
+                        else if (refInnerContig <= 1.0 && tgtInnerContig > 1.0)
+                        {
+                            ratio /= 4.0;
+                        }
                     }
                 }
 
@@ -463,38 +554,44 @@ struct CostModel
     std::vector<double> extractFeatures(const WorkloadMetrics &w,
                                         const std::vector<std::vector<uint32_t>> &inShapes,
                                         const std::vector<std::vector<uint64_t>> &inStrides,
-                                        const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
-                                        const std::vector<uint64_t> &outStrides, const DType &outDType) const
+                                        const std::vector<DType> &inDTypes,
+                                        const std::vector<uint32_t> &outShape,
+                                        const std::vector<uint64_t> &outStrides,
+                                        const DType &outDType) const
     {
         std::vector<double> features;
         features.push_back(1.0); // Bias / intercept
 
+        // 1. Compute & algorithmic intensity
         features.push_back(std::log(std::max(1.0, w.flops)));
-        features.push_back(std::log(std::max(1.0, w.bytesRead)));
-        features.push_back(std::log(std::max(1.0, w.bytesWritten)));
 
+        // 2. Global output complexity
         double outElements = static_cast<double>(countElements(outShape));
-        double inElements = 0.0;
-        for (const auto &s : inShapes)
-            inElements += static_cast<double>(countElements(s));
+        double outInnerContig = getInnerContigElements(outShape, outStrides);
+        double outUniqueElems = getUniqueElements(outShape, outStrides);
+        uint32_t outEffRank = getEffectiveRank(outShape);
 
         features.push_back(std::log(std::max(1.0, outElements)));
-        features.push_back(std::log(std::max(1.0, inElements)));
+        features.push_back(std::log(std::max(1.0, outInnerContig)));
+        features.push_back(std::log(std::max(1.0, outUniqueElems)));
+        features.push_back(std::log(std::max(1.0, static_cast<double>(outEffRank))));
 
+        // 3. Per-input layout and access geometry
         for (uint64_t i = 0; i < inShapes.size(); ++i)
         {
             double elements = static_cast<double>(countElements(inShapes[i]));
-            double bytes = elements * getDTypeSize(inDTypes[i]);
-            bool contig = isContiguous(inStrides[i], inShapes[i]);
-            features.push_back(std::log(std::max(1.0, bytes)));
-            features.push_back(contig ? 1.0 : 0.0);
-        }
+            double innerContig = getInnerContigElements(inShapes[i], inStrides[i]);
+            double uniqueElems = getUniqueElements(inShapes[i], inStrides[i]);
+            uint32_t effRank = getEffectiveRank(inShapes[i]);
 
-        double elements = static_cast<double>(countElements(outShape));
-        double bytes = elements * getDTypeSize(outDType);
-        bool contig = isContiguous(outStrides, outShape);
-        features.push_back(std::log(std::max(1.0, bytes)));
-        features.push_back(contig ? 1.0 : 0.0);
+            bool isInnerZero = !inStrides[i].empty() && inStrides[i].back() == 0 && inShapes[i].back() > 1;
+
+            features.push_back(std::log(std::max(1.0, elements)));
+            features.push_back(std::log(std::max(1.0, innerContig)));
+            features.push_back(std::log(std::max(1.0, uniqueElems)));
+            features.push_back(std::log(std::max(1.0, static_cast<double>(effRank))));
+            features.push_back(isInnerZero ? 1.0 : 0.0);
+        }
 
         return features;
     }
@@ -672,7 +769,7 @@ struct CostModel
         if (modelIt != models.end())
         {
             auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-            return modelIt->second.predict(features, targetW, inShapes, inDTypes, outShape, outDType);
+            return modelIt->second.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
         }
 
         LinearModel fallbackModel;
@@ -681,6 +778,6 @@ struct CostModel
         fallbackModel.opType = opType;
         fallbackModel.opName = opName;
         auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-        return fallbackModel.predict(features, targetW, inShapes, inDTypes, outShape, outDType);
+        return fallbackModel.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
     }
 };
