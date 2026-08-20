@@ -22,21 +22,7 @@ class ThreadPool
     {
         if (n == 0)
         {
-            const char *env = std::getenv("TG_NUM_THREADS");
-            if (!env)
-                env = std::getenv("TENSOR_GRAPHS_NUM_THREADS");
-            if (!env)
-                env = std::getenv("OMP_NUM_THREADS");
-            if (env)
-            {
-                n = std::max(1, std::atoi(env));
-            }
-            else
-            {
-                n = std::thread::hardware_concurrency();
-                if (n == 0)
-                    n = 1;
-            }
+            n = std::max(1U, std::thread::hardware_concurrency());
         }
 
         std::unique_lock<std::mutex> lock(queue_mutex);
@@ -142,25 +128,9 @@ class ThreadPool
     }
 
   private:
-    ThreadPool() : stop(false), num_threads_(1)
+    ThreadPool() : stop(false)
     {
-        uint32_t default_threads = 0;
-        const char *env = std::getenv("TG_NUM_THREADS");
-        if (!env)
-            env = std::getenv("TENSOR_GRAPHS_NUM_THREADS");
-        if (!env)
-            env = std::getenv("OMP_NUM_THREADS");
-        if (env)
-        {
-            default_threads = std::max(1, std::atoi(env));
-        }
-        else
-        {
-            default_threads = std::thread::hardware_concurrency();
-            if (default_threads == 0)
-                default_threads = 1;
-        }
-        set_num_threads(default_threads);
+        set_num_threads(0);
     }
 
     ~ThreadPool()

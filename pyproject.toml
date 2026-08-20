@@ -39,11 +39,3 @@ addopts = "--cov=tensor_graphs"
 
 [tool.ruff.lint]
 ignore = ["E402", "F403", "E741"]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
