@@ -207,7 +207,6 @@ def client_worker(
     traj_queue,
     shared_version,
     device_str: str | None = None,
-    use_in_process: bool = False,
     shared_action_feats=None,
     shared_logits=None,
     shared_v=None,
@@ -260,20 +259,6 @@ def client_worker(
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(console_handler)
 
-    agent = None
-    local_version = -1
-    weights_path = Path(config.run_dir) / "client_weights.pt"
-
-    if use_in_process:
-        agent = AlphaZeroTransformer(
-            d_model=config.d_model,
-            nhead=config.nhead,
-            num_layers=config.num_layers,
-            max_feat_dim=config.max_feat_dim,
-        )
-        agent.eval()
-        logger.info(f"{LOG_PREFIX} [Worker {rank}] Using in-process CPU evaluation.")
-
     graph_provider = get_graph_provider(config, worker_rank=rank)
     logger.info(
         f"{LOG_PREFIX} [Worker {rank}] Initializing graph provider (source: {config.graph_source})..."
@@ -282,24 +267,8 @@ def client_worker(
     episode = 0
 
     while True:
-        if use_in_process:
-            with shared_version.get_lock():
-                episode_version = shared_version.value
-            if episode_version > local_version and weights_path.exists():
-                try:
-                    loaded = torch.load(weights_path, map_location="cpu", weights_only=True)
-                    if isinstance(loaded, dict) and "state_dict" in loaded:
-                        agent.load_state_dict(loaded["state_dict"], strict=False)
-                        local_version = loaded.get("version", episode_version)
-                    else:
-                        agent.load_state_dict(loaded, strict=False)
-                        local_version = episode_version
-                    logger.info(f"{LOG_PREFIX} [Worker {rank}] Reloaded weights to version {local_version}")
-                except Exception as e:
-                    logger.info(f"{LOG_PREFIX} [Worker {rank}] Failed reloading weights: {e}")
-        else:
-            with shared_version.get_lock():
-                episode_version = shared_version.value
+        with shared_version.get_lock():
+            episode_version = shared_version.value
 
         try:
             egraph_context = graph_provider.get_context(config, episode=episode)
@@ -322,7 +291,7 @@ def client_worker(
         mcts_tree = {}
 
         delegate = ActorDelegate(
-            agent=agent,
+            agent=None,
             req_queue=req_queue,
             resp_queue=resp_queue,
             worker_id=rank,
@@ -340,6 +309,7 @@ def client_worker(
         )
 
         for _ in range(config.num_simulations):
+            # 2. Clear the active stack at the start of each simulation
             delegate.active_stack.clear()
             
             try:
@@ -366,6 +336,7 @@ def client_worker(
         else:
             best_Z = -1.0
 
+        # 3. Update the pack_episode call to use the preserved delegate
         packed_payload = TrajectoryCodec.pack_episode(
             mcts_tree, best_Z, delegate.prefix_registry
         )
@@ -556,23 +527,16 @@ def main():
     if args.model_path is not None:
         config.model_path = args.model_path
 
-    use_in_process = target_device.startswith("cpu")
-
     # TODO: MAX_ACTIONS is a hardcoded limit for shared memory size to handle worst-case expansion paths. Might need to be dynamic for exceptionally large extraction graphs.
     MAX_ACTIONS = 16384 
-    if not use_in_process:
-        shared_action_feats = torch.zeros((config.workers, MAX_ACTIONS, 7), dtype=torch.float32).share_memory_()
-        shared_logits = torch.zeros((config.workers, MAX_ACTIONS), dtype=torch.float32).share_memory_()
-        shared_v = torch.zeros((config.workers,), dtype=torch.float32).share_memory_()
-    else:
-        shared_action_feats = None
-        shared_logits = None
-        shared_v = None
+    shared_action_feats = torch.zeros((config.workers, MAX_ACTIONS, 7), dtype=torch.float32).share_memory_()
+    shared_logits = torch.zeros((config.workers, MAX_ACTIONS), dtype=torch.float32).share_memory_()
+    shared_v = torch.zeros((config.workers,), dtype=torch.float32).share_memory_()
 
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
     print(f" C++ Threads / Worker: {config.cpp_threads}")
-    print(f" Inference Device: {target_device} (In-Process CPU: {use_in_process})")
+    print(f" Inference Device: {target_device}")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
     print(f" Graph Source: {config.graph_source.upper()}")
     print(
@@ -589,22 +553,17 @@ def main():
     runs_dir = Path("runs")
     runs_dir.mkdir(parents=True, exist_ok=True)
 
-    if not use_in_process:
-        inf_process = mp.Process(
-            target=inference_worker,
-            args=(
-                config, 
-                req_queue, 
-                resp_queues, 
-                weights_event, 
-                "runs", 
-                target_device, 
-                shared_action_feats, 
-                shared_logits, 
-                shared_v
-            ),
-        )
-        inf_process.start()
+    target_device = (
+        args.device
+        if args.device is not None
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+
+    inf_process = mp.Process(
+        target=inference_worker,
+        args=(config, req_queue, resp_queues, weights_event, "runs", target_device),
+    )
+    inf_process.start()
 
     processes = []
     for rank in range(config.workers):
@@ -618,7 +577,6 @@ def main():
                 traj_queue,
                 shared_version,
                 target_device,
-                use_in_process,
                 shared_action_feats,
                 shared_logits,
                 shared_v,
