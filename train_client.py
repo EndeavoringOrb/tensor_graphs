@@ -24,10 +24,10 @@ from train_shared import (
     TrainConfig,
     TrajectoryCodec,
     create_client_socket,
+    get_default_model_path,
     get_graph_provider,
     recv_msg,
     send_msg,
-    get_default_model_path
 )
 
 
@@ -261,24 +261,28 @@ def client_worker(
         best_cost = float("inf")
         extraction_costs = []
         mcts_tree = {}
-        last_delegate = None
+        # Remove last_delegate = None
+
+        # 1. Instantiate the delegate ONCE per episode
+        delegate = ActorDelegate(
+            agent=None,
+            req_queue=req_queue,
+            resp_queue=resp_queue,
+            worker_id=rank,
+            mcts_tree=mcts_tree,
+            c_puct=config.c_puct,
+            episode=episode,
+            decay_episodes=config.decay_episodes,
+            base_noise=config.base_noise,
+            min_noise=config.min_noise,
+            depth_gamma=config.depth_gamma,
+            version=episode_version,
+        )
 
         for _ in range(config.num_simulations):
-            delegate = ActorDelegate(
-                agent=None,
-                req_queue=req_queue,
-                resp_queue=resp_queue,
-                worker_id=rank,
-                mcts_tree=mcts_tree,
-                c_puct=config.c_puct,
-                episode=episode,
-                decay_episodes=config.decay_episodes,
-                base_noise=config.base_noise,
-                min_noise=config.min_noise,
-                depth_gamma=config.depth_gamma,
-                version=episode_version,
-            )
-            last_delegate = delegate
+            # 2. Clear the active stack at the start of each simulation
+            delegate.active_stack.clear()
+            
             try:
                 costs = tensor_graphs.run_hierarchical_simulations(
                     egraph_context,
@@ -303,12 +307,9 @@ def client_worker(
         else:
             best_Z = -1.0
 
-        packed_payload = (
-            TrajectoryCodec.pack_episode(
-                mcts_tree, best_Z, last_delegate.prefix_registry
-            )
-            if last_delegate
-            else {"prefixes": {}, "transitions": []}
+        # 3. Update the pack_episode call to use the preserved delegate
+        packed_payload = TrajectoryCodec.pack_episode(
+            mcts_tree, best_Z, delegate.prefix_registry
         )
 
         num_transitions = len(packed_payload["transitions"])

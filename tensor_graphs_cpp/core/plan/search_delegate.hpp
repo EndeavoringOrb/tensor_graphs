@@ -18,6 +18,7 @@ struct ActionFeatureCache
 struct ActionFeatureExtractDispatch
 {
     float cost;
+    float dp_cost = 0.0f;
     uint64_t size; // n elements * dtype size
     MemSpace mem_space;
     std::vector<uint32_t> engine_idxs;
@@ -29,6 +30,7 @@ struct ActionFeatureMalloc
     uint64_t size = 0;  // bytes
     uint32_t start = 0; // birth time (idx into dispatch order of first eclass that uses this)
     uint32_t end = 0;   // death time (idx into dispatch order of last eclass that uses this)
+    uint64_t mem_cap = 0;
 };
 
 struct ActionFeatureBufferize
@@ -43,6 +45,11 @@ class SearchDelegate
 {
   public:
     virtual ~SearchDelegate() = default;
+
+    virtual bool fast_fail() const
+    {
+        return false;
+    }
 
     virtual void push_state()
     {

@@ -182,7 +182,7 @@ struct DotOp
 
     static OpTraits traits()
     {
-        return OpTraits{op_type, name, is_elementwise, inferShape, forwardRegion, backwardRegion,
+        return OpTraits{op_type,         name,       is_elementwise, inferShape, forwardRegion, backwardRegion,
                         computeWorkload, isConstant, buildPattern};
     }
 };

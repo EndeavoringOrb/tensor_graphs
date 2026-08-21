@@ -15,7 +15,6 @@
 #include "core/common/thread_pool.hpp"
 #include "core/logging.hpp"
 #include "core/types.hpp"
-#include "core/types.hpp"
 
 #if defined(TG_OS_WINDOWS)
 #include <windows.h>

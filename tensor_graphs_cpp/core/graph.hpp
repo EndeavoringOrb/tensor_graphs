@@ -724,7 +724,7 @@ struct Graph
     }
 
     LogicalId im2col(LogicalId input_id, int32_t kernel_size, int32_t stride, int32_t padding,
-                 std::source_location loc = std::source_location::current())
+                     std::source_location loc = std::source_location::current())
     {
         LogicalId k_id = constant({1}, &kernel_size, DType::INT32);
         LogicalId s_id = constant({1}, &stride, DType::INT32);

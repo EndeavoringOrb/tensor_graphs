@@ -18,9 +18,9 @@ from train_shared import (
     PrefixData,
     TrainConfig,
     create_server_socket,
+    get_default_model_path,
     recv_msg,
     send_msg,
-    get_default_model_path
 )
 
 torch.set_float32_matmul_precision("high")

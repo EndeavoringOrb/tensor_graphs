@@ -42,13 +42,7 @@ class Qwen3VLModel
     std::string resolve_weight_name(const std::string &name)
     {
         std::vector<std::string> candidate_prefixes = {
-            "",
-            "model.",
-            "language_model.",
-            "text_encoder.model.",
-            "model.language_model.",
-            "text_model."
-        };
+            "", "model.", "language_model.", "text_encoder.model.", "model.language_model.", "text_model."};
         for (const auto &prefix : candidate_prefixes)
         {
             std::string full_name = prefix + name;
@@ -123,8 +117,7 @@ class Qwen3VLModel
         LogicalId x_sq = g.mul(x, x);
         LogicalId sum_sq = g.sum(x_sq, -1);
         LogicalId mean_sq = g.div(sum_sq, g.fill((float)head_dim, {1, num_heads, S, 1}));
-        LogicalId std =
-            g.pow(g.add(mean_sq, g.fill(eps, {1, num_heads, S, 1})), g.fill(0.5f, {1, num_heads, S, 1}));
+        LogicalId std = g.pow(g.add(mean_sq, g.fill(eps, {1, num_heads, S, 1})), g.fill(0.5f, {1, num_heads, S, 1}));
         LogicalId inv_std = g.repeat(g.div(g.fill(1.0f, {1, num_heads, S, 1}), std), head_dim, 3);
         LogicalId x_norm = g.mul(x, inv_std);
 
@@ -216,7 +209,7 @@ class Qwen3VLModel
     {
         std::string prefix = "layers." + std::to_string(layer_idx) + ".self_attn.";
 
-        uint32_t q_dim = cfg.num_attention_heads * cfg.head_dim;   // 32 * 128 = 4096
+        uint32_t q_dim = cfg.num_attention_heads * cfg.head_dim;  // 32 * 128 = 4096
         uint32_t kv_dim = cfg.num_key_value_heads * cfg.head_dim; // 8 * 128 = 1024
 
         LogicalId q = linear(x, prefix + "q_proj.weight", "", cfg.hidden_size, q_dim, S);
@@ -244,12 +237,10 @@ class Qwen3VLModel
 
         // GQA: Repeat KV heads (8 -> 32)
         uint32_t rep_factor = cfg.num_attention_heads / cfg.num_key_value_heads;
-        LogicalId k_5d =
-            g.repeat(g.reshape(k, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}),
-                     rep_factor, 2);
-        LogicalId v_5d =
-            g.repeat(g.reshape(v, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}),
-                     rep_factor, 2);
+        LogicalId k_5d = g.repeat(
+            g.reshape(k, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}), rep_factor, 2);
+        LogicalId v_5d = g.repeat(
+            g.reshape(v, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}), rep_factor, 2);
         k = g.reshape(g.contiguous(k_5d), {1, (int32_t)cfg.num_attention_heads, (int32_t)S, (int32_t)cfg.head_dim});
         v = g.reshape(g.contiguous(v_5d), {1, (int32_t)cfg.num_attention_heads, (int32_t)S, (int32_t)cfg.head_dim});
 

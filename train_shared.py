@@ -21,7 +21,7 @@ class TrainConfig:
     run_dir: str = "runs"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
-    num_simulations: int = 10
+    num_simulations: int = 800
     level_simulations: list = dataclasses.field(default_factory=lambda: [1, 1, 1, 1])
     replay_buffer_size: int = 100_000
     batch_size: int = 64
@@ -85,6 +85,7 @@ class TrainConfig:
         data = json.loads(p.read_text(encoding="utf-8"))
         return cls.from_dict(data)
 
+
 DEFAULT_MODEL_PATHS = {
     "gemma-3-270m": "models/google/gemma-3-270m",
     "qwen-3.6-35b-a3b": "models/Qwen/Qwen3.6-35B-A3B",
@@ -108,6 +109,7 @@ def get_default_model_path(model_name: str) -> str:
         if k.lower().replace("_", "-") == norm:
             return v
     return f"models/{model_name}"
+
 
 # ==============================================================================
 # GRAPH PROVIDER & GENERATOR
@@ -237,12 +239,9 @@ class ModelGraphProvider:
     ) -> tensor_graphs.SaturatedEGraphContext:
         if self._cached_context is None:
             model_path = self.model_path
-            if (
-                not model_path
-                or (
-                    model_path == "models/google/gemma-3-270m"
-                    and self.model_name != "gemma-3-270m"
-                )
+            if not model_path or (
+                model_path == "models/google/gemma-3-270m"
+                and self.model_name != "gemma-3-270m"
             ):
                 model_path = get_default_model_path(self.model_name)
 
@@ -286,8 +285,13 @@ class RandomGraphProvider:
                 seed=seed,
             )
 
+            rng = random.Random(seed)
+            mem_cap = rng.randint(
+                32 * 1024 * 1024, 256 * 1024 * 1024
+            )  # 32MB to 256MB for small graphs
+
             self._cached_context = tensor_graphs.build_and_saturate_egraph_from_graph(
-                graph, root, buckets, config.log_cost_calls
+                graph, root, buckets, config.log_cost_calls, mem_cap
             )
             self._last_sampled_episode = episode
 
@@ -520,6 +524,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.prefix_cache_v = {}
         self.worker_registered_prefixes = set()
 
+    def fast_fail(self) -> bool:
+        return True
+
     def push_state(self):
         pass
 
@@ -538,11 +545,14 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
     def _store_raw_graph(self, phase_name, node_features, edge_src, edge_dst):
         phase_id = self.PHASE_MAP[phase_name]
-        dim = (
-            5
-            if phase_name in ["cache", "bufferize"]
-            else (4 if phase_name in ["extract", "dispatch"] else 3)
-        )
+        dim_map = {
+            "cache": 5,
+            "extract": 5,
+            "dispatch": 5,
+            "bufferize": 5,
+            "malloc": 3,
+        }
+        dim = dim_map.get(phase_name, 5)
         if not node_features:
             nf = np.zeros((0, dim), dtype=np.float32)
             src = np.zeros(0, dtype=np.int64)
@@ -800,6 +810,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             feats.append(
                 [
                     math.log1p(max(0.0, float(f.cost))),
+                    math.log1p(max(0.0, float(getattr(f, "dp_cost", 0.0)))),
                     math.log1p(max(0.0, float(f.size))),
                     mem_type,
                     eng_len,
@@ -827,7 +838,12 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
     def _extract_malloc_features(self, items):
         feats = [
-            [math.log1p(max(0.0, float(f.size))), float(f.start), float(f.end)]
+            [
+                math.log1p(max(0.0, float(f.size))),
+                float(f.start),
+                float(f.end),
+                math.log1p(max(0.0, float(getattr(f, "mem_cap", 0.0)))),
+            ]
             for f in items
         ]
         return torch.nan_to_num(

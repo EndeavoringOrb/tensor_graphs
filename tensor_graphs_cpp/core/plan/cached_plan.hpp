@@ -48,7 +48,8 @@ struct SaturatedEGraphContext
 inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_graph(const Graph &input_graph,
                                                                                     LogicalId rootId,
                                                                                     const std::vector<Bucket> &buckets,
-                                                                                    bool log_cost_calls = false)
+                                                                                    bool log_cost_calls = false,
+                                                                                    uint64_t mem_cap_override = 0)
 {
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
@@ -57,6 +58,13 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_gr
 #ifdef TG_USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
 #endif
+    if (mem_cap_override > 0)
+    {
+        bufferSizes[MemSpace{1, HandleType::CPP}] = mem_cap_override;
+#ifdef TG_USE_CUDA
+        bufferSizes[MemSpace{2, HandleType::CUDA}] = mem_cap_override;
+#endif
+    }
     if (HardwareCaps::get().has_opencl)
     {
         bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
@@ -180,7 +188,8 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
         fullB.outputNeededRegion = {fullOut};
         ctx->buckets.push_back(fullB);
     }
-    else if (model_name == "krea" || model_name == "krea-2-turbo" || model_name == "krea2-turbo" || model_name == "krea2")
+    else if (model_name == "krea" || model_name == "krea-2-turbo" || model_name == "krea2-turbo" ||
+             model_name == "krea2")
     {
         std::string actual_path = model_path;
         if (std::filesystem::is_directory(model_path))
@@ -480,6 +489,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                 node_features.push_back(0.0f); // is_enode
                 node_features.push_back((float)countElements(cls.shape) * getDTypeSize(cls.dtype));
                 node_features.push_back((float)cls.dtype);
+                node_features.push_back(0.0f); // dp_cost pad
 
                 for (ENodeId enode_id : cls.enodes)
                 {
@@ -494,6 +504,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                 node_features.push_back(1.0f); // is_enode
                 node_features.push_back(enodeInfos[i].cost);
                 node_features.push_back((float)enode.getOpType());
+                node_features.push_back(enodeInfos[i].dp_cost);
 
                 for (EClassId child : enode.getChildren())
                 {

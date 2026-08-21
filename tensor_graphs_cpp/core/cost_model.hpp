@@ -14,8 +14,8 @@
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
-#include "core/types.hpp"
 #include "core/ops/ops.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
 
 #if defined(TG_USE_CUDA)
@@ -270,10 +270,8 @@ struct CostModel
 
         float predict(const std::vector<double> &features, const WorkloadMetrics &targetW,
                       const std::vector<std::vector<uint32_t>> &inShapes,
-                      const std::vector<std::vector<uint64_t>> &inStrides,
-                      const std::vector<DType> &inDTypes,
-                      const std::vector<uint32_t> &outShape,
-                      const std::vector<uint64_t> &outStrides,
+                      const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
+                      const std::vector<uint32_t> &outShape, const std::vector<uint64_t> &outStrides,
                       DType outDType) const
         {
             if (valid && weights.size() == features.size())
@@ -293,15 +291,13 @@ struct CostModel
 
             if (hasSingleRecord)
             {
-                WorkloadMetrics refW =
-                    computeWorkload(opType, singleRecord.inputShapes, singleRecord.inputDTypes,
-                                    singleRecord.outputShape, singleRecord.outputDType, opName);
+                WorkloadMetrics refW = computeWorkload(opType, singleRecord.inputShapes, singleRecord.inputDTypes,
+                                                       singleRecord.outputShape, singleRecord.outputDType, opName);
                 double refTime = std::max(1e-6, static_cast<double>(singleRecord.runTime));
                 double ratio = 1.0;
 
                 bool isDot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
-                             (opName.find("dot") != std::string::npos) ||
-                             (opName.find("linear") != std::string::npos);
+                             (opName.find("dot") != std::string::npos) || (opName.find("linear") != std::string::npos);
 
                 if (isDot)
                 {
@@ -347,18 +343,17 @@ struct CostModel
                     }
 
                     // Stride penalty adjustment for copy/elementwise kernels
-                    if (!inShapes.empty() && !singleRecord.inputShapes.empty() &&
-                        !inStrides.empty() && !singleRecord.inputStrides.empty())
+                    if (!inShapes.empty() && !singleRecord.inputShapes.empty() && !inStrides.empty() &&
+                        !singleRecord.inputStrides.empty())
                     {
-                        double refInnerContig = getInnerContigElements(singleRecord.inputShapes[0], singleRecord.inputStrides[0]);
+                        double refInnerContig =
+                            getInnerContigElements(singleRecord.inputShapes[0], singleRecord.inputStrides[0]);
                         double tgtInnerContig = getInnerContigElements(inShapes[0], inStrides[0]);
 
                         bool refInnerZero = !singleRecord.inputStrides[0].empty() &&
                                             singleRecord.inputStrides[0].back() == 0 &&
                                             singleRecord.inputShapes[0].back() > 1;
-                        bool tgtInnerZero = !inStrides[0].empty() &&
-                                            inStrides[0].back() == 0 &&
-                                            inShapes[0].back() > 1;
+                        bool tgtInnerZero = !inStrides[0].empty() && inStrides[0].back() == 0 && inShapes[0].back() > 1;
 
                         if (tgtInnerZero && !refInnerZero)
                         {
@@ -366,7 +361,8 @@ struct CostModel
                         }
                         else if (!tgtInnerZero && refInnerZero)
                         {
-                            ratio /= std::max(2.0, std::log2(std::max(2.0, (double)singleRecord.inputShapes[0].back())));
+                            ratio /=
+                                std::max(2.0, std::log2(std::max(2.0, (double)singleRecord.inputShapes[0].back())));
                         }
                         else if (refInnerContig > 1.0 && tgtInnerContig <= 1.0)
                         {
@@ -491,13 +487,10 @@ struct CostModel
         }
     }
 
-    std::vector<double> extractFeatures(const WorkloadMetrics &w,
-                                        const std::vector<std::vector<uint32_t>> &inShapes,
+    std::vector<double> extractFeatures(const WorkloadMetrics &w, const std::vector<std::vector<uint32_t>> &inShapes,
                                         const std::vector<std::vector<uint64_t>> &inStrides,
-                                        const std::vector<DType> &inDTypes,
-                                        const std::vector<uint32_t> &outShape,
-                                        const std::vector<uint64_t> &outStrides,
-                                        const DType &outDType) const
+                                        const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
+                                        const std::vector<uint64_t> &outStrides, const DType &outDType) const
     {
         std::vector<double> features;
         features.push_back(1.0); // Bias
@@ -559,8 +552,8 @@ struct CostModel
         }
 
         int K = static_cast<int>(recs.size());
-        auto sample_w = computeWorkload(model.opType, recs[0].inputShapes, recs[0].inputDTypes,
-                                        recs[0].outputShape, recs[0].outputDType, model.opName);
+        auto sample_w = computeWorkload(model.opType, recs[0].inputShapes, recs[0].inputDTypes, recs[0].outputShape,
+                                        recs[0].outputDType, model.opName);
         auto sample_feat = extractFeatures(sample_w, recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
                                            recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
         int D = static_cast<int>(sample_feat.size());
@@ -572,8 +565,8 @@ struct CostModel
 
         for (int i = 0; i < K; ++i)
         {
-            auto w = computeWorkload(model.opType, recs[i].inputShapes, recs[i].inputDTypes,
-                                     recs[i].outputShape, recs[i].outputDType, model.opName);
+            auto w = computeWorkload(model.opType, recs[i].inputShapes, recs[i].inputDTypes, recs[i].outputShape,
+                                     recs[i].outputDType, model.opName);
             auto feat = extractFeatures(w, recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
                                         recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
             for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
@@ -707,7 +700,8 @@ struct CostModel
         if (modelIt != models.end())
         {
             auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-            return modelIt->second.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+            return modelIt->second.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides,
+                                           outDType);
         }
 
         LinearModel fallbackModel;

@@ -2,9 +2,9 @@
 #include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "models/gemma-3-270m.hpp"
-#include "models/qwen-image-vae.hpp"
 #include "models/krea-2-turbo.hpp"
 #include "models/qwen-3.6-35b-a3b.hpp"
+#include "models/qwen-image-vae.hpp"
 #include "models/qwen3-vl.hpp"
 
 struct ModelGraphRoots

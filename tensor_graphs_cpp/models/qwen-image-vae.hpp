@@ -53,13 +53,7 @@ class Krea2TurboVAEModel
 
     std::string resolve_weight_name(const std::string &name)
     {
-        std::vector<std::string> candidate_prefixes = {
-            "",
-            "model.",
-            "vae.",
-            "first_stage_model.",
-            "model.vae."
-        };
+        std::vector<std::string> candidate_prefixes = {"", "model.", "vae.", "first_stage_model.", "model.vae."};
         for (const auto &prefix : candidate_prefixes)
         {
             std::string full_name = prefix + name;
@@ -281,7 +275,8 @@ class Krea2TurboVAEModel
         x = upsample_2d(x, 384, cur_h, cur_w);
         cur_h *= 2;
         cur_w *= 2;
-        x = conv2d(x, "decoder.upsamples.3.resample.1.weight", "decoder.upsamples.3.resample.1.bias", 384, 192, cur_h, cur_w, 3, 1, 1);
+        x = conv2d(x, "decoder.upsamples.3.resample.1.weight", "decoder.upsamples.3.resample.1.bias", 384, 192, cur_h,
+                   cur_w, 3, 1, 1);
 
         // Stage 1: 192 -> 384, Upsample 2x -> 192 (cur_h, cur_w: 256 -> 512)
         x = residual_block(x, "decoder.upsamples.4.", 192, 384, cur_h, cur_w);
@@ -290,7 +285,8 @@ class Krea2TurboVAEModel
         x = upsample_2d(x, 384, cur_h, cur_w);
         cur_h *= 2;
         cur_w *= 2;
-        x = conv2d(x, "decoder.upsamples.7.resample.1.weight", "decoder.upsamples.7.resample.1.bias", 384, 192, cur_h, cur_w, 3, 1, 1);
+        x = conv2d(x, "decoder.upsamples.7.resample.1.weight", "decoder.upsamples.7.resample.1.bias", 384, 192, cur_h,
+                   cur_w, 3, 1, 1);
 
         // Stage 2: 192 -> 192, Upsample 2x -> 96 (cur_h, cur_w: 512 -> 1024)
         x = residual_block(x, "decoder.upsamples.8.", 192, 192, cur_h, cur_w);
@@ -299,7 +295,8 @@ class Krea2TurboVAEModel
         x = upsample_2d(x, 192, cur_h, cur_w);
         cur_h *= 2;
         cur_w *= 2;
-        x = conv2d(x, "decoder.upsamples.11.resample.1.weight", "decoder.upsamples.11.resample.1.bias", 192, 96, cur_h, cur_w, 3, 1, 1);
+        x = conv2d(x, "decoder.upsamples.11.resample.1.weight", "decoder.upsamples.11.resample.1.bias", 192, 96, cur_h,
+                   cur_w, 3, 1, 1);
 
         // Stage 3: 96 -> 96 (no upsample) (cur_h, cur_w: 1024)
         x = residual_block(x, "decoder.upsamples.12.", 96, 96, cur_h, cur_w);

@@ -250,8 +250,8 @@ struct Session
         std::cout << "[Session.compile] Materializing exact peak memory arenas..." << std::endl;
         for (const auto &pair : peakSizes)
         {
-            std::cout << "  - " << pair.first << ": " << pair.second << " bytes ("
-                      << (pair.second / (1024.0 * 1024.0)) << " MB)" << std::endl;
+            std::cout << "  - " << pair.first << ": " << pair.second << " bytes (" << (pair.second / (1024.0 * 1024.0))
+                      << " MB)" << std::endl;
         }
 
         memManager.init(peakSizes);

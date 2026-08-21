@@ -30,6 +30,7 @@ struct ENodeInfo
 {
     float cost;
     bool is_view;
+    float dp_cost = 0.0f;
 };
 
 struct DispatchIterator
@@ -103,6 +104,7 @@ struct DispatchIterator
                         const ENode &enode = egraph.getENode(enodeId);
 
                         f.cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].cost : 0.0f;
+                        f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
                         f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         for (const auto &eng : enode.getEngines())
@@ -164,6 +166,11 @@ struct DispatchIterator
             else
             {
                 selection_at_pos[pos] = 0;
+                if (delegate && delegate->fast_fail())
+                {
+                    is_done = true;
+                    return false;
+                }
                 if (!ascend())
                 {
                     is_done = true;
@@ -300,6 +307,8 @@ struct DispatchIterator
                 node_features.push_back((float)enode.getOpType());
                 node_features.push_back((enode_id.value < enodeInfos.size()) ? enodeInfos[enode_id.value].cost : 0.0f);
                 node_features.push_back((float)enode.getMemSpace().type);
+                node_features.push_back((enode_id.value < enodeInfos.size()) ? enodeInfos[enode_id.value].dp_cost
+                                                                             : 0.0f);
 
                 uint32_t src_idx = class_to_node_idx[u];
                 for (EClassId child : enode.getChildren())
@@ -447,6 +456,7 @@ struct Extractor
                         const ENode &enode = egraph.getENode(enodeId);
                         ActionFeatureExtractDispatch f;
                         f.cost = enodeInfos[enodeId.value].cost;
+                        f.dp_cost = enodeInfos[enodeId.value].dp_cost;
                         f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         for (const auto &eng : enode.getEngines())
@@ -528,6 +538,12 @@ struct Extractor
             {
                 if (delegate)
                     delegate->pop_state();
+
+                if (delegate && delegate->fast_fail())
+                {
+                    to_process.clear();
+                    return false;
+                }
 
                 int best_conflict_pos = -1;
                 for (EClassId c_node : aggregate_conflicts)

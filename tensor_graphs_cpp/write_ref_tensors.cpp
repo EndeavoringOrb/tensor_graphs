@@ -252,11 +252,13 @@ int main(int argc, char *argv[])
     {
         roots = build_krea2_graph(g, mem, model_path);
     }
-    else if (model == "vae" || model == "krea-2-turbo-vae" || model == "krea-vae" || model == "krea2-vae" || model == "qwen-image-vae")
+    else if (model == "vae" || model == "krea-2-turbo-vae" || model == "krea-vae" || model == "krea2-vae" ||
+             model == "qwen-image-vae")
     {
         roots = build_krea2_vae_graph(g, mem, model_path);
     }
-    else if (model == "qwen3-vl" || model == "qwen3-vl-bf16" || model == "qwen3vl" || model == "qwen3vl-bf16" || model == "qwen3vl_4b_bf16")
+    else if (model == "qwen3-vl" || model == "qwen3-vl-bf16" || model == "qwen3vl" || model == "qwen3vl-bf16" ||
+             model == "qwen3vl_4b_bf16")
     {
         roots = build_qwen3_vl_graph(g, mem, model_path);
     }

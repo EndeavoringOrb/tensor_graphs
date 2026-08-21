@@ -457,6 +457,11 @@ struct BufferizeIterator
             else
             {
                 state[k] = 0;
+                if (delegate && delegate->fast_fail())
+                {
+                    is_done = true;
+                    return false;
+                }
                 if (!ascend())
                 {
                     is_done = true;
@@ -668,6 +673,7 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
                     f.size = unallocated[avail[idx]].size;
                     f.start = unallocated[avail[idx]].start;
                     f.end = unallocated[avail[idx]].end;
+                    f.mem_cap = mem_cap;
                     features.push_back(f);
                 }
                 std::vector<uint32_t> custom_order = delegate->order_malloc(features);

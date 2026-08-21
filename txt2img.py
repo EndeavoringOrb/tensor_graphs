@@ -54,21 +54,80 @@ def encode_prompt(tokenizer_obj, prompt: str, max_seq_len: int = 128) -> list[in
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Krea 2 Turbo Text-to-Image Generation")
-    parser.add_argument("--prompt_file", type=Path, default=Path("prompt.txt"), help="Path to .txt file containing the prompt")
-    parser.add_argument("--model-path", type=str, default="models/krea/Krea-2-Turbo/krea.safetensors", help="Path to Krea-2-Turbo model directory or checkpoint")
-    parser.add_argument("--text-encoder-path", type=str, default="models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors", help="Path to Qwen3-VL text encoder checkpoint")
-    parser.add_argument("--vae-path", type=str, default="models/krea/Krea-2-Turbo/qwen_image_vae.safetensors", help="Path to Qwen Image VAE checkpoint")
-    parser.add_argument("--run-dir", type=str, default=None, help="Path to runs/N to load the search agent from")
-    parser.add_argument("--min-compile-time", type=float, default=0.0, help="Minimum required compile time per bucket in seconds")
-    parser.add_argument("--disable-caching", action="store_true", help="Disable dirty region session caching")
-    parser.add_argument("--height", type=int, default=1024, help="Output image height (divisible by 16)")
-    parser.add_argument("--width", type=int, default=1024, help="Output image width (divisible by 16)")
-    parser.add_argument("--steps", type=int, default=8, help="Number of flow-matching inference steps (default: 8)")
-    parser.add_argument("--mu", type=float, default=1.15, help="Timestep schedule shift parameter (default: 1.15)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for latent noise initialization")
-    parser.add_argument("--output", type=str, default="output.png", help="Path to save generated image")
-    parser.add_argument("--threads", type=int, default=0, help="C++ execution threads (0 = auto-detect)")
+    parser = argparse.ArgumentParser(
+        description="Krea 2 Turbo Text-to-Image Generation"
+    )
+    parser.add_argument(
+        "--prompt_file",
+        type=Path,
+        default=Path("prompt.txt"),
+        help="Path to .txt file containing the prompt",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="models/krea/Krea-2-Turbo/krea.safetensors",
+        help="Path to Krea-2-Turbo model directory or checkpoint",
+    )
+    parser.add_argument(
+        "--text-encoder-path",
+        type=str,
+        default="models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
+        help="Path to Qwen3-VL text encoder checkpoint",
+    )
+    parser.add_argument(
+        "--vae-path",
+        type=str,
+        default="models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
+        help="Path to Qwen Image VAE checkpoint",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Path to runs/N to load the search agent from",
+    )
+    parser.add_argument(
+        "--min-compile-time",
+        type=float,
+        default=0.0,
+        help="Minimum required compile time per bucket in seconds",
+    )
+    parser.add_argument(
+        "--disable-caching",
+        action="store_true",
+        help="Disable dirty region session caching",
+    )
+    parser.add_argument(
+        "--height", type=int, default=1024, help="Output image height (divisible by 16)"
+    )
+    parser.add_argument(
+        "--width", type=int, default=1024, help="Output image width (divisible by 16)"
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=8,
+        help="Number of flow-matching inference steps (default: 8)",
+    )
+    parser.add_argument(
+        "--mu",
+        type=float,
+        default=1.15,
+        help="Timestep schedule shift parameter (default: 1.15)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for latent noise initialization",
+    )
+    parser.add_argument(
+        "--output", type=str, default="output.png", help="Path to save generated image"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=0, help="C++ execution threads (0 = auto-detect)"
+    )
     args = parser.parse_args()
 
     if args.threads > 0:
@@ -83,7 +142,9 @@ def main():
     print(" Krea 2 Turbo (12B DiT + Qwen3-VL + Qwen-Image VAE)")
     print(f" Prompt File: {args.prompt_file}")
     print(f" Prompt: {prompt!r}")
-    print(f" Resolution: {args.width}x{args.height} | Steps: {args.steps} | Shift mu: {args.mu}")
+    print(
+        f" Resolution: {args.width}x{args.height} | Steps: {args.steps} | Shift mu: {args.mu}"
+    )
     print("=========================================================")
 
     # Initialize search agent delegate if run directory is specified
@@ -110,7 +171,9 @@ def main():
             agent.load_state_dict(load_file(model_file))
             print(f"Loaded trained delegate agent from {model_file}")
         else:
-            print(f"Warning: Model weights not found at {model_file}, using initialized agent.")
+            print(
+                f"Warning: Model weights not found at {model_file}, using initialized agent."
+            )
 
         agent.eval()
         delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
@@ -166,10 +229,14 @@ def main():
 
         v_tensor = torch.tensor(v, dtype=torch.float32).reshape_as(latent)
         latent = latent + dt * v_tensor
-        print(f"  Step {step + 1:2d}/{args.steps} [t = {t_cur:.3f} -> {t_nxt:.3f}] - {step_ms:.2f} ms")
+        print(
+            f"  Step {step + 1:2d}/{args.steps} [t = {t_cur:.3f} -> {t_nxt:.3f}] - {step_ms:.2f} ms"
+        )
 
     t_diff = time.perf_counter() - t_start_diff
-    print(f"Diffusion generation complete in {t_diff * 1000:.2f} ms ({t_diff / args.steps * 1000:.2f} ms/step)")
+    print(
+        f"Diffusion generation complete in {t_diff * 1000:.2f} ms ({t_diff / args.steps * 1000:.2f} ms/step)"
+    )
 
     # 6. Decode final latents to pixels through VAE Graph
     print("\nDecoding latents to pixels with Qwen-Image VAE...")
@@ -179,7 +246,9 @@ def main():
     print(f"VAE decoding complete in {t_vae * 1000:.2f} ms")
 
     # 7. Convert and save final image
-    image_tensor = torch.tensor(pixels, dtype=torch.float32).reshape(1, 3, args.height, args.width)
+    image_tensor = torch.tensor(pixels, dtype=torch.float32).reshape(
+        1, 3, args.height, args.width
+    )
     image_tensor = torch.clamp((image_tensor + 1.0) / 2.0, 0.0, 1.0)
     image_np = (image_tensor[0].permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
 

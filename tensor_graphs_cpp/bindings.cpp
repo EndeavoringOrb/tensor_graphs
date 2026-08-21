@@ -9,8 +9,8 @@
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "models/deepseek-v4-flash.hpp"
-#include "models/qwen-image-vae.hpp"
 #include "models/krea-2-turbo.hpp"
+#include "models/qwen-image-vae.hpp"
 #include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
 
@@ -354,8 +354,8 @@ class Krea2Session
 
         std::string te_cache = "dirty_region_caches/qwen3-vl-4b-seq" + std::to_string(cfg.text_seq_len) + ".bin";
 
-        te_session = std::make_unique<Session>(*te_g, *te_mem, teOutputId, te_cache, 0, te_repo.get(),
-                                               disable_caching, min_compile_time, delegate);
+        te_session = std::make_unique<Session>(*te_g, *te_mem, teOutputId, te_cache, 0, te_repo.get(), disable_caching,
+                                               min_compile_time, delegate);
         te_session->compile(true);
 
         // --- 2. Build and compile DiT Transformer graph ---
@@ -513,7 +513,6 @@ class Krea2Session
         return host_output;
     }
 };
-
 
 PYBIND11_MODULE(tensor_graphs, m)
 {
@@ -680,6 +679,7 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
         .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
+        .def_readwrite("dp_cost", &ActionFeatureExtractDispatch::dp_cost)
         .def_readwrite("size", &ActionFeatureExtractDispatch::size)
         .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
         .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
@@ -694,7 +694,8 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<ActionFeatureMalloc>(m, "ActionFeatureMalloc")
         .def_readwrite("size", &ActionFeatureMalloc::size)
         .def_readwrite("start", &ActionFeatureMalloc::start)
-        .def_readwrite("end", &ActionFeatureMalloc::end);
+        .def_readwrite("end", &ActionFeatureMalloc::end)
+        .def_readwrite("mem_cap", &ActionFeatureMalloc::mem_cap);
 
     // Search Delegate
     py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")
@@ -721,7 +722,8 @@ PYBIND11_MODULE(tensor_graphs, m)
           py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
 
     m.def("build_and_saturate_egraph_from_graph", &build_and_saturate_egraph_from_graph, py::arg("graph"),
-          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false);
+          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false,
+          py::arg("mem_cap_override") = 0);
 
     m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
           py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false);
@@ -742,8 +744,8 @@ PYBIND11_MODULE(tensor_graphs, m)
                       std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128,
-             py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
-             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0)
+             py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f, py::arg("cache_file") = "",
+             py::arg("disable_caching") = false, py::arg("threads") = 0)
         .def("encode_text", &Krea2Session::encode_text, py::arg("token_ids"))
         .def("predict_velocity", &Krea2Session::predict_velocity, py::arg("latent_data"), py::arg("timestep"),
              py::arg("text_data"))

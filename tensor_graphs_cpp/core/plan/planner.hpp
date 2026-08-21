@@ -270,6 +270,11 @@ struct CacheIterator
             else
             {
                 state[k] = 0;
+                if (delegate && delegate->fast_fail())
+                {
+                    is_done = true;
+                    return false;
+                }
                 if (!ascend())
                 {
                     is_done = true;
@@ -646,12 +651,13 @@ struct Planner
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
 
-        ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
+        ProgressTimer timer(egraph.getENodes().size(), "calculating enode info");
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
         {
             const ENode &enode = egraph.getENodes()[i];
             ENodeInfo info;
             info.is_view = false;
+            info.dp_cost = TGConstants::INF;
 
             if (enode.getKernelId() != KernelId{0})
             {
@@ -807,8 +813,76 @@ struct Planner
             }
 
             enodeInfos[i] = std::move(info);
-            timer3.tick();
+            timer.tick();
         }
+
+        // DP pass for subtree cost approximation
+        std::vector<float> eclass_dp_cost(egraph.getClasses().size(), TGConstants::INF);
+        for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
+        {
+            EClassId cid = egraph.findConst(EClassId{i});
+            if (cid.value == i)
+            {
+                for (ENodeId enodeId : egraph.getEClass(cid).enodes)
+                {
+                    if (egraph.getENode(enodeId).getOpType() == OpType::INPUT ||
+                        egraph.getENode(enodeId).getOpType() == OpType::CACHE)
+                    {
+                        eclass_dp_cost[i] = 0.0f;
+                        enodeInfos[enodeId.value].dp_cost = 0.0f;
+                    }
+                }
+            }
+        }
+
+        bool changed = true;
+        int iters = 0;
+        int max_iters = 1000;
+        ProgressTimer timer2(max_iters, "calculating enode dp cost");
+        while (changed && iters < max_iters)
+        {
+            changed = false;
+            iters++;
+            for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+            {
+                const ENode &enode = egraph.getENodes()[i];
+                float cost = enodeInfos[i].cost;
+                if (cost == TGConstants::INF)
+                    continue;
+
+                float sum_child_cost = 0.0f;
+                bool all_children_ready = true;
+                for (EClassId child : enode.getChildren())
+                {
+                    EClassId canon = egraph.findConst(child);
+                    if (eclass_dp_cost[canon.value] == TGConstants::INF)
+                    {
+                        all_children_ready = false;
+                        break;
+                    }
+                    sum_child_cost += eclass_dp_cost[canon.value];
+                }
+
+                if (all_children_ready)
+                {
+                    float total_cost = cost + sum_child_cost;
+                    if (total_cost < enodeInfos[i].dp_cost)
+                    {
+                        enodeInfos[i].dp_cost = total_cost;
+                        changed = true;
+
+                        EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
+                        EClassId canon = egraph.findConst(e_class_id);
+                        if (total_cost < eclass_dp_cost[canon.value])
+                        {
+                            eclass_dp_cost[canon.value] = total_cost;
+                        }
+                    }
+                }
+            }
+            timer2.tick();
+        }
+
         return enodeInfos;
     }
 
@@ -926,6 +1000,7 @@ struct Planner
                 node_features.push_back(0.0f); // is_enode
                 node_features.push_back((float)countElements(cls.shape) * getDTypeSize(cls.dtype));
                 node_features.push_back((float)cls.dtype);
+                node_features.push_back(0.0f); // dp_cost pad
 
                 for (ENodeId enode_id : cls.enodes)
                 {
@@ -940,6 +1015,7 @@ struct Planner
                 node_features.push_back(1.0f); // is_enode
                 node_features.push_back(enodeInfos[i].cost);
                 node_features.push_back((float)enode.getOpType());
+                node_features.push_back(enodeInfos[i].dp_cost);
 
                 for (EClassId child : enode.getChildren())
                 {
@@ -1068,6 +1144,10 @@ struct Planner
 
             if (!valid)
             {
+                if (delegate && delegate->fast_fail())
+                {
+                    break;
+                }
                 int max_conflict_path_pos = -1;
                 int best_conflict_pos = -1;
 
