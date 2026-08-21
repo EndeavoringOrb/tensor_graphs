@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -13,6 +15,14 @@
 #include "core/plan/search_delegate.hpp"
 #include "core/types.hpp"
 #include "models/run_models.hpp"
+
+struct SaturatedState
+{
+    EGraph egraph;
+    std::unordered_map<EClassId, LogicalId> eclassToLogical;
+    std::vector<ENodeInfo> enodeInfos;
+    std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
+};
 
 struct SaturatedEGraphContext
 {
@@ -30,6 +40,9 @@ struct SaturatedEGraphContext
     std::unordered_map<EClassId, LogicalId> baseEclassToLogical;
 
     CostModel costModel;
+
+    // Worker-local saturation cache keyed on sorted (LogicalId -> MemSpace) selections
+    std::unordered_map<std::string, std::shared_ptr<SaturatedState>> saturationCache;
 
     SaturatedEGraphContext() : costModel(false)
     {
@@ -215,7 +228,6 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
 
         if (compile_decode_buckets)
         {
-            // Diffusion step bucket: text embedding is static/cached, latent + timestep are dirty
             Bucket stepB;
             stepB.inputDirtyRegions[latentId] = {makeFull(ctx->graph.getNode(latentId).getShape())};
             stepB.inputDirtyRegions[timestepId] = {makeFull(ctx->graph.getNode(timestepId).getShape())};
@@ -384,11 +396,11 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             avail_mem_spaces.push_back(kv.first);
         }
     }
-    std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b) {
+    std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b)
+              {
         if (a.type != b.type)
             return a.type < b.type;
-        return a.idx < b.idx;
-    });
+        return a.idx < b.idx; });
 
     CacheIterator cache_iter(ctx->graph, candidates, avail_mem_spaces, delegate);
     std::unordered_map<LogicalId, MemSpace> cachedNodes;
@@ -401,69 +413,101 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
     {
         cache_eval_count++;
 
-        auto preallocatedBuffers = ctx->preallocateLogicalBuffers(cachedNodes);
+        // 1. Generate deterministic string key for cached node configuration
+        std::vector<LogicalId> keys;
+        keys.reserve(cachedNodes.size());
+        for (const auto &kv : cachedNodes)
+            keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
 
-        EGraph egraph = ctx->baseEGraph;
-        auto eclassToLogical = ctx->baseEclassToLogical;
-
-        Engine cpu = Engine{0, EngineType::CPU};
-        for (const auto &cls : egraph.getClasses())
+        std::stringstream ss;
+        for (auto k : keys)
         {
-            EClassId canonId = egraph.find(cls.id);
-            if (canonId != cls.id)
-                continue;
-            if (eclassToLogical.count(canonId) == 0)
-                continue;
-            LogicalId logicalId = eclassToLogical.at(canonId);
-            if (cachedNodes.count(logicalId) == 0)
-                continue;
+            ss << k.value << ":" << cachedNodes.at(k).idx << ":" << static_cast<int>(cachedNodes.at(k).type) << ";";
+        }
+        std::string state_key = ss.str();
 
-            bool hasCache = false;
-            for (int i = 0; i < cls.enodes.size(); i++)
+        std::shared_ptr<SaturatedState> state;
+
+        // 2. Query saturation cache
+        if (ctx->saturationCache.count(state_key))
+        {
+            state = ctx->saturationCache[state_key];
+        }
+        else
+        {
+            // Cache Miss: Perform injection, saturation, cost evaluation, and pruning
+            state = std::make_shared<SaturatedState>();
+            state->preallocatedBuffers = ctx->preallocateLogicalBuffers(cachedNodes);
+
+            EGraph egraph = ctx->baseEGraph;
+            auto eclassToLogical = ctx->baseEclassToLogical;
+
+            Engine cpu = Engine{0, EngineType::CPU};
+            for (const auto &cls : egraph.getClasses())
             {
-                if (egraph.getENode(cls.enodes[i]).getOpType() == OpType::CACHE)
+                EClassId canonId = egraph.find(cls.id);
+                if (canonId != cls.id)
+                    continue;
+                if (eclassToLogical.count(canonId) == 0)
+                    continue;
+                LogicalId logicalId = eclassToLogical.at(canonId);
+                if (cachedNodes.count(logicalId) == 0)
+                    continue;
+
+                bool hasCache = false;
+                for (size_t i = 0; i < cls.enodes.size(); i++)
                 {
-                    hasCache = true;
-                    break;
+                    if (egraph.getENode(cls.enodes[i]).getOpType() == OpType::CACHE)
+                    {
+                        hasCache = true;
+                        break;
+                    }
+                }
+                if (!hasCache)
+                {
+                    ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
+                                            cachedNodes.at(logicalId), {cpu}, toString(logicalId));
+                    egraph.addENode(canonId, cacheNode);
                 }
             }
-            if (!hasCache)
+
+            std::unordered_set<EClassId> protectedEClasses;
+            for (const auto &kv : cachedNodes)
             {
-                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
-                                        cachedNodes.at(logicalId), {cpu}, toString(logicalId));
-                egraph.addENode(canonId, cacheNode);
+                LogicalId logicalId = kv.first;
+                if (ctx->baseNodeToEClass.count(logicalId))
+                {
+                    protectedEClasses.insert(egraph.findConst(ctx->baseNodeToEClass.at(logicalId)));
+                }
             }
-        }
 
-        std::unordered_set<EClassId> protectedEClasses;
-        for (const auto &kv : cachedNodes)
-        {
-            LogicalId logicalId = kv.first;
-            if (ctx->baseNodeToEClass.count(logicalId))
+            planner.injectInputPartialPaths(egraph, ctx->graph, bucket.inputDirtyRegions, cachedNodes,
+                                            ctx->baseNodeToEClass, eclassToLogical);
+            planner.injectOutputPartialPaths(egraph, ctx->graph, ctx->rootId, bucket.outputNeededRegion, cachedNodes,
+                                             ctx->baseNodeToEClass, eclassToLogical);
+
+            planner.saturate(egraph, protectedEClasses, eclassToLogical, true, false, nullptr);
+
+            std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
+            for (const auto &kv : eclassToLogical)
             {
-                protectedEClasses.insert(egraph.findConst(ctx->baseNodeToEClass.at(logicalId)));
+                updatedEClassToLogical[egraph.findConst(kv.first)] = kv.second;
             }
+            eclassToLogical = std::move(updatedEClassToLogical);
+
+            auto enodeInfos = planner.computeENodeInfos(egraph, eclassToLogical, cachedNodes, /*strictCache=*/true);
+            planner.pruneEGraph(egraph, enodeInfos);
+
+            state->egraph = std::move(egraph);
+            state->eclassToLogical = std::move(eclassToLogical);
+            state->enodeInfos = std::move(enodeInfos);
+
+            ctx->saturationCache[state_key] = state;
         }
 
-        planner.injectInputPartialPaths(egraph, ctx->graph, bucket.inputDirtyRegions, cachedNodes,
-                                        ctx->baseNodeToEClass, eclassToLogical);
-        planner.injectOutputPartialPaths(egraph, ctx->graph, ctx->rootId, bucket.outputNeededRegion, cachedNodes,
-                                         ctx->baseNodeToEClass, eclassToLogical);
-
-        planner.saturate(egraph, protectedEClasses, eclassToLogical, true, false, nullptr);
-
-        std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
-        for (const auto &kv : eclassToLogical)
-        {
-            updatedEClassToLogical[egraph.findConst(kv.first)] = kv.second;
-        }
-        eclassToLogical = std::move(updatedEClassToLogical);
-
-        auto enodeInfos = planner.computeENodeInfos(egraph, eclassToLogical, cachedNodes, /*strictCache=*/true);
-        planner.pruneEGraph(egraph, enodeInfos);
-
-        EClassId rootEClassId = egraph.findConst(ctx->baseNodeToEClass.at(ctx->rootId));
-        if (egraph.getEClass(rootEClassId).enodes.empty())
+        EClassId rootEClassId = state->egraph.findConst(ctx->baseNodeToEClass.at(ctx->rootId));
+        if (state->egraph.getEClass(rootEClassId).enodes.empty())
         {
             if (delegate)
                 delegate->on_leaf_evaluated(TGConstants::INF);
@@ -472,23 +516,22 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             continue;
         }
 
-        // tensor_graphs_cpp/core/plan/cached_plan.hpp
         if (delegate)
         {
             std::vector<float> node_features;
             std::vector<uint32_t> edge_src;
             std::vector<uint32_t> edge_dst;
 
-            uint32_t num_classes = egraph.getClasses().size();
-            uint32_t num_enodes = egraph.getENodes().size();
+            uint32_t num_classes = static_cast<uint32_t>(state->egraph.getClasses().size());
+            uint32_t num_enodes = static_cast<uint32_t>(state->egraph.getENodes().size());
 
             for (uint32_t i = 0; i < num_classes; ++i)
             {
-                const EClass &cls = egraph.getClasses()[i];
+                const EClass &cls = state->egraph.getClasses()[i];
                 node_features.push_back(1.0f); // is_eclass
                 node_features.push_back(0.0f); // is_enode
-                node_features.push_back((float)countElements(cls.shape) * getDTypeSize(cls.dtype));
-                node_features.push_back((float)cls.dtype);
+                node_features.push_back(static_cast<float>(countElements(cls.shape) * getDTypeSize(cls.dtype)));
+                node_features.push_back(static_cast<float>(cls.dtype));
                 node_features.push_back(0.0f); // dp_cost pad
 
                 for (ENodeId enode_id : cls.enodes)
@@ -499,27 +542,28 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             }
             for (uint32_t i = 0; i < num_enodes; ++i)
             {
-                const ENode &enode = egraph.getENodes()[i];
+                const ENode &enode = state->egraph.getENodes()[i];
                 node_features.push_back(0.0f); // is_eclass
                 node_features.push_back(1.0f); // is_enode
-                node_features.push_back(enodeInfos[i].cost);
-                node_features.push_back((float)enode.getOpType());
-                node_features.push_back(enodeInfos[i].dp_cost);
+                node_features.push_back(state->enodeInfos[i].cost);
+                node_features.push_back(static_cast<float>(enode.getOpType()));
+                node_features.push_back(state->enodeInfos[i].dp_cost);
 
                 for (EClassId child : enode.getChildren())
                 {
                     edge_src.push_back(num_classes + i);
-                    edge_dst.push_back(egraph.findConst(child).value);
+                    edge_dst.push_back(state->egraph.findConst(child).value);
                 }
             }
             delegate->init_egraph(node_features, edge_src, edge_dst);
         }
 
         // Extractor (Level 1)
-        Extractor extractor(egraph, rootEClassId, enodeInfos, delegate);
-        extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, ctx->mem->getMemCaps(),
-                                                                   eclassToLogical, preallocatedBuffers, delegate));
+        Extractor extractor(state->egraph, rootEClassId, state->enodeInfos, delegate);
+        extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
+        extractor.registerValidator(std::make_unique<MemValidator>(state->egraph, state->enodeInfos, ctx->mem->getMemCaps(),
+                                                                   state->eclassToLogical, state->preallocatedBuffers,
+                                                                   delegate));
 
         uint32_t extract_count = 0;
         while (extractor.getNextSelection())
@@ -528,7 +572,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             const auto &selection_map = extractor.selection_map;
 
             // Dispatch (Level 2)
-            DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos, delegate);
+            DispatchIterator dispatch_iterator(state->egraph, selection_map, state->enodeInfos, delegate);
             uint32_t dispatch_count = 0;
             std::vector<EClassId> order;
 
@@ -537,7 +581,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                 dispatch_count++;
 
                 // Bufferize (Level 3)
-                BufferizeIterator buf_iter(order, egraph, selection_map, enodeInfos, delegate);
+                BufferizeIterator buf_iter(order, state->egraph, selection_map, state->enodeInfos, delegate);
                 uint32_t buf_count = 0;
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -553,20 +597,20 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
                     for (EClassId eclass : order)
                     {
-                        auto logicalIt = eclassToLogical.find(eclass);
-                        if (logicalIt == eclassToLogical.end())
+                        auto logicalIt = state->eclassToLogical.find(eclass);
+                        if (logicalIt == state->eclassToLogical.end())
                             continue;
                         auto sel_it = selection_map.find(eclass);
                         if (sel_it == selection_map.end())
                             continue;
                         uint32_t sel = sel_it->second;
-                        ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
-                        const ENode &node = egraph.getENode(enode_id);
+                        ENodeId enode_id = state->egraph.getEClass(eclass).enodes[sel];
+                        const ENode &node = state->egraph.getENode(enode_id);
                         if (node.getOpType() != OpType::INPUT && node.getOpType() != OpType::CACHE)
                             continue;
 
-                        auto preIt = preallocatedBuffers.find(logicalIt->second);
-                        if (preIt == preallocatedBuffers.end())
+                        auto preIt = state->preallocatedBuffers.find(logicalIt->second);
+                        if (preIt == state->preallocatedBuffers.end())
                             continue;
 
                         BufferId buf_id = eclass_to_buf_local.at(eclass);
@@ -612,7 +656,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                     float cost = TGConstants::INF;
                     if (alloc_ok)
                     {
-                        cost = get_cost(order, egraph, selection_map, enodeInfos);
+                        cost = get_cost(order, state->egraph, selection_map, state->enodeInfos);
                         all_costs.push_back(cost);
                     }
 

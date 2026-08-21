@@ -466,9 +466,6 @@ def recv_msg(sock):
     return pickle.loads(zlib.decompress(data))
 
 
-# ==============================================================================
-# ACTOR DELEGATE
-# ==============================================================================
 class ActorDelegate(tensor_graphs.SearchDelegate):
     PHASE_MAP = {"cache": 0, "extract": 1, "dispatch": 2, "bufferize": 3, "malloc": 4}
 
@@ -487,6 +484,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         min_noise: float = 0.01,
         depth_gamma: float = 0.7,
         version: int = 0,
+        shared_action_feats: torch.Tensor | None = None,
+        shared_logits: torch.Tensor | None = None,
+        shared_v: torch.Tensor | None = None,
     ):
         super().__init__()
         self.agent = agent
@@ -501,6 +501,11 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.min_noise = min_noise
         self.depth_gamma = depth_gamma
         self.version = version
+
+        # Shared memory references
+        self.shared_action_feats = shared_action_feats
+        self.shared_logits = shared_logits
+        self.shared_v = shared_v
 
         if exploration_noise is not None:
             self.episode_noise = (
@@ -642,6 +647,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             cache_key = (self.version, prefix_key)
 
             if self.agent is not None:
+                # Local In-Process Evaluation
                 device = next(self.agent.parameters()).device
                 ctx = self.prefix_cache_ctx[cache_key]
                 v = self.prefix_cache_v[cache_key]
@@ -671,24 +677,56 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                     )
                 scores = logits[0, :A_len].cpu().float().numpy()
             else:
-                self.req_queue.put(
-                    (
-                        "evaluate",
-                        self.version,
-                        prefix_key,
-                        action_feats_np,
-                        phase_id,
-                        self.worker_id,
-                    )
-                )
-                status, *data = self.resp_queue.get()
+                if self.shared_action_feats is not None:
+                    # Shared Memory Fast-Path (Remote Evaluator)
+                    A_len = action_feats_np.shape[0]
+                    max_actions = self.shared_action_feats.shape[1]
+                    
+                    # TODO: Truncating action features if they exceed max_actions. Ideally fallback to queue or resize dynamically.
+                    if A_len > max_actions:
+                        A_len = max_actions
+                        action_feats_np = action_feats_np[:A_len]
 
-                if status == "error" and data[0] == "missing_prefix":
-                    pdata = self.prefix_registry[prefix_key]
-                    self.req_queue.put(
-                        ("register_prefix", self.version, prefix_key, pdata)
+                    dim_feat = min(7, action_feats_np.shape[1])
+                    self.shared_action_feats[self.worker_id, :A_len, :dim_feat].copy_(
+                        torch.from_numpy(action_feats_np[:, :dim_feat])
                     )
-                    self.worker_registered_prefixes.add(cache_key)
+
+                    self.req_queue.put(
+                        (
+                            "evaluate_shm",
+                            self.version,
+                            prefix_key,
+                            A_len,
+                            phase_id,
+                            self.worker_id,
+                        )
+                    )
+                    status, *data = self.resp_queue.get()
+
+                    if status == "error" and data[0] == "missing_prefix":
+                        pdata = self.prefix_registry[prefix_key]
+                        self.req_queue.put(
+                            ("register_prefix", self.version, prefix_key, pdata)
+                        )
+                        self.worker_registered_prefixes.add(cache_key)
+                        self.req_queue.put(
+                            (
+                                "evaluate_shm",
+                                self.version,
+                                prefix_key,
+                                A_len,
+                                phase_id,
+                                self.worker_id,
+                            )
+                        )
+                        status, *data = self.resp_queue.get()
+
+                    scores = self.shared_logits[self.worker_id, :A_len].clone().numpy()
+                    v = self.shared_v[self.worker_id].item()
+                    self.phase_values[phase_name] = v
+                else:
+                    # Queue Fallback
                     self.req_queue.put(
                         (
                             "evaluate",
@@ -701,8 +739,26 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                     )
                     status, *data = self.resp_queue.get()
 
-                scores, v = data
-                self.phase_values[phase_name] = v
+                    if status == "error" and data[0] == "missing_prefix":
+                        pdata = self.prefix_registry[prefix_key]
+                        self.req_queue.put(
+                            ("register_prefix", self.version, prefix_key, pdata)
+                        )
+                        self.worker_registered_prefixes.add(cache_key)
+                        self.req_queue.put(
+                            (
+                                "evaluate",
+                                self.version,
+                                prefix_key,
+                                action_feats_np,
+                                phase_id,
+                                self.worker_id,
+                            )
+                        )
+                        status, *data = self.resp_queue.get()
+
+                    scores, v = data
+                    self.phase_values[phase_name] = v
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
             v = self.phase_values.get(phase_name, 0.0)
@@ -711,7 +767,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
 
             if effective_noise > 0.001:
-                # Dynamically scale alpha inversely with sqrt(|A|)
                 num_a = len(scores)
                 dirichlet_alpha = max(0.01, 1.0 / math.sqrt(max(1, num_a)))
                 noise = (
@@ -742,7 +797,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         N_s = N_sa.sum()
         Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
 
-        # Min-Max Q-value normalization so Q matches the U exploration scale
         visited_mask = N_sa > 0
         if np.any(visited_mask):
             min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
