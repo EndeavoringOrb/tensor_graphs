@@ -561,7 +561,17 @@ def main():
 
     inf_process = mp.Process(
         target=inference_worker,
-        args=(config, req_queue, resp_queues, weights_event, "runs", target_device),
+        args=(
+            config,
+            req_queue,
+            resp_queues,
+            weights_event,
+            "runs",
+            target_device,
+            shared_action_feats,
+            shared_logits,
+            shared_v,
+        ),
     )
     inf_process.start()
 
