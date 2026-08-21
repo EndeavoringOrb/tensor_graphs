@@ -107,6 +107,7 @@ class Executor
             {
                 logical_id = compiled.get_logical_id(inst.eclass_id);
             }
+            const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             outBufObj->setupOutput(ctx, outView, logical_id);
 
             bool issued_work = false;

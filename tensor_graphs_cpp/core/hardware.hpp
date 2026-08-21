@@ -405,11 +405,11 @@ struct System
                   << " Engines.\n";
         for (auto &mem_space : mem_spaces)
         {
-            LOG(L_INFO) << mem_space;
+            LOG(INFO) << mem_space;
         }
         for (auto &engine : engines)
         {
-            LOG(L_INFO) << engine;
+            LOG(INFO) << engine;
         }
     }
 };

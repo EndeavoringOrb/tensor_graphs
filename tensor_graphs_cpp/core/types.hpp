@@ -992,6 +992,9 @@ template <typename T> inline std::string toString(const std::vector<T> &vec)
     return ss.str();
 }
 
+std::string toString(OpType op);
+std::ostream &operator<<(std::ostream &os, OpType op);
+
 inline std::string toString(DType dtype)
 {
     switch (dtype)

@@ -43,8 +43,8 @@ struct DotOp
         {
             if (s0[0] != s1[0] || s0[1] != s1[1] || s0[3] != s1[2])
             {
-                Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[2]) +
-                                 " != " + std::to_string(s1[1]));
+                Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[3]) +
+                                 " != " + std::to_string(s1[2]));
             }
             graph.getNode(nodeId).setShape({s0[0], s0[1], s0[2], s1[3]});
         }
@@ -96,7 +96,14 @@ struct DotOp
         for (const auto &box : rB)
         {
             Region outBox;
-            if (sB.size() == 3)
+            if (sB.size() == 4)
+            {
+                outBox.region.push_back(box.region[0]);    // B
+                outBox.region.push_back(box.region[1]);    // H
+                outBox.region.push_back({0, outShape[2]}); // M
+                outBox.region.push_back(box.region[3]);    // N
+            }
+            else if (sB.size() == 3)
             {
                 outBox.region.push_back(box.region[0]);    // B
                 outBox.region.push_back({0, outShape[1]}); // M
@@ -175,7 +182,7 @@ struct DotOp
 
     static OpTraits traits()
     {
-        return OpTraits{op_type,         name,       is_elementwise, inferShape, forwardRegion, backwardRegion,
+        return OpTraits{op_type, name, is_elementwise, inferShape, forwardRegion, backwardRegion,
                         computeWorkload, isConstant, buildPattern};
     }
 };

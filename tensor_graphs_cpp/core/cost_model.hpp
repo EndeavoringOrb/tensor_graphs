@@ -15,6 +15,7 @@
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "core/types.hpp"
+#include "core/ops/ops.hpp"
 #include "generated/build_context.gen.hpp"
 
 #if defined(TG_USE_CUDA)
@@ -94,67 +95,6 @@ inline void tg_deserialize(BinaryReader &br, Record &val)
     br.read(val.engines);
     br.read(val.input_mem_spaces);
     br.read(val.runTime);
-}
-
-struct WorkloadMetrics
-{
-    double flops = 0.0;
-    double bytesRead = 0.0;
-    double bytesWritten = 0.0;
-};
-
-inline WorkloadMetrics computeWorkload(OpType opType, const std::string &opName,
-                                      const std::vector<std::vector<uint32_t>> &inShapes,
-                                      const std::vector<DType> &inDTypes,
-                                      const std::vector<uint32_t> &outShape,
-                                      DType outDType)
-{
-    WorkloadMetrics m;
-    m.bytesWritten = static_cast<double>(countElements(outShape) * getDTypeSize(outDType));
-    for (size_t i = 0; i < inShapes.size(); ++i)
-    {
-        DType dt = (i < inDTypes.size()) ? inDTypes[i] : DType::FLOAT32;
-        m.bytesRead += static_cast<double>(countElements(inShapes[i]) * getDTypeSize(dt));
-    }
-
-    bool isDot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
-                 (opName.find("dot") != std::string::npos) || (opName.find("linear") != std::string::npos);
-
-    if (isDot)
-    {
-        if (inShapes.size() >= 2 && !inShapes[0].empty() && !inShapes[1].empty())
-        {
-            const auto &s0 = inShapes[0];
-            const auto &s1 = inShapes[1];
-            uint64_t B = 1;
-            if (s0.size() == 4)
-                B = static_cast<uint64_t>(s0[0]) * s0[1];
-            else if (s0.size() == 3)
-                B = s0[0];
-
-            uint64_t M = (s0.size() >= 2) ? s0[s0.size() - 2] : 1;
-            uint64_t K = s0.back();
-            uint64_t N = s1.back();
-            m.flops = 2.0 * static_cast<double>(B * M * N * K);
-        }
-        else
-        {
-            m.flops = 2.0 * static_cast<double>(countElements(outShape));
-        }
-    }
-    else if (opType == OpType::SUM || opType == OpType::MAX || opType == OpType::ARGMAX)
-    {
-        if (!inShapes.empty())
-            m.flops = static_cast<double>(countElements(inShapes[0]));
-        else
-            m.flops = static_cast<double>(countElements(outShape));
-    }
-    else
-    {
-        m.flops = static_cast<double>(countElements(outShape));
-    }
-
-    return m;
 }
 
 inline double getInnerContigElements(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
@@ -354,8 +294,8 @@ struct CostModel
             if (hasSingleRecord)
             {
                 WorkloadMetrics refW =
-                    computeWorkload(opType, opName, singleRecord.inputShapes, singleRecord.inputDTypes,
-                                    singleRecord.outputShape, singleRecord.outputDType);
+                    computeWorkload(opType, singleRecord.inputShapes, singleRecord.inputDTypes,
+                                    singleRecord.outputShape, singleRecord.outputDType, opName);
                 double refTime = std::max(1e-6, static_cast<double>(singleRecord.runTime));
                 double ratio = 1.0;
 
@@ -619,8 +559,8 @@ struct CostModel
         }
 
         int K = static_cast<int>(recs.size());
-        auto sample_w = computeWorkload(model.opType, model.opName, recs[0].inputShapes, recs[0].inputDTypes,
-                                        recs[0].outputShape, recs[0].outputDType);
+        auto sample_w = computeWorkload(model.opType, recs[0].inputShapes, recs[0].inputDTypes,
+                                        recs[0].outputShape, recs[0].outputDType, model.opName);
         auto sample_feat = extractFeatures(sample_w, recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
                                            recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
         int D = static_cast<int>(sample_feat.size());
@@ -632,8 +572,8 @@ struct CostModel
 
         for (int i = 0; i < K; ++i)
         {
-            auto w = computeWorkload(model.opType, model.opName, recs[i].inputShapes, recs[i].inputDTypes,
-                                     recs[i].outputShape, recs[i].outputDType);
+            auto w = computeWorkload(model.opType, recs[i].inputShapes, recs[i].inputDTypes,
+                                     recs[i].outputShape, recs[i].outputDType, model.opName);
             auto feat = extractFeatures(w, recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
                                         recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
             for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
@@ -760,7 +700,7 @@ struct CostModel
             opName = entry.opName;
         }
 
-        WorkloadMetrics targetW = computeWorkload(opType, opName, inShapes, inDTypes, outShape, outDType);
+        WorkloadMetrics targetW = computeWorkload(opType, inShapes, inDTypes, outShape, outDType, opName);
 
         ModelKey mk = {kernelId, inShapes.size()};
         auto modelIt = models.find(mk);

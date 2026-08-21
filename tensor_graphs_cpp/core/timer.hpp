@@ -2,7 +2,7 @@
 #include <chrono>
 #include <iostream>
 
-#define DEBUG_TIMING
+#define TG_DEBUG_TIMING
 
 #ifdef TG_DEBUG_TIMING
 

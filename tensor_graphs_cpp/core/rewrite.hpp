@@ -971,10 +971,12 @@ struct SlicePushDownElementwise : public Rule
 
                 for (ENodeId srcNodeIdx : egraph.getEClass(srcClass).enodes)
                 {
-                    const ENode &opNode = egraph.getENode(srcNodeIdx);
+                    const ENode opNode = egraph.getENode(srcNodeIdx);
                     OpType op = opNode.getOpType();
-                    if (!isElementwise(opNode.getOpType()))
+                    if (!isElementwise(op) || op == OpType::COPY_TO || op == OpType::CONTIGUOUS)
+                    {
                         continue;
+                    }
 
                     bool hasBroadcastChild = false;
                     for (EClassId cid : opNode.getChildren())
@@ -1197,6 +1199,10 @@ struct SlicePushDownDot : public Rule
 
                 for (ENodeId srcNodeIdx : egraph.getEClass(srcClass).enodes)
                 {
+                    const ENode &opNode = egraph.getENode(srcNodeIdx);
+                    OpType op = opNode.getOpType();
+                    if (!isElementwise(op) || op == OpType::COPY_TO || op == OpType::CONTIGUOUS)
+                        continue;
                     if (egraph.getENode(srcNodeIdx).getOpType() == OpType::DOT)
                     {
                         MatchKey key{eNodeIdx, childNodeIdx.value, srcNodeIdx.value};
@@ -1433,6 +1439,9 @@ struct FlattenBatchDot : public Rule
         if (!isContiguous(egraph.getEClass(egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx})))))
             return false;
 
+        if (aCls.mem_space != enode.getMemSpace() || bCls.mem_space != enode.getMemSpace())
+            return false;
+
         return true;
     }
 
@@ -1508,6 +1517,17 @@ struct FlattenElementwise : public Rule
         if (outShape.size() < 2)
             return false;
 
+        uint64_t total = 1;
+        for (uint32_t d : outShape)
+            total *= d;
+        if (total == 0)
+            return false;
+
+        TensorNode shapeConst;
+        shapeConst.setShape({1});
+        shapeConst.strides = {1};
+        shapeConst.dtype = DType::INT32;
+
         for (EClassId childId : enode.getChildren())
         {
             const EClass &childCls = egraph.getEClass(egraph.findConst(childId));
@@ -1515,10 +1535,49 @@ struct FlattenElementwise : public Rule
                 return false;
             if (!isContiguous(childCls))
                 return false;
+
+            // Check if RESHAPE is supported in this child's memory space
+            TensorNode inChild;
+            inChild.setShape(childCls.shape);
+            inChild.strides = childCls.strides;
+            inChild.dtype = childCls.dtype;
+
+            TensorNode outFlat;
+            outFlat.setShape({static_cast<uint32_t>(total)});
+            outFlat.strides = {1};
+            outFlat.dtype = childCls.dtype;
+
+            auto matches = KernelRegistry::get().findMatchingKernels(
+                OpType::RESHAPE, "", {inChild, shapeConst}, outFlat, false, childCls.mem_space,
+                {childCls.mem_space, MemSpace{1, HandleType::CPP}}, {});
+            if (matches.empty())
+                return false;
         }
 
         const EClass &outCls = egraph.getEClass(egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx})));
         if (!isContiguous(outCls))
+            return false;
+
+        // Check if output RESHAPE is supported in outCls.mem_space
+        TensorNode inFlat;
+        inFlat.setShape({static_cast<uint32_t>(total)});
+        inFlat.strides = {1};
+        inFlat.dtype = outCls.dtype;
+
+        TensorNode shapeConstOut;
+        shapeConstOut.setShape({static_cast<uint32_t>(outShape.size())});
+        shapeConstOut.strides = {1};
+        shapeConstOut.dtype = DType::INT32;
+
+        TensorNode outOrig;
+        outOrig.setShape(outCls.shape);
+        outOrig.strides = outCls.strides;
+        outOrig.dtype = outCls.dtype;
+
+        auto outMatches = KernelRegistry::get().findMatchingKernels(
+            OpType::RESHAPE, "", {inFlat, shapeConstOut}, outOrig, false, outCls.mem_space,
+            {outCls.mem_space, MemSpace{1, HandleType::CPP}}, {});
+        if (outMatches.empty())
             return false;
 
         return true;
@@ -1556,7 +1615,7 @@ struct FlattenElementwise : public Rule
             EClassId canonChild = egraph.findConst(childId);
             const EClass childCls = egraph.getEClass(canonChild);
             EClassId r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides,
-                                       childCls.dtype, opNode.getMemSpace());
+                                       childCls.dtype, childCls.mem_space);
             flatChildren.push_back(r);
         }
 
@@ -1609,6 +1668,9 @@ struct DotSplitRule : public Rule
             if ((N >= splitThreshold && N % 2 == 0) || (K >= splitThreshold && K % 2 == 0))
                 return true;
         }
+
+        if (aCls.mem_space != enode.getMemSpace() || bCls.mem_space != enode.getMemSpace())
+            return false;
 
         return false;
     }
