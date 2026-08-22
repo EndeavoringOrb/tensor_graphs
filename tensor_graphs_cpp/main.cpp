@@ -96,8 +96,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
     std::vector<uint32_t> tokens = initial_tokens;
-    auto bufferSizes = getDefaultBufferSizes();
-    MemoryManager mem(bufferSizes);
+    MemoryManager mem;
     Graph g;
     if (activeGraphOut)
     {

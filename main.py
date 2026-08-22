@@ -5,7 +5,7 @@ import tensor_graphs
 from safetensors.torch import load_file
 
 from train_models import AlphaZeroTransformer
-from train_shared import ActorDelegate, TrainConfig
+from train_shared import ActorDelegate, HeuristicDelegate, TrainConfig
 from utils.decode import load_tokenizer
 
 
@@ -102,21 +102,24 @@ def main():
         except FileNotFoundError as e:
             print(f"Warning: Failed to load config from {config_file}: {e}")
 
-    agent = AlphaZeroTransformer(
-        d_model=cfg.d_model,
-        nhead=cfg.nhead,
-        num_layers=cfg.num_layers,
-        max_feat_dim=cfg.max_feat_dim,
-    )
+        agent = AlphaZeroTransformer(
+            d_model=cfg.d_model,
+            nhead=cfg.nhead,
+            num_layers=cfg.num_layers,
+            max_feat_dim=cfg.max_feat_dim,
+        )
 
-    if run_dir_path:
         model_file = run_dir_path / "model.safetensors"
         if model_file.exists():
             agent.load_state_dict(load_file(model_file))
             print(f"Loaded trained delegate agent from {model_file}")
 
-    agent.eval()
-    delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+        agent.eval()
+        delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+    else:
+        print("No --run-dir specified. Using HeuristicDelegate (caching disabled).")
+        delegate = HeuristicDelegate()
+        args.disable_caching = True
 
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(

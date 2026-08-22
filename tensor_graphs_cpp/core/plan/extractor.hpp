@@ -378,7 +378,7 @@ struct Extractor
     std::vector<bool> has_options;
     uint32_t active_options = 0;
     std::unordered_map<EClassId, uint32_t> next_sel;
-    EClassId target_backtrack_eclass;
+    EClassId target_backtrack_eclass = EClassId{UINT32_MAX};
     uint64_t numClasses;
 
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
@@ -636,6 +636,7 @@ struct Extractor
                     const ENode &enode = egraph.getENode(enodeId);
                     ActionFeatureExtractDispatch f;
                     f.cost = enodeInfos[enodeId.value].cost;
+                    f.dp_cost = enodeInfos[enodeId.value].dp_cost;
                     f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                     f.mem_space = enode.getMemSpace();
                     for (const auto &eng : enode.getEngines())

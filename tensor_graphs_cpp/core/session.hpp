@@ -161,8 +161,9 @@ struct Session
             std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
-          minCompileSeconds(_minCompileSeconds), delegate(_delegate), logCostCalls(_logCostCalls),
-          costModel(_logCostCalls)
+          minCompileSeconds(_minCompileSeconds),
+          delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()),
+          logCostCalls(_logCostCalls), costModel(_logCostCalls)
     {
         ensureOutputDirectories();
         loadCache();

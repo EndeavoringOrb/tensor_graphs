@@ -115,15 +115,9 @@ class LLMSession
             set_num_threads(threads);
         }
 
-        std::unordered_map<MemSpace, uint64_t> bufferSizes = {
-            {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
+        auto act_delegate = delegate ? delegate : std::make_shared<HeuristicSearchDelegate>();
 
-        if (HardwareCaps::get().has_opencl)
-        {
-            bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-        }
-
-        mem = std::make_unique<MemoryManager>(bufferSizes);
+        mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
         if (model_name == "gemma-3-270m")
@@ -166,7 +160,7 @@ class LLMSession
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, delegate);
+                                            min_compile_time, act_delegate);
 
         if (compile_decode_buckets)
         {
@@ -314,15 +308,7 @@ class Krea2Session
             set_num_threads(threads);
         }
 
-        std::unordered_map<MemSpace, uint64_t> bufferSizes = {
-            {MemSpace{1, HandleType::CPP}, 32ULL * 1024 * 1024 * 1024}};
-#ifdef TG_USE_CUDA
-        bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
-#endif
-        if (HardwareCaps::get().has_opencl)
-        {
-            bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-        }
+        auto act_delegate = delegate ? delegate : std::make_shared<HeuristicSearchDelegate>();
 
         // --- 1. Build and compile Qwen3-VL Text Encoder graph ---
         std::string actual_te_path = text_encoder_path;
@@ -342,7 +328,7 @@ class Krea2Session
                 actual_te_path = model_path;
         }
 
-        te_mem = std::make_unique<MemoryManager>(bufferSizes);
+        te_mem = std::make_unique<MemoryManager>();
         te_g = std::make_unique<Graph>();
 
         teInputIdsId = te_g->input({1, cfg.text_seq_len}, DType::INT32);
@@ -355,7 +341,7 @@ class Krea2Session
         std::string te_cache = "dirty_region_caches/qwen3-vl-4b-seq" + std::to_string(cfg.text_seq_len) + ".bin";
 
         te_session = std::make_unique<Session>(*te_g, *te_mem, teOutputId, te_cache, 0, te_repo.get(), disable_caching,
-                                               min_compile_time, delegate);
+                                               min_compile_time, act_delegate);
         te_session->compile(true);
 
         // --- 2. Build and compile DiT Transformer graph ---
@@ -367,7 +353,7 @@ class Krea2Session
         else if (std::filesystem::exists(model_path + "/transformer"))
             actual_dit_path = model_path + "/transformer";
 
-        mem = std::make_unique<MemoryManager>(bufferSizes);
+        mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
         latentInputId = g->input({1, cfg.latent_channels, cfg.latent_h, cfg.latent_w}, DType::FLOAT32);
@@ -389,7 +375,7 @@ class Krea2Session
         }
 
         session = std::make_unique<Session>(*g, *mem, velocityOutputId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, delegate);
+                                            min_compile_time, act_delegate);
         session->compile(true);
 
         // --- 3. Build and compile VAE Decoder graph ---
@@ -404,7 +390,7 @@ class Krea2Session
                 actual_vae_path = model_path;
         }
 
-        vae_mem = std::make_unique<MemoryManager>(bufferSizes);
+        vae_mem = std::make_unique<MemoryManager>();
         vae_g = std::make_unique<Graph>();
 
         vaeLatentInputId =
@@ -420,7 +406,7 @@ class Krea2Session
             "dirty_region_caches/qwen-image-vae-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";
 
         vae_session = std::make_unique<Session>(*vae_g, *vae_mem, vaeImageOutputId, vae_cache, 0, vae_repo.get(),
-                                                disable_caching, min_compile_time, delegate);
+                                                disable_caching, min_compile_time, act_delegate);
         vae_session->compile(true);
     }
 
@@ -713,6 +699,10 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("order_dispatch", &SearchDelegate::order_dispatch)
         .def("order_bufferize", &SearchDelegate::order_bufferize)
         .def("order_malloc", &SearchDelegate::order_malloc);
+
+    py::class_<HeuristicSearchDelegate, SearchDelegate, std::shared_ptr<HeuristicSearchDelegate>>(m, "HeuristicSearchDelegate")
+        .def(py::init<>());
+    m.attr("HeuristicDelegate") = m.attr("HeuristicSearchDelegate");
 
     // Saturated E-Graph Context & Simulations
     py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")

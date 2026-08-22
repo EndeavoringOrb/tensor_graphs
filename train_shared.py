@@ -905,3 +905,5 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         return torch.nan_to_num(
             torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
         )
+
+HeuristicDelegate = tensor_graphs.HeuristicSearchDelegate

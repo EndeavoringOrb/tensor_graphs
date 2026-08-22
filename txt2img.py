@@ -10,7 +10,7 @@ from PIL import Image
 from safetensors.torch import load_file
 
 from train_models import AlphaZeroTransformer
-from train_shared import ActorDelegate, TrainConfig
+from train_shared import ActorDelegate, HeuristicDelegate, TrainConfig
 from utils.decode import load_tokenizer
 
 PROMPT_TEMPLATE_ENCODE_PREFIX = (
@@ -147,8 +147,7 @@ def main():
     )
     print("=========================================================")
 
-    # Initialize search agent delegate if run directory is specified
-    delegate = None
+    # Initialize search agent delegate
     if args.run_dir:
         run_dir_path = Path(args.run_dir)
         config_file = run_dir_path / "config.json"
@@ -177,6 +176,10 @@ def main():
 
         agent.eval()
         delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+    else:
+        print("No --run-dir specified. Using HeuristicDelegate (caching disabled).")
+        delegate = HeuristicDelegate()
+        args.disable_caching = True
 
     # 1. Initialize Krea2Session (compiles Qwen3-VL, DiT, and VAE)
     session = tensor_graphs.Krea2Session(

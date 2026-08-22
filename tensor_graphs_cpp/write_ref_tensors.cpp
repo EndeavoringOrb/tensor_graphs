@@ -231,9 +231,7 @@ int main(int argc, char *argv[])
     std::string model = parser.get_positional("model");
     std::string model_path = parser.get_positional("model_path");
 
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
-    std::unordered_map<uint32_t, uint64_t> idxCaps = {{1, 24ULL * 1024 * 1024 * 1024}};
-    MemoryManager mem(bufferSizes);
+    MemoryManager mem;
     Graph g;
 
     uint32_t max_seq_len = 8;

@@ -67,20 +67,16 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_gr
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
 
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
-#ifdef TG_USE_CUDA
-    bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
-#endif
+    auto bufferSizes = System::get().getBufferSizes();
     if (mem_cap_override > 0)
     {
         bufferSizes[MemSpace{1, HandleType::CPP}] = mem_cap_override;
 #ifdef TG_USE_CUDA
-        bufferSizes[MemSpace{2, HandleType::CUDA}] = mem_cap_override;
+        for (uint32_t dev = 0; dev < System::get().getNumCudaDevices(); ++dev)
+        {
+            bufferSizes[MemSpace{dev, HandleType::CUDA}] = mem_cap_override;
+        }
 #endif
-    }
-    if (HardwareCaps::get().has_opencl)
-    {
-        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
     }
 
     ctx->mem = std::make_unique<MemoryManager>(bufferSizes);
@@ -123,17 +119,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
 {
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
-
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 32ULL * 1024 * 1024 * 1024}};
-#ifdef TG_USE_CUDA
-    bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
-#endif
-    if (HardwareCaps::get().has_opencl)
-    {
-        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-    }
-
-    ctx->mem = std::make_unique<MemoryManager>(bufferSizes);
+    ctx->mem = std::make_unique<MemoryManager>(System::get().getBufferSizes());
 
     uint32_t max_seq_len = 8;
     ModelGraphRoots roots;
