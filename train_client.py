@@ -522,6 +522,7 @@ def main():
         else ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
+    config.model_path = get_default_model_path(config.model_name)
     if args.model is not None:
         config.model_name = args.model
         if args.model_path is None:
