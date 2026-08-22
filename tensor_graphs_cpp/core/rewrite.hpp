@@ -548,7 +548,17 @@ struct FusionRule : public Rule
                 egraph.addEClass(enode.getShape(), enode.getStrides(), enode.getDType(), target_mem_space);
             newEClass = egraph.addENode(newEClass, enode);
 
-            addOpToEGraph(egraph, OpType::COPY_TO, {newEClass}, enode.getShape(), enode.getStrides(), enode.getDType(),
+            EClassId srcForCopy = newEClass;
+            const EClass srcCls = egraph.getEClass(egraph.findConst(srcForCopy));
+
+            if (!isContiguous(srcCls))
+            {
+                srcForCopy = addOpToEGraph(egraph, OpType::CONTIGUOUS, {srcForCopy}, srcCls.shape,
+                                           calcContiguousStrides(srcCls.shape), srcCls.dtype, srcCls.mem_space);
+            }
+
+            const EClass copySrcCls = egraph.getEClass(egraph.findConst(srcForCopy));
+            addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides, copySrcCls.dtype,
                           originalMemSpace, e_class_id);
 
             auto it = ctx.eclassToLogical.find(egraph.findConst(e_class_id));
