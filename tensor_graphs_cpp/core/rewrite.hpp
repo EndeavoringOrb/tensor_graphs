@@ -107,7 +107,7 @@ struct Rule
 inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClassId> &children,
                               const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
                               MemSpace mem_space, EClassId targetEClass = EClassId(),
-                              std::source_location loc = std::source_location::current())
+                              SourceLocation loc = SourceLocation::current())
 {
     EClassId cls = targetEClass;
     if (cls == EClassId())

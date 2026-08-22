@@ -155,6 +155,10 @@ struct CostModel
         {
             return kernelId == o.kernelId && numInputs == o.numInputs;
         }
+        bool operator!=(const ModelKey &o) const
+        {
+            return !(*this == o);
+        }
     };
 
     struct ModelKeyHash

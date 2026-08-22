@@ -168,9 +168,8 @@ class HeuristicSearchDelegate : public SearchDelegate
     {
         std::vector<uint32_t> res(choices.size());
         std::iota(res.begin(), res.end(), 0);
-        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
-            return choices[a].is_new_buffer > choices[b].is_new_buffer;
-        });
+        std::stable_sort(res.begin(), res.end(),
+                         [&](uint32_t a, uint32_t b) { return choices[a].is_new_buffer > choices[b].is_new_buffer; });
         return res;
     }
 
@@ -178,9 +177,8 @@ class HeuristicSearchDelegate : public SearchDelegate
     {
         std::vector<uint32_t> res(avail_buffers.size());
         std::iota(res.begin(), res.end(), 0);
-        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
-            return avail_buffers[a].size > avail_buffers[b].size;
-        });
+        std::stable_sort(res.begin(), res.end(),
+                         [&](uint32_t a, uint32_t b) { return avail_buffers[a].size > avail_buffers[b].size; });
         return res;
     }
 };

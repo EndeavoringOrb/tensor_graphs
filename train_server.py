@@ -1,11 +1,11 @@
 import argparse
+import math
 import queue
 import struct
 import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-import math
 
 import numpy as np
 import tensor_graphs

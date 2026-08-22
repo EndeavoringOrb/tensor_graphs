@@ -700,7 +700,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("order_bufferize", &SearchDelegate::order_bufferize)
         .def("order_malloc", &SearchDelegate::order_malloc);
 
-    py::class_<HeuristicSearchDelegate, SearchDelegate, std::shared_ptr<HeuristicSearchDelegate>>(m, "HeuristicSearchDelegate")
+    py::class_<HeuristicSearchDelegate, SearchDelegate, std::shared_ptr<HeuristicSearchDelegate>>(
+        m, "HeuristicSearchDelegate")
         .def(py::init<>());
     m.attr("HeuristicDelegate") = m.attr("HeuristicSearchDelegate");
 

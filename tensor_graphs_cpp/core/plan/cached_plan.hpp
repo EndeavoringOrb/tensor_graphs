@@ -382,11 +382,11 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             avail_mem_spaces.push_back(kv.first);
         }
     }
-    std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b)
-              {
+    std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b) {
         if (a.type != b.type)
             return a.type < b.type;
-        return a.idx < b.idx; });
+        return a.idx < b.idx;
+    });
 
     CacheIterator cache_iter(ctx->graph, candidates, avail_mem_spaces, delegate);
     std::unordered_map<LogicalId, MemSpace> cachedNodes;
@@ -547,9 +547,9 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         // Extractor (Level 1)
         Extractor extractor(state->egraph, rootEClassId, state->enodeInfos, delegate);
         extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(state->egraph, state->enodeInfos, ctx->mem->getMemCaps(),
-                                                                   state->eclassToLogical, state->preallocatedBuffers,
-                                                                   delegate));
+        extractor.registerValidator(std::make_unique<MemValidator>(state->egraph, state->enodeInfos,
+                                                                   ctx->mem->getMemCaps(), state->eclassToLogical,
+                                                                   state->preallocatedBuffers, delegate));
 
         uint32_t extract_count = 0;
         while (extractor.getNextSelection())

@@ -30,6 +30,11 @@ class ENode
                mem_space == other.mem_space && engines == other.engines && contentHash == other.contentHash;
     }
 
+    bool operator!=(const ENode &other) const
+    {
+        return !(*this == other);
+    }
+
     // Read-only getters
     KernelId getKernelId() const
     {

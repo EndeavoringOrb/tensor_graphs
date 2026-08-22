@@ -690,9 +690,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
                     # Zero out the active buffer slice first
                     self.shared_action_feats[self.worker_id, :A_len, :].zero_()
-                    self.shared_action_feats[
-                        self.worker_id, :A_len, :dim_feat
-                    ].copy_(torch.from_numpy(action_feats_np[:, :dim_feat]))
+                    self.shared_action_feats[self.worker_id, :A_len, :dim_feat].copy_(
+                        torch.from_numpy(action_feats_np[:, :dim_feat])
+                    )
 
                     self.req_queue.put(
                         (
@@ -905,5 +905,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         return torch.nan_to_num(
             torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
         )
+
 
 HeuristicDelegate = tensor_graphs.HeuristicSearchDelegate

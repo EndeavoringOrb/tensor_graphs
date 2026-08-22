@@ -162,7 +162,8 @@ struct OpenCLState
             device_name = std::string(devName);
 
             cl_ulong max_alloc = 0;
-            if (clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc), &max_alloc, nullptr) == CL_SUCCESS)
+            if (clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc), &max_alloc, nullptr) ==
+                CL_SUCCESS)
             {
                 max_mem_alloc_size = max_alloc;
             }

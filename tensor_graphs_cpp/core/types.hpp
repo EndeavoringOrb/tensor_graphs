@@ -28,7 +28,6 @@ typedef uint32_t cl_uint;
 #include <list>
 #include <map>
 #include <memory>
-#include <source_location>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -69,7 +68,32 @@ using json = nlohmann::json;
 #define TG_ARCH_X64
 #endif
 
-inline std::string toString(std::source_location loc)
+struct SourceLocation
+{
+    const char *file_;
+    uint32_t line_;
+
+    constexpr SourceLocation(const char *file = __builtin_FILE(), uint32_t line = __builtin_LINE())
+        : file_(file), line_(line)
+    {
+    }
+
+    static constexpr SourceLocation current(const char *file = __builtin_FILE(), uint32_t line = __builtin_LINE())
+    {
+        return SourceLocation(file, line);
+    }
+
+    constexpr const char *file_name() const noexcept
+    {
+        return file_;
+    }
+    constexpr uint32_t line() const noexcept
+    {
+        return line_;
+    }
+};
+
+inline std::string toString(SourceLocation loc)
 {
     return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
 }
@@ -78,7 +102,7 @@ namespace Error
 {
 template <typename T = std::runtime_error, typename... Args>
 [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args,
-                                   std::source_location loc = std::source_location::current())
+                                   SourceLocation loc = SourceLocation::current())
 {
     std::cerr << "\n[TensorGraph Error] (" << toString(loc) << ") " << msg << std::endl << std::flush;
     throw T(msg, std::forward<Args>(args)...);
@@ -148,7 +172,30 @@ struct BufferId
 {
     uint32_t value = UINT32_MAX;
 
-    auto operator<=>(const BufferId &) const = default;
+    bool operator==(const BufferId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const BufferId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const BufferId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const BufferId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const BufferId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const BufferId &o) const
+    {
+        return value >= o.value;
+    }
 
     BufferId operator++(int)
     {
@@ -162,7 +209,30 @@ struct LogicalId
 {
     uint32_t value = UINT32_MAX;
 
-    auto operator<=>(const LogicalId &) const = default;
+    bool operator==(const LogicalId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const LogicalId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const LogicalId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const LogicalId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const LogicalId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const LogicalId &o) const
+    {
+        return value >= o.value;
+    }
 
     LogicalId operator++(int)
     {
@@ -206,19 +276,91 @@ class LogicalIdAllocator
 struct EClassId
 {
     uint32_t value = UINT32_MAX;
-    auto operator<=>(const EClassId &) const = default;
+
+    bool operator==(const EClassId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const EClassId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const EClassId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const EClassId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const EClassId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const EClassId &o) const
+    {
+        return value >= o.value;
+    }
 };
 
 struct ENodeId
 {
     uint32_t value = UINT32_MAX;
-    auto operator<=>(const ENodeId &) const = default;
+
+    bool operator==(const ENodeId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const ENodeId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const ENodeId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const ENodeId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const ENodeId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const ENodeId &o) const
+    {
+        return value >= o.value;
+    }
 };
 
 struct KernelId
 {
     uint64_t value = UINT32_MAX;
-    auto operator<=>(const KernelId &) const = default;
+
+    bool operator==(const KernelId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const KernelId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const KernelId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const KernelId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const KernelId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const KernelId &o) const
+    {
+        return value >= o.value;
+    }
 };
 
 enum class HandleType : uint32_t
@@ -252,6 +394,10 @@ struct MemSpace
     bool operator==(const MemSpace &other) const
     {
         return idx == other.idx && type == other.type;
+    }
+    bool operator!=(const MemSpace &other) const
+    {
+        return !(*this == other);
     }
 };
 
@@ -385,6 +531,10 @@ struct Engine
     {
         return idx == other.idx && type == other.type;
     }
+    bool operator!=(const Engine &other) const
+    {
+        return !(*this == other);
+    }
 };
 
 namespace std
@@ -449,6 +599,15 @@ struct Dim
 {
     uint32_t start;
     uint32_t stop;
+
+    bool operator==(const Dim &other) const
+    {
+        return start == other.start && stop == other.stop;
+    }
+    bool operator!=(const Dim &other) const
+    {
+        return !(*this == other);
+    }
 };
 
 struct Region
@@ -627,6 +786,11 @@ struct GraphPatternCacheKey
             output.strides != o.output.strides)
             return false;
         return true;
+    }
+
+    bool operator!=(const GraphPatternCacheKey &o) const
+    {
+        return !(*this == o);
     }
 };
 
@@ -868,6 +1032,11 @@ inline bool operator==(const Region &a, const Region &b)
         }
     }
     return true;
+}
+
+inline bool operator!=(const Region &a, const Region &b)
+{
+    return !(a == b);
 }
 
 inline bool operator<=(const Region &a, const Region &b)
@@ -1428,6 +1597,11 @@ inline bool operator==(const Bucket &a, const Bucket &b)
         }
     }
     return true;
+}
+
+inline bool operator!=(const Bucket &a, const Bucket &b)
+{
+    return !(a == b);
 }
 
 struct CompiledGraph

@@ -883,7 +883,7 @@ class Toolchain:
     def get_cxx_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
-            "-std=c++20",
+            "-std=c++17",
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",
         ]
         if self.platform.is_windows:
@@ -988,7 +988,7 @@ class Toolchain:
     def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
-            "-std=c++20",
+            "-std=c++17",
             "-x",
             "cu",
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",

@@ -125,7 +125,7 @@ def inference_worker(
 
         valid_reqs = []
         for req in eval_reqs:
-            # For "evaluate" index 3 is action_features. For "evaluate_shm" index 3 is A_len. 
+            # For "evaluate" index 3 is action_features. For "evaluate_shm" index 3 is A_len.
             ver, pkey = req[1], req[2]
             cache_key = (ver, pkey)
             if cache_key not in prefix_cache_ctx:
@@ -141,7 +141,7 @@ def inference_worker(
         for (ver, pkey), group_reqs in groups.items():
             cache_key = (ver, pkey)
             B = len(group_reqs)
-            
+
             max_A = 0
             for req in group_reqs:
                 if req[0] == "evaluate":
@@ -169,7 +169,9 @@ def inference_worker(
                 else:  # "evaluate_shm"
                     A_len = req[3]
                     wid = req[5]
-                    padded_actions[i, :A_len, 1:8] = shared_action_feats[wid, :A_len, :].to(device)
+                    padded_actions[i, :A_len, 1:8] = shared_action_feats[
+                        wid, :A_len, :
+                    ].to(device)
 
                 padded_actions[i, :A_len, 0] = torch.arange(
                     A_len, dtype=torch.float32, device=device
@@ -311,7 +313,7 @@ def client_worker(
         for _ in range(config.num_simulations):
             # 2. Clear the active stack at the start of each simulation
             delegate.active_stack.clear()
-            
+
             try:
                 costs = tensor_graphs.run_hierarchical_simulations(
                     egraph_context,
@@ -528,9 +530,13 @@ def main():
         config.model_path = args.model_path
 
     # TODO: MAX_ACTIONS is a hardcoded limit for shared memory size to handle worst-case expansion paths. Might need to be dynamic for exceptionally large extraction graphs.
-    MAX_ACTIONS = 16384 
-    shared_action_feats = torch.zeros((config.workers, MAX_ACTIONS, 7), dtype=torch.float32).share_memory_()
-    shared_logits = torch.zeros((config.workers, MAX_ACTIONS), dtype=torch.float32).share_memory_()
+    MAX_ACTIONS = 16384
+    shared_action_feats = torch.zeros(
+        (config.workers, MAX_ACTIONS, 7), dtype=torch.float32
+    ).share_memory_()
+    shared_logits = torch.zeros(
+        (config.workers, MAX_ACTIONS), dtype=torch.float32
+    ).share_memory_()
     shared_v = torch.zeros((config.workers,), dtype=torch.float32).share_memory_()
 
     print("=========================================================")

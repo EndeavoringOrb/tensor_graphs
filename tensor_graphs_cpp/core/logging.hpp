@@ -3,9 +3,10 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
-#include <source_location>
 #include <sstream>
 #include <string>
+
+#include "core/types.hpp"
 
 #ifdef ERROR
 #undef ERROR
@@ -59,7 +60,7 @@ inline const char *logLevelToString(LogLevel level)
 class LogMessage
 {
   public:
-    LogMessage(LogLevel level, std::source_location loc = std::source_location::current()) : level_(level)
+    LogMessage(LogLevel level, SourceLocation loc = SourceLocation::current()) : level_(level)
     {
         stream_ << "[" << logLevelToString(level) << "] " << loc.file_name() << ":" << loc.line() << " - ";
     }
