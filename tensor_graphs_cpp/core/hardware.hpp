@@ -416,12 +416,10 @@ struct System
         {
             uint64_t size_bytes = default_buffer_sizes.count(mem_space) ? default_buffer_sizes.at(mem_space) : 0;
             double size_mb = static_cast<double>(size_bytes) / (1024.0 * 1024.0);
-            std::cout << "  - " << mem_space << ": " << size_bytes << " bytes (" << size_mb << " MB)\n";
             LOG(INFO) << mem_space << ": " << size_bytes << " bytes (" << size_mb << " MB)";
         }
         for (const auto &engine : engines)
         {
-            std::cout << "  - " << engine << "\n";
             LOG(INFO) << engine;
         }
     }

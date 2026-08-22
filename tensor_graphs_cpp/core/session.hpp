@@ -345,7 +345,6 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        std::cout << "[Session.ensureCacheCoverage] Selecting cache nodes via SearchDelegate..." << std::endl;
         Planner planner(costModel, memManager.getMemCaps());
 
         std::unordered_map<LogicalId, MemSpace> bestCachedNodes;

@@ -26,6 +26,7 @@
 
 int main(int argc, char *argv[])
 {
+    System::get();
     ArgParser parser("bench", "Benchmark registered kernels.");
     parser.add_option({"--skip", "-s"}, "Number of kernels to skip.", "0");
     parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
