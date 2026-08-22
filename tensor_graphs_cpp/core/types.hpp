@@ -100,9 +100,8 @@ inline std::string toString(SourceLocation loc)
 
 namespace Error
 {
-template <typename T = std::runtime_error, typename... Args>
-[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args,
-                                   SourceLocation loc = SourceLocation::current())
+template <typename T = std::runtime_error>
+[[noreturn]] inline void throw_err(const std::string &msg, SourceLocation loc = SourceLocation::current())
 {
     std::cerr << "\n[TensorGraph Error] (" << toString(loc) << ") " << msg << std::endl << std::flush;
     throw T(msg, std::forward<Args>(args)...);
@@ -1562,7 +1561,6 @@ inline void tg_deserialize(BinaryReader &br, Bucket &val)
 
 inline bool operator==(const Bucket &a, const Bucket &b)
 {
-    bool equal = true;
     if (a.inputDirtyRegions.size() != b.inputDirtyRegions.size())
     {
         return false;
