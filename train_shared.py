@@ -681,16 +681,18 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                     # Shared Memory Fast-Path (Remote Evaluator)
                     A_len = action_feats_np.shape[0]
                     max_actions = self.shared_action_feats.shape[1]
-                    
-                    # TODO: Truncating action features if they exceed max_actions. Ideally fallback to queue or resize dynamically.
+
                     if A_len > max_actions:
                         A_len = max_actions
                         action_feats_np = action_feats_np[:A_len]
 
                     dim_feat = min(7, action_feats_np.shape[1])
-                    self.shared_action_feats[self.worker_id, :A_len, :dim_feat].copy_(
-                        torch.from_numpy(action_feats_np[:, :dim_feat])
-                    )
+
+                    # Zero out the active buffer slice first
+                    self.shared_action_feats[self.worker_id, :A_len, :].zero_()
+                    self.shared_action_feats[
+                        self.worker_id, :A_len, :dim_feat
+                    ].copy_(torch.from_numpy(action_feats_np[:, :dim_feat]))
 
                     self.req_queue.put(
                         (

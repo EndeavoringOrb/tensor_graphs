@@ -216,7 +216,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
             else if (std::filesystem::exists(model_path + "/transformer"))
                 actual_path = model_path + "/transformer";
         }
-        roots = build_krea2_graph(ctx->graph, *ctx->mem, actual_path, 1024, 1024, 128);
+        roots = build_krea2_graph(ctx->graph, *ctx->mem, actual_path, 512, 512, 128);
         ctx->rootId = roots.roots[0];
         ctx->inputIdsId = roots.inputs[0];
         ctx->max_seq_len = 128;
@@ -253,7 +253,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
             else if (std::filesystem::exists(model_path + "/qwen_image_vae.safetensors"))
                 actual_path = model_path + "/qwen_image_vae.safetensors";
         }
-        roots = build_krea2_vae_graph(ctx->graph, *ctx->mem, actual_path, 1024, 1024);
+        roots = build_krea2_vae_graph(ctx->graph, *ctx->mem, actual_path, 512, 512);
         ctx->rootId = roots.roots[0];
         ctx->inputIdsId = roots.inputs[0];
         ctx->max_seq_len = 0;

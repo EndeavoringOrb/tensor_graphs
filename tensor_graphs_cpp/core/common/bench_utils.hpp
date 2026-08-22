@@ -704,58 +704,66 @@ inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernel
         return cache;
     }
 
-    BinaryReader br(file);
-    while (file.peek() != EOF)
+    try
     {
-        uint8_t type = 0;
-        br.read(type);
-
-        if (type == 0) // Metadata
+        BinaryReader br(file);
+        while (file.peek() != EOF)
         {
-            br.read(cache.version);
-            br.read(cache.rootId);
-            br.read(cache.selectedCachedNodes);
-        }
-        else if (type == 1) // Compiled Bucket
-        {
-            CompiledGraph cg;
-            br.read(cg);
+            uint8_t type = 0;
+            br.read(type);
 
-            if (validateKernels)
+            if (type == 0) // Metadata
             {
-                for (const auto &inst : cg.instructions)
+                br.read(cache.version);
+                br.read(cache.rootId);
+                br.read(cache.selectedCachedNodes);
+            }
+            else if (type == 1) // Compiled Bucket
+            {
+                CompiledGraph cg;
+                br.read(cg);
+
+                if (validateKernels)
                 {
-                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                    for (const auto &inst : cg.instructions)
                     {
-                        cache.isValid = false;
-                        cache.invalidReason = "Invalid Kernel ID: " + toString(inst.kernel_id);
-                        break;
+                        if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                        {
+                            cache.isValid = false;
+                            cache.invalidReason = "Invalid Kernel ID: " + toString(inst.kernel_id);
+                            break;
+                        }
                     }
+                    if (!cache.isValid)
+                        break;
                 }
-                if (!cache.isValid)
-                    break;
+                cache.compiledGraphs.push_back(std::move(cg));
             }
-            cache.compiledGraphs.push_back(std::move(cg));
-        }
-        else if (type == 2) // Constants
-        {
-            uint32_t count = 0;
-            br.read(count);
-            for (uint32_t i = 0; i < count; ++i)
+            else if (type == 2) // Constants
             {
-                LogicalId nodeId;
-                std::vector<uint8_t> data;
-                br.read(nodeId);
-                br.read(data);
-                cache.constants[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                uint32_t count = 0;
+                br.read(count);
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    LogicalId nodeId;
+                    std::vector<uint8_t> data;
+                    br.read(nodeId);
+                    br.read(data);
+                    cache.constants[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                }
+            }
+            else
+            {
+                cache.isValid = false;
+                cache.invalidReason = "Unknown block type";
+                break;
             }
         }
-        else
-        {
-            cache.isValid = false;
-            cache.invalidReason = "Unknown block type";
-            break;
-        }
+    }
+    catch (const std::exception &e)
+    {
+        cache.isValid = false;
+        cache.invalidReason = std::string("Corrupted cache file: ") + e.what();
     }
 
     return cache;

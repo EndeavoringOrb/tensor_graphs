@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
+import math
 
 import numpy as np
 import tensor_graphs
@@ -337,11 +338,19 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     padded_actions, padded_pid, context=batched_ctx
                 )
 
-            logits = logits.masked_fill(~action_mask, -float("inf"))
+            # 1. Mask logits safely with -1e9 instead of -inf to prevent numeric instability
+            logits = logits.masked_fill(~action_mask, -1e9)
             log_probs = F.log_softmax(logits.float(), dim=1)
 
+            # 2. Replace -inf / masked log_probs with 0.0 before multiplying with padded_pis
+            safe_log_probs = torch.where(
+                action_mask, log_probs, torch.zeros_like(log_probs)
+            )
+
             loss_matrix = torch.where(
-                padded_pis > 0, padded_pis * log_probs, torch.zeros_like(log_probs)
+                padded_pis > 0,
+                padded_pis * safe_log_probs,
+                torch.zeros_like(safe_log_probs),
             )
             per_item_p_loss = -loss_matrix.sum(dim=1)
             p_loss = per_item_p_loss.mean()
@@ -351,31 +360,53 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             )
             v_preds = v_pred.float().view(-1).expand_as(zs)
 
-            # Smooth L1 / Huber loss provides robust gradients against outlier reward targets
             per_item_v_loss = F.smooth_l1_loss(v_preds, zs, reduction="none")
             v_loss = per_item_v_loss.mean()
 
             group_loss = p_loss + v_loss
+
+            # Skip backward if loss is NaN to protect model weights
+            if torch.isnan(group_loss) or torch.isinf(group_loss):
+                print(
+                    f"[Learner] Warning: NaN/Inf loss encountered for prefix {pkey}, skipping group."
+                )
+                continue
+
             group_loss.backward()
 
-            # Record per-item loss and update PER priority
             per_item_loss = (per_item_p_loss + per_item_v_loss).detach().cpu().tolist()
             for it, l_val in zip(items, per_item_loss):
-                it["loss"] = float(l_val)
-                buffer.update_priority(float(l_val))
+                if not (math.isnan(l_val) or math.isinf(l_val)):
+                    it["loss"] = float(l_val)
+                    buffer.update_priority(float(l_val))
 
             total_loss += float(group_loss.detach().item()) * B_g
             n_transitions += B_g
 
         if n_transitions > 0:
-            torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
-            optimizer.step()
+            # Check for NaN / Inf in parameter gradients before stepping optimizer
+            has_nan_grad = False
+            for param in agent.parameters():
+                if param.grad is not None and (
+                    torch.isnan(param.grad).any() or torch.isinf(param.grad).any()
+                ):
+                    has_nan_grad = True
+                    break
 
-            batches_processed += 1
-            avg_loss = total_loss / n_transitions
-            print(
-                f"[Learner] Batch {batches_processed:04d} | Total BufSize: {len(buffer)} (Prefixes: {len(buffer.prefix_table)}) | Loss: {avg_loss:.4f}"
-            )
+            if has_nan_grad:
+                print(
+                    "[Learner] Warning: NaN/Inf gradient detected, skipping optimizer step."
+                )
+                optimizer.zero_grad()
+            else:
+                torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
+                optimizer.step()
+
+                batches_processed += 1
+                avg_loss = total_loss / n_transitions
+                print(
+                    f"[Learner] Batch {batches_processed:04d} | Total BufSize: {len(buffer)} (Prefixes: {len(buffer.prefix_table)}) | Loss: {avg_loss:.4f}"
+                )
 
             with open(losses_bin_path, "ab") as f_bin:
                 f_bin.write(struct.pack(pack_fmt, batches_processed, avg_loss))

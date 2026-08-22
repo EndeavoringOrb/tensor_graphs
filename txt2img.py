@@ -99,10 +99,10 @@ def main():
         help="Disable dirty region session caching",
     )
     parser.add_argument(
-        "--height", type=int, default=1024, help="Output image height (divisible by 16)"
+        "--height", type=int, default=512, help="Output image height (divisible by 16)"
     )
     parser.add_argument(
-        "--width", type=int, default=1024, help="Output image width (divisible by 16)"
+        "--width", type=int, default=512, help="Output image width (divisible by 16)"
     )
     parser.add_argument(
         "--steps",
