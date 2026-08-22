@@ -104,7 +104,7 @@ template <typename T = std::runtime_error>
 [[noreturn]] inline void throw_err(const std::string &msg, SourceLocation loc = SourceLocation::current())
 {
     std::cerr << "\n[TensorGraph Error] (" << toString(loc) << ") " << msg << std::endl << std::flush;
-    throw T(msg, std::forward<Args>(args)...);
+    throw T(msg);
 }
 } // namespace Error
 
