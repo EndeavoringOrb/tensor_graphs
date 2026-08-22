@@ -293,13 +293,21 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             if prefix is None:
                 continue
 
+            # Guard against empty node features
+            if len(prefix.node_features) == 0:
+                dummy_nf = np.zeros((1, 8), dtype=np.float32)
+                dummy_e = np.zeros((2, 0), dtype=np.int64)
+            else:
+                dummy_nf = prefix.node_features
+                dummy_e = prefix.edge_index
+
             gf_t = torch.tensor(
                 prefix.global_feature, dtype=torch.float32, device=device
             ).unsqueeze(0)
             nf_t = torch.tensor(
-                prefix.node_features, dtype=torch.float32, device=device
+                dummy_nf, dtype=torch.float32, device=device
             ).unsqueeze(0)
-            e_t = torch.tensor(prefix.edge_index, dtype=torch.int64, device=device)
+            e_t = torch.tensor(dummy_e, dtype=torch.int64, device=device)
             pid_t = torch.tensor([prefix.phase_id], dtype=torch.int64, device=device)
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
@@ -307,6 +315,11 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
             B_g = len(items)
             max_A = max(len(it["action_features"]) for it in items)
+            if max_A == 0:
+                for it in items:
+                    it["loss"] = 0.0
+                continue
+
             padded_actions = torch.zeros(
                 (B_g, max_A, 8), dtype=torch.float32, device=device
             )
@@ -338,21 +351,14 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     padded_actions, padded_pid, context=batched_ctx
                 )
 
-            # 1. Mask logits safely with -1e9 instead of -inf to prevent numeric instability
-            logits = logits.masked_fill(~action_mask, -1e9)
-            log_probs = F.log_softmax(logits.float(), dim=1)
+            # Cast to float32 before masking & log_softmax for numerical stability
+            logits_f32 = logits.float()
+            logits_f32 = logits_f32.masked_fill(~action_mask, -1e4)
+            log_probs = F.log_softmax(logits_f32, dim=1)
 
-            # 2. Replace -inf / masked log_probs with 0.0 before multiplying with padded_pis
-            safe_log_probs = torch.where(
-                action_mask, log_probs, torch.zeros_like(log_probs)
-            )
-
-            loss_matrix = torch.where(
-                padded_pis > 0,
-                padded_pis * safe_log_probs,
-                torch.zeros_like(safe_log_probs),
-            )
-            per_item_p_loss = -loss_matrix.sum(dim=1)
+            # Cleanly compute cross entropy policy loss without gradient leakage
+            safe_log_probs = torch.where(action_mask, log_probs, torch.zeros_like(log_probs))
+            per_item_p_loss = -(padded_pis * safe_log_probs).sum(dim=1)
             p_loss = per_item_p_loss.mean()
 
             zs = torch.tensor(
@@ -365,11 +371,13 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
             group_loss = p_loss + v_loss
 
-            # Skip backward if loss is NaN to protect model weights
+            # If NaN/Inf occurs, mark loss as 0.0 and assign minimal priority so it evicts
             if torch.isnan(group_loss) or torch.isinf(group_loss):
                 print(
-                    f"[Learner] Warning: NaN/Inf loss encountered for prefix {pkey}, skipping group."
+                    f"[Learner] Warning: NaN/Inf loss encountered for prefix {pkey}, neutralizing group."
                 )
+                for it in items:
+                    it["loss"] = 0.0
                 continue
 
             group_loss.backward()
@@ -379,6 +387,8 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 if not (math.isnan(l_val) or math.isinf(l_val)):
                     it["loss"] = float(l_val)
                     buffer.update_priority(float(l_val))
+                else:
+                    it["loss"] = 0.0
 
             total_loss += float(group_loss.detach().item()) * B_g
             n_transitions += B_g
