@@ -353,13 +353,14 @@ def client_worker(
             f"Extractions: {len(extraction_costs)} | Sending {num_transitions} deduplicated transitions..."
         )
 
-        traj_queue.put(
-            {
-                "payload": packed_payload,
-                "cost": best_cost,
-                "costs": extraction_costs,
-            }
-        )
+        if len(extraction_costs) > 0:
+            traj_queue.put(
+                {
+                    "payload": packed_payload,
+                    "cost": best_cost,
+                    "costs": extraction_costs,
+                }
+            )
         episode += 1
 
 

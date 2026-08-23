@@ -30,7 +30,7 @@ class TrainConfig:
     # Graph Source & Generation Config
     graph_source: str = "model"  # "model" or "random"
     random_min_nodes: int = 10
-    random_max_nodes: int = 30
+    random_max_nodes: int = 300
     random_hidden_dim: int = 128
     random_seq_len: int = 64
     random_seed: int | None = None
@@ -137,20 +137,18 @@ def generate_random_graph(
 
     for _ in range(num_nodes):
         op_choice = random.choice(
-            ["elementwise", "unary", "dot", "reduce", "reshape_cycle"]
+            ["elementwise", "unary", "dot"]
         )
 
         if op_choice == "unary":
             src = random.choice(available_nodes)
-            u_op = random.choice(["sin", "cos", "neg", "relu"])
+            u_op = random.choice(["sin", "cos", "neg"])
             if u_op == "sin":
                 node = g.sin(src)
             elif u_op == "cos":
                 node = g.cos(src)
-            elif u_op == "neg":
-                node = g.neg(src)
             else:
-                node = g.relu(src, shape_standard)
+                node = g.neg(src)
             available_nodes.append(node)
 
         elif op_choice == "elementwise":
@@ -167,21 +165,6 @@ def generate_random_graph(
             src = random.choice(available_nodes)
             w = random.choice(weights)
             node = g.dot(src, w)
-            available_nodes.append(node)
-
-        elif op_choice == "reduce":
-            src = random.choice(available_nodes)
-            axis_const = g.constant([-1])
-            node = g.sum(src, axis_const)
-            node = g.repeat(node, hidden_dim, 2)
-            available_nodes.append(node)
-
-        elif op_choice == "reshape_cycle":
-            src = random.choice(available_nodes)
-            sh_flat = [1, seq_len * hidden_dim]
-            sh_rec = [1, seq_len, hidden_dim]
-            node = g.reshape(src, sh_flat)
-            node = g.reshape(node, sh_rec)
             available_nodes.append(node)
 
     root = available_nodes[-1]
