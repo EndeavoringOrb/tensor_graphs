@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/core/plan/validators/mem.hpp
 #pragma once
 
 #include <algorithm>
@@ -148,8 +149,308 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
     return curr;
 }
 
+struct BufferizeContext
+{
+    const std::vector<EClassId> &ordered;
+    const EGraph &egraph;
+    const std::unordered_map<EClassId, uint32_t> &selection_map;
+    const std::vector<ENodeInfo> &enodeInfos;
+    const std::unordered_map<EClassId, uint32_t> &birth_times;
+    const std::unordered_map<EClassId, uint32_t> &death_times;
+    const std::unordered_map<EClassId, EClassId> &inplace_alias;
+    const std::vector<int> &current_choices;
+    uint32_t k;
+
+    EClassId get_inplace_alias(EClassId id) const
+    {
+        auto it = inplace_alias.find(id);
+        while (it != inplace_alias.end())
+        {
+            id = it->second;
+            it = inplace_alias.find(id);
+        }
+        return id;
+    }
+};
+
+class IBufferizeDominationRule
+{
+  public:
+    virtual ~IBufferizeDominationRule() = default;
+    virtual std::string name() const = 0;
+    virtual bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) = 0;
+};
+
+// =============================================================================
+// Rule 1: Memory Space Incompatibility
+// =============================================================================
+class MemSpaceMismatchInplaceRule : public IBufferizeDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "MemSpaceMismatchInplaceRule";
+    }
+
+    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    {
+        if (candidate_choice < 0)
+            return false;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+
+        if (static_cast<size_t>(candidate_choice) >= node.getChildren().size())
+            return false;
+
+        EClassId child = ctx.egraph.findConst(node.getChildren()[candidate_choice]);
+        EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+        EClassId target_base = ctx.get_inplace_alias(child_base);
+
+        auto base_sel_it = ctx.selection_map.find(target_base);
+        if (base_sel_it == ctx.selection_map.end())
+            return false;
+
+        uint32_t base_sel = base_sel_it->second;
+        ENodeId base_enode_id = ctx.egraph.getEClass(target_base).enodes[base_sel];
+        const ENode &base_node = ctx.egraph.getENode(base_enode_id);
+
+        return base_node.getMemSpace() != node.getMemSpace();
+    }
+};
+
+// =============================================================================
+// Rule 2: Linear Chain In-place Domination
+// =============================================================================
+class LinearChainInplaceDominationRule : public IBufferizeDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "LinearChainInplaceDominationRule";
+    }
+
+    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    {
+        if (candidate_choice != -1)
+            return false;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+        uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
+
+        for (int choice : ctx.current_choices)
+        {
+            if (choice < 0)
+                continue;
+
+            if (static_cast<size_t>(choice) >= node.getChildren().size())
+                continue;
+
+            EClassId child = ctx.egraph.findConst(node.getChildren()[choice]);
+            EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+
+            auto death_it = ctx.death_times.find(child_base);
+            if (death_it == ctx.death_times.end() || death_it->second != ctx.k)
+                continue;
+
+            EClassId target_base = ctx.get_inplace_alias(child_base);
+            auto base_sel_it = ctx.selection_map.find(target_base);
+            if (base_sel_it == ctx.selection_map.end())
+                continue;
+
+            uint32_t base_sel = base_sel_it->second;
+            const ENode &base_node = ctx.egraph.getENode(ctx.egraph.getEClass(target_base).enodes[base_sel]);
+
+            if (base_node.getOpType() == OpType::INPUT || base_node.getOpType() == OpType::CACHE)
+                continue;
+
+            if (base_node.getMemSpace() != node.getMemSpace())
+                continue;
+
+            uint64_t in_size = getSizeBytes(base_node.getShape(), base_node.getDType());
+            if (out_size == in_size)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+};
+
+// =============================================================================
+// Rule 3: Interval-Subset Domination (Latest Birth Time)
+// =============================================================================
+class IntervalSubsetDominationRule : public IBufferizeDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "IntervalSubsetDominationRule";
+    }
+
+    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    {
+        if (candidate_choice < 0)
+            return false;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+
+        if (static_cast<size_t>(candidate_choice) >= node.getChildren().size())
+            return false;
+
+        EClassId cand_child = ctx.egraph.findConst(node.getChildren()[candidate_choice]);
+        EClassId cand_child_base = resolve_view_alias(cand_child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+        EClassId cand_target_base = ctx.get_inplace_alias(cand_child_base);
+
+        auto cand_sel_it = ctx.selection_map.find(cand_target_base);
+        if (cand_sel_it == ctx.selection_map.end())
+            return false;
+
+        const ENode &cand_base_node =
+            ctx.egraph.getENode(ctx.egraph.getEClass(cand_target_base).enodes[cand_sel_it->second]);
+        uint64_t cand_size = getSizeBytes(cand_base_node.getShape(), cand_base_node.getDType());
+        MemSpace cand_ms = cand_base_node.getMemSpace();
+
+        auto cand_birth_it = ctx.birth_times.find(cand_target_base);
+        if (cand_birth_it == ctx.birth_times.end())
+            return false;
+        uint32_t cand_birth = cand_birth_it->second;
+
+        for (int other_choice : ctx.current_choices)
+        {
+            if (other_choice < 0 || other_choice == candidate_choice)
+                continue;
+
+            if (static_cast<size_t>(other_choice) >= node.getChildren().size())
+                continue;
+
+            EClassId other_child = ctx.egraph.findConst(node.getChildren()[other_choice]);
+            EClassId other_child_base = resolve_view_alias(other_child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+            EClassId other_target_base = ctx.get_inplace_alias(other_child_base);
+
+            auto other_sel_it = ctx.selection_map.find(other_target_base);
+            if (other_sel_it == ctx.selection_map.end())
+                continue;
+
+            const ENode &other_base_node =
+                ctx.egraph.getENode(ctx.egraph.getEClass(other_target_base).enodes[other_sel_it->second]);
+            uint64_t other_size = getSizeBytes(other_base_node.getShape(), other_base_node.getDType());
+            MemSpace other_ms = other_base_node.getMemSpace();
+
+            if (other_ms != cand_ms || other_size != cand_size)
+                continue;
+
+            auto other_birth_it = ctx.birth_times.find(other_target_base);
+            if (other_birth_it == ctx.birth_times.end())
+                continue;
+            uint32_t other_birth = other_birth_it->second;
+
+            if (other_birth > cand_birth)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+};
+
+// =============================================================================
+// Rule 4: Commutative In-place Symmetry Breaking
+// =============================================================================
+class CommutativeInplaceSymmetryRule : public IBufferizeDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "CommutativeInplaceSymmetryRule";
+    }
+
+    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    {
+        if (candidate_choice < 0)
+            return false;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+
+        if (static_cast<size_t>(candidate_choice) >= node.getChildren().size())
+            return false;
+
+        EClassId cand_child = ctx.egraph.findConst(node.getChildren()[candidate_choice]);
+        EClassId cand_child_base = resolve_view_alias(cand_child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+        EClassId cand_target_base = ctx.get_inplace_alias(cand_child_base);
+
+        auto cand_sel_it = ctx.selection_map.find(cand_target_base);
+        if (cand_sel_it == ctx.selection_map.end())
+            return false;
+
+        const ENode &cand_base_node =
+            ctx.egraph.getENode(ctx.egraph.getEClass(cand_target_base).enodes[cand_sel_it->second]);
+        uint64_t cand_size = getSizeBytes(cand_base_node.getShape(), cand_base_node.getDType());
+        MemSpace cand_ms = cand_base_node.getMemSpace();
+
+        auto cand_birth_it = ctx.birth_times.find(cand_target_base);
+        if (cand_birth_it == ctx.birth_times.end())
+            return false;
+        uint32_t cand_birth = cand_birth_it->second;
+
+        for (size_t i = 0; i < candidate_choice_idx; ++i)
+        {
+            int other_choice = ctx.current_choices[i];
+            if (other_choice < 0)
+                continue;
+
+            if (static_cast<size_t>(other_choice) >= node.getChildren().size())
+                continue;
+
+            EClassId other_child = ctx.egraph.findConst(node.getChildren()[other_choice]);
+            EClassId other_child_base = resolve_view_alias(other_child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+            EClassId other_target_base = ctx.get_inplace_alias(other_child_base);
+
+            auto other_sel_it = ctx.selection_map.find(other_target_base);
+            if (other_sel_it == ctx.selection_map.end())
+                continue;
+
+            const ENode &other_base_node =
+                ctx.egraph.getENode(ctx.egraph.getEClass(other_target_base).enodes[other_sel_it->second]);
+            uint64_t other_size = getSizeBytes(other_base_node.getShape(), other_base_node.getDType());
+            MemSpace other_ms = other_base_node.getMemSpace();
+
+            if (other_ms != cand_ms || other_size != cand_size)
+                continue;
+
+            auto other_birth_it = ctx.birth_times.find(other_target_base);
+            if (other_birth_it == ctx.birth_times.end())
+                continue;
+            uint32_t other_birth = other_birth_it->second;
+
+            if (other_birth == cand_birth)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+};
+
 struct BufferizeIterator
 {
+  public:
+    std::vector<std::shared_ptr<IBufferizeDominationRule>> domination_rules;
+
     const std::vector<EClassId> &ordered;
     const EGraph &egraph;
     const std::unordered_map<EClassId, uint32_t> &selection_map;
@@ -169,11 +470,21 @@ struct BufferizeIterator
 
     BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,
                       const std::unordered_map<EClassId, uint32_t> &_selection_map,
-                      const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate)
+                      const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
         : ordered(_ordered), egraph(_egraph), selection_map(_selection_map), enodeInfos(_enodeInfos),
           delegate(_delegate)
     {
         init();
+    }
+
+    void addDominationRule(std::shared_ptr<IBufferizeDominationRule> rule)
+    {
+        domination_rules.push_back(std::move(rule));
+    }
+
+    void clearDominationRules()
+    {
+        domination_rules.clear();
     }
 
     void init()
@@ -371,7 +682,7 @@ struct BufferizeIterator
         uint32_t N = ordered.size();
         while (k >= 0)
         {
-            if (k == N)
+            if (k == static_cast<int>(N))
             {
                 build_buffers(out_buffers, out_eclass_to_buf);
                 return true;
@@ -439,11 +750,32 @@ struct BufferizeIterator
                 }
             }
 
-            if (state[k] < valid_choices[k].size())
+            bool chosen = false;
+            while (state[k] < valid_choices[k].size())
             {
                 uint32_t choice_idx = choice_orders[k][state[k]];
                 int choice = valid_choices[k][choice_idx];
                 state[k]++;
+
+                if (!domination_rules.empty())
+                {
+                    BufferizeContext ctx{ordered,       egraph,           selection_map,
+                                         enodeInfos,    birth_times,      death_times,
+                                         inplace_alias, valid_choices[k], static_cast<uint32_t>(k)};
+                    bool dominated = false;
+                    for (const auto &rule : domination_rules)
+                    {
+                        if (rule->is_dominated(choice, choice_idx, ctx))
+                        {
+                            dominated = true;
+                            break;
+                        }
+                    }
+                    if (dominated)
+                    {
+                        continue;
+                    }
+                }
 
                 if (choice != -1)
                 {
@@ -452,9 +784,12 @@ struct BufferizeIterator
                     inplace_alias[eclass] = get_inplace_alias(child_base);
                 }
 
+                chosen = true;
                 k++;
+                break;
             }
-            else
+
+            if (!chosen)
             {
                 state[k] = 0;
                 if (delegate && delegate->fast_fail())
@@ -934,6 +1269,10 @@ struct MemValidator : public ISelectionValidator
         cost = get_cost(order, egraph, selection_map, enodeInfos);
 
         BufferizeIterator buf_iter(order, egraph, selection_map, enodeInfos, delegate);
+        buf_iter.addDominationRule(std::make_shared<MemSpaceMismatchInplaceRule>());
+        buf_iter.addDominationRule(std::make_shared<LinearChainInplaceDominationRule>());
+        buf_iter.addDominationRule(std::make_shared<IntervalSubsetDominationRule>());
+        buf_iter.addDominationRule(std::make_shared<CommutativeInplaceSymmetryRule>());
 
         std::vector<ParallelBuffer> unallocated_buffers;
         std::unordered_map<EClassId, BufferId> eclass_to_buf_local;

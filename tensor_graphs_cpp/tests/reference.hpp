@@ -24,12 +24,7 @@
 #include "core/shape_propagator.hpp"
 #include "generated/kernels_all.gen.hpp"
 
-#include "tests/dispatch_domination.hpp"
-#include "tests/fused.hpp"
-#include "tests/input_hashcons.hpp"
-#include "tests/mem_cap_prune.hpp"
-#include "tests/region_merge.hpp"
-#include "tests/shape_propagation.hpp"
+#include "tests/common.hpp"
 
 void runRefTests(std::string testDir = "tensor_graphs_cpp/tests/data")
 {

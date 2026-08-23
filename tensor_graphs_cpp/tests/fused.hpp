@@ -61,45 +61,6 @@ void fillRandom(void *ptr, uint64_t elements, DType dtype)
     }
 }
 
-bool compareOutputs(const float *ref, const float *test, uint64_t elements, float eps = 1e-4f)
-{
-    for (uint64_t i = 0; i < elements; ++i)
-    {
-        if (std::abs(ref[i] - test[i]) > eps)
-        {
-            std::cout << "\nMismatch at index " << i << ": (ref)" << ref[i] << " != (test)" << test[i] << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
-
-bool compareOutputs(const int32_t *ref, const int32_t *test, uint64_t elements, float eps = 1e-4f)
-{
-    for (uint64_t i = 0; i < elements; ++i)
-    {
-        if (ref[i] != test[i])
-        {
-            std::cout << "\nMismatch at index " << i << ": (ref)" << ref[i] << " != (test)" << test[i] << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
-
-bool compareOutputs(const bool *ref, const bool *test, uint64_t elements, float eps = 1e-4f)
-{
-    for (uint64_t i = 0; i < elements; ++i)
-    {
-        if (ref[i] != test[i])
-        {
-            std::cout << "\nMismatch at index " << i << ": (ref)" << ref[i] << " != (test)" << test[i] << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
-
 std::vector<float> executeReferenceGraph(LogicalId rootId, Graph &graph,
                                          const std::unordered_map<LogicalId, std::vector<uint8_t>> &rawInputData,
                                          bool forceNonContiguous = false)

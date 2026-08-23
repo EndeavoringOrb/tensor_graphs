@@ -564,6 +564,10 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
                 // Bufferize (Level 3)
                 BufferizeIterator buf_iter(order, state->egraph, selection_map, state->enodeInfos, delegate);
+                buf_iter.addDominationRule(std::make_shared<MemSpaceMismatchInplaceRule>());
+                buf_iter.addDominationRule(std::make_shared<LinearChainInplaceDominationRule>());
+                buf_iter.addDominationRule(std::make_shared<IntervalSubsetDominationRule>());
+                buf_iter.addDominationRule(std::make_shared<CommutativeInplaceSymmetryRule>());
                 uint32_t buf_count = 0;
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;

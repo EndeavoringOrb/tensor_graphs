@@ -24,10 +24,12 @@
 #include "core/shape_propagator.hpp"
 #include "generated/kernels_all.gen.hpp"
 
+#include "tests/bufferize_domination.hpp"
 #include "tests/dispatch_domination.hpp"
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
 #include "tests/mem_cap_prune.hpp"
+#include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/shape_propagation.hpp"
 
@@ -56,6 +58,7 @@ int main(int argc, char *argv[])
         runShapePropagationTests();
         runPreExtractionMemCapTests();
         runDispatchDominationTests();
+        runBufferizeDominationTests();
         runInputHashconsTests();
         // runRefTests(); TODO: fix python tests
     }
