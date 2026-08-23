@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "core/common/constants.hpp"
 #include "core/cost_model.hpp"
 #include "core/egraph.hpp"
 #include "core/graph.hpp"
@@ -288,10 +289,243 @@ struct CacheIterator
     }
 };
 
+struct ENodeDominationContext
+{
+    const EGraph &egraph;
+    const std::vector<ENodeInfo> &enodeInfos;
+    const std::unordered_map<EClassId, LogicalId> &eclassToLogical;
+    const std::unordered_map<LogicalId, MemSpace> &cachedNodes;
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
+};
+
+class IENodeDominationRule
+{
+  public:
+    virtual ~IENodeDominationRule() = default;
+    virtual std::string name() const = 0;
+    virtual bool is_dominated(ENodeId enodeId, const ENodeDominationContext &ctx) = 0;
+};
+
+class MemCapENodeDominationRule : public IENodeDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "MemCapENodeDominationRule";
+    }
+
+    bool is_dominated(ENodeId enodeId, const ENodeDominationContext &ctx) override
+    {
+        const ENode &enode = ctx.egraph.getENode(enodeId);
+        MemSpace ms = enode.getMemSpace();
+
+        if (ms.type == HandleType::STORAGE || ctx.mem_caps.find(ms) == ctx.mem_caps.end())
+            return false;
+
+        uint64_t cap = ctx.mem_caps.at(ms);
+        uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
+
+        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+        {
+            return out_size > cap;
+        }
+
+        const ENodeInfo &info = ctx.enodeInfos[enodeId.value];
+        bool can_be_inplace = false;
+        if (info.is_view)
+        {
+            can_be_inplace = true;
+        }
+        else if (enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
+        {
+            const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
+            for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
+            {
+                if (inplace_idx < enode.getChildren().size())
+                {
+                    EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
+                    const EClass &cCls = ctx.egraph.getEClass(child);
+                    if (cCls.mem_space == ms)
+                    {
+                        uint64_t in_size = (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
+                        if (out_size <= in_size)
+                        {
+                            can_be_inplace = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        uint64_t sum_inputs_in_ms = 0;
+        std::unordered_set<EClassId> seen_children;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (seen_children.insert(canon_child).second)
+            {
+                const EClass &cCls = ctx.egraph.getEClass(canon_child);
+                if (cCls.mem_space == ms)
+                {
+                    sum_inputs_in_ms += (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
+                }
+            }
+        }
+
+        uint64_t required_mem = (can_be_inplace ? 0 : out_size) + sum_inputs_in_ms;
+        return required_mem > cap;
+    }
+};
+
+class FasterEquivalentENodeDominationRule : public IENodeDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "FasterEquivalentENodeDominationRule";
+    }
+
+    bool is_dominated(ENodeId enodeId, const ENodeDominationContext &ctx) override
+    {
+        float costA = ctx.enodeInfos[enodeId.value].cost;
+        if (costA == TGConstants::INF)
+            return false;
+
+        const ENode &a = ctx.egraph.getENode(enodeId);
+        EClassId e_class_id = ctx.egraph.getENodeEClass(enodeId);
+        const EClass &cls = ctx.egraph.getEClass(ctx.egraph.findConst(e_class_id));
+        const ENodeInfo &infoA = ctx.enodeInfos[enodeId.value];
+
+        std::vector<uint32_t> a_inplace;
+        if (a.getKernelId().value != 0 && KernelRegistry::get().hasKernel(a.getKernelId()))
+        {
+            a_inplace = KernelRegistry::get().getKernel(a.getKernelId()).safe_inplace_idxs;
+        }
+
+        for (ENodeId otherId : cls.enodes)
+        {
+            if (otherId == enodeId)
+                continue;
+
+            float costB = ctx.enodeInfos[otherId.value].cost;
+            if (costB == TGConstants::INF)
+                continue;
+
+            const ENode &b = ctx.egraph.getENode(otherId);
+            const ENodeInfo &infoB = ctx.enodeInfos[otherId.value];
+
+            if (a.getChildren().size() != b.getChildren().size())
+                continue;
+
+            bool same_children = true;
+            for (size_t c = 0; c < a.getChildren().size(); ++c)
+            {
+                if (ctx.egraph.findConst(a.getChildren()[c]) != ctx.egraph.findConst(b.getChildren()[c]))
+                {
+                    same_children = false;
+                    break;
+                }
+            }
+            if (!same_children)
+                continue;
+
+            if (a.getMemSpace() != b.getMemSpace())
+                continue;
+            if (a.getShape() != b.getShape())
+                continue;
+            if (a.getStrides() != b.getStrides())
+                continue;
+            if (a.getDType() != b.getDType())
+                continue;
+            if (a.getEngines() != b.getEngines())
+                continue;
+            if (infoA.is_view != infoB.is_view)
+                continue;
+            if (a.getContentHash() != b.getContentHash())
+                continue;
+
+            std::vector<uint32_t> b_inplace;
+            if (b.getKernelId().value != 0 && KernelRegistry::get().hasKernel(b.getKernelId()))
+            {
+                b_inplace = KernelRegistry::get().getKernel(b.getKernelId()).safe_inplace_idxs;
+            }
+
+            bool inplace_compatible = true;
+            for (uint32_t in_idx : a_inplace)
+            {
+                if (std::find(b_inplace.begin(), b_inplace.end(), in_idx) == b_inplace.end())
+                {
+                    inplace_compatible = false;
+                    break;
+                }
+            }
+            if (!inplace_compatible)
+                continue;
+
+            if (costB < costA - 1e-9f)
+            {
+                return true;
+            }
+
+            if (std::abs(costA - costB) <= 1e-9f)
+            {
+                if (b_inplace.size() > a_inplace.size())
+                {
+                    return true;
+                }
+                if (b_inplace.size() == a_inplace.size() && otherId < enodeId)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+};
+
 struct Planner
 {
     CostModel &costModel;
     std::unordered_map<MemSpace, uint64_t> mem_caps;
+    std::vector<std::shared_ptr<IENodeDominationRule>> domination_rules;
+
+    void addDominationRule(std::shared_ptr<IENodeDominationRule> rule)
+    {
+        domination_rules.push_back(std::move(rule));
+    }
+
+    void clearDominationRules()
+    {
+        domination_rules.clear();
+    }
+
+    void applyDominationRules(const EGraph &egraph, std::vector<ENodeInfo> &enodeInfos,
+                              const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
+                              const std::unordered_map<LogicalId, MemSpace> &cachedNodes)
+    {
+        if (domination_rules.empty())
+            return;
+
+        ENodeDominationContext ctx{egraph, enodeInfos, eclassToLogical, cachedNodes, mem_caps};
+
+        for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+        {
+            ENodeId enodeId{i};
+            if (enodeInfos[i].cost == TGConstants::INF)
+                continue;
+
+            for (const auto &rule : domination_rules)
+            {
+                if (rule->is_dominated(enodeId, ctx))
+                {
+                    enodeInfos[i].cost = TGConstants::INF;
+                    break;
+                }
+            }
+        }
+    }
 
     void preallocateLogicalBuffers(const Graph &graph, const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                    std::unordered_map<LogicalId, ParallelBuffer> &out) const
@@ -558,7 +792,6 @@ struct Planner
         std::vector<uint32_t> valid_enode_count(numClasses, 0);
         std::vector<std::vector<ENodeId>> parents_map(numClasses);
 
-        // construct parents_map
         for (uint32_t i = 0; i < numClasses; ++i)
         {
             EClassId e_class_id = egraph.find(EClassId{i});
@@ -679,19 +912,6 @@ struct Planner
                         info.cost = TGConstants::INF;
                     }
                     else if (enode.getMemSpace() != cachedNodes.at(logicalId))
-                    {
-                        info.cost = TGConstants::INF;
-                    }
-                }
-
-                // 1. Pre-extraction Memory Cap Check for INPUT / CACHE
-                MemSpace ms = enode.getMemSpace();
-                if (ms.type != HandleType::STORAGE && mem_caps.count(ms))
-                {
-                    uint64_t cap = mem_caps.at(ms);
-                    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) &
-                                        ~4095ULL; // TODO: make & use alignment size var somewhere
-                    if (out_size > cap)
                     {
                         info.cost = TGConstants::INF;
                     }
@@ -819,63 +1039,6 @@ struct Planner
 
                 info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
                                                    enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
-
-                // 2. Pre-extraction Memory Cap Check:
-                // If ((size of output if not inplace else 0) + size of inputs for an enode) > mem_cap, prune it
-                MemSpace ms = enode.getMemSpace();
-                if (ms.type != HandleType::STORAGE && mem_caps.count(ms))
-                {
-                    uint64_t cap = mem_caps.at(ms);
-                    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
-
-                    bool can_be_inplace = false;
-                    if (info.is_view)
-                    {
-                        can_be_inplace = true;
-                    }
-                    else if (enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
-                    {
-                        const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
-                        for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
-                        {
-                            if (inplace_idx < enode.getChildren().size())
-                            {
-                                EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
-                                const EClass &cCls = egraph.getEClass(child);
-                                if (cCls.mem_space == ms)
-                                {
-                                    uint64_t in_size = (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
-                                    if (out_size <= in_size)
-                                    {
-                                        can_be_inplace = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    uint64_t sum_inputs_in_ms = 0;
-                    std::unordered_set<EClassId> seen_children;
-                    for (EClassId child : enode.getChildren())
-                    {
-                        EClassId canon_child = egraph.findConst(child);
-                        if (seen_children.insert(canon_child).second)
-                        {
-                            const EClass &cCls = egraph.getEClass(canon_child);
-                            if (cCls.mem_space == ms)
-                            {
-                                sum_inputs_in_ms += (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
-                            }
-                        }
-                    }
-
-                    uint64_t required_mem = (can_be_inplace ? 0 : out_size) + sum_inputs_in_ms;
-                    if (required_mem > cap)
-                    {
-                        info.cost = TGConstants::INF;
-                    }
-                }
             }
             else
             {
@@ -885,6 +1048,8 @@ struct Planner
             enodeInfos[i] = std::move(info);
             timer.tick();
         }
+
+        applyDominationRules(egraph, enodeInfos, eclassToLogical, cachedNodes);
 
         // DP pass for subtree cost approximation
         std::vector<float> eclass_dp_cost(egraph.getClasses().size(), TGConstants::INF);
@@ -958,7 +1123,6 @@ struct Planner
 
     void pruneEGraph(EGraph &egraph, const std::vector<ENodeInfo> &enodeInfos)
     {
-        bool droppedInf = false;
         uint32_t totalPruned = 0;
         for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
         {
@@ -970,56 +1134,17 @@ struct Planner
             std::vector<ENodeId> validEnodes;
             validEnodes.reserve(cls.enodes.size());
 
-            // 1. Remove infinite-cost nodes
+            // Remove infinite-cost nodes (which includes nodes marked INF by domination rules)
             for (ENodeId enodeId : cls.enodes)
             {
-                if (enodeInfos[enodeId.value].cost == TGConstants::INF)
-                {
-                    droppedInf = true;
-                }
-                else
+                if (enodeInfos[enodeId.value].cost != TGConstants::INF)
                 {
                     validEnodes.push_back(enodeId);
                 }
             }
 
-            // 2. Prune duplicated nodes to minimize search space bloat
-            std::vector<ENodeId> deduped;
-            deduped.reserve(validEnodes.size());
-            for (uint64_t idxA = 0; idxA < validEnodes.size(); ++idxA)
-            {
-                ENodeId idA = validEnodes[idxA];
-                const ENode &a = egraph.getENode(idA);
-                const ENodeInfo &ia = enodeInfos[idA.value];
-
-                bool dominated = false;
-                for (uint64_t idxB = 0; idxB < validEnodes.size(); ++idxB)
-                {
-                    if (idxA == idxB)
-                        continue;
-                    ENodeId idB = validEnodes[idxB];
-                    const ENode &b = egraph.getENode(idB);
-                    const ENodeInfo &ib = enodeInfos[idB.value];
-
-                    if (a != b)
-                        continue;
-
-                    if (ib.cost < ia.cost - 1e-9f)
-                    {
-                        dominated = true;
-                        break;
-                    }
-                    if (std::abs(ib.cost - ia.cost) <= 1e-9f && idB < idA)
-                    {
-                        dominated = true;
-                        break;
-                    }
-                }
-                if (!dominated)
-                    deduped.push_back(idA);
-            }
-            totalPruned += (validEnodes.size() - deduped.size());
-            cls.enodes = std::move(deduped);
+            totalPruned += (cls.enodes.size() - validEnodes.size());
+            cls.enodes = std::move(validEnodes);
         }
 
         totalPruned += deathCascade(egraph);
@@ -1145,7 +1270,6 @@ struct Planner
             float cost = TGConstants::INF;
             std::vector<EClassId> conflict_nodes;
 
-            // 2. Compute dispatch order
             DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
             dispatch_iterator.addDominationRule(std::make_shared<SingleEngineDispatchDominationRule>());
             dispatch_iterator.addDominationRule(std::make_shared<MultiEngineCommutativityRule>());
@@ -1359,7 +1483,6 @@ struct Planner
             compiled.nodeViews[eclass_id] =
                 TensorView(enode.getShape(), final_offset_bytes, final_strides, enode.getDType());
 
-            // Resolve actual engines mapped for this instruction using kernel.matches
             if (kernel_ptr)
             {
                 std::vector<TensorNode> dummyInputs(inst.children.size());
@@ -1384,7 +1507,6 @@ struct Planner
 
             if (inst.engines.empty())
             {
-                // TODO: this is hacky
                 if (inst.outBuffer.mem_space.type == HandleType::CUDA)
                     inst.engines.push_back(Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU});
                 else
@@ -1413,7 +1535,6 @@ struct Planner
     BaseEGraphState baseState;
     bool baseStateInitialized = false;
 
-    // Initialize baseState.egraph from graph
     void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, Repo *repo = nullptr)
     {
         if (KernelRegistry::get().nKernels() == 0)
@@ -1918,9 +2039,7 @@ struct Planner
             for (KernelId uid : scatterRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
-                std::vector<uint64_t> strides =
-                    (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape); // TODO check inplace based
-                                                                                             // on bufferization stuff
+                std::vector<uint64_t> strides = (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape);
                 ENode sn(uid, OpType::SCATTER, "", {current_E, contigEClass, startsId, endsId, stepsId}, lClass.shape,
                          strides, lClass.dtype, target_mem_space, {cpu});
                 egraph.addENode(scatterEClass, sn);
@@ -1989,6 +2108,8 @@ struct Planner
     Planner(CostModel &costModel, const std::unordered_map<MemSpace, uint64_t> &mem_caps)
         : costModel(costModel), mem_caps(mem_caps)
     {
+        addDominationRule(std::make_shared<MemCapENodeDominationRule>());
+        addDominationRule(std::make_shared<FasterEquivalentENodeDominationRule>());
     }
 
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
@@ -2026,7 +2147,6 @@ struct Planner
             }
         }
 
-        // Add cache enodes
         Engine cpu = Engine{0, EngineType::CPU};
         for (const auto &cls : egraph.getClasses())
         {

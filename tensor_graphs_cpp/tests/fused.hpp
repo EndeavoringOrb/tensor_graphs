@@ -17,6 +17,8 @@
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
+#include "tests/common.hpp"
+
 void fillRandom(void *ptr, uint64_t elements, DType dtype)
 {
     static std::mt19937 gen(42);

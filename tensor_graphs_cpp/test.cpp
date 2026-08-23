@@ -26,6 +26,7 @@
 
 #include "tests/bufferize_domination.hpp"
 #include "tests/dispatch_domination.hpp"
+#include "tests/enode_domination.hpp"
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
 #include "tests/mem_cap_prune.hpp"
@@ -41,6 +42,7 @@ int main(int argc, char *argv[])
                       "Path to cache file. If provided, only kernel calls "
                       "present in the cache file will be tested.",
                       "");
+    parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     if (!parser.parse(argc, argv))
@@ -51,19 +53,24 @@ int main(int argc, char *argv[])
     std::string targetKernel = parser.get_positional("targetKernel");
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
+    bool skipFused = parser.get_flag("--skip-fused");
 
     if (targetKernel.empty() && cachePath.empty())
     {
         runRegionMergeTests();
         runShapePropagationTests();
         runPreExtractionMemCapTests();
+        runENodeDominationTests();
         runDispatchDominationTests();
         runBufferizeDominationTests();
         runInputHashconsTests();
         // runRefTests(); TODO: fix python tests
     }
 
-    runNonReferenceKernelTests(targetKernel, useRecords, cachePath);
+    if (!skipFused)
+    {
+        runNonReferenceKernelTests(targetKernel, useRecords, cachePath);
+    }
 
     return 0;
 }
