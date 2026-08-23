@@ -33,14 +33,292 @@ struct ENodeInfo
     float dp_cost = 0.0f;
 };
 
+struct DispatchContext
+{
+    const EGraph &egraph;
+    const std::unordered_map<EClassId, uint32_t> &selection_map;
+    const std::vector<ENodeInfo> &enodeInfos;
+    const std::vector<EClassId> &ordered;
+    const std::vector<EClassId> &current_ready;
+    uint32_t pos;
+};
+
+class IDispatchDominationRule
+{
+  public:
+    virtual ~IDispatchDominationRule() = default;
+    virtual std::string name() const = 0;
+    virtual bool is_dominated(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) = 0;
+};
+
+// =============================================================================
+// Rule A: Multi-Engine Commutativity (Partial Order Reduction)
+// =============================================================================
+// If candidate node `u` and another ready node `v` execute on different engines
+// with disjoint memory spaces and are independent, their discrete relative order
+// does not affect asynchronous concurrency or makespan. Enforce a canonical
+// order (e.g. Engine index/type priority) to break symmetric interleavings.
+class MultiEngineCommutativityRule : public IDispatchDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "MultiEngineCommutativityRule";
+    }
+
+    bool is_dominated(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) override
+    {
+        if (candidate_idx == 0 || ctx.current_ready.size() <= 1)
+            return false;
+
+        const auto &cand_enode =
+            ctx.egraph.getENode(ctx.egraph.getEClass(candidate).enodes[ctx.selection_map.at(candidate)]);
+        if (cand_enode.getEngines().empty())
+            return false;
+        const Engine &cand_engine = cand_enode.getEngines()[0];
+        MemSpace cand_ms = cand_enode.getMemSpace();
+
+        // Check if there is an earlier ready node `v` with a lower canonical engine ID
+        // that runs on a disjoint engine and disjoint memory space
+        for (size_t i = 0; i < candidate_idx; ++i)
+        {
+            EClassId other = ctx.current_ready[i];
+            const auto &other_enode =
+                ctx.egraph.getENode(ctx.egraph.getEClass(other).enodes[ctx.selection_map.at(other)]);
+            if (other_enode.getEngines().empty())
+                continue;
+
+            const Engine &other_engine = other_enode.getEngines()[0];
+            MemSpace other_ms = other_enode.getMemSpace();
+
+            if (other_engine != cand_engine && other_ms != cand_ms)
+            {
+                // Canonical ordering: prefer lower engine type or index first
+                if (std::make_pair(static_cast<uint32_t>(other_engine.type), other_engine.idx) <
+                    std::make_pair(static_cast<uint32_t>(cand_engine.type), cand_engine.idx))
+                {
+                    return true; // candidate `u` is dominated; `other` must be dispatched first
+                }
+            }
+        }
+        return false;
+    }
+};
+
+// =============================================================================
+// Rule B: Disjoint Subgraph Symmetry Breaking
+// =============================================================================
+// If independent subgraphs run on disjoint memory spaces, once execution of a
+// subgraph's component has started, avoid switching to a disjoint subgraph if
+// the current component still has ready work. This collapses O((|A|+|B|)!/(|A|!|B|!))
+// interleavings without altering makespan or peak memory.
+class DisjointSubgraphSymmetryRule : public IDispatchDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "DisjointSubgraphSymmetryRule";
+    }
+
+    bool is_dominated(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) override
+    {
+        if (ctx.ordered.empty() || ctx.current_ready.size() <= 1)
+            return false;
+
+        // Determine the memory space of the most recently dispatched operation
+        EClassId last_dispatched = ctx.ordered.back();
+        auto last_sel_it = ctx.selection_map.find(last_dispatched);
+        if (last_sel_it == ctx.selection_map.end())
+            return false;
+
+        const auto &last_enode = ctx.egraph.getENode(ctx.egraph.getEClass(last_dispatched).enodes[last_sel_it->second]);
+        MemSpace active_ms = last_enode.getMemSpace();
+
+        // Check if there is still a ready node belonging to the same active memory space
+        bool has_active_ready = false;
+        for (EClassId ready_node : ctx.current_ready)
+        {
+            const auto &enode =
+                ctx.egraph.getENode(ctx.egraph.getEClass(ready_node).enodes[ctx.selection_map.at(ready_node)]);
+            if (enode.getMemSpace() == active_ms)
+            {
+                has_active_ready = true;
+                break;
+            }
+        }
+
+        if (!has_active_ready)
+            return false;
+
+        // If the active memory space still has ready nodes, candidate is dominated if it belongs to a disjoint memory
+        // space
+        const auto &cand_enode =
+            ctx.egraph.getENode(ctx.egraph.getEClass(candidate).enodes[ctx.selection_map.at(candidate)]);
+        if (cand_enode.getMemSpace() != active_ms)
+        {
+            return true;
+        }
+
+        return false;
+    }
+};
+
+// =============================================================================
+// Rule C: Last-Reader Buffer-Free Dominance
+// =============================================================================
+// If ready node `u` is the LAST remaining reader of its inputs (dispatching it
+// immediately frees those input buffers), while candidate `v` on the same engine
+// with equal cost does NOT free any buffer, candidate `v` is dominated by `u`.
+class LastReaderBufferFreeDominationRule : public IDispatchDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "LastReaderBufferFreeDominationRule";
+    }
+
+    bool is_dominated(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) override
+    {
+        if (ctx.current_ready.size() <= 1)
+            return false;
+
+        const auto &cand_enode =
+            ctx.egraph.getENode(ctx.egraph.getEClass(candidate).enodes[ctx.selection_map.at(candidate)]);
+        if (cand_enode.getEngines().empty())
+            return false;
+        const Engine &cand_engine = cand_enode.getEngines()[0];
+        float cand_cost =
+            ctx.enodeInfos[ctx.egraph.getEClass(candidate).enodes[ctx.selection_map.at(candidate)].value].cost;
+
+        // Set of undispatched nodes in the selection map
+        std::unordered_set<EClassId> dispatched(ctx.ordered.begin(), ctx.ordered.end());
+
+        auto frees_buffers = [&](EClassId node) -> bool {
+            const auto &enode = ctx.egraph.getENode(ctx.egraph.getEClass(node).enodes[ctx.selection_map.at(node)]);
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = ctx.egraph.findConst(child);
+                bool has_other_undispatched_reader = false;
+
+                for (const auto &kv : ctx.selection_map)
+                {
+                    if (kv.first == node || dispatched.count(kv.first))
+                        continue;
+                    const auto &other_node = ctx.egraph.getENode(ctx.egraph.getEClass(kv.first).enodes[kv.second]);
+                    for (EClassId other_child : other_node.getChildren())
+                    {
+                        if (ctx.egraph.findConst(other_child) == canon_child)
+                        {
+                            has_other_undispatched_reader = true;
+                            break;
+                        }
+                    }
+                    if (has_other_undispatched_reader)
+                        break;
+                }
+
+                if (!has_other_undispatched_reader)
+                {
+                    return true; // `node` is the last reader of `canon_child`
+                }
+            }
+            return false;
+        };
+
+        bool cand_frees = frees_buffers(candidate);
+        if (cand_frees)
+            return false; // Candidate frees memory; not dominated
+
+        // Check if there is another ready node `other` on the same engine that frees memory with <= cost
+        for (size_t i = 0; i < ctx.current_ready.size(); ++i)
+        {
+            if (i == candidate_idx)
+                continue;
+            EClassId other = ctx.current_ready[i];
+            const auto &other_enode =
+                ctx.egraph.getENode(ctx.egraph.getEClass(other).enodes[ctx.selection_map.at(other)]);
+            if (other_enode.getEngines().empty() || other_enode.getEngines()[0] != cand_engine)
+                continue;
+
+            float other_cost =
+                ctx.enodeInfos[ctx.egraph.getEClass(other).enodes[ctx.selection_map.at(other)].value].cost;
+            if (other_cost <= cand_cost + 1e-6f && frees_buffers(other))
+            {
+                return true; // `candidate` is dominated by `other`
+            }
+        }
+
+        return false;
+    }
+};
+
+// =============================================================================
+// Single-Engine Generalization Rule
+// =============================================================================
+class SingleEngineDispatchDominationRule : public IDispatchDominationRule
+{
+  public:
+    std::string name() const override
+    {
+        return "SingleEngineDispatchDomination";
+    }
+
+    bool is_dominated(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) override
+    {
+        if (candidate_idx == 0 || ctx.current_ready.size() <= 1)
+            return false;
+
+        const auto &enode0 = ctx.egraph.getENode(
+            ctx.egraph.getEClass(ctx.current_ready[0]).enodes[ctx.selection_map.at(ctx.current_ready[0])]);
+        if (enode0.getEngines().empty())
+            return false;
+        const Engine &target_engine = enode0.getEngines()[0];
+
+        for (size_t i = 1; i < ctx.current_ready.size(); ++i)
+        {
+            const auto &enode = ctx.egraph.getENode(
+                ctx.egraph.getEClass(ctx.current_ready[i]).enodes[ctx.selection_map.at(ctx.current_ready[i])]);
+            if (enode.getEngines().empty() || !(enode.getEngines()[0] == target_engine))
+            {
+                return false;
+            }
+        }
+
+        for (const auto &kv : ctx.selection_map)
+        {
+            const auto &enode = ctx.egraph.getENode(ctx.egraph.getEClass(kv.first).enodes[kv.second]);
+            if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+                continue;
+            if (enode.getEngines().empty() || !(enode.getEngines()[0] == target_engine))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+};
+
 struct DispatchIterator
 {
   public:
+    std::vector<std::shared_ptr<IDispatchDominationRule>> domination_rules;
+
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &_enode_infos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
         : egraph(_egraph), enodeInfos(_enode_infos), delegate(_delegate)
     {
         initOrderState(selection_map);
+    }
+
+    void addDominationRule(std::shared_ptr<IDispatchDominationRule> rule)
+    {
+        domination_rules.push_back(std::move(rule));
+    }
+
+    void clearDominationRules()
+    {
+        domination_rules.clear();
     }
 
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
@@ -86,12 +364,13 @@ struct DispatchIterator
                 }
             }
 
-            uint32_t choice_idx = selection_at_pos[pos];
-
-            if (choice_idx < current_ready.size())
+            bool chosen = false;
+            while (selection_at_pos[pos] < current_ready.size())
             {
+                uint32_t choice_idx = selection_at_pos[pos];
                 selection_at_pos[pos] = choice_idx + 1;
                 uint32_t choice = choice_idx;
+
                 if (delegate)
                 {
                     std::vector<ActionFeatureExtractDispatch> features;
@@ -146,6 +425,25 @@ struct DispatchIterator
                 }
 
                 EClassId node = current_ready[choice];
+
+                if (!domination_rules.empty())
+                {
+                    DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos};
+                    bool dominated = false;
+                    for (const auto &rule : domination_rules)
+                    {
+                        if (rule->is_dominated(node, choice, ctx))
+                        {
+                            dominated = true;
+                            break;
+                        }
+                    }
+                    if (dominated)
+                    {
+                        continue;
+                    }
+                }
+
                 ordered.push_back(node);
                 chosen_at_pos[pos] = node;
                 choice_at_pos[pos] = choice;
@@ -162,8 +460,11 @@ struct DispatchIterator
                         added_nodes_at_pos[pos].push_back(dep);
                     }
                 }
+                chosen = true;
+                break;
             }
-            else
+
+            if (!chosen)
             {
                 selection_at_pos[pos] = 0;
                 if (delegate && delegate->fast_fail())

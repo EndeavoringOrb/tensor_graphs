@@ -125,14 +125,14 @@ def generate_random_graph(
         np.random.seed(seed)
 
     g = tensor_graphs.Graph()
-    
+
     available_nodes = []
-    
+
     # Establish base inputs
     in0 = g.input([1, seq_len, hidden_dim], tensor_graphs.DType.FLOAT32)
     in1 = g.input([1, seq_len, hidden_dim], tensor_graphs.DType.FLOAT32)
     in_w = g.input([1, hidden_dim, hidden_dim], tensor_graphs.DType.FLOAT32)
-    
+
     available_nodes.append((in0, [1, seq_len, hidden_dim]))
     available_nodes.append((in1, [1, seq_len, hidden_dim]))
     available_nodes.append((in_w, [1, hidden_dim, hidden_dim]))
@@ -141,17 +141,17 @@ def generate_random_graph(
     runtime_inputs = {in0, in1, in_w}
 
     op_choices = [
-        "unary", 
-        "binary", 
-        "dot", 
-        "reduce", 
-        "reshape", 
-        "permute", 
-        "concat", 
+        "unary",
+        "binary",
+        "dot",
+        "reduce",
+        "reshape",
+        "permute",
+        "concat",
         "repeat",
         "slice",
         "triu",
-        "fill"
+        "fill",
     ]
 
     for _ in range(num_nodes):
@@ -195,8 +195,11 @@ def generate_random_graph(
                 K = shape1[-1]
                 # Dot: requires identical prefix ranks and compatible inner K dimension
                 compat_nodes = [
-                    n for n in available_nodes 
-                    if len(n[1]) == len(shape1) and n[1][:-2] == shape1[:-2] and n[1][-2] == K
+                    n
+                    for n in available_nodes
+                    if len(n[1]) == len(shape1)
+                    and n[1][:-2] == shape1[:-2]
+                    and n[1][-2] == K
                 ]
                 if compat_nodes:
                     src2, shape2 = random.choice(compat_nodes)
@@ -209,7 +212,7 @@ def generate_random_graph(
             if len(shape) > 0:
                 axis = random.randint(0, len(shape) - 1)
                 r_op = random.choice(["sum", "max"])
-                ax_id = g.constant([axis]) # Reduction axis requires LogicalId
+                ax_id = g.constant([axis])  # Reduction axis requires LogicalId
                 if r_op == "sum":
                     out = g.sum(src, ax_id)
                 elif r_op == "max":
@@ -222,7 +225,9 @@ def generate_random_graph(
             src, shape = random.choice(available_nodes)
             if len(shape) == 3:
                 out_shape = [shape[0], shape[2], shape[1]]
-                out = g.reshape(src, out_shape) # Reshape python binding takes list[int]
+                out = g.reshape(
+                    src, out_shape
+                )  # Reshape python binding takes list[int]
                 available_nodes.append((out, out_shape))
             elif len(shape) == 2:
                 out_shape = [shape[1], shape[0]]
@@ -286,30 +291,30 @@ def generate_random_graph(
                 if shape[axis] > 1:
                     st = random.randint(0, shape[axis] - 1)
                     en = random.randint(st + 1, shape[axis])
-                    
-                    starts = [0]*len(shape)
+
+                    starts = [0] * len(shape)
                     ends = list(shape)
-                    steps = [1]*len(shape)
-                    
+                    steps = [1] * len(shape)
+
                     starts[axis] = st
                     ends[axis] = en
-                    
+
                     st_id = g.constant(starts)
                     en_id = g.constant(ends)
                     stps_id = g.constant(steps)
-                    
+
                     out = g.slice(src, st_id, en_id, stps_id)
                     out_shape = list(shape)
                     out_shape[axis] = en - st
                     available_nodes.append((out, out_shape))
-        
+
         elif op == "triu":
             src, shape = random.choice(available_nodes)
             if len(shape) >= 2 and shape[-1] == shape[-2]:
                 k_id = g.constant([0])
                 out = g.triu(src, k_id)
                 available_nodes.append((out, list(shape)))
-        
+
         elif op == "fill":
             f_shape = [1, seq_len, hidden_dim]
             out = g.fill(1.0, f_shape)
@@ -318,7 +323,7 @@ def generate_random_graph(
     root, root_shape = available_nodes[-1]
 
     full_bucket = tensor_graphs.Bucket()
-    
+
     reachable_nodes = set()
     stack = [root]
     while stack:
@@ -339,7 +344,7 @@ def generate_random_graph(
             dirty_map[node_id] = [r]
 
     full_bucket.inputDirtyRegions = dirty_map
-    
+
     r_out = tensor_graphs.Region()
     r_out.region = [tensor_graphs.Dim(0, d) for d in root_shape]
     full_bucket.outputNeededRegion = [r_out]
@@ -411,9 +416,7 @@ class RandomGraphProvider:
             )
 
             rng = random.Random(seed)
-            mem_cap = rng.randint(
-                1 * 1024, 256 * 1024 * 1024
-            )  # 1KB to 256MB
+            mem_cap = rng.randint(1 * 1024, 256 * 1024 * 1024)  # 1KB to 256MB
 
             self._cached_context = tensor_graphs.build_and_saturate_egraph_from_graph(
                 graph, root, buckets, config.log_cost_calls, mem_cap

@@ -38,10 +38,12 @@ def downsample_for_plotting(x, y, max_points=20_000):
     row_idx = np.arange(x_view.shape[0])
 
     # Interleave min and max points in chronological order
-    take_idx = np.column_stack([
-        np.minimum(min_indices, max_indices),
-        np.maximum(min_indices, max_indices),
-    ])
+    take_idx = np.column_stack(
+        [
+            np.minimum(min_indices, max_indices),
+            np.maximum(min_indices, max_indices),
+        ]
+    )
 
     x_down = np.take_along_axis(x_view, take_idx, axis=1).ravel()
     y_down = np.take_along_axis(y_view, take_idx, axis=1).ravel()
@@ -123,9 +125,7 @@ def main():
             label="Extracted Cost (ms)",
             rasterized=True,
         )
-        ax.set_title(
-            f"Extracted Cost over Episodes ({len(cost_indices):,} points)"
-        )
+        ax.set_title(f"Extracted Cost over Episodes ({len(cost_indices):,} points)")
         ax.set_xlabel("Episode / Sample")
         ax.set_ylabel("Cost (ms)")
         ax.grid(True, which="both", linestyle="--", alpha=0.5)

@@ -304,9 +304,9 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             gf_t = torch.tensor(
                 prefix.global_feature, dtype=torch.float32, device=device
             ).unsqueeze(0)
-            nf_t = torch.tensor(
-                dummy_nf, dtype=torch.float32, device=device
-            ).unsqueeze(0)
+            nf_t = torch.tensor(dummy_nf, dtype=torch.float32, device=device).unsqueeze(
+                0
+            )
             e_t = torch.tensor(dummy_e, dtype=torch.int64, device=device)
             pid_t = torch.tensor([prefix.phase_id], dtype=torch.int64, device=device)
 
@@ -357,7 +357,9 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             log_probs = F.log_softmax(logits_f32, dim=1)
 
             # Cleanly compute cross entropy policy loss without gradient leakage
-            safe_log_probs = torch.where(action_mask, log_probs, torch.zeros_like(log_probs))
+            safe_log_probs = torch.where(
+                action_mask, log_probs, torch.zeros_like(log_probs)
+            )
             per_item_p_loss = -(padded_pis * safe_log_probs).sum(dim=1)
             p_loss = per_item_p_loss.mean()
 

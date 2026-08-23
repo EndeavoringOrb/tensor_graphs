@@ -107,8 +107,6 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_gr
     ctx->baseNodeToEClass = planner.baseState.nodeToEClass;
     ctx->baseEclassToLogical = planner.baseState.eclassToLogical;
 
-    ctx->costModel.load("benchmarks/records.bin");
-
     return ctx;
 }
 
@@ -295,8 +293,6 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
     ctx->baseEGraph = planner.baseState.egraph;
     ctx->baseNodeToEClass = planner.baseState.nodeToEClass;
     ctx->baseEclassToLogical = planner.baseState.eclassToLogical;
-
-    ctx->costModel.load("benchmarks/records.bin");
 
     return ctx;
 }

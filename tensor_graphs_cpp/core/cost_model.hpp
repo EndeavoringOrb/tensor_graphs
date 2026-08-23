@@ -395,11 +395,15 @@ struct CostModel
     bool doneWarning = false;
     bool enableLogging = false;
 
-    CostModel(bool logCalls = true) : enableLogging(logCalls)
+    CostModel(bool logCalls = true, const std::string &recordsPath = "benchmarks/records.bin") : enableLogging(logCalls)
     {
         if (enableLogging)
         {
             initLogging();
+        }
+        if (!recordsPath.empty() && std::filesystem::exists(recordsPath))
+        {
+            load(recordsPath);
         }
     }
 

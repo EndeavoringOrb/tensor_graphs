@@ -683,6 +683,19 @@ struct Planner
                         info.cost = TGConstants::INF;
                     }
                 }
+
+                // 1. Pre-extraction Memory Cap Check for INPUT / CACHE
+                MemSpace ms = enode.getMemSpace();
+                if (ms.type != HandleType::STORAGE && mem_caps.count(ms))
+                {
+                    uint64_t cap = mem_caps.at(ms);
+                    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) &
+                                        ~4095ULL; // TODO: make & use alignment size var somewhere
+                    if (out_size > cap)
+                    {
+                        info.cost = TGConstants::INF;
+                    }
+                }
             }
             else if (enode.getKernelId() != KernelId{0})
             {
@@ -806,6 +819,63 @@ struct Planner
 
                 info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
                                                    enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
+
+                // 2. Pre-extraction Memory Cap Check:
+                // If ((size of output if not inplace else 0) + size of inputs for an enode) > mem_cap, prune it
+                MemSpace ms = enode.getMemSpace();
+                if (ms.type != HandleType::STORAGE && mem_caps.count(ms))
+                {
+                    uint64_t cap = mem_caps.at(ms);
+                    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
+
+                    bool can_be_inplace = false;
+                    if (info.is_view)
+                    {
+                        can_be_inplace = true;
+                    }
+                    else if (enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
+                    {
+                        const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
+                        for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
+                        {
+                            if (inplace_idx < enode.getChildren().size())
+                            {
+                                EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
+                                const EClass &cCls = egraph.getEClass(child);
+                                if (cCls.mem_space == ms)
+                                {
+                                    uint64_t in_size = (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
+                                    if (out_size <= in_size)
+                                    {
+                                        can_be_inplace = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    uint64_t sum_inputs_in_ms = 0;
+                    std::unordered_set<EClassId> seen_children;
+                    for (EClassId child : enode.getChildren())
+                    {
+                        EClassId canon_child = egraph.findConst(child);
+                        if (seen_children.insert(canon_child).second)
+                        {
+                            const EClass &cCls = egraph.getEClass(canon_child);
+                            if (cCls.mem_space == ms)
+                            {
+                                sum_inputs_in_ms += (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
+                            }
+                        }
+                    }
+
+                    uint64_t required_mem = (can_be_inplace ? 0 : out_size) + sum_inputs_in_ms;
+                    if (required_mem > cap)
+                    {
+                        info.cost = TGConstants::INF;
+                    }
+                }
             }
             else
             {
@@ -1076,30 +1146,12 @@ struct Planner
             std::vector<EClassId> conflict_nodes;
 
             // 2. Compute dispatch order
-            Engine first_engine = Engine{UINT32_MAX, EngineType::CPU};
-            bool single_engine = true;
-            for (const auto &kv : selection_map)
-            {
-                uint32_t sel = kv.second;
-                ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
-                const ENode &enode = egraph.getENode(enode_id);
-                for (const auto &eng : enode.getEngines())
-                {
-                    if (first_engine == Engine{UINT32_MAX, EngineType::CPU})
-                    {
-                        first_engine = eng;
-                    }
-                    else if (first_engine != eng)
-                    {
-                        single_engine = false;
-                        break;
-                    }
-                }
-                if (!single_engine)
-                    break;
-            }
-
             DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
+            dispatch_iterator.addDominationRule(std::make_shared<SingleEngineDispatchDominationRule>());
+            dispatch_iterator.addDominationRule(std::make_shared<MultiEngineCommutativityRule>());
+            dispatch_iterator.addDominationRule(std::make_shared<DisjointSubgraphSymmetryRule>());
+            dispatch_iterator.addDominationRule(std::make_shared<LastReaderBufferFreeDominationRule>());
+
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
@@ -1114,7 +1166,7 @@ struct Planner
                     best_eclass_to_buf = eclass_to_buf;
                     LOG(INFO) << "new best cost " << best_cost;
                 }
-                if (stopOnFirstValid || single_engine)
+                if (stopOnFirstValid)
                 {
                     break;
                 }
@@ -1407,9 +1459,16 @@ struct Planner
                 std::vector<EClassId> children;
                 for (LogicalId pid : node.child_ids)
                     children.push_back(baseState.egraph.findConst(baseState.nodeToEClass[pid]));
-                ENode enode = ENode(
-                    KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype,
-                    graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, node.contentHash);
+
+                std::string contentHash = node.contentHash;
+                if (graph.getInputDataType(nodeId) == InputDataType::RUNTIME)
+                {
+                    contentHash = toString(nodeId);
+                }
+
+                ENode enode =
+                    ENode(KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype,
+                          graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, contentHash);
                 baseState.egraph.addENode(e_class_id, enode);
                 continue;
             }
