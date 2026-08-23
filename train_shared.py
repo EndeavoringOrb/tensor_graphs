@@ -34,7 +34,7 @@ class TrainConfig:
     random_hidden_dim: int = 128
     random_seq_len: int = 64
     random_seed: int | None = None
-    resample_graph_every: int = 0
+    resample_graph_every: int = 1
 
     # Transformer Architecture Config
     d_model: int = 32
@@ -94,7 +94,6 @@ DEFAULT_MODEL_PATHS = {
     "krea-2-turbo-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
     "vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
     "qwen-image-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
-    "qwen-image-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
     "qwen3-vl": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
     "qwen3-vl-bf16": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
     "qwen3vl": "models/krea/Krea-2-Turbo/qwen3vl_4b_bf16.safetensors",
@@ -120,66 +119,206 @@ def generate_random_graph(
     seq_len: int = 64,
     seed: int | None = None,
 ) -> tuple[tensor_graphs.Graph, tensor_graphs.LogicalId, list]:
+    """Generates an extensive, shape-compatible random computation graph."""
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
 
     g = tensor_graphs.Graph()
-    shape_standard = [1, seq_len, hidden_dim]
-    shape_proj = [1, hidden_dim, hidden_dim]
+    
+    available_nodes = []
+    
+    # Establish base inputs
+    in0 = g.input([1, seq_len, hidden_dim], tensor_graphs.DType.FLOAT32)
+    in1 = g.input([1, seq_len, hidden_dim], tensor_graphs.DType.FLOAT32)
+    in_w = g.input([1, hidden_dim, hidden_dim], tensor_graphs.DType.FLOAT32)
+    
+    available_nodes.append((in0, [1, seq_len, hidden_dim]))
+    available_nodes.append((in1, [1, seq_len, hidden_dim]))
+    available_nodes.append((in_w, [1, hidden_dim, hidden_dim]))
 
-    in0 = g.input(shape_standard, tensor_graphs.DType.FLOAT32)
-    in1 = g.input(shape_standard, tensor_graphs.DType.FLOAT32)
-    in_w = g.input(shape_proj, tensor_graphs.DType.FLOAT32)
+    # Keep track of specifically the runtime inputs for dirtiness mapping
+    runtime_inputs = {in0, in1, in_w}
 
-    available_nodes = [in0, in1]
-    weights = [in_w]
+    op_choices = [
+        "unary", 
+        "binary", 
+        "dot", 
+        "reduce", 
+        "reshape", 
+        "permute", 
+        "concat", 
+        "repeat",
+        "slice",
+        "triu",
+        "fill"
+    ]
 
     for _ in range(num_nodes):
-        op_choice = random.choice(
-            ["elementwise", "unary", "dot"]
-        )
+        op = random.choice(op_choices)
 
-        if op_choice == "unary":
-            src = random.choice(available_nodes)
-            u_op = random.choice(["sin", "cos", "neg"])
+        if op == "unary":
+            src, shape = random.choice(available_nodes)
+            u_op = random.choice(["sin", "cos", "neg", "log", "relu"])
             if u_op == "sin":
-                node = g.sin(src)
+                out = g.sin(src)
             elif u_op == "cos":
-                node = g.cos(src)
-            else:
-                node = g.neg(src)
-            available_nodes.append(node)
+                out = g.cos(src)
+            elif u_op == "neg":
+                out = g.neg(src)
+            elif u_op == "log":
+                out = g.log(src)
+            elif u_op == "relu":
+                out = g.relu(src, shape)
+            available_nodes.append((out, list(shape)))
 
-        elif op_choice == "elementwise":
-            src1 = random.choice(available_nodes)
-            src2 = random.choice(available_nodes)
-            b_op = random.choice(["add", "mul"])
-            if b_op == "add":
-                node = g.add(src1, src2)
-            else:
-                node = g.mul(src1, src2)
-            available_nodes.append(node)
+        elif op == "binary":
+            src1, shape1 = random.choice(available_nodes)
+            # Binary element-wise requires exact shape match
+            compat_nodes = [n for n in available_nodes if n[1] == shape1]
+            if compat_nodes:
+                src2, _ = random.choice(compat_nodes)
+                b_op = random.choice(["add", "mul", "div", "pow"])
+                if b_op == "add":
+                    out = g.add(src1, src2)
+                elif b_op == "mul":
+                    out = g.mul(src1, src2)
+                elif b_op == "div":
+                    out = g.div(src1, src2)
+                elif b_op == "pow":
+                    out = g.pow(src1, src2)
+                available_nodes.append((out, list(shape1)))
 
-        elif op_choice == "dot":
-            src = random.choice(available_nodes)
-            w = random.choice(weights)
-            node = g.dot(src, w)
-            available_nodes.append(node)
+        elif op == "dot":
+            src1, shape1 = random.choice(available_nodes)
+            if len(shape1) >= 2:
+                K = shape1[-1]
+                # Dot: requires identical prefix ranks and compatible inner K dimension
+                compat_nodes = [
+                    n for n in available_nodes 
+                    if len(n[1]) == len(shape1) and n[1][:-2] == shape1[:-2] and n[1][-2] == K
+                ]
+                if compat_nodes:
+                    src2, shape2 = random.choice(compat_nodes)
+                    out = g.dot(src1, src2)
+                    out_shape = list(shape1[:-1]) + [shape2[-1]]
+                    available_nodes.append((out, out_shape))
 
-    root = available_nodes[-1]
+        elif op == "reduce":
+            src, shape = random.choice(available_nodes)
+            if len(shape) > 0:
+                axis = random.randint(0, len(shape) - 1)
+                r_op = random.choice(["sum", "max"])
+                ax_id = g.constant([axis]) # Reduction axis requires LogicalId
+                if r_op == "sum":
+                    out = g.sum(src, ax_id)
+                elif r_op == "max":
+                    out = g.max(src, ax_id)
+                out_shape = list(shape)
+                out_shape[axis] = 1
+                available_nodes.append((out, out_shape))
+
+        elif op == "reshape":
+            src, shape = random.choice(available_nodes)
+            if len(shape) == 3:
+                out_shape = [shape[0], shape[2], shape[1]]
+                out = g.reshape(src, out_shape) # Reshape python binding takes list[int]
+                available_nodes.append((out, out_shape))
+            elif len(shape) == 2:
+                out_shape = [shape[1], shape[0]]
+                out = g.reshape(src, out_shape)
+                available_nodes.append((out, out_shape))
+
+        elif op == "permute":
+            src, shape = random.choice(available_nodes)
+            if len(shape) == 3:
+                dims = [0, 2, 1]
+                dims_id = g.constant(dims)
+                out = g.permute(src, dims_id)
+                out_shape = [shape[dims[0]], shape[dims[1]], shape[dims[2]]]
+                available_nodes.append((out, out_shape))
+            elif len(shape) == 2:
+                dims = [1, 0]
+                dims_id = g.constant(dims)
+                out = g.permute(src, dims_id)
+                out_shape = [shape[dims[0]], shape[dims[1]]]
+                available_nodes.append((out, out_shape))
+
+        elif op == "concat":
+            src1, shape1 = random.choice(available_nodes)
+            if len(shape1) > 0:
+                axis = random.randint(0, len(shape1) - 1)
+                compat_nodes = []
+                for n in available_nodes:
+                    s2 = n[1]
+                    if len(s2) == len(shape1):
+                        match = True
+                        for d in range(len(shape1)):
+                            if d != axis and shape1[d] != s2[d]:
+                                match = False
+                                break
+                        if match:
+                            compat_nodes.append(n)
+                if compat_nodes:
+                    src2, shape2 = random.choice(compat_nodes)
+                    out = g.concat([src1, src2], axis)
+                    out_shape = list(shape1)
+                    out_shape[axis] = shape1[axis] + shape2[axis]
+                    available_nodes.append((out, out_shape))
+
+        elif op == "repeat":
+            src, shape = random.choice(available_nodes)
+            if len(shape) > 0:
+                # Find an axis with size 1 to satisfy native striding constraints
+                ones = [i for i, d in enumerate(shape) if d == 1]
+                if ones:
+                    axis = random.choice(ones)
+                    repeats = random.choice([2, 3])
+                    out = g.repeat(src, repeats, axis)
+                    out_shape = list(shape)
+                    out_shape[axis] *= repeats
+                    available_nodes.append((out, out_shape))
+
+        elif op == "slice":
+            src, shape = random.choice(available_nodes)
+            if len(shape) > 0:
+                axis = random.randint(0, len(shape) - 1)
+                if shape[axis] > 1:
+                    st = random.randint(0, shape[axis] - 1)
+                    en = random.randint(st + 1, shape[axis])
+                    
+                    starts = [0]*len(shape)
+                    ends = list(shape)
+                    steps = [1]*len(shape)
+                    
+                    starts[axis] = st
+                    ends[axis] = en
+                    
+                    st_id = g.constant(starts)
+                    en_id = g.constant(ends)
+                    stps_id = g.constant(steps)
+                    
+                    out = g.slice(src, st_id, en_id, stps_id)
+                    out_shape = list(shape)
+                    out_shape[axis] = en - st
+                    available_nodes.append((out, out_shape))
+        
+        elif op == "triu":
+            src, shape = random.choice(available_nodes)
+            if len(shape) >= 2 and shape[-1] == shape[-2]:
+                k_id = g.constant([0])
+                out = g.triu(src, k_id)
+                available_nodes.append((out, list(shape)))
+        
+        elif op == "fill":
+            f_shape = [1, seq_len, hidden_dim]
+            out = g.fill(1.0, f_shape)
+            available_nodes.append((out, f_shape))
+
+    root, root_shape = available_nodes[-1]
 
     full_bucket = tensor_graphs.Bucket()
-    dim_b = tensor_graphs.Dim(0, 1)
-    dim_s = tensor_graphs.Dim(0, seq_len)
-    dim_h = tensor_graphs.Dim(0, hidden_dim)
-
-    r_in = tensor_graphs.Region()
-    r_in.region = [dim_b, dim_s, dim_h]
-
-    r_w = tensor_graphs.Region()
-    r_w.region = [dim_b, dim_h, dim_h]
-
+    
     reachable_nodes = set()
     stack = [root]
     while stack:
@@ -192,15 +331,18 @@ def generate_random_graph(
             stack.append(child)
 
     dirty_map = {}
-    if in0 in reachable_nodes:
-        dirty_map[in0] = [r_in]
-    if in1 in reachable_nodes:
-        dirty_map[in1] = [r_in]
-    if in_w in reachable_nodes:
-        dirty_map[in_w] = [r_w]
+    for node_id in reachable_nodes:
+        if node_id in runtime_inputs:
+            node = g.getNode(node_id)
+            r = tensor_graphs.Region()
+            r.region = [tensor_graphs.Dim(0, d) for d in node.shape]
+            dirty_map[node_id] = [r]
 
     full_bucket.inputDirtyRegions = dirty_map
-    full_bucket.outputNeededRegion = [r_in]
+    
+    r_out = tensor_graphs.Region()
+    r_out.region = [tensor_graphs.Dim(0, d) for d in root_shape]
+    full_bucket.outputNeededRegion = [r_out]
 
     return g, root, [full_bucket]
 
@@ -270,8 +412,8 @@ class RandomGraphProvider:
 
             rng = random.Random(seed)
             mem_cap = rng.randint(
-                32 * 1024 * 1024, 256 * 1024 * 1024
-            )  # 32MB to 256MB for small graphs
+                1 * 1024, 256 * 1024 * 1024
+            )  # 1KB to 256MB
 
             self._cached_context = tensor_graphs.build_and_saturate_egraph_from_graph(
                 graph, root, buckets, config.log_cost_calls, mem_cap
