@@ -150,7 +150,7 @@ inline void testInplaceAliasEraseOnNewBuffer()
             selection_map[canon] = 0;
     }
 
-    DispatchIterator dispatch_iter(egraph, selection_map, enodeInfos);
+    auto dispatch_iter = makeDispatchIterator(egraph, selection_map, enodeInfos);
     std::vector<EClassId> order;
     if (!dispatch_iter.getNextDispatchOrder(selection_map, order))
     {
@@ -233,7 +233,7 @@ inline void testBuildBuffersCoverageAndFallback()
             selection_map[canon] = 0;
     }
 
-    DispatchIterator dispatch_iter(egraph, selection_map, enodeInfos);
+    auto dispatch_iter = makeDispatchIterator(egraph, selection_map, enodeInfos);
     std::vector<EClassId> order;
     if (!dispatch_iter.getNextDispatchOrder(selection_map, order))
     {

@@ -47,9 +47,8 @@ void runDispatchDominationTests()
                 selection_map[canon] = 0;
         }
 
-        // Unconstrained
-        DispatchIterator iterUnconstrained(egraph, selection_map, enodeInfos);
-        iterUnconstrained.clearDominationRules();
+        // Unconstrained (empty pruning rule set)
+        auto iterUnconstrained = makeDispatchIterator(egraph, selection_map, enodeInfos);
         std::vector<EClassId> order;
         uint32_t count_unconstrained = 0;
         float min_cost_unconstrained = TGConstants::INF;
@@ -60,12 +59,10 @@ void runDispatchDominationTests()
                 std::min(min_cost_unconstrained, get_cost(order, egraph, selection_map, enodeInfos));
         }
 
-        // All Rules
-        DispatchIterator iterAllRules(egraph, selection_map, enodeInfos);
-        iterAllRules.addDominationRule(std::make_shared<SingleEngineDispatchDominationRule>());
-        iterAllRules.addDominationRule(std::make_shared<MultiEngineCommutativityRule>());
-        iterAllRules.addDominationRule(std::make_shared<DisjointSubgraphSymmetryRule>());
-        iterAllRules.addDominationRule(std::make_shared<LastReaderBufferFreeDominationRule>());
+        // All Rules -- registered as template parameters (compile-time dispatch, no vtables)
+        auto iterAllRules = makeDispatchIterator(egraph, selection_map, enodeInfos,
+                                                 SingleEngineDispatchDominationRule{}, MultiEngineCommutativityRule{},
+                                                 DisjointSubgraphSymmetryRule{}, LastReaderBufferFreeDominationRule{});
 
         uint32_t count_all_rules = 0;
         float min_cost_all_rules = TGConstants::INF;

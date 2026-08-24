@@ -553,8 +553,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             extract_count++;
             const auto &selection_map = extractor.selection_map;
 
-            // Dispatch (Level 2)
-            DispatchIterator dispatch_iterator(state->egraph, selection_map, state->enodeInfos, delegate);
+            // Dispatch (Level 2) -- unconstrained (empty pruning rule set)
+            DispatchIterator<> dispatch_iterator(state->egraph, selection_map, state->enodeInfos, delegate);
             uint32_t dispatch_count = 0;
             std::vector<EClassId> order;
 

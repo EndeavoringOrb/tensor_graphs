@@ -108,7 +108,7 @@ inline void runBufferizeDominationTests()
         }
 
         // Get a valid dispatch order
-        DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
+        auto dispatch_iterator = makeDispatchIterator(egraph, selection_map, enodeInfos);
         std::vector<EClassId> order;
         if (!dispatch_iterator.getNextDispatchOrder(selection_map, order))
         {
@@ -227,7 +227,7 @@ inline void runBufferizeDominationTests()
             selection_map[canon] = chosen_idx;
         }
 
-        DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
+        auto dispatch_iterator = makeDispatchIterator(egraph, selection_map, enodeInfos);
         std::vector<EClassId> order;
         if (!dispatch_iterator.getNextDispatchOrder(selection_map, order))
         {

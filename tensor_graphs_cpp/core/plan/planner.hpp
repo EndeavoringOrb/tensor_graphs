@@ -1270,11 +1270,9 @@ struct Planner
             float cost = TGConstants::INF;
             std::vector<EClassId> conflict_nodes;
 
-            DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
-            // dispatch_iterator.addDominationRule(std::make_shared<SingleEngineDispatchDominationRule>());
-            dispatch_iterator.addDominationRule(std::make_shared<MultiEngineCommutativityRule>());
-            dispatch_iterator.addDominationRule(std::make_shared<DisjointSubgraphSymmetryRule>());
-            // dispatch_iterator.addDominationRule(std::make_shared<LastReaderBufferFreeDominationRule>());
+            auto dispatch_iterator =
+                makeDispatchIterator(egraph, selection_map, enodeInfos, SingleEngineDispatchDominationRule{},
+                                     MultiEngineCommutativityRule{}, DisjointSubgraphSymmetryRule{}); // LastReaderBufferFreeDominationRule{}
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
@@ -1356,15 +1354,15 @@ struct Planner
                 {
                     extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
                     LOG(INFO) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                               << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
-                               << " (path index " << best_conflict_pos << ") to resolve OOM.";
+                              << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
+                              << " (path index " << best_conflict_pos << ") to resolve OOM.";
                 }
                 else if (max_conflict_path_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
                     LOG(INFO) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                               << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
-                               << " (path index " << max_conflict_path_pos << ")";
+                              << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
+                              << " (path index " << max_conflict_path_pos << ")";
                 }
             }
 
