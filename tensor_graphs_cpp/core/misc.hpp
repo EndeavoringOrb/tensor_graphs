@@ -443,21 +443,6 @@ inline TensorView makeView(const TensorNode &node)
     return view;
 }
 
-inline uint64_t getRequiredBufferSize(const TensorView &view)
-{
-    if (view.getShape().empty())
-        return 1;
-    uint64_t maxOffset = 0;
-    for (uint64_t i = 0; i < view.getShape().size(); ++i)
-    {
-        if (view.getShape()[i] > 0)
-        {
-            maxOffset += (view.getShape()[i] - 1) * view.strides[i];
-        }
-    }
-    return maxOffset + 1;
-}
-
 inline std::vector<float> flattenOutput(const void *ptr, const std::vector<uint32_t> &shape,
                                         const std::vector<uint64_t> &strides, DType dtype)
 {

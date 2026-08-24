@@ -68,7 +68,7 @@ class ENode
     {
         return mem_space;
     }
-    const std::vector<Engine> getEngines() const
+    const std::vector<Engine> &getEngines() const
     {
         return engines;
     }

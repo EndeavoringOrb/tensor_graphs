@@ -81,3 +81,30 @@ bool compareOutputs(const bool *ref, const bool *test, uint64_t elements, float 
     }
     return true;
 }
+
+inline void populateDummyRecords(CostModel &costModel, const EGraph &egraph, float defaultRuntime = 1.0f)
+{
+    for (const auto &enode : egraph.getENodes())
+    {
+        KernelId kid = enode.getKernelId();
+        if (kid.value != 0 && kid.value != UINT32_MAX && costModel.records.find(kid) == costModel.records.end())
+        {
+            Record r;
+            r.kernelId = kid;
+            r.buildContextId = BUILD_CONTEXT_ID;
+            r.hwTag = HW_TAG;
+            r.outputShape = enode.getShape();
+            r.outputStrides = enode.getStrides();
+            r.outputDType = enode.getDType();
+            for (EClassId child : enode.getChildren())
+            {
+                const auto &cCls = egraph.getEClass(egraph.findConst(child));
+                r.inputShapes.push_back(cCls.shape);
+                r.inputStrides.push_back(cCls.strides);
+                r.inputDTypes.push_back(cCls.dtype);
+            }
+            r.runTime = defaultRuntime;
+            costModel.records[kid].push_back(r);
+        }
+    }
+}

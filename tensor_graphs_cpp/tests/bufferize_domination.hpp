@@ -13,10 +13,12 @@
 #include "core/plan/validators/mem.hpp"
 #include "core/types.hpp"
 
+#include "tests/common.hpp"
+
 inline void runBufferizeDominationTests()
 {
     std::cout << "bufferize domination optimality tests" << std::endl << std::flush;
-    CostModel costModel;
+    CostModel costModel(false, "");
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}};
 
     // Register reference kernels with safe_inplace_idxs enabled for testing
@@ -41,6 +43,22 @@ inline void runBufferizeDominationTests()
         registered = true;
     }
 
+    for (uint64_t kid : {0xBB0001ULL, 0xBB0002ULL, 0xBB0003ULL})
+    {
+        Record r;
+        r.kernelId = KernelId{kid};
+        r.buildContextId = BUILD_CONTEXT_ID;
+        r.hwTag = HW_TAG;
+        r.outputShape = {8, 8};
+        r.outputStrides = {8, 1};
+        r.outputDType = DType::FLOAT32;
+        r.inputShapes = {{8, 8}, {8, 8}};
+        r.inputStrides = {{8, 1}, {8, 1}};
+        r.inputDTypes = {DType::FLOAT32, DType::FLOAT32};
+        r.runTime = 1.0f;
+        costModel.records[r.kernelId].push_back(r);
+    }
+
     // -------------------------------------------------------------------------
     // Test Case 1: Linear Chain & Commutative In-Place Symmetry
     // -------------------------------------------------------------------------
@@ -56,6 +74,7 @@ inline void runBufferizeDominationTests()
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
         Planner planner(costModel, mem_caps);
         planner.initBaseEGraph(root, graph, topo, nullptr);
+        populateDummyRecords(costModel, planner.baseState.egraph);
 
         EGraph egraph = planner.baseState.egraph;
         std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;
@@ -176,6 +195,7 @@ inline void runBufferizeDominationTests()
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
         Planner planner(costModel, mem_caps);
         planner.initBaseEGraph(root, graph, topo, nullptr);
+        populateDummyRecords(costModel, planner.baseState.egraph);
 
         EGraph egraph = planner.baseState.egraph;
         std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;

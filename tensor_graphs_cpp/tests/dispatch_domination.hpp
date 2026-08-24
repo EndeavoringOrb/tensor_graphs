@@ -10,10 +10,12 @@
 #include "core/plan/planner.hpp"
 #include "core/types.hpp"
 
+#include "tests/common.hpp"
+
 void runDispatchDominationTests()
 {
     std::cout << "dispatch domination optimality tests" << std::endl << std::flush;
-    CostModel costModel;
+    CostModel costModel(false, "");
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}};
 
     // -------------------------------------------------------------------------
@@ -30,6 +32,7 @@ void runDispatchDominationTests()
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
         Planner planner(costModel, mem_caps);
         planner.initBaseEGraph(root, graph, topo, nullptr);
+        populateDummyRecords(costModel, planner.baseState.egraph);
 
         EGraph egraph = planner.baseState.egraph;
         std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;

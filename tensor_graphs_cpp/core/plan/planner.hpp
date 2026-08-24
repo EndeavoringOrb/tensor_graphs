@@ -1151,8 +1151,8 @@ struct Planner
 
         if (totalPruned > 0)
         {
-            std::cout << "[Planner.pruneEGraph] Pruned " << totalPruned << " dominated enodes from the search space."
-                      << std::endl;
+            LOG(DEBUG) << "[Planner.pruneEGraph] Pruned " << totalPruned << " dominated enodes from the search space."
+                       << std::endl;
         }
     }
 
@@ -1235,7 +1235,7 @@ struct Planner
 
         int max_iters = 10'000'000;
         int remaining_iters = max_iters;
-        ProgressTimer timer(max_iters, "extracting graphs");
+        ProgressTimer timer(max_iters, "extracting graphs", false, false, 2.0, LogLevel::INFO);
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
         LOG(INFO) << "entering loop";
@@ -1271,10 +1271,10 @@ struct Planner
             std::vector<EClassId> conflict_nodes;
 
             DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
-            dispatch_iterator.addDominationRule(std::make_shared<SingleEngineDispatchDominationRule>());
+            // dispatch_iterator.addDominationRule(std::make_shared<SingleEngineDispatchDominationRule>());
             dispatch_iterator.addDominationRule(std::make_shared<MultiEngineCommutativityRule>());
             dispatch_iterator.addDominationRule(std::make_shared<DisjointSubgraphSymmetryRule>());
-            dispatch_iterator.addDominationRule(std::make_shared<LastReaderBufferFreeDominationRule>());
+            // dispatch_iterator.addDominationRule(std::make_shared<LastReaderBufferFreeDominationRule>());
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
@@ -1355,14 +1355,14 @@ struct Planner
                 if (best_conflict_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
-                    LOG(DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                    LOG(INFO) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
                                << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
                                << " (path index " << best_conflict_pos << ") to resolve OOM.";
                 }
                 else if (max_conflict_path_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
-                    LOG(DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                    LOG(INFO) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
                                << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
                                << " (path index " << max_conflict_path_pos << ")";
                 }
@@ -1395,7 +1395,8 @@ struct Planner
                                      const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                      const ExtractionResult &extraction,
                                      const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-                                     const std::unordered_map<EClassId, LogicalId> &eclassToLogical)
+                                     const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
+                                     const std::vector<ENodeInfo> &enodeInfos)
     {
         CompiledGraph compiled;
 
@@ -1403,33 +1404,76 @@ struct Planner
         {
             const ENode &enode =
                 egraph.getENode(egraph.getEClass(eclass_id).enodes[extraction.selection_map.at(eclass_id)]);
-            LogicalId logical_id = eclassToLogical.count(eclass_id) ? eclassToLogical.at(eclass_id) : LogicalId();
+
+            LogicalId logical_id;
+            if (eclassToLogical.count(eclass_id))
+            {
+                logical_id = eclassToLogical.at(eclass_id);
+            }
+            else
+            {
+                EClassId base_eclass = resolve_view_alias(eclass_id, egraph, extraction.selection_map, enodeInfos);
+                if (eclassToLogical.count(base_eclass))
+                {
+                    logical_id = eclassToLogical.at(base_eclass);
+                }
+            }
+
+            if (logical_id != LogicalId{UINT32_MAX} && logical_id.value != UINT32_MAX)
+            {
+                compiled.eclass_to_logical[eclass_id] = logical_id;
+            }
 
             OpInstruction inst;
             inst.eclass_id = eclass_id;
             inst.logical_id = logical_id;
             inst.kernel_id = enode.getKernelId();
+
             for (EClassId child : enode.getChildren())
             {
-                inst.children.push_back(egraph.findConst(child));
+                EClassId canon_child = egraph.findConst(child);
+                inst.children.push_back(canon_child);
+
+                if (!compiled.eclass_to_logical.count(canon_child))
+                {
+                    if (eclassToLogical.count(canon_child))
+                    {
+                        compiled.eclass_to_logical[canon_child] = eclassToLogical.at(canon_child);
+                    }
+                    else
+                    {
+                        EClassId base_child =
+                            resolve_view_alias(canon_child, egraph, extraction.selection_map, enodeInfos);
+                        if (eclassToLogical.count(base_child))
+                        {
+                            compiled.eclass_to_logical[canon_child] = eclassToLogical.at(base_child);
+                        }
+                    }
+                }
             }
             inst.inBuffers.resize(inst.children.size());
+
+            auto out_buf_it = extraction.eclass_to_buf.find(eclass_id);
+            BufferId out_buf_id =
+                (out_buf_it != extraction.eclass_to_buf.end()) ? out_buf_it->second : BufferId{UINT32_MAX};
+
             for (uint32_t i = 0; i < extraction.buffers.size(); i++)
             {
-                if (extraction.buffers[i].id == extraction.eclass_to_buf.at(eclass_id))
+                if (out_buf_id.value != UINT32_MAX && extraction.buffers[i].id == out_buf_id)
                 {
                     inst.outBuffer = extraction.buffers[i];
                 }
                 for (uint32_t j = 0; j < inst.children.size(); j++)
                 {
-                    if (extraction.buffers[i].id == extraction.eclass_to_buf.at(inst.children[j]))
+                    auto in_buf_it = extraction.eclass_to_buf.find(inst.children[j]);
+                    if (in_buf_it != extraction.eclass_to_buf.end() && extraction.buffers[i].id == in_buf_it->second)
                     {
                         inst.inBuffers[j] = extraction.buffers[i];
                     }
                 }
             }
 
-            if (graph.hasNode(logical_id))
+            if (logical_id != LogicalId{UINT32_MAX} && logical_id.value != UINT32_MAX && graph.hasNode(logical_id))
             {
                 inst.debugOrigin = graph.getNode(logical_id).debugOrigin;
             }
@@ -1458,19 +1502,33 @@ struct Planner
                 for (uint32_t i = 0; i < inst.children.size(); i++)
                 {
                     EClassId child_id = inst.children[i];
-                    const TensorView &childView = compiled.nodeViews.at(child_id);
-
-                    LogicalId fakeId = tempGraph.input(childView.getShape(), childView.dtype, childView.strides);
-
-                    if (egraph.constantStaging.count(child_id))
+                    if (compiled.nodeViews.count(child_id))
                     {
-                        tempGraph.constantStaging[fakeId] = egraph.constantStaging.at(child_id);
-                    }
+                        const TensorView &childView = compiled.nodeViews.at(child_id);
+                        LogicalId fakeId = tempGraph.input(childView.getShape(), childView.dtype, childView.strides);
 
-                    dummyInputNodes.push_back(tempGraph.getNode(fakeId));
+                        if (egraph.constantStaging.count(child_id))
+                        {
+                            tempGraph.constantStaging[fakeId] = egraph.constantStaging.at(child_id);
+                        }
+                        else if (compiled.constantStaging.count(child_id))
+                        {
+                            tempGraph.constantStaging[fakeId] = compiled.constantStaging.at(child_id);
+                        }
+                        else if (eclassToLogical.count(child_id) &&
+                                 graph.constantStaging.count(eclassToLogical.at(child_id)))
+                        {
+                            tempGraph.constantStaging[fakeId] = graph.constantStaging.at(eclassToLogical.at(child_id));
+                        }
+
+                        dummyInputNodes.push_back(tempGraph.getNode(fakeId));
+                    }
                 }
 
-                final_offset_bytes = compiled.nodeViews.at(inst.children[0]).offset;
+                if (!inst.children.empty() && compiled.nodeViews.count(inst.children[0]))
+                {
+                    final_offset_bytes = compiled.nodeViews.at(inst.children[0]).offset;
+                }
 
                 TensorView dummyOutView(enode.getShape(), final_offset_bytes, enode.getStrides(), enode.getDType());
 
@@ -1489,10 +1547,13 @@ struct Planner
                 std::vector<MemSpace> in_mem_spaces(inst.children.size());
                 for (size_t i = 0; i < inst.children.size(); ++i)
                 {
-                    const auto &view = compiled.nodeViews.at(inst.children[i]);
-                    dummyInputs[i].setShape(view.getShape());
-                    dummyInputs[i].strides = view.strides;
-                    dummyInputs[i].dtype = view.dtype;
+                    if (compiled.nodeViews.count(inst.children[i]))
+                    {
+                        const auto &view = compiled.nodeViews.at(inst.children[i]);
+                        dummyInputs[i].setShape(view.getShape());
+                        dummyInputs[i].strides = view.strides;
+                        dummyInputs[i].dtype = view.dtype;
+                    }
                     in_mem_spaces[i] = inst.inBuffers[i].mem_space;
                 }
                 TensorNode dummyOutput;
@@ -1513,14 +1574,21 @@ struct Planner
                     inst.engines.push_back(Engine{0, EngineType::CPU});
             }
 
-            if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
+            if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE && !is_view)
             {
                 compiled.instructions.push_back(inst);
             }
         }
 
         compiled.nodeCosts = extraction.eclass_to_cost;
-        compiled.eclass_to_logical = eclassToLogical;
+
+        for (const auto &kv : eclassToLogical)
+        {
+            if (!compiled.eclass_to_logical.count(kv.first))
+            {
+                compiled.eclass_to_logical[kv.first] = kv.second;
+            }
+        }
 
         return compiled;
     }
@@ -2220,6 +2288,6 @@ struct Planner
                                       preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds,
                                       delegate, enodeInfos);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
-                                  eclassToLogical);
+                                  eclassToLogical, enodeInfos);
     }
 };

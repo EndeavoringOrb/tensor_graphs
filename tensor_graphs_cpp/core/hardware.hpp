@@ -17,12 +17,18 @@
 #include "core/types.hpp"
 
 #if defined(TG_OS_WINDOWS)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #ifdef min
 #undef min
 #endif
 #ifdef max
 #undef max
+#endif
+#ifdef ERROR
+#undef ERROR
 #endif
 #elif defined(TG_OS_LINUX)
 #include <unistd.h>

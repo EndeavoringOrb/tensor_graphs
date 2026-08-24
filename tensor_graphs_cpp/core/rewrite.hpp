@@ -560,12 +560,6 @@ struct FusionRule : public Rule
             const EClass copySrcCls = egraph.getEClass(egraph.findConst(srcForCopy));
             addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides, copySrcCls.dtype,
                           originalMemSpace, e_class_id);
-
-            auto it = ctx.eclassToLogical.find(egraph.findConst(e_class_id));
-            if (it != ctx.eclassToLogical.end())
-            {
-                ctx.eclassToLogical[newEClass] = it->second;
-            }
         }
     }
 

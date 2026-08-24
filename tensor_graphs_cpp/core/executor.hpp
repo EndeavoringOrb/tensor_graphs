@@ -26,21 +26,13 @@ class Executor
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
 
-        std::unordered_set<EClassId> restored_constants;
-        for (const auto &inst : compiled.instructions)
+        for (const auto &pair : compiled.constantStaging)
         {
-            for (size_t i = 0; i < inst.children.size(); ++i)
+            EClassId eclass_id = pair.first;
+            if (compiled.nodeViews.count(eclass_id))
             {
-                EClassId child = inst.children[i];
-                if (!compiled.has_logical_id(child) && compiled.constantStaging.count(child))
-                {
-                    if (restored_constants.insert(child).second)
-                    {
-                        const ParallelBuffer &buf = inst.inBuffers[i];
-                        memManager.write(buf.mem_space, buf.offset, compiled.constantStaging.at(child)->data(),
-                                         compiled.constantStaging.at(child)->size());
-                    }
-                }
+                const TensorView &view = compiled.nodeViews.at(eclass_id);
+                memManager.write(MemSpace{1, HandleType::CPP}, view.offset, pair.second->data(), pair.second->size());
             }
         }
 

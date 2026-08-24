@@ -13,7 +13,7 @@
 inline void runPreExtractionMemCapTests()
 {
     std::cout << "pre-extraction mem_cap pruning tests" << std::endl << std::flush;
-    CostModel costModel;
+    CostModel costModel(false, "");
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 8ULL * 1024 * 1024}}; // 8 MB cap
 
     Graph graph;
@@ -25,6 +25,32 @@ inline void runPreExtractionMemCapTests()
     Planner planner(costModel, mem_caps);
     planner.initBaseEGraph(addNode, graph, topo, nullptr);
 
+    // Provide a valid non-INF record so unconstrained mode preserves the node
+    EClassId rootEClass = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(addNode));
+    for (ENodeId enodeId : planner.baseState.egraph.getEClass(rootEClass).enodes)
+    {
+        KernelId kid = planner.baseState.egraph.getENode(enodeId).getKernelId();
+        if (kid.value != 0 && kid.value != UINT32_MAX)
+        {
+            Record r;
+            r.kernelId = kid;
+            r.buildContextId = BUILD_CONTEXT_ID;
+            r.hwTag = HW_TAG;
+            r.inputShapes = {{1024, 1024}, {1024, 1024}};
+            r.outputShape = {1024, 1024};
+            r.inputStrides = {{1024, 1}, {1024, 1}};
+            r.outputStrides = {1024, 1};
+            r.inputDTypes = {DType::FLOAT32, DType::FLOAT32};
+            r.outputDType = DType::FLOAT32;
+            r.inputConstants = {{}, {}};
+            r.output_mem_space = MemSpace{1, HandleType::CPP};
+            r.engines = {Engine{0, EngineType::CPU}};
+            r.input_mem_spaces = {MemSpace{1, HandleType::CPP}, MemSpace{1, HandleType::CPP}};
+            r.runTime = 1.0f;
+            costModel.records[kid].push_back(r);
+        }
+    }
+
     EGraph egraph = planner.baseState.egraph;
     std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;
     std::unordered_map<LogicalId, MemSpace> cachedNodes;
@@ -33,7 +59,6 @@ inline void runPreExtractionMemCapTests()
     auto enodeInfos = planner.computeENodeInfos(egraph, eclassToLogical, cachedNodes, false);
     planner.pruneEGraph(egraph, enodeInfos);
 
-    EClassId rootEClass = egraph.findConst(planner.baseState.nodeToEClass.at(addNode));
     // Verify that non-inplace enodes exceeding 8MB are eliminated
     for (ENodeId enodeId : egraph.getEClass(rootEClass).enodes)
     {

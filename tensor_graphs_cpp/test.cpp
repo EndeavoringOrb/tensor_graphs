@@ -25,6 +25,7 @@
 #include "generated/kernels_all.gen.hpp"
 
 #include "tests/bufferize_domination.hpp"
+#include "tests/constant_view_regression.hpp"
 #include "tests/dispatch_domination.hpp"
 #include "tests/enode_domination.hpp"
 #include "tests/fused.hpp"
@@ -33,6 +34,7 @@
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/shape_propagation.hpp"
+#include "tests/view_bufferize_regression.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -64,6 +66,8 @@ int main(int argc, char *argv[])
         runDispatchDominationTests();
         runBufferizeDominationTests();
         runInputHashconsTests();
+        runViewBufferizeRegressionTests();
+        runConstantViewRegressionTests();
         // runRefTests(); TODO: fix python tests
     }
 
@@ -71,6 +75,8 @@ int main(int argc, char *argv[])
     {
         runNonReferenceKernelTests(targetKernel, useRecords, cachePath);
     }
+
+    LOG(INFO) << "finished testing";
 
     return 0;
 }

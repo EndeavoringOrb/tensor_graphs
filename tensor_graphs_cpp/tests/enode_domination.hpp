@@ -11,10 +11,11 @@
 #include "core/plan/planner.hpp"
 #include "core/types.hpp"
 
+#include "tests/common.hpp"
+
 inline void runENodeDominationTests()
 {
     std::cout << "enode domination optimality tests" << std::endl << std::flush;
-    CostModel costModel;
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}};
 
     // Register test kernels: fma_v1 (slower) and fma_v2 (faster)
@@ -39,37 +40,42 @@ inline void runENodeDominationTests()
         registered = true;
     }
 
-    // Set records for costModel: fma_v1 (2.5ms), fma_v2 (0.5ms), fma_v3_inplace (0.5ms)
-    Record r1;
-    r1.kernelId = KernelId{0xED0001};
-    r1.buildContextId = BUILD_CONTEXT_ID;
-    r1.hwTag = HW_TAG;
-    r1.inputShapes = {{8, 8}, {8, 8}};
-    r1.outputShape = {8, 8};
-    r1.inputStrides = {{8, 1}, {8, 1}};
-    r1.outputStrides = {8, 1};
-    r1.inputDTypes = {DType::FLOAT32, DType::FLOAT32};
-    r1.outputDType = DType::FLOAT32;
-    r1.output_mem_space = MemSpace{1, HandleType::CPP};
-    r1.engines = {Engine{0, EngineType::CPU}};
-    r1.input_mem_spaces = {MemSpace{1, HandleType::CPP}, MemSpace{1, HandleType::CPP}};
-    r1.runTime = 2.5f;
-    costModel.records[r1.kernelId].push_back(r1);
+    auto initBaseRecords = [](CostModel &costModel) {
+        Record r1;
+        r1.kernelId = KernelId{0xED0001};
+        r1.buildContextId = BUILD_CONTEXT_ID;
+        r1.hwTag = HW_TAG;
+        r1.inputShapes = {{8, 8}, {8, 8}};
+        r1.outputShape = {8, 8};
+        r1.inputStrides = {{8, 1}, {8, 1}};
+        r1.outputStrides = {8, 1};
+        r1.inputDTypes = {DType::FLOAT32, DType::FLOAT32};
+        r1.outputDType = DType::FLOAT32;
+        r1.inputConstants = {{}, {}};
+        r1.output_mem_space = MemSpace{1, HandleType::CPP};
+        r1.engines = {Engine{0, EngineType::CPU}};
+        r1.input_mem_spaces = {MemSpace{1, HandleType::CPP}, MemSpace{1, HandleType::CPP}};
+        r1.runTime = 2.5f;
+        costModel.records[r1.kernelId].push_back(r1);
 
-    Record r2 = r1;
-    r2.kernelId = KernelId{0xED0002};
-    r2.runTime = 0.5f;
-    costModel.records[r2.kernelId].push_back(r2);
+        Record r2 = r1;
+        r2.kernelId = KernelId{0xED0002};
+        r2.runTime = 0.5f;
+        costModel.records[r2.kernelId].push_back(r2);
 
-    Record r3 = r1;
-    r3.kernelId = KernelId{0xED0003};
-    r3.runTime = 0.5f;
-    costModel.records[r3.kernelId].push_back(r3);
+        Record r3 = r1;
+        r3.kernelId = KernelId{0xED0003};
+        r3.runTime = 0.5f;
+        costModel.records[r3.kernelId].push_back(r3);
+    };
 
     // -------------------------------------------------------------------------
     // Test 1: Faster Equivalent Implementation Prunes Slower Implementation
     // -------------------------------------------------------------------------
     {
+        CostModel costModel(false, "");
+        initBaseRecords(costModel);
+
         Graph graph;
         LogicalId in0 = graph.input({8, 8}, DType::FLOAT32);
         LogicalId in1 = graph.input({8, 8}, DType::FLOAT32);
@@ -78,6 +84,7 @@ inline void runENodeDominationTests()
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
         Planner planner(costModel, mem_caps);
         planner.initBaseEGraph(root, graph, topo, nullptr);
+        populateDummyRecords(costModel, planner.baseState.egraph, 10.0f);
 
         EGraph egraph = planner.baseState.egraph;
         std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;
@@ -157,15 +164,21 @@ inline void runENodeDominationTests()
     // Test 2: Different Inputs Are NOT Dominated
     // -------------------------------------------------------------------------
     {
+        CostModel costModel(false, "");
+        initBaseRecords(costModel);
+
         Graph graph;
         LogicalId in0 = graph.input({8, 8}, DType::FLOAT32);
         LogicalId in1 = graph.input({8, 8}, DType::FLOAT32);
         LogicalId in2 = graph.input({8, 8}, DType::FLOAT32);
         LogicalId root = graph.add(in0, in1);
 
-        std::vector<LogicalId> topo = topologicalSort({root}, graph);
+        // in2 is not reachable from root, so include it explicitly as a topo root;
+        // otherwise initBaseEGraph won't create its eclass and nodeToEClass.at(in2) throws.
+        std::vector<LogicalId> topo = topologicalSort({root, in2}, graph);
         Planner planner(costModel, mem_caps);
         planner.initBaseEGraph(root, graph, topo, nullptr);
+        populateDummyRecords(costModel, planner.baseState.egraph, 10.0f);
 
         EGraph egraph = planner.baseState.egraph;
         std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;
@@ -212,6 +225,9 @@ inline void runENodeDominationTests()
     // Test 3: Death Cascade Pruning after Domination
     // -------------------------------------------------------------------------
     {
+        CostModel costModel(false, "");
+        initBaseRecords(costModel);
+
         Graph graph;
         LogicalId in0 = graph.input({8, 8}, DType::FLOAT32);
         LogicalId in1 = graph.input({8, 8}, DType::FLOAT32);
@@ -221,6 +237,7 @@ inline void runENodeDominationTests()
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
         Planner planner(costModel, mem_caps);
         planner.initBaseEGraph(root, graph, topo, nullptr);
+        populateDummyRecords(costModel, planner.baseState.egraph, 10.0f);
 
         EGraph egraph = planner.baseState.egraph;
         std::unordered_map<EClassId, LogicalId> eclassToLogical = planner.baseState.eclassToLogical;

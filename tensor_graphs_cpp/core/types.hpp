@@ -1789,3 +1789,18 @@ struct KernelContext
         return cuda_streams[idx];
     }
 };
+
+inline uint64_t getRequiredBufferSize(const TensorView &view)
+{
+    if (view.getShape().empty())
+        return 1;
+    uint64_t maxOffset = 0;
+    for (uint64_t i = 0; i < view.getShape().size(); ++i)
+    {
+        if (view.getShape()[i] > 0)
+        {
+            maxOffset += (view.getShape()[i] - 1) * view.strides[i];
+        }
+    }
+    return maxOffset + 1;
+}

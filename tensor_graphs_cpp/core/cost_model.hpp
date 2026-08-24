@@ -44,21 +44,21 @@
 
 struct Record
 {
-    KernelId kernelId;
-    uint64_t buildContextId;
-    std::string hwTag;
+    KernelId kernelId = KernelId{0};
+    uint64_t buildContextId = 0;
+    std::string hwTag = HW_TAG;
 
     std::vector<std::vector<uint32_t>> inputShapes;
     std::vector<uint32_t> outputShape;
     std::vector<std::vector<uint64_t>> inputStrides;
     std::vector<uint64_t> outputStrides;
     std::vector<DType> inputDTypes;
-    DType outputDType;
+    DType outputDType = DType::FLOAT32;
     std::vector<std::vector<uint8_t>> inputConstants;
-    MemSpace output_mem_space;
-    std::vector<Engine> engines;
+    MemSpace output_mem_space = {1, HandleType::CPP};
+    std::vector<Engine> engines = {Engine(0, EngineType::CPU)};
     std::vector<MemSpace> input_mem_spaces;
-    float runTime;
+    float runTime = 0.0f;
 };
 
 inline void tg_serialize(BinaryWriter &bw, const Record &val)

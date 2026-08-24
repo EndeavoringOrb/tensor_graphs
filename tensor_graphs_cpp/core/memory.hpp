@@ -63,9 +63,14 @@ struct StorageBuffer : public DeviceBuffer
     }
     void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
+        if (logicalId == LogicalId{UINT32_MAX} || logicalId.value == UINT32_MAX)
+        {
+            Error::throw_err("StorageBuffer::setupInput: logicalId is uninitialized (UINT32_MAX). "
+                             "Check that storage EClass was properly mapped to its source weight LogicalId.");
+        }
         TensorMetadata meta = FileRegistry::get().getNodeMeta(logicalId);
         TensorView v = view;
-        v.offset = meta.dataOffsetStart;
+        v.offset = meta.dataOffsetStart + view.offset;
         ctx.inViews.push_back(v);
         ctx.inputs.push_back(nullptr);
         ctx.fd.push_back(FileRegistry::get().getNodeFd(logicalId));
@@ -255,7 +260,7 @@ struct OpenCLBuffer : public DeviceBuffer
         cl_int err;
         arena_ptr_cl_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, allocSize, nullptr, &err);
         if (err != CL_SUCCESS)
-            Error::throw_err("clCreateBuffer failed");
+            Error::throw_err("clCreateBuffer failed with error: " + std::to_string(err));
     }
     void resize(uint64_t newSizeBytes) override
     {
@@ -284,7 +289,7 @@ struct OpenCLBuffer : public DeviceBuffer
         ctx.inputs.push_back(nullptr);
         ctx.fd.push_back(-1);
 
-        uint64_t size = countElements(view) * getDTypeSize(view.dtype);
+        uint64_t size = getRequiredBufferSize(view) * getDTypeSize(view.dtype);
         if (size == 0)
             size = 1;
 
@@ -306,7 +311,8 @@ struct OpenCLBuffer : public DeviceBuffer
             cl_int err;
             buf = clCreateSubBuffer(arena_ptr_cl_mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
             if (err != CL_SUCCESS)
-                Error::throw_err("clCreateSubBuffer failed");
+                Error::throw_err("clCreateSubBuffer failed in setupInput (offset=" + std::to_string(v.offset) +
+                                 "): error " + std::to_string(err));
         }
         ctx.cl_inputs.push_back(buf);
     }
@@ -318,7 +324,7 @@ struct OpenCLBuffer : public DeviceBuffer
         ctx.outViews.push_back(v);
         ctx.outputs.push_back(nullptr);
 
-        uint64_t size = countElements(view) * getDTypeSize(view.dtype);
+        uint64_t size = getRequiredBufferSize(view) * getDTypeSize(view.dtype);
         if (size == 0)
             size = 1;
 
@@ -340,26 +346,33 @@ struct OpenCLBuffer : public DeviceBuffer
             cl_int err;
             buf = clCreateSubBuffer(arena_ptr_cl_mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
             if (err != CL_SUCCESS)
-                Error::throw_err("clCreateSubBuffer failed");
+                Error::throw_err("clCreateSubBuffer failed in setupOutput (offset=" + std::to_string(v.offset) +
+                                 "): error " + std::to_string(err));
         }
         ctx.cl_outputs.push_back(buf);
     }
     void cleanupContext(KernelContext &ctx) override
     {
-        for (cl_mem sub : ctx.cl_inputs)
+        for (cl_mem &sub : ctx.cl_inputs)
         {
             if (sub)
+            {
                 clReleaseMemObject(sub);
+                sub = nullptr;
+            }
         }
-        for (cl_mem sub : ctx.cl_outputs)
+        for (cl_mem &sub : ctx.cl_outputs)
         {
             if (sub)
+            {
                 clReleaseMemObject(sub);
+                sub = nullptr;
+            }
         }
     }
     uint8_t *getBasePtr() override
     {
-        return nullptr;
+        Error::throw_err("getBasePtr not implemented for opencl");
     }
 };
 #endif // TG_USE_OPENCL

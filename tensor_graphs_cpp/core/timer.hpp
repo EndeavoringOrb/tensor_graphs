@@ -1,6 +1,14 @@
 #pragma once
 #include <chrono>
-#include <iostream>
+#include <cstdint>
+#include <sstream>
+#include <string>
+
+#include "core/logging.hpp"
+
+#ifdef ERROR
+#undef ERROR
+#endif
 
 #define TG_DEBUG_TIMING
 
@@ -18,15 +26,16 @@ struct ProgressTimer
 
     double minInterval; // seconds
     std::string label;
+    LogLevel logLevel;
 
     bool has_total;
     bool disable;
     bool disable_tick;
 
     ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, bool disable_tick_ = false,
-                  double minInterval_ = 2)
+                  double minInterval_ = 2, LogLevel logLevel_ = LogLevel::DEBUG)
         : start(clock::now()), last_print(start), total(total_), minInterval(minInterval_), label(label_),
-          has_total(total_ > 0), disable(disable_), disable_tick(disable_tick_)
+          logLevel(logLevel_), has_total(total_ > 0), disable(disable_), disable_tick(disable_tick_)
     {
         if (label.size() > 0)
         {
@@ -40,6 +49,31 @@ struct ProgressTimer
         last_print = start;
         current = 0;
         has_total = total > 0;
+    }
+
+    // LOG takes a compile-time level token, so dispatch the runtime level through a switch
+    void logMessage(const std::string &msg) const
+    {
+        switch (logLevel)
+        {
+        case LogLevel::DEBUG:
+            LOG(DEBUG) << msg;
+            break;
+        case LogLevel::INFO:
+            LOG(INFO) << msg;
+            break;
+        case LogLevel::WARNING:
+            LOG(WARNING) << msg;
+            break;
+        case LogLevel::ERROR:
+            LOG(ERROR) << msg;
+            break;
+        case LogLevel::CRITICAL:
+            LOG(CRITICAL) << msg;
+            break;
+        case LogLevel::OFF:
+            break;
+        }
     }
 
     inline void tick(uint64_t increment = 1)
@@ -68,20 +102,21 @@ struct ProgressTimer
         double elapsed = std::chrono::duration<double>(now - start).count();
         double rate = current / (elapsed > 0.0 ? elapsed : 1e-9);
 
-        std::cout << label;
+        std::ostringstream oss;
+        oss << label;
 
         if (has_total)
         {
             double eta = (total > current) ? (total - current) / rate : 0.0;
 
-            std::cout << current << "/" << total << " ETA: " << eta << "s";
+            oss << current << "/" << total << " ETA: " << eta << "s";
         }
         else
         {
-            std::cout << current << " (" << rate << " it/s, " << elapsed << "s)";
+            oss << current << " (" << rate << " it/s, " << elapsed << "s)";
         }
 
-        std::cout << "\r" << std::flush;
+        logMessage(oss.str());
     }
 
     // returns elapsed time in seconds
@@ -99,18 +134,21 @@ struct ProgressTimer
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
 
-        std::cout << label;
+        std::ostringstream oss;
+        oss << label;
 
         if (has_total)
         {
-            std::cout << "done " << current << "/" << total;
+            oss << "done " << current << "/" << total;
         }
         else
         {
-            std::cout << "done " << current;
+            oss << "done " << current;
         }
 
-        std::cout << " in " << elapsed << "s\n";
+        oss << " in " << elapsed << "s";
+
+        logMessage(oss.str());
     }
 };
 

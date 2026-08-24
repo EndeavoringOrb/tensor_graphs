@@ -246,6 +246,12 @@ struct Session
                     }
                 }
             }
+            for (const auto &pair : g.nodeViews)
+            {
+                uint64_t extent =
+                    pair.second.offset + countElements(pair.second.getShape()) * getDTypeSize(pair.second.dtype);
+                peakSizes[MemSpace{1, HandleType::CPP}] = std::max(peakSizes[MemSpace{1, HandleType::CPP}], extent);
+            }
         }
 
         std::cout << "[Session.compile] Materializing exact peak memory arenas..." << std::endl;
@@ -257,27 +263,37 @@ struct Session
 
         memManager.init(peakSizes);
 
+        // Write all constants directly to their allocated offsets in memory
         std::unordered_set<LogicalId> written;
         for (const CompiledGraph &g : cachedGraphs)
         {
-            for (const auto &inst : g.instructions)
+            for (const auto &pair : g.eclass_to_logical)
             {
-                for (uint32_t i = 0; i < inst.children.size(); i++)
+                EClassId eclass_id = pair.first;
+                LogicalId logical_id = pair.second;
+                if (graph.constantStaging.count(logical_id))
                 {
-                    EClassId child = inst.children[i];
-                    if (!g.has_logical_id(child))
-                        continue;
-                    LogicalId logical_id = g.get_logical_id(child);
-                    if (graph.constantStaging.count(logical_id))
+                    if (g.nodeViews.count(eclass_id))
                     {
                         if (written.insert(logical_id).second)
                         {
                             const TensorNode &node = graph.getNode(logical_id);
-                            const ParallelBuffer &buf = inst.inBuffers[i];
-                            memManager.write(buf.mem_space, buf.offset, graph.constantStaging.at(logical_id)->data(),
-                                             node.getSizeBytes());
+                            const TensorView &view = g.nodeViews.at(eclass_id);
+                            memManager.write(MemSpace{1, HandleType::CPP}, view.offset,
+                                             graph.constantStaging.at(logical_id)->data(), node.getSizeBytes());
                         }
                     }
+                }
+            }
+
+            for (const auto &pair : g.constantStaging)
+            {
+                EClassId eclass_id = pair.first;
+                if (g.nodeViews.count(eclass_id))
+                {
+                    const TensorView &view = g.nodeViews.at(eclass_id);
+                    memManager.write(MemSpace{1, HandleType::CPP}, view.offset, pair.second->data(),
+                                     pair.second->size());
                 }
             }
         }
@@ -292,6 +308,19 @@ struct Session
     {
         for (const CompiledGraph &g : cachedGraphs)
         {
+            for (const auto &pair : g.eclass_to_logical)
+            {
+                if (pair.second == logicalId)
+                {
+                    EClassId eclass_id = pair.first;
+                    if (g.nodeViews.count(eclass_id))
+                    {
+                        const TensorView &view = g.nodeViews.at(eclass_id);
+                        memManager.write(MemSpace{1, HandleType::CPP}, view.offset, data, size);
+                        return;
+                    }
+                }
+            }
             for (const auto &inst : g.instructions)
             {
                 for (uint32_t i = 0; i < inst.children.size(); i++)
@@ -306,7 +335,7 @@ struct Session
             }
         }
         Error::throw_err("Logical Node ID " + toString(logicalId) +
-                         " not found in compiled instructions during Session::writeInput");
+                         " not found in compiled graph during Session::writeInput");
     }
 
     const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr, bool doSaturate = true)
@@ -333,11 +362,38 @@ struct Session
         }
 
         const uint32_t graphIdx = getBestGraphIdx(bucket);
-        executor->run(cachedGraphs[graphIdx], debugCallback);
+        const CompiledGraph &cg = cachedGraphs[graphIdx];
+        executor->run(cg, debugCallback);
 
-        const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions.back();
-        DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
-        return buf->getBasePtr() + lastInst.outBuffer.offset;
+        // Find the root node in CPU RAM
+        for (const auto &pair : cg.eclass_to_logical)
+        {
+            if (pair.second == rootId)
+            {
+                EClassId eclass_id = pair.first;
+                if (cg.nodeViews.count(eclass_id))
+                {
+                    const TensorView &rootView = cg.nodeViews.at(eclass_id);
+                    DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+                    if (buf && buf->getBasePtr())
+                    {
+                        return buf->getBasePtr() + rootView.offset;
+                    }
+                }
+            }
+        }
+
+        if (!cg.instructions.empty())
+        {
+            const OpInstruction &lastInst = cg.instructions.back();
+            DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
+            if (buf && buf->getBasePtr())
+            {
+                return buf->getBasePtr() + lastInst.outBuffer.offset;
+            }
+        }
+
+        Error::throw_err("Failed to retrieve valid host output pointer for root node during Session::run");
     }
 
     void ensureCacheCoverage(bool doSaturate)

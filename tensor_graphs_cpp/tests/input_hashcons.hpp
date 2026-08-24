@@ -13,7 +13,7 @@
 inline void runInputHashconsTests()
 {
     std::cout << "input hashcons tests" << std::endl << std::flush;
-    CostModel costModel;
+    CostModel costModel(false, "");
 
     // -------------------------------------------------------------------------
     // Test 1: Distinct runtime inputs with IDENTICAL shape/dtype must NOT merge

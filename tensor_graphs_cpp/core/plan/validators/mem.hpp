@@ -783,6 +783,10 @@ struct BufferizeIterator
                     EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
                     inplace_alias[eclass] = get_inplace_alias(child_base);
                 }
+                else
+                {
+                    inplace_alias.erase(eclass);
+                }
 
                 chosen = true;
                 k++;
@@ -858,15 +862,24 @@ struct BufferizeIterator
                 base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
             }
             EClassId target_base = get_inplace_alias(base);
+            if (selection_map.find(target_base) == selection_map.end())
+            {
+                target_base = base;
+            }
+            if (selection_map.find(target_base) == selection_map.end())
+            {
+                target_base = eclass;
+            }
 
             if (base_to_buf.find(target_base) == base_to_buf.end())
             {
-                BufferId buf_id = BufferId{(uint32_t)out_buffers.size()};
-                base_to_buf[target_base] = buf_id;
-
                 auto base_sel_it = selection_map.find(target_base);
                 if (base_sel_it == selection_map.end())
                     continue;
+
+                BufferId buf_id = BufferId{(uint32_t)out_buffers.size()};
+                base_to_buf[target_base] = buf_id;
+
                 uint32_t base_sel = base_sel_it->second;
                 ENodeId base_enode_id = egraph.getEClass(target_base).enodes[base_sel];
                 const ENode &base_node = egraph.getENode(base_enode_id);
@@ -878,8 +891,8 @@ struct BufferizeIterator
                 }
                 size_bytes = (size_bytes + 4095) & ~4095ULL;
 
-                uint32_t b_time = act_birth_times[target_base];
-                uint32_t d_time = act_death_times[target_base];
+                uint32_t b_time = act_birth_times.count(target_base) ? act_birth_times[target_base] : 0;
+                uint32_t d_time = act_death_times.count(target_base) ? act_death_times[target_base] : 1;
 
                 ParallelBuffer buf = {buf_id, base_node.getMemSpace(), size_bytes, b_time, d_time, -1};
                 out_buffers.push_back(std::move(buf));
