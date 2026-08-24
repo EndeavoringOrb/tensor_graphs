@@ -32,6 +32,7 @@
 #include "core/memory.hpp"
 #include "core/repo.hpp"
 #include "core/session.hpp"
+#include "core/settings.hpp"
 #include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
 #include "generated/kernels_all.gen.hpp"
@@ -39,20 +40,6 @@
 #include "stb_image.h"
 
 namespace fs = std::filesystem;
-
-std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
-{
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
-#ifdef TG_USE_CUDA
-    LOG(INFO) << "ADDING CUDA MEMCAP";
-    bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
-#endif
-    if (HardwareCaps::get().has_opencl)
-    {
-        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-    }
-    return bufferSizes;
-}
 
 const float *sync_output_to_host(const float *device_ptr, uint64_t num_elements, std::vector<float> &host_buffer)
 {
@@ -87,8 +74,7 @@ int32_t perform_argmax(const float *logits, uint32_t vocab_size)
 template <typename ConfigClass>
 void run_autoregressive_llm(const std::string &model_path, const std::string &model_name, const std::string &cache_file,
                             const std::vector<uint32_t> &initial_tokens, uint32_t vocab_size, uint32_t max_seq_len,
-                            uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching,
-                            float min_compile_time,
+                            uint32_t num_tokens_to_generate, const Settings &settings,
                             ModelGraphRoots (*builder)(Graph &, MemoryManager &, const std::string &model_path,
                                                        uint32_t max_seq_len),
                             bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
@@ -111,7 +97,11 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
     std::string gHash = computeGraphHash(g, roots.roots);
     Repo repo("benchmarks/repo_" + model_name, gHash, true);
 
-    Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching, min_compile_time);
+    Settings sessionSettings = settings;
+    sessionSettings.cache_file = cache_file;
+    sessionSettings.do_saturate = doSaturate;
+
+    Session session(g, mem, logits_id, sessionSettings, &repo);
 
     for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
     {
@@ -125,7 +115,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
         session.addBucket(inputDirty, {outputNeeded});
     }
 
-    if (only_plan)
+    if (settings.only_plan)
     {
         session.plan(doSaturate);
         return;
@@ -175,24 +165,21 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
     }
 }
 
-void run_gemma(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time,
-               bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
-               Graph **activeGraphOut = nullptr)
+void run_gemma(const std::string &model_path, const Settings &settings, bool refOnly = false, bool doSaturate = true,
+               const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Gemma3ModelConfig>(model_path, "gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin",
-                                              {2, 9259}, Gemma3ModelConfig().vocab_size, 8, 6, only_plan,
-                                              disable_caching, min_compile_time, build_gemma_graph, refOnly, doSaturate,
-                                              debugCb, activeGraphOut);
+                                              {2, 9259}, Gemma3ModelConfig().vocab_size, 8, 6, settings,
+                                              build_gemma_graph, refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
-void run_qwen_35b(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time,
-                  bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
-                  Graph **activeGraphOut = nullptr)
+void run_qwen_35b(const std::string &model_path, const Settings &settings, bool refOnly = false, bool doSaturate = true,
+                  const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
-    run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
-        model_path, "qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin", {24227},
-        Qwen3_6_35B_A3B_Config().vocab_size, 32, 31, only_plan, disable_caching, min_compile_time, build_qwen_graph,
-        refOnly, doSaturate, debugCb, activeGraphOut);
+    run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(model_path, "qwen-3.6-35b-a3b",
+                                                   "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin", {24227},
+                                                   Qwen3_6_35B_A3B_Config().vocab_size, 32, 31, settings,
+                                                   build_qwen_graph, refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
 int main(int argc, char *argv[])
@@ -210,37 +197,35 @@ int main(int argc, char *argv[])
 #endif
 
     ArgParser parser("main", "Run a target model inference or plan execution.");
-    parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
-    parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
-    parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
-    parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
-    parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
-    parser.add_option({"--sort-enodes"}, "Sort order for enodes in extraction (cost or height).", "cost");
     parser.add_positional("model", "Name of the target model (gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.");
+
+    Settings settings;
+    settings.add_to_argparser(parser);
 
     if (!parser.parse(argc, argv))
     {
         return 1;
     }
 
+    settings.load(argc, argv);
+
     std::string model = parser.get_positional("model");
     std::string model_path = parser.get_positional("model_path");
-    bool only_plan = parser.get_flag("--only-plan");
-    bool disable_caching = parser.get_flag("--disable-caching");
-    std::string write_refs = parser.get_option("--write-refs");
-    std::string compare_refs = parser.get_option("--compare-refs");
-    float min_compile_time = std::stof(parser.get_option("--min-compile-time"));
+
+    if (settings.num_threads > 0)
+    {
+        set_num_threads(settings.num_threads);
+    }
 
     Debug::ReferenceVerifier verifier;
-    if (!verifier.init(write_refs, compare_refs))
+    if (!verifier.init(settings.write_refs, settings.compare_refs))
     {
         return 1;
     }
-    std::string dbg_mode = verifier.getMode();
 
-    bool refOnly = !write_refs.empty();
-    bool doSaturate = write_refs.empty();
+    bool refOnly = !settings.write_refs.empty();
+    bool doSaturate = settings.write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
     auto debugCb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
@@ -248,11 +233,9 @@ int main(int argc, char *argv[])
     };
 
     if (model == "gemma-3-270m")
-        run_gemma(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb,
-                  &activeGraphPtr);
+        run_gemma(model_path, settings, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
-        run_qwen_35b(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb,
-                     &activeGraphPtr);
+        run_qwen_35b(model_path, settings, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 

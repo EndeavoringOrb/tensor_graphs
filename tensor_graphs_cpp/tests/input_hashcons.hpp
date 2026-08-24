@@ -25,7 +25,7 @@ inline void runInputHashconsTests()
         LogicalId addNode = graph.add(in0, in1);
 
         std::vector<LogicalId> topo = topologicalSort({addNode}, graph);
-        Planner planner(costModel, {});
+        Planner planner(costModel);
         planner.initBaseEGraph(addNode, graph, topo, nullptr);
 
         EClassId cls0 = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(in0));
@@ -53,7 +53,7 @@ inline void runInputHashconsTests()
         LogicalId addSelf = graph.add(in0, in0);
 
         std::vector<LogicalId> topo = topologicalSort({addSelf}, graph);
-        Planner planner(costModel, {});
+        Planner planner(costModel);
         planner.initBaseEGraph(addSelf, graph, topo, nullptr);
 
         const ENode &selfAddENode = planner.baseState.egraph.getENode(
@@ -135,7 +135,7 @@ inline void runInputHashconsTests()
         LogicalId addNode = graph.add(in, c);
 
         std::vector<LogicalId> topo = topologicalSort({addNode}, graph);
-        Planner planner(costModel, {});
+        Planner planner(costModel);
         planner.initBaseEGraph(addNode, graph, topo, nullptr);
 
         EClassId inCls = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(in));
@@ -168,7 +168,7 @@ inline void runInputHashconsTests()
         LogicalId root = graph.add(graph.add(sumA, sumB), sumC);
 
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
-        Planner planner(costModel, {});
+        Planner planner(costModel);
         planner.initBaseEGraph(root, graph, topo, nullptr);
 
         EClassId eA = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(inA));

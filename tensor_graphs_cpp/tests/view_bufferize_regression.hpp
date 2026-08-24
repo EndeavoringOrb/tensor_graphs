@@ -30,6 +30,8 @@ inline void testViewNotEmittedIntoInstructions()
     std::unordered_map<MemSpace, uint64_t> mem_caps = {
         {MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024},
     };
+    Settings settings = Settings::get_default();
+    settings.mem_caps = mem_caps;
 
     Graph graph;
     // 1. Create a storage-backed weight node
@@ -47,7 +49,7 @@ inline void testViewNotEmittedIntoInstructions()
     LogicalId out = graph.dot(x, w_3d); // [1, 4, 8] in CPP
 
     std::vector<LogicalId> topo = topologicalSort({out}, graph);
-    Planner planner(costModel, mem_caps);
+    Planner planner(costModel, settings);
     planner.initBaseEGraph(out, graph, topo, nullptr);
     populateDummyRecords(costModel, planner.baseState.egraph);
 
@@ -102,6 +104,8 @@ inline void testInplaceAliasEraseOnNewBuffer()
     std::unordered_map<MemSpace, uint64_t> mem_caps = {
         {MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024},
     };
+    Settings settings = Settings::get_default();
+    settings.mem_caps = mem_caps;
 
     // Register safe in-place kernel for testing
     static bool registered = false;
@@ -135,7 +139,7 @@ inline void testInplaceAliasEraseOnNewBuffer()
     LogicalId root = graph.add(t1, t0);
 
     std::vector<LogicalId> topo = topologicalSort({root}, graph);
-    Planner planner(costModel, mem_caps);
+    Planner planner(costModel, settings);
     planner.initBaseEGraph(root, graph, topo, nullptr);
     populateDummyRecords(costModel, planner.baseState.egraph);
 
@@ -207,6 +211,8 @@ inline void testBuildBuffersCoverageAndFallback()
     std::unordered_map<MemSpace, uint64_t> mem_caps = {
         {MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024},
     };
+    Settings settings = Settings::get_default();
+    settings.mem_caps = mem_caps;
 
     Graph graph;
     LogicalId in0 = graph.input({4, 8}, DType::FLOAT32);
@@ -218,7 +224,7 @@ inline void testBuildBuffersCoverageAndFallback()
     LogicalId root = graph.neg(v3);
 
     std::vector<LogicalId> topo = topologicalSort({root}, graph);
-    Planner planner(costModel, mem_caps);
+    Planner planner(costModel, settings);
     planner.initBaseEGraph(root, graph, topo, nullptr);
     populateDummyRecords(costModel, planner.baseState.egraph);
 

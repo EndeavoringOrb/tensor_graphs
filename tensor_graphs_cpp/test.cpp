@@ -21,12 +21,14 @@
 #include "core/misc.hpp"
 #include "core/plan/planner.hpp"
 #include "core/session.hpp"
+#include "core/settings.hpp"
 #include "core/shape_propagator.hpp"
 #include "generated/kernels_all.gen.hpp"
 
 #include "tests/bufferize_domination.hpp"
 #include "tests/constant_view_regression.hpp"
 #include "tests/dispatch_domination.hpp"
+#include "tests/dispatch_rules_benchmark.hpp"
 #include "tests/enode_domination.hpp"
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
@@ -47,10 +49,15 @@ int main(int argc, char *argv[])
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
+    Settings settings;
+    settings.add_to_argparser(parser);
+
     if (!parser.parse(argc, argv))
     {
         return 1;
     }
+
+    settings.load(argc, argv);
 
     std::string targetKernel = parser.get_positional("targetKernel");
     bool useRecords = !parser.get_flag("--no-records");
@@ -59,6 +66,7 @@ int main(int argc, char *argv[])
 
     if (targetKernel.empty() && cachePath.empty())
     {
+        runDispatchRulesBenchmark();
         runRegionMergeTests();
         runShapePropagationTests();
         runPreExtractionMemCapTests();
@@ -68,7 +76,6 @@ int main(int argc, char *argv[])
         runInputHashconsTests();
         runViewBufferizeRegressionTests();
         runConstantViewRegressionTests();
-        // runRefTests(); TODO: fix python tests
     }
 
     if (!skipFused)

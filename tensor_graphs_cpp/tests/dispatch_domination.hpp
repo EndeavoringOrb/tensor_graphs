@@ -17,6 +17,8 @@ void runDispatchDominationTests()
     std::cout << "dispatch domination optimality tests" << std::endl << std::flush;
     CostModel costModel(false, "");
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}};
+    Settings settings;
+    settings.mem_caps = mem_caps;
 
     // -------------------------------------------------------------------------
     // Test Case 1: All Rules
@@ -30,7 +32,7 @@ void runDispatchDominationTests()
         LogicalId root = graph.add(b1, b2);
 
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
-        Planner planner(costModel, mem_caps);
+        Planner planner(costModel, settings);
         planner.initBaseEGraph(root, graph, topo, nullptr);
         populateDummyRecords(costModel, planner.baseState.egraph);
 

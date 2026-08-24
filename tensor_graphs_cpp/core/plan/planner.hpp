@@ -488,8 +488,8 @@ class FasterEquivalentENodeDominationRule : public IENodeDominationRule
 struct Planner
 {
     CostModel &costModel;
-    std::unordered_map<MemSpace, uint64_t> mem_caps;
     std::vector<std::shared_ptr<IENodeDominationRule>> domination_rules;
+    const Settings &settings;
 
     void addDominationRule(std::shared_ptr<IENodeDominationRule> rule)
     {
@@ -508,7 +508,7 @@ struct Planner
         if (domination_rules.empty())
             return;
 
-        ENodeDominationContext ctx{egraph, enodeInfos, eclassToLogical, cachedNodes, mem_caps};
+        ENodeDominationContext ctx{egraph, enodeInfos, eclassToLogical, cachedNodes, settings.mem_caps};
 
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
         {
@@ -650,7 +650,7 @@ struct Planner
         }
 
         std::vector<MemSpace> avail_mem_spaces;
-        for (const auto &kv : mem_caps)
+        for (const auto &kv : settings.mem_caps)
         {
             if (kv.first.type != HandleType::STORAGE)
             {
@@ -1224,8 +1224,8 @@ struct Planner
         Extractor extractor = Extractor(egraph, rootEClassId, enodeInfos, delegate);
         // extractor.registerValidator(std::make_unique<CycleStepValidator>(egraph));
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical,
-                                                                   preallocatedBuffers, delegate));
+        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, settings.mem_caps,
+                                                                   eclassToLogical, preallocatedBuffers, delegate));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -1271,8 +1271,7 @@ struct Planner
             std::vector<EClassId> conflict_nodes;
 
             auto dispatch_iterator =
-                makeDispatchIterator(egraph, selection_map, enodeInfos, SingleEngineDispatchDominationRule{},
-                                     MultiEngineCommutativityRule{}, DisjointSubgraphSymmetryRule{}); // LastReaderBufferFreeDominationRule{}
+                makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, delegate, settings);
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
@@ -2171,8 +2170,8 @@ struct Planner
         return injected;
     }
 
-    Planner(CostModel &costModel, const std::unordered_map<MemSpace, uint64_t> &mem_caps)
-        : costModel(costModel), mem_caps(mem_caps)
+    Planner(CostModel &costModel, const Settings &settings = Settings::get_default())
+        : costModel(costModel), settings(settings)
     {
         addDominationRule(std::make_shared<MemCapENodeDominationRule>());
         addDominationRule(std::make_shared<FasterEquivalentENodeDominationRule>());

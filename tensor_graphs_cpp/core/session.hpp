@@ -78,6 +78,8 @@ struct Session
     std::shared_ptr<SearchDelegate> delegate = nullptr;
     bool logCostCalls = false;
 
+    Settings settings;
+
     void ensureOutputDirectories() const
     {
         std::filesystem::create_directories("benchmarks");
@@ -156,15 +158,35 @@ struct Session
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
+    Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, Repo *_repo = nullptr,
+            std::shared_ptr<SearchDelegate> _delegate = nullptr)
+        : graph(g), memManager(mem), rootId(root), settings(_settings), isPlanned(false), isCompiled(false),
+          cachePath(_settings.cache_file), nBucketSizes(0), repo(_repo), disableCaching(_settings.disable_caching),
+          minCompileSeconds(_settings.min_compile_seconds),
+          delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()),
+          logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
+    {
+        ensureOutputDirectories();
+        loadCache();
+    }
+
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
-            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true)
+            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true,
+            const std::string &_recordsPath = "benchmarks/records.bin")
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
           minCompileSeconds(_minCompileSeconds),
           delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()), logCostCalls(_logCostCalls),
-          costModel(_logCostCalls)
+          costModel(_logCostCalls, _recordsPath)
     {
+        settings = Settings::get_default();
+        settings.cache_file = cacheFile;
+        settings.disable_caching = _disableCaching;
+        settings.min_compile_seconds = _minCompileSeconds;
+        settings.log_cost_calls = _logCostCalls;
+        if (!_recordsPath.empty())
+            settings.records_path = _recordsPath;
         ensureOutputDirectories();
         loadCache();
     }
@@ -401,7 +423,7 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        Planner planner(costModel, memManager.getMemCaps());
+        Planner planner(costModel, settings);
 
         std::unordered_map<LogicalId, MemSpace> bestCachedNodes;
         if (!disableCaching)
@@ -422,7 +444,7 @@ struct Session
         cachedGraphs.resize(manualBuckets.size());
 
         ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t i) {
-            Planner threadPlanner(costModel, memManager.getMemCaps());
+            Planner threadPlanner(costModel, settings);
             threadPlanner.baseState = planner.baseState;
             threadPlanner.baseStateInitialized = true;
 

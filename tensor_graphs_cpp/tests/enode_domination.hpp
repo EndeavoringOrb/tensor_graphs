@@ -17,6 +17,8 @@ inline void runENodeDominationTests()
 {
     std::cout << "enode domination optimality tests" << std::endl << std::flush;
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}};
+    Settings settings;
+    settings.mem_caps = mem_caps;
 
     // Register test kernels: fma_v1 (slower) and fma_v2 (faster)
     static bool registered = false;
@@ -82,7 +84,7 @@ inline void runENodeDominationTests()
         LogicalId root = graph.add(in0, in1);
 
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
-        Planner planner(costModel, mem_caps);
+        Planner planner(costModel, settings);
         planner.initBaseEGraph(root, graph, topo, nullptr);
         populateDummyRecords(costModel, planner.baseState.egraph, 10.0f);
 
@@ -129,7 +131,7 @@ inline void runENodeDominationTests()
         }
 
         // B) Test Dependency Injection: Clear rules and verify neither is pruned
-        Planner unconstrainedPlanner(costModel, mem_caps);
+        Planner unconstrainedPlanner(costModel, settings);
         unconstrainedPlanner.clearDominationRules();
 
         EGraph egraphUnconstrained = planner.baseState.egraph;
@@ -176,7 +178,7 @@ inline void runENodeDominationTests()
         // in2 is not reachable from root, so include it explicitly as a topo root;
         // otherwise initBaseEGraph won't create its eclass and nodeToEClass.at(in2) throws.
         std::vector<LogicalId> topo = topologicalSort({root, in2}, graph);
-        Planner planner(costModel, mem_caps);
+        Planner planner(costModel, settings);
         planner.initBaseEGraph(root, graph, topo, nullptr);
         populateDummyRecords(costModel, planner.baseState.egraph, 10.0f);
 
@@ -235,7 +237,7 @@ inline void runENodeDominationTests()
         LogicalId root = graph.add(in0, neg_in1);
 
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
-        Planner planner(costModel, mem_caps);
+        Planner planner(costModel, settings);
         planner.initBaseEGraph(root, graph, topo, nullptr);
         populateDummyRecords(costModel, planner.baseState.egraph, 10.0f);
 

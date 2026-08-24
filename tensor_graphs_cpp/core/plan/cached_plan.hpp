@@ -33,6 +33,7 @@ struct SaturatedEGraphContext
     uint32_t vocab_size = 0;
     uint32_t max_seq_len = 0;
     std::vector<Bucket> buckets;
+    Settings settings;
 
     // Base state
     EGraph baseEGraph;
@@ -41,10 +42,9 @@ struct SaturatedEGraphContext
 
     CostModel costModel;
 
-    // Worker-local saturation cache keyed on sorted (LogicalId -> MemSpace) selections
     std::unordered_map<std::string, std::shared_ptr<SaturatedState>> saturationCache;
 
-    SaturatedEGraphContext() : costModel(false)
+    SaturatedEGraphContext() : costModel(false), settings(Settings::get_default())
     {
     }
 
@@ -52,7 +52,7 @@ struct SaturatedEGraphContext
         const std::unordered_map<LogicalId, MemSpace> &cachedNodes) const
     {
         std::unordered_map<LogicalId, ParallelBuffer> out;
-        Planner planner(const_cast<CostModel &>(costModel), mem->getMemCaps());
+        Planner planner(const_cast<CostModel &>(costModel), settings);
         planner.preallocateLogicalBuffers(graph, cachedNodes, out);
         return out;
     }
@@ -67,19 +67,18 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_gr
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
 
-    auto bufferSizes = System::get().getBufferSizes();
     if (mem_cap_override > 0)
     {
-        bufferSizes[MemSpace{1, HandleType::CPP}] = mem_cap_override;
+        ctx->settings.mem_caps[MemSpace{1, HandleType::CPP}] = mem_cap_override;
 #ifdef TG_USE_CUDA
         for (uint32_t dev = 0; dev < System::get().getNumCudaDevices(); ++dev)
         {
-            bufferSizes[MemSpace{dev, HandleType::CUDA}] = mem_cap_override;
+            ctx->settings.mem_caps[MemSpace{dev, HandleType::CUDA}] = mem_cap_override;
         }
 #endif
     }
 
-    ctx->mem = std::make_unique<MemoryManager>(bufferSizes);
+    ctx->mem = std::make_unique<MemoryManager>(ctx->settings.mem_caps);
     ctx->graph = input_graph;
     ctx->rootId = rootId;
     ctx->buckets = buckets;
@@ -100,7 +99,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_gr
 
     std::vector<LogicalId> topo = topologicalSort({rootId}, ctx->graph);
 
-    Planner planner(ctx->costModel, ctx->mem->getMemCaps());
+    Planner planner(ctx->costModel, ctx->settings);
     planner.initBaseEGraph(ctx->rootId, ctx->graph, topo, nullptr);
 
     ctx->baseEGraph = planner.baseState.egraph;
@@ -117,7 +116,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
 {
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
-    ctx->mem = std::make_unique<MemoryManager>(System::get().getBufferSizes());
+    ctx->mem = std::make_unique<MemoryManager>(ctx->settings.mem_caps);
 
     uint32_t max_seq_len = 8;
     ModelGraphRoots roots;
@@ -287,7 +286,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
 
     std::vector<LogicalId> topo = topologicalSort(roots.roots, ctx->graph);
 
-    Planner planner(ctx->costModel, ctx->mem->getMemCaps());
+    Planner planner(ctx->costModel, ctx->settings);
     planner.initBaseEGraph(ctx->rootId, ctx->graph, topo, nullptr);
 
     ctx->baseEGraph = planner.baseState.egraph;
@@ -389,7 +388,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
     std::vector<float> all_costs;
     uint32_t cache_eval_count = 0;
-    Planner planner(ctx->costModel, ctx->mem->getMemCaps());
+    Planner planner(ctx->costModel, ctx->settings);
 
     while (cache_iter.getNextCacheSelection(cachedNodes))
     {
@@ -554,7 +553,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             const auto &selection_map = extractor.selection_map;
 
             // Dispatch (Level 2) -- unconstrained (empty pruning rule set)
-            DispatchIterator<> dispatch_iterator(state->egraph, selection_map, state->enodeInfos, delegate);
+            auto dispatch_iterator = makeConfiguredDispatchIterator(state->egraph, selection_map, state->enodeInfos,
+                                                                    delegate, ctx->settings);
             uint32_t dispatch_count = 0;
             std::vector<EClassId> order;
 

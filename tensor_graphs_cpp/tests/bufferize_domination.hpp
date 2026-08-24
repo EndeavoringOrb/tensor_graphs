@@ -20,6 +20,8 @@ inline void runBufferizeDominationTests()
     std::cout << "bufferize domination optimality tests" << std::endl << std::flush;
     CostModel costModel(false, "");
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}};
+    Settings settings;
+    settings.mem_caps = mem_caps;
 
     // Register reference kernels with safe_inplace_idxs enabled for testing
     static bool registered = false;
@@ -72,7 +74,7 @@ inline void runBufferizeDominationTests()
         LogicalId root = graph.neg(sum_node);
 
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
-        Planner planner(costModel, mem_caps);
+        Planner planner(costModel, settings);
         planner.initBaseEGraph(root, graph, topo, nullptr);
         populateDummyRecords(costModel, planner.baseState.egraph);
 
@@ -193,7 +195,7 @@ inline void runBufferizeDominationTests()
         LogicalId root = graph.neg(t3);
 
         std::vector<LogicalId> topo = topologicalSort({root}, graph);
-        Planner planner(costModel, mem_caps);
+        Planner planner(costModel, settings);
         planner.initBaseEGraph(root, graph, topo, nullptr);
         populateDummyRecords(costModel, planner.baseState.egraph);
 

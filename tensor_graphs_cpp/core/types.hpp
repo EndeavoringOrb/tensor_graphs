@@ -171,6 +171,11 @@ struct BufferId
 {
     uint32_t value = UINT32_MAX;
 
+    constexpr BufferId() = default;
+    constexpr explicit BufferId(uint32_t val) : value(val)
+    {
+    }
+
     bool operator==(const BufferId &o) const
     {
         return value == o.value;
@@ -207,6 +212,11 @@ struct BufferId
 struct LogicalId
 {
     uint32_t value = UINT32_MAX;
+
+    constexpr LogicalId() = default;
+    constexpr explicit LogicalId(uint32_t val) : value(val)
+    {
+    }
 
     bool operator==(const LogicalId &o) const
     {
@@ -276,6 +286,11 @@ struct EClassId
 {
     uint32_t value = UINT32_MAX;
 
+    constexpr EClassId() = default;
+    constexpr explicit EClassId(uint32_t val) : value(val)
+    {
+    }
+
     bool operator==(const EClassId &o) const
     {
         return value == o.value;
@@ -306,6 +321,11 @@ struct ENodeId
 {
     uint32_t value = UINT32_MAX;
 
+    constexpr ENodeId() = default;
+    constexpr explicit ENodeId(uint32_t val) : value(val)
+    {
+    }
+
     bool operator==(const ENodeId &o) const
     {
         return value == o.value;
@@ -335,6 +355,11 @@ struct ENodeId
 struct KernelId
 {
     uint64_t value = UINT32_MAX;
+
+    constexpr KernelId() = default;
+    constexpr explicit KernelId(uint64_t val) : value(val)
+    {
+    }
 
     bool operator==(const KernelId &o) const
     {

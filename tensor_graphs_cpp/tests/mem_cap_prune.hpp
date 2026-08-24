@@ -15,6 +15,8 @@ inline void runPreExtractionMemCapTests()
     std::cout << "pre-extraction mem_cap pruning tests" << std::endl << std::flush;
     CostModel costModel(false, "");
     std::unordered_map<MemSpace, uint64_t> mem_caps = {{MemSpace{1, HandleType::CPP}, 8ULL * 1024 * 1024}}; // 8 MB cap
+    Settings settings;
+    settings.mem_caps = mem_caps;
 
     Graph graph;
     LogicalId in0 = graph.input({1024, 1024}, DType::FLOAT32); // 4 MB
@@ -22,7 +24,7 @@ inline void runPreExtractionMemCapTests()
     LogicalId addNode = graph.add(in0, in1);                   // 4 MB out, 4MB in0, 4MB in1 -> 12MB out-of-place
 
     std::vector<LogicalId> topo = topologicalSort({addNode}, graph);
-    Planner planner(costModel, mem_caps);
+    Planner planner(costModel, settings);
     planner.initBaseEGraph(addNode, graph, topo, nullptr);
 
     // Provide a valid non-INF record so unconstrained mode preserves the node
@@ -76,7 +78,7 @@ inline void runPreExtractionMemCapTests()
     }
 
     // 2. Test Dependency Injection: Cleared rules preserve over-capacity nodes
-    Planner unconstrainedPlanner(costModel, mem_caps);
+    Planner unconstrainedPlanner(costModel, settings);
     unconstrainedPlanner.clearDominationRules();
     EGraph unconstrainedEGraph = planner.baseState.egraph;
     auto unconstrainedInfos =
@@ -106,7 +108,7 @@ inline void runPreExtractionMemCapTests()
     }
 
     // 3. Test Injected MemCapENodeDominationRule specifically
-    Planner injectedPlanner(costModel, mem_caps);
+    Planner injectedPlanner(costModel, settings);
     injectedPlanner.clearDominationRules();
     injectedPlanner.addDominationRule(std::make_shared<MemCapENodeDominationRule>());
     EGraph injectedEGraph = planner.baseState.egraph;
@@ -131,7 +133,9 @@ inline void runPreExtractionMemCapTests()
 
     // 4. With 2MB cap: Even the 4MB inputs exceed 2MB, so deathCascade prunes everything
     std::unordered_map<MemSpace, uint64_t> tiny_caps = {{MemSpace{1, HandleType::CPP}, 2ULL * 1024 * 1024}};
-    Planner tinyPlanner(costModel, tiny_caps);
+    Settings tinySettings;
+    tinySettings.mem_caps = tiny_caps;
+    Planner tinyPlanner(costModel, tinySettings);
     EGraph tinyEGraph = planner.baseState.egraph;
     auto tinyInfos = tinyPlanner.computeENodeInfos(tinyEGraph, eclassToLogical, cachedNodes, false);
     tinyPlanner.pruneEGraph(tinyEGraph, tinyInfos);
