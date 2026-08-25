@@ -1,4 +1,3 @@
-// tensor_graphs_cpp/core/rewrite.hpp
 #pragma once
 #include <algorithm>
 #include <cstring>
@@ -46,7 +45,8 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
+    {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -94,6 +94,7 @@ struct RuleCtx
     const std::unordered_set<EClassId> &protectedEClasses;
     std::unordered_map<EClassId, LogicalId> &eclassToLogical;
     Repo *repo;
+    CostModel *costModel = nullptr;
 };
 
 struct Rule
@@ -405,7 +406,8 @@ struct FusionRule : public Rule
                     pattern.graph, pattern.rootId, inputNodes, outputNode, false, target_ms, {}, {}, true,
                     ignoreInputMemSpaces, true, true);
 
-                for (KernelId uid : kernelMatches) // TODO: only add the fastest one?
+                std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>> matched_kernels;
+                for (KernelId uid : kernelMatches)
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
                     std::vector<Engine> mapped_engines;
@@ -413,153 +415,274 @@ struct FusionRule : public Rule
                     if (kernel.matches(inputNodes, outputNode, target_ms, {}, {}, false, true, true, true,
                                        &mapped_engines, &mapped_input_spaces))
                     {
-                        addFusedNode(ctx, kernel, target_ms, mapped_engines, mapped_input_spaces, inputs,
-                                     ENodeId{eNodeIdx});
+                        matched_kernels.push_back({&kernel, {mapped_engines, mapped_input_spaces}});
                     }
                 }
+
+                addFusedCandidates(ctx, matched_kernels, target_ms, inputs, ENodeId{eNodeIdx});
             }
         }
     }
 
-    void addFusedNode(RuleCtx &ctx, const KernelEntry &kernel, MemSpace target_mem_space,
-                      const std::vector<Engine> &target_engines, const std::vector<MemSpace> &expected_input_mem_spaces,
-                      const std::vector<EClassId> &child_ids, ENodeId eNodeIdx) const
+    struct FusedCandidate
+    {
+        const KernelEntry *kernel;
+        MemSpace target_mem_space;
+        std::vector<Engine> mapped_engines;
+        std::vector<MemSpace> mapped_input_spaces;
+        std::vector<std::vector<std::vector<MemSpace>>> child_mem_paths;
+        std::vector<bool> child_need_contig;
+        std::vector<bool> child_need_copy;
+        float cost = std::numeric_limits<float>::infinity();
+    };
+
+    void addFusedCandidates(RuleCtx &ctx,
+                            const std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>> &matched_kernels,
+                            MemSpace target_mem_space,
+                            const std::vector<EClassId> &child_ids,
+                            ENodeId eNodeIdx)
     {
         EGraph &egraph = ctx.egraph;
-        std::vector<EClassId> adapted_children;
-        if (child_ids.size() < kernel.min_num_inputs || child_ids.size() > kernel.max_num_inputs)
-        {
-            Error::throw_err("[addFusedNode] input count mismatch");
-        }
-
-        std::vector<std::vector<std::vector<MemSpace>>> child_mem_paths(child_ids.size());
-        std::vector<bool> child_need_contig(child_ids.size(), false);
-        std::vector<bool> child_need_copy(child_ids.size(), false);
-
-        for (uint64_t i = 0; i < child_ids.size(); ++i)
-        {
-            EClassId pid = child_ids[i];
-            const EClass parent = egraph.getEClass(egraph.findConst(pid));
-
-            MemSpace expectedMemSpace =
-                (i < expected_input_mem_spaces.size()) ? expected_input_mem_spaces[i] : target_mem_space;
-
-            bool foundMemSpace = (parent.mem_space == expectedMemSpace);
-            bool needCopy = !foundMemSpace;
-            bool needContig = false;
-            uint64_t ruleIdx = std::min(
-                i, static_cast<uint64_t>(kernel.requiresContiguous.empty() ? 0 : kernel.requiresContiguous.size() - 1));
-            if (ruleIdx < kernel.requiresContiguous.size())
-            {
-                needContig = (kernel.requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
-            }
-            else
-            {
-                needContig = needCopy && !isContiguous(parent);
-            }
-
-            child_need_contig[i] = needContig;
-            child_need_copy[i] = needCopy;
-
-            if (needCopy)
-            {
-                TensorNode dummyNode;
-                dummyNode.opType = OpType::INPUT;
-                dummyNode.dtype = parent.dtype;
-                dummyNode.setShape(parent.shape);
-                dummyNode.strides = parent.strides;
-
-                child_mem_paths[i] = findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, target_engines);
-                if (child_mem_paths[i].empty())
-                {
-                    return;
-                }
-            }
-        }
-
         const ENode oldENode = egraph.getENode(eNodeIdx);
         EClassId e_class_id = egraph.getENodeEClass(eNodeIdx);
 
-        for (uint64_t i = 0; i < child_ids.size(); ++i)
+        const std::vector<uint32_t> &outShape = oldENode.getShape();
+        DType outDtype = oldENode.getDType();
+
+        std::vector<FusedCandidate> candidates;
+        candidates.reserve(matched_kernels.size());
+
+        // -------------------------------------------------------------------------
+        // Stage 1: Resolve adaptation requirements & compute true execution cost
+        // -------------------------------------------------------------------------
+        for (const auto &item : matched_kernels)
         {
-            EClassId pid = child_ids[i];
-            const EClass parent = egraph.getEClass(egraph.findConst(pid));
+            const KernelEntry *kernel = item.first;
+            const auto &mapped_engines = item.second.first;
+            const auto &mapped_input_spaces = item.second.second;
 
-            bool needCopy = child_need_copy[i];
-            bool needContig = child_need_contig[i];
+            FusedCandidate cand;
+            cand.kernel = kernel;
+            cand.target_mem_space = target_mem_space;
+            cand.mapped_engines = mapped_engines;
+            cand.mapped_input_spaces = mapped_input_spaces;
+            cand.child_mem_paths.resize(child_ids.size());
+            cand.child_need_contig.resize(child_ids.size(), false);
+            cand.child_need_copy.resize(child_ids.size(), false);
 
-            if (!needCopy && !needContig)
+            bool valid_paths = true;
+            std::vector<std::vector<uint32_t>> actualInShapes;
+            std::vector<std::vector<uint64_t>> actualInStrides;
+            std::vector<DType> actualInDTypes;
+            std::vector<std::vector<uint8_t>> actualInConstants;
+
+            for (uint64_t i = 0; i < child_ids.size(); ++i)
             {
-                adapted_children.push_back(pid);
-                continue;
-            }
+                EClassId pid = child_ids[i];
+                const EClass parent = egraph.getEClass(egraph.findConst(pid));
 
-            EClassId currentPid = pid;
-            EClass currentClass = parent;
+                MemSpace expectedMemSpace = (i < mapped_input_spaces.size()) ? mapped_input_spaces[i] : target_mem_space;
+                bool foundMemSpace = (parent.mem_space == expectedMemSpace);
+                bool needCopy = !foundMemSpace;
+                bool needContig = false;
 
-            if (needContig)
-            {
-                currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape,
-                                           calcContiguousStrides(currentClass.shape), currentClass.dtype,
-                                           currentClass.mem_space);
-                currentClass = egraph.getEClass(egraph.findConst(currentPid));
-            }
-
-            if (needCopy)
-            {
-                EClassId finalTargetClass = EClassId();
-                for (const auto &path : child_mem_paths[i])
+                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(kernel->requiresContiguous.empty() ? 0 : kernel->requiresContiguous.size() - 1));
+                if (ruleIdx < kernel->requiresContiguous.size())
                 {
-                    EClassId pathPid = currentPid;
-                    EClass pathClass = currentClass;
-                    for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
+                    needContig = (kernel->requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
+                }
+                else
+                {
+                    needContig = needCopy && !isContiguous(parent);
+                }
+
+                cand.child_need_contig[i] = needContig;
+                cand.child_need_copy[i] = needCopy;
+
+                if (needCopy)
+                {
+                    TensorNode dummyNode;
+                    dummyNode.opType = OpType::INPUT;
+                    dummyNode.dtype = parent.dtype;
+                    dummyNode.setShape(parent.shape);
+                    dummyNode.strides = parent.strides;
+
+                    cand.child_mem_paths[i] = findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, mapped_engines);
+                    if (cand.child_mem_paths[i].empty())
                     {
-                        MemSpace next_ms = path[p_idx];
-                        pathPid = addOpToEGraph(egraph, OpType::COPY_TO, {pathPid}, pathClass.shape, pathClass.strides,
-                                                pathClass.dtype, next_ms,
-                                                (p_idx == path.size() - 1) ? finalTargetClass : EClassId());
-                        if (p_idx == path.size() - 1)
-                        {
-                            finalTargetClass = pathPid;
-                        }
-                        pathClass = egraph.getEClass(egraph.findConst(pathPid));
+                        valid_paths = false;
+                        break;
                     }
                 }
-                currentPid = finalTargetClass;
+
+                // Determine the ACTUAL strides the kernel will receive at execution
+                actualInShapes.push_back(parent.shape);
+                actualInDTypes.push_back(parent.dtype);
+                if (needContig || (needCopy && !isContiguous(parent)))
+                {
+                    actualInStrides.push_back(calcContiguousStrides(parent.shape));
+                }
+                else
+                {
+                    actualInStrides.push_back(parent.strides);
+                }
+
+                EClassId canonChild = egraph.findConst(pid);
+                if (egraph.constantStaging.count(canonChild))
+                    actualInConstants.push_back(*egraph.constantStaging.at(canonChild));
+                else
+                    actualInConstants.push_back({});
             }
 
-            adapted_children.push_back(currentPid);
-        }
+            if (!valid_paths)
+                continue;
 
-        std::vector<uint64_t> strides =
-            kernel.is_view ? oldENode.getStrides() : calcContiguousStrides(oldENode.getShape());
+            std::vector<uint64_t> actualOutStrides = kernel->is_view ? oldENode.getStrides() : calcContiguousStrides(outShape);
 
-        ENode enode(kernel.uid, kernel.opType, kernel.opName, adapted_children, oldENode.getShape(), strides,
-                    oldENode.getDType(), target_mem_space, target_engines);
-
-        MemSpace originalMemSpace = egraph.getEClass(egraph.findConst(e_class_id)).mem_space;
-        if (target_mem_space == originalMemSpace)
-        {
-            egraph.addENode(e_class_id, enode);
-        }
-        else
-        {
-            EClassId newEClass =
-                egraph.addEClass(enode.getShape(), enode.getStrides(), enode.getDType(), target_mem_space);
-            newEClass = egraph.addENode(newEClass, enode);
-
-            EClassId srcForCopy = newEClass;
-            const EClass srcCls = egraph.getEClass(egraph.findConst(srcForCopy));
-
-            if (!isContiguous(srcCls))
+            if (ctx.costModel)
             {
-                srcForCopy = addOpToEGraph(egraph, OpType::CONTIGUOUS, {srcForCopy}, srcCls.shape,
-                                           calcContiguousStrides(srcCls.shape), srcCls.dtype, srcCls.mem_space);
+                cand.cost = ctx.costModel->estimateCost(kernel->uid, outShape, actualOutStrides, outDtype,
+                                                        actualInShapes, actualInStrides, actualInDTypes, actualInConstants,
+                                                        /*exactRecordOnly=*/true);
             }
 
-            const EClass copySrcCls = egraph.getEClass(egraph.findConst(srcForCopy));
-            addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides, copySrcCls.dtype,
-                          originalMemSpace, e_class_id);
+            candidates.push_back(std::move(cand));
+        }
+
+        // -------------------------------------------------------------------------
+        // Stage 2: Filter equivalent candidates using exact benchmark costs
+        // -------------------------------------------------------------------------
+        std::vector<bool> keep(candidates.size(), true);
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].cost == std::numeric_limits<float>::infinity())
+                continue; // Keep unbenchmarked candidates
+
+            for (size_t j = 0; j < candidates.size(); ++j)
+            {
+                if (i == j || candidates[j].cost == std::numeric_limits<float>::infinity())
+                    continue;
+
+                const auto &c1 = candidates[i];
+                const auto &c2 = candidates[j];
+
+                if (c1.mapped_engines != c2.mapped_engines)
+                    continue;
+                if (c1.mapped_input_spaces != c2.mapped_input_spaces)
+                    continue;
+                if (c1.kernel->requiresContiguous != c2.kernel->requiresContiguous)
+                    continue;
+                if (c1.kernel->safe_inplace_idxs != c2.kernel->safe_inplace_idxs)
+                    continue;
+                if (c1.kernel->is_view != c2.kernel->is_view)
+                    continue;
+
+                if (c2.cost < c1.cost - 1e-9f)
+                {
+                    keep[i] = false;
+                    break;
+                }
+                if (std::abs(c1.cost - c2.cost) <= 1e-9f && c2.kernel->uid < c1.kernel->uid)
+                {
+                    keep[i] = false;
+                    break;
+                }
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Stage 3: Materialize only the winning candidates into the EGraph
+        // -------------------------------------------------------------------------
+        for (size_t k = 0; k < candidates.size(); ++k)
+        {
+            if (!keep[k])
+                continue;
+
+            const auto &cand = candidates[k];
+            std::vector<EClassId> adapted_children;
+            adapted_children.reserve(child_ids.size());
+
+            for (uint64_t i = 0; i < child_ids.size(); ++i)
+            {
+                EClassId pid = child_ids[i];
+                const EClass parent = egraph.getEClass(egraph.findConst(pid));
+
+                bool needCopy = cand.child_need_copy[i];
+                bool needContig = cand.child_need_contig[i];
+
+                if (!needCopy && !needContig)
+                {
+                    adapted_children.push_back(pid);
+                    continue;
+                }
+
+                EClassId currentPid = pid;
+                EClass currentClass = parent;
+
+                if (needContig)
+                {
+                    currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape,
+                                               calcContiguousStrides(currentClass.shape), currentClass.dtype,
+                                               currentClass.mem_space);
+                    currentClass = egraph.getEClass(egraph.findConst(currentPid));
+                }
+
+                if (needCopy)
+                {
+                    EClassId finalTargetClass = EClassId();
+                    for (const auto &path : cand.child_mem_paths[i])
+                    {
+                        EClassId pathPid = currentPid;
+                        EClass pathClass = currentClass;
+                        for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
+                        {
+                            MemSpace next_ms = path[p_idx];
+                            pathPid = addOpToEGraph(egraph, OpType::COPY_TO, {pathPid}, pathClass.shape, pathClass.strides,
+                                                    pathClass.dtype, next_ms,
+                                                    (p_idx == path.size() - 1) ? finalTargetClass : EClassId());
+                            if (p_idx == path.size() - 1)
+                            {
+                                finalTargetClass = pathPid;
+                            }
+                            pathClass = egraph.getEClass(egraph.findConst(pathPid));
+                        }
+                    }
+                    currentPid = finalTargetClass;
+                }
+
+                adapted_children.push_back(currentPid);
+            }
+
+            std::vector<uint64_t> strides =
+                cand.kernel->is_view ? oldENode.getStrides() : calcContiguousStrides(oldENode.getShape());
+
+            ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, adapted_children, oldENode.getShape(), strides,
+                        oldENode.getDType(), cand.target_mem_space, cand.mapped_engines);
+
+            MemSpace originalMemSpace = egraph.getEClass(egraph.findConst(e_class_id)).mem_space;
+            if (cand.target_mem_space == originalMemSpace)
+            {
+                egraph.addENode(e_class_id, enode);
+            }
+            else
+            {
+                EClassId newEClass =
+                    egraph.addEClass(enode.getShape(), enode.getStrides(), enode.getDType(), cand.target_mem_space);
+                newEClass = egraph.addENode(newEClass, enode);
+
+                EClassId srcForCopy = newEClass;
+                const EClass srcCls = egraph.getEClass(egraph.findConst(srcForCopy));
+
+                if (!isContiguous(srcCls))
+                {
+                    srcForCopy = addOpToEGraph(egraph, OpType::CONTIGUOUS, {srcForCopy}, srcCls.shape,
+                                               calcContiguousStrides(srcCls.shape), srcCls.dtype, srcCls.mem_space);
+                }
+
+                const EClass copySrcCls = egraph.getEClass(egraph.findConst(srcForCopy));
+                addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides, copySrcCls.dtype,
+                              originalMemSpace, e_class_id);
+            }
         }
     }
 
@@ -1350,7 +1473,8 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId) {
+                                       EClassId stId, EClassId enId, EClassId stepId)
+                {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1935,7 +2059,8 @@ struct RemoveContiguous : public Rule
         std::vector<std::vector<EClassId>> childCombinations;
         std::vector<EClassId> currentCombination(children.size());
 
-        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
+        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped)
+        {
             if (pos == children.size())
             {
                 if (hasUnwrapped)

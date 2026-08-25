@@ -902,7 +902,7 @@ struct Planner
                   std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool injected,
                   bool allowPushDownOnProtected = false, Repo *repo = nullptr)
     {
-        RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo};
+        RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo, &costModel};
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
         rules.emplace_back(std::make_unique<FlattenBatchDot>());

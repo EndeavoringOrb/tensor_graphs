@@ -226,8 +226,7 @@ int main(int argc, char *argv[])
             dummyOutput.strides = r.outputStrides;
             dummyOutput.dtype = r.outputDType;
 
-            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines, false,
-                                false, false, true))
+            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines))
             {
                 std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId
                           << "): record fails matches() validity check." << std::endl;
