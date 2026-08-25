@@ -174,11 +174,63 @@ struct Settings
         if (records.empty())
             return false;
 
+        // 1. Group records by category
+        std::unordered_map<std::string, std::vector<RuleBenchmarkRecord>> cat_records;
         for (const auto &rec : records)
         {
-            rules[rec.category][rec.rule_name] = rec.was_faster;
+            cat_records[rec.category].push_back(rec);
             benchmark_records[rec.category][rec.rule_name] = rec;
-            category_defined[rec.category] = true;
+        }
+
+        // 2. Find the combination with the highest speedup (best slope reduction)
+        for (const auto &[category, recs] : cat_records)
+        {
+            const RuleBenchmarkRecord *best_rec = nullptr;
+            double best_speedup = 1.0;
+
+            for (const auto &rec : recs)
+            {
+                if (rec.was_faster && rec.speedup > best_speedup)
+                {
+                    best_speedup = rec.speedup;
+                    best_rec = &rec;
+                }
+            }
+
+            category_defined[category] = true;
+
+            // Collect all individual rule names known for this category
+            std::unordered_set<std::string> all_known_rules;
+            for (const auto &rec : recs)
+            {
+                std::stringstream ss(rec.rule_name);
+                std::string token;
+                while (std::getline(ss, token, '+'))
+                {
+                    if (!token.empty())
+                        all_known_rules.insert(token);
+                }
+            }
+
+            // 3. Activate rules belonging to the winning combination
+            std::unordered_set<std::string> active_rules;
+            if (best_rec != nullptr)
+            {
+                std::stringstream ss(best_rec->rule_name);
+                std::string token;
+                while (std::getline(ss, token, '+'))
+                {
+                    if (!token.empty())
+                        active_rules.insert(token);
+                }
+                std::cout << "[Settings] Category '" << category << "' activated best combination: "
+                          << best_rec->rule_name << " (speedup: " << best_rec->speedup << "x)\n";
+            }
+
+            for (const auto &rule_name : all_known_rules)
+            {
+                rules[category][rule_name] = (active_rules.count(rule_name) > 0);
+            }
         }
         return true;
     }
@@ -575,6 +627,10 @@ struct Settings
         for (const auto &p : defaults)
         {
             set_rule_enabled(p.first, p.second, enabled);
+        }
+        for (const std::string &cat : {"dispatch", "bufferize", "malloc", "cache", "extract", "enode"})
+        {
+            category_defined[cat] = true;
         }
     }
 

@@ -153,10 +153,11 @@ template <typename... Rules> struct CacheIterator
     std::vector<std::vector<uint32_t>> choice_orders;
     std::unordered_map<LogicalId, MemSpace> current_cache_selection;
 
+    template <typename... Rs>
     CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
                   const std::vector<MemSpace> &_avail_mem_spaces, std::shared_ptr<SearchDelegate> _delegate,
-                  Rules &&..._rules)
-        : rules(std::forward<Rules>(_rules)...), graph(_graph), candidate_nodes(_candidates),
+                  Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), graph(_graph), candidate_nodes(_candidates),
           avail_mem_spaces(_avail_mem_spaces), delegate(std::move(_delegate))
     {
         init();
@@ -1564,7 +1565,7 @@ struct Planner
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
                                    best_eclass_to_buf, best_cost,  best_eclass_to_cost};
-        std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
+        LOG(INFO) << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
     }

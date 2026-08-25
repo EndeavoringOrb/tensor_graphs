@@ -101,11 +101,11 @@ template <typename... Rules> struct DispatchIterator
   public:
     prune::PruningRuleSet<Rules...> rules;
 
+    template <typename... Rs>
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &_enode_infos, std::shared_ptr<SearchDelegate> _delegate,
-                     Rules &&..._rules)
-        : egraph(_egraph), enodeInfos(_enode_infos), delegate(std::move(_delegate)),
-          rules(std::forward<Rules>(_rules)...)
+                     Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), egraph(_egraph), enodeInfos(_enode_infos), delegate(std::move(_delegate))
     {
         selection_map_ref = &selection_map;
         initOrderState(selection_map);
@@ -630,12 +630,12 @@ template <typename... Rules> struct Extractor
     EClassId target_backtrack_eclass = EClassId{UINT32_MAX};
     uint64_t numClasses;
 
+    template <typename... Rs>
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
-              std::shared_ptr<SearchDelegate> _delegate, Rules &&..._rules)
-        : rules(std::forward<Rules>(_rules)...), egraph(_egraph), enodeInfos(_enodeInfos),
-          delegate(std::move(_delegate)), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
-          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
-          has_options(_egraph.classes.size(), false)
+              std::shared_ptr<SearchDelegate> _delegate, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), egraph(_egraph), enodeInfos(_enodeInfos), delegate(std::move(_delegate)),
+          numClasses(_egraph.classes.size()), to_process({root_eclass_id}), in_path(_egraph.classes.size(), false),
+          path_pos(_egraph.classes.size(), -1), has_options(_egraph.classes.size(), false)
     {
         ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX}, 0};
         rules.init(ctx);

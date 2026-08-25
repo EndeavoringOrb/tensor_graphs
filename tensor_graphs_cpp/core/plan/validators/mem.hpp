@@ -546,11 +546,12 @@ template <typename... Rules> struct BufferizeIterator
     std::vector<std::vector<uint32_t>> choice_orders;
     std::unordered_map<EClassId, EClassId> inplace_alias;
 
+    template <typename... Rs>
     BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,
                       const std::unordered_map<EClassId, uint32_t> &_selection_map,
                       const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate,
-                      Rules &&..._rules)
-        : rules(std::forward<Rules>(_rules)...), ordered(_ordered), egraph(_egraph), selection_map(_selection_map),
+                      Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), ordered(_ordered), egraph(_egraph), selection_map(_selection_map),
           enodeInfos(_enodeInfos), delegate(std::move(_delegate))
     {
         init();
@@ -1133,9 +1134,13 @@ class LargerBufferPriorityRule
             return false;
         int cand = c.avail[c.idx];
         int64_t cand_size = c.unallocated_sizes[cand];
-        for (int j = c.k + 1; j < static_cast<int>(c.avail.size()); ++j)
+        for (int j = c.k; j < static_cast<int>(c.avail.size()); ++j)
         {
+            if (j == c.idx)
+                continue;
             int other = c.avail[j];
+            if (c.current_offsets[other] != c.offset)
+                continue;
             if (c.unallocated_sizes[other] > cand_size)
             {
                 return true;
@@ -1185,9 +1190,10 @@ template <typename... Rules> struct MallocIterator
 
     bool is_done = false;
 
+    template <typename... Rs>
     MallocIterator(uint64_t _mem_cap, const std::vector<ParallelBuffer> &_unallocated,
-                   std::shared_ptr<SearchDelegate> _delegate, Rules &&..._rules)
-        : rules(std::forward<Rules>(_rules)...), mem_cap(_mem_cap), unallocated(_unallocated),
+                   std::shared_ptr<SearchDelegate> _delegate, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), mem_cap(_mem_cap), unallocated(_unallocated),
           delegate(std::move(_delegate)), N(static_cast<int>(_unallocated.size()))
     {
         unallocated_sizes.resize(N);
