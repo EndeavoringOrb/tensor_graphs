@@ -94,356 +94,6 @@ struct DispatchNodeMeta
 };
 
 // =============================================================================
-// Rule A: Multi-Engine Commutativity
-// =============================================================================
-class MultiEngineCommutativityRule
-{
-  public:
-    bool enabled = true;
-    MultiEngineCommutativityRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "MultiEngineCommutativityRule";
-    }
-
-    void init(const DispatchContext &ctx)
-    {
-        if (!enabled)
-            return;
-        meta.initFrom(ctx);
-    }
-
-    bool check(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (candidate_idx == 0 || ctx.current_ready.size() <= 1)
-            return false;
-
-        if (!meta.has_eng[candidate.value])
-            return false;
-        const uint64_t cand_e = meta.eng_key[candidate.value];
-        const uint64_t cand_m = meta.ms_key[candidate.value];
-
-        for (size_t i = 0; i < candidate_idx; ++i)
-        {
-            const EClassId other = ctx.current_ready[i];
-            if (!meta.has_eng[other.value])
-                continue;
-
-            const uint64_t oth_e = meta.eng_key[other.value];
-            if (oth_e != cand_e && meta.ms_key[other.value] != cand_m && oth_e < cand_e)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-  private:
-    DispatchNodeMeta meta;
-};
-
-// =============================================================================
-// Rule B: Disjoint Subgraph Symmetry Breaking
-// =============================================================================
-class DisjointSubgraphSymmetryRule
-{
-  public:
-    bool enabled = true;
-    DisjointSubgraphSymmetryRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "DisjointSubgraphSymmetryRule";
-    }
-
-    void init(const DispatchContext &ctx)
-    {
-        if (!enabled)
-            return;
-        meta.initFrom(ctx);
-    }
-
-    bool check(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (ctx.ordered.empty() || ctx.current_ready.size() <= 1)
-            return false;
-
-        const EClassId last_dispatched = ctx.ordered.back();
-        if (last_dispatched.value >= meta.in_selection.size() || !meta.in_selection[last_dispatched.value])
-            return false;
-        const uint64_t active_ms = meta.ms_key[last_dispatched.value];
-
-        if (meta.ms_key[candidate.value] == active_ms)
-            return false;
-
-        bool has_active_ready = false;
-        for (EClassId ready_node : ctx.current_ready)
-        {
-            if (meta.ms_key[ready_node.value] == active_ms)
-            {
-                has_active_ready = true;
-                break;
-            }
-        }
-        return has_active_ready;
-    }
-
-  private:
-    DispatchNodeMeta meta;
-};
-
-// =============================================================================
-// Rule C: Last-Reader Buffer-Free Dominance
-// =============================================================================
-class LastReaderBufferFreeDominationRule
-{
-  public:
-    bool enabled = true;
-    LastReaderBufferFreeDominationRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "LastReaderBufferFreeDominationRule";
-    }
-
-    void init(const DispatchContext &ctx)
-    {
-        if (!enabled)
-            return;
-        meta.initFrom(ctx);
-
-        const EGraph &g = ctx.egraph;
-        const size_t n = g.getClasses().size();
-
-        remaining.assign(n, 0);
-        node_children.clear();
-        node_children.resize(n);
-
-        for (const auto &kv : ctx.selection_map)
-        {
-            EClassId node = g.findConst(kv.first);
-            if (node.value >= n)
-                continue;
-            const ENodeId eid = g.getEClass(node).enodes[kv.second];
-            const ENode &en = g.getENode(eid);
-
-            auto &kids = node_children[node.value];
-            kids.clear();
-            for (EClassId child : en.getChildren())
-            {
-                EClassId canon_child = g.findConst(child);
-                if (canon_child.value >= n || canon_child == node)
-                    continue;
-                if (std::find(kids.begin(), kids.end(), canon_child) == kids.end())
-                {
-                    kids.push_back(canon_child);
-                    remaining[canon_child.value]++;
-                }
-            }
-        }
-    }
-
-    void on_push(EClassId node, const DispatchContext &)
-    {
-        if (!enabled)
-            return;
-        for (EClassId child : node_children[node.value])
-            --remaining[child.value];
-    }
-
-    void on_pop(EClassId node, const DispatchContext &)
-    {
-        if (!enabled)
-            return;
-        for (EClassId child : node_children[node.value])
-            ++remaining[child.value];
-    }
-
-    bool check(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (ctx.current_ready.size() <= 1)
-            return false;
-
-        if (!meta.has_eng[candidate.value])
-            return false;
-        const uint64_t cand_e = meta.eng_key[candidate.value];
-        const float cand_cost = meta.cost[candidate.value];
-
-        if (frees_buffer(candidate))
-            return false;
-
-        for (size_t i = 0; i < ctx.current_ready.size(); ++i)
-        {
-            if (i == candidate_idx)
-                continue;
-            const EClassId other = ctx.current_ready[i];
-            if (!meta.has_eng[other.value] || meta.eng_key[other.value] != cand_e)
-                continue;
-
-            if (meta.cost[other.value] <= cand_cost + 1e-6f && frees_buffer(other))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-  private:
-    DispatchNodeMeta meta;
-    std::vector<uint32_t> remaining;
-    std::vector<std::vector<EClassId>> node_children;
-
-    bool frees_buffer(EClassId node) const
-    {
-        for (EClassId child : node_children[node.value])
-        {
-            if (remaining[child.value] == 1)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
-// =============================================================================
-// Rule D: Single-Engine Generalization
-// =============================================================================
-class SingleEngineDispatchDominationRule
-{
-  public:
-    bool enabled = true;
-    SingleEngineDispatchDominationRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "SingleEngineDispatchDomination";
-    }
-
-    void init(const DispatchContext &ctx)
-    {
-        if (!enabled)
-            return;
-        meta.initFrom(ctx);
-
-        const size_t n = meta.eng_key.size();
-        engine_ok.assign(n, 0);
-
-        bool have_target = false;
-        bool any_non_input = false;
-        uint64_t target = DispatchNodeMeta::kNoKey;
-
-        for (const auto &kv : ctx.selection_map)
-        {
-            EClassId node = ctx.egraph.findConst(kv.first);
-            if (node.value >= n || !meta.in_selection[node.value])
-                continue;
-            if (meta.input_like[node.value])
-                continue;
-
-            any_non_input = true;
-            if (!meta.has_eng[node.value])
-                return;
-            const uint64_t e = meta.eng_key[node.value];
-            if (!have_target)
-            {
-                target = e;
-                have_target = true;
-            }
-            else if (e != target)
-            {
-                return;
-            }
-        }
-
-        if (!have_target && !any_non_input)
-            return;
-
-        if (have_target)
-        {
-            mode = Mode::Pinned;
-            target_key = target;
-            has_input_like = false;
-            for (const auto &kv : ctx.selection_map)
-            {
-                EClassId node = ctx.egraph.findConst(kv.first);
-                if (node.value >= n || !meta.in_selection[node.value])
-                    continue;
-                has_input_like = has_input_like || meta.input_like[node.value] != 0;
-                engine_ok[node.value] = (meta.has_eng[node.value] && meta.eng_key[node.value] == target) ? 1 : 0;
-            }
-        }
-        else
-        {
-            mode = Mode::AllInputLike;
-            has_input_like = true;
-        }
-    }
-
-    bool check(EClassId candidate, size_t candidate_idx, const DispatchContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (mode == Mode::Inactive || candidate_idx == 0 || ctx.current_ready.size() <= 1)
-            return false;
-
-        if (mode == Mode::AllInputLike)
-        {
-            const EClassId first = ctx.current_ready[0];
-            if (!meta.has_eng[first.value])
-                return false;
-            const uint64_t first_e = meta.eng_key[first.value];
-            for (EClassId r : ctx.current_ready)
-            {
-                if (!meta.has_eng[r.value] || meta.eng_key[r.value] != first_e)
-                    return false;
-            }
-            return true;
-        }
-
-        if (!has_input_like)
-            return true;
-
-        for (EClassId r : ctx.current_ready)
-        {
-            if (!engine_ok[r.value])
-                return false;
-        }
-        return true;
-    }
-
-  private:
-    enum class Mode
-    {
-        Inactive,
-        Pinned,
-        AllInputLike
-    };
-
-    DispatchNodeMeta meta;
-    Mode mode = Mode::Inactive;
-    uint64_t target_key = DispatchNodeMeta::kNoKey;
-    bool has_input_like = false;
-    std::vector<uint8_t> engine_ok;
-};
-
-// =============================================================================
 // DispatchIterator
 // =============================================================================
 template <typename... Rules> struct DispatchIterator
@@ -514,18 +164,7 @@ template <typename... Rules> struct DispatchIterator
                 if (delegate)
                 {
                     delegate->push_state();
-                }
-            }
 
-            bool chosen = false;
-            while (selection_at_pos[pos] < current_ready.size())
-            {
-                uint32_t choice_idx = selection_at_pos[pos];
-                selection_at_pos[pos] = choice_idx + 1;
-                uint32_t choice = choice_idx;
-
-                if (delegate)
-                {
                     std::vector<ActionFeatureExtractDispatch> features;
                     features.reserve(current_ready.size());
                     for (auto id : current_ready)
@@ -566,16 +205,25 @@ template <typename... Rules> struct DispatchIterator
                             g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
                                            enode.getShape(), enode.getStrides(), "");
                         }
-                        f.graph = g;
+                        f.graph = std::move(g);
 
                         features.push_back(f);
                     }
-                    std::vector<uint32_t> custom_order = delegate->order_dispatch(features);
-                    if (choice_idx < custom_order.size())
-                    {
-                        choice = custom_order[choice_idx];
-                    }
+                    choice_orders[pos] = delegate->order_dispatch(features);
                 }
+                else
+                {
+                    choice_orders[pos].resize(current_ready.size());
+                    std::iota(choice_orders[pos].begin(), choice_orders[pos].end(), 0u);
+                }
+            }
+
+            bool chosen = false;
+            while (selection_at_pos[pos] < current_ready.size())
+            {
+                uint32_t choice_idx = selection_at_pos[pos];
+                selection_at_pos[pos] = choice_idx + 1;
+                uint32_t choice = choice_orders[pos][choice_idx];
 
                 EClassId node = current_ready[choice];
 
@@ -649,6 +297,7 @@ template <typename... Rules> struct DispatchIterator
     std::vector<EClassId> chosen_at_pos;
     std::vector<uint32_t> choice_at_pos;
     std::vector<uint32_t> selection_at_pos;
+    std::vector<std::vector<uint32_t>> choice_orders;
 
     bool is_done = false;
     bool first_yield = true;
@@ -678,6 +327,8 @@ template <typename... Rules> struct DispatchIterator
         chosen_at_pos.assign(num_nodes_in_selection + 1, EClassId{UINT32_MAX});
         choice_at_pos.assign(num_nodes_in_selection + 1, 0);
         selection_at_pos.assign(num_nodes_in_selection + 1, 0);
+        choice_orders.clear();
+        choice_orders.resize(num_nodes_in_selection + 1);
 
         std::vector<uint8_t> in_selection(max_class_id, 0);
         for (const auto &kv : selection_map)
@@ -840,12 +491,7 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
 {
     settings.validate_dispatch_rules();
-    return makeDispatchIteratorWithDelegate(
-        egraph, selection_map, enodeInfos, std::move(delegate),
-        SingleEngineDispatchDominationRule(settings.is_rule_enabled("dispatch", "SingleEngineDispatchDomination")),
-        MultiEngineCommutativityRule(settings.is_rule_enabled("dispatch", "MultiEngineCommutativityRule")),
-        DisjointSubgraphSymmetryRule(settings.is_rule_enabled("dispatch", "DisjointSubgraphSymmetryRule")),
-        LastReaderBufferFreeDominationRule(settings.is_rule_enabled("dispatch", "LastReaderBufferFreeDominationRule")));
+    return makeDispatchIteratorWithDelegate(egraph, selection_map, enodeInfos, std::move(delegate));
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
@@ -855,12 +501,120 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
     return makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, nullptr, settings);
 }
 
-struct Extractor
+// =============================================================================
+// ExtractContext -- view into Extractor state at check() time
+// =============================================================================
+struct ExtractContext
+{
+    const EGraph &egraph;
+    const std::vector<ENodeInfo> &enodeInfos;
+    const std::unordered_map<EClassId, uint32_t> &selection_map;
+    const std::vector<EClassId> &path;
+    EClassId current; // EClass being decided
+    uint32_t sel;     // index into current's enodes of the candidate ENode
+};
+
+// =============================================================================
+// Extractor pruning rules (plain structs; conform to prune::PruningRuleSet)
+// =============================================================================
+
+// Rule: Skip ENodes whose cost has already been marked INF by the cost model /
+// pre-extraction domination rules. Reduces dead-branch exploration.
+class InfiniteCostSkipRule
+{
+  public:
+    bool enabled = true;
+    InfiniteCostSkipRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "InfiniteCostSkipRule";
+    }
+    bool check(ENodeId /*cand*/, size_t /*cand_idx*/, const ExtractContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        const auto &enodes = ctx.egraph.getEClass(ctx.current).enodes;
+        if (ctx.sel >= enodes.size())
+            return false;
+        ENodeId enode_id = enodes[ctx.sel];
+        if (enode_id.value >= ctx.enodeInfos.size())
+            return false;
+        return ctx.enodeInfos[enode_id.value].cost == TGConstants::INF;
+    }
+};
+
+// Rule: Symmetry breaking -- if a sibling EClass in the path already selected
+// an ENode with the same kernelId (and equivalent children), the candidate is
+// dominated. Prunes redundant permutation of equivalent fused rewrites.
+class SiblingEquivalentSkipRule
+{
+  public:
+    bool enabled = true;
+    SiblingEquivalentSkipRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "SiblingEquivalentSkipRule";
+    }
+    bool check(ENodeId /*cand*/, size_t /*cand_idx*/, const ExtractContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        const auto &enodes = ctx.egraph.getEClass(ctx.current).enodes;
+        if (ctx.sel >= enodes.size())
+            return false;
+        ENodeId cand_id = enodes[ctx.sel];
+        const ENode &cand_en = ctx.egraph.getENode(cand_id);
+        KernelId cand_kid = cand_en.getKernelId();
+        if (cand_kid.value == 0)
+            return false; // no kernel, skip
+
+        // Walk the path backwards (siblings are path entries before `current`).
+        for (auto it = ctx.path.rbegin(); it != ctx.path.rend(); ++it)
+        {
+            EClassId sibling = *it;
+            if (sibling == ctx.current)
+                break;
+            auto sel_it = ctx.selection_map.find(sibling);
+            if (sel_it == ctx.selection_map.end())
+                continue;
+            ENodeId s_enode_id = ctx.egraph.getEClass(sibling).enodes[sel_it->second];
+            const ENode &s_en = ctx.egraph.getENode(s_enode_id);
+            if (s_en.getKernelId() != cand_kid)
+                continue;
+            if (s_en.getChildren().size() != cand_en.getChildren().size())
+                continue;
+            // children must be canonically equal
+            bool same_children = true;
+            for (size_t c = 0; c < cand_en.getChildren().size(); ++c)
+            {
+                if (ctx.egraph.findConst(cand_en.getChildren()[c]) != ctx.egraph.findConst(s_en.getChildren()[c]))
+                {
+                    same_children = false;
+                    break;
+                }
+            }
+            if (same_children)
+                return true;
+        }
+        return false;
+    }
+};
+
+// =============================================================================
+// Extractor<Rules...> -- zero-overhead, rules inlined via std::tuple
+// =============================================================================
+template <typename... Rules> struct Extractor
 {
   private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
   public:
+    prune::PruningRuleSet<Rules...> rules;
+
     std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
@@ -872,15 +626,19 @@ struct Extractor
     std::vector<bool> has_options;
     uint32_t active_options = 0;
     std::unordered_map<EClassId, uint32_t> next_sel;
+    std::unordered_map<EClassId, std::vector<uint32_t>> current_orders;
     EClassId target_backtrack_eclass = EClassId{UINT32_MAX};
     uint64_t numClasses;
 
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
-              std::shared_ptr<SearchDelegate> _delegate = nullptr)
-        : egraph(_egraph), enodeInfos(_enodeInfos), delegate(_delegate), numClasses(_egraph.classes.size()),
-          to_process({root_eclass_id}), in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
+              std::shared_ptr<SearchDelegate> _delegate, Rules &&..._rules)
+        : rules(std::forward<Rules>(_rules)...), egraph(_egraph), enodeInfos(_enodeInfos),
+          delegate(std::move(_delegate)), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
+          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
           has_options(_egraph.classes.size(), false)
     {
+        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX}, 0};
+        rules.init(ctx);
     }
 
     void registerValidator(std::unique_ptr<ISelectionValidator> validator)
@@ -902,9 +660,17 @@ struct Extractor
         return true;
     }
 
+    bool is_done() const
+    {
+        return to_process.empty() && path.empty();
+    }
+
     bool getNextSelection()
     {
         LOG(DEBUG) << "getNextSelection";
+        if (is_done())
+            return false;
+
         while (!to_process.empty())
         {
             EClassId current = to_process.back();
@@ -927,22 +693,14 @@ struct Extractor
                 next_sel.erase(nextIt);
             }
 
-            if (sel == 0 && delegate)
-            {
-                delegate->push_state();
-            }
-
             const auto &enodes = egraph.getEClass(current).enodes;
 
-            bool found_valid = false;
-            int max_conflict_path_pos = -1;
-            std::vector<EClassId> aggregate_conflicts;
-
-            for (; sel < enodes.size(); ++sel)
+            if (sel == 0)
             {
-                uint32_t chosen_sel = sel;
                 if (delegate)
                 {
+                    delegate->push_state();
+
                     std::vector<ActionFeatureExtractDispatch> features;
                     features.reserve(enodes.size());
                     for (ENodeId enodeId : enodes)
@@ -980,18 +738,35 @@ struct Extractor
                             g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
                                            enode.getShape(), enode.getStrides(), "");
                         }
-                        f.graph = g;
+                        f.graph = std::move(g);
 
                         features.push_back(f);
                     }
-                    std::vector<uint32_t> custom_order = delegate->order_enodes(features);
-                    if (sel < custom_order.size())
-                    {
-                        chosen_sel = custom_order[sel];
-                    }
+                    current_orders[current] = delegate->order_enodes(features);
+                }
+                else
+                {
+                    current_orders[current].resize(enodes.size());
+                    std::iota(current_orders[current].begin(), current_orders[current].end(), 0u);
+                }
+            }
+
+            bool found_valid = false;
+            int max_conflict_path_pos = -1;
+            std::vector<EClassId> aggregate_conflicts;
+
+            for (; sel < enodes.size(); ++sel)
+            {
+                uint32_t chosen_sel = current_orders[current][sel];
+                ENodeId enode_id = enodes[chosen_sel];
+
+                // Apply DFS pruning rules -- skip candidate if pruned.
+                ExtractContext pctx{egraph, enodeInfos, selection_map, path, current, chosen_sel};
+                if (rules.is_pruned(enode_id, static_cast<size_t>(chosen_sel), pctx))
+                {
+                    continue;
                 }
 
-                ENodeId enode_id = enodes[chosen_sel];
                 selection_map[current] = chosen_sel;
 
                 bool step_valid = true;
@@ -1121,55 +896,10 @@ struct Extractor
             const auto &enodes = egraph.getEClass(current).enodes;
 
             uint32_t iteration_index = chosen_sel;
-            if (delegate)
+            auto it = std::find(current_orders[current].begin(), current_orders[current].end(), chosen_sel);
+            if (it != current_orders[current].end())
             {
-                std::vector<ActionFeatureExtractDispatch> features;
-                features.reserve(enodes.size());
-                for (ENodeId enodeId : enodes)
-                {
-                    const ENode &enode = egraph.getENode(enodeId);
-                    ActionFeatureExtractDispatch f;
-                    f.cost = enodeInfos[enodeId.value].cost;
-                    f.dp_cost = enodeInfos[enodeId.value].dp_cost;
-                    f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
-                    f.mem_space = enode.getMemSpace();
-                    for (const auto &eng : enode.getEngines())
-                    {
-                        f.engine_idxs.push_back(eng.idx);
-                    }
-
-                    Graph g;
-                    std::vector<LogicalId> inIds;
-                    for (EClassId child : enode.getChildren())
-                    {
-                        const EClass &cCls = egraph.getEClass(egraph.findConst(child));
-                        inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
-                    }
-
-                    if (enode.getOpType() == OpType::FUSED)
-                    {
-                        if (KernelRegistry::get().hasKernel(enode.getKernelId()))
-                        {
-                            auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
-                            if (refFact)
-                                refFact(inIds, g);
-                        }
-                    }
-                    else
-                    {
-                        g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds, enode.getShape(),
-                                       enode.getStrides(), "");
-                    }
-                    f.graph = g;
-
-                    features.push_back(f);
-                }
-                std::vector<uint32_t> custom_order = delegate->order_enodes(features);
-                auto it = std::find(custom_order.begin(), custom_order.end(), chosen_sel);
-                if (it != custom_order.end())
-                {
-                    iteration_index = static_cast<uint32_t>(std::distance(custom_order.begin(), it));
-                }
+                iteration_index = static_cast<uint32_t>(std::distance(current_orders[current].begin(), it));
             }
 
             ENodeId enode_id = enodes[chosen_sel];
@@ -1219,6 +949,7 @@ struct Extractor
             else
             {
                 selection_map.erase(current);
+                current_orders.erase(current);
                 if (delegate)
                     delegate->pop_state();
                 if (has_options[current.value])
@@ -1230,3 +961,40 @@ struct Extractor
         }
     }
 };
+
+// =============================================================================
+// Factory helpers for Extractor
+// =============================================================================
+template <typename... Rules>
+Extractor<std::decay_t<Rules>...> makeExtractor(const EGraph &egraph, EClassId root_eclass_id,
+                                                const std::vector<ENodeInfo> &enodeInfos, Rules &&...rules)
+{
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr,
+                                             std::forward<Rules>(rules)...);
+}
+
+template <typename... Rules>
+Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(const EGraph &egraph, EClassId root_eclass_id,
+                                                            const std::vector<ENodeInfo> &enodeInfos,
+                                                            std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
+{
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate),
+                                             std::forward<Rules>(rules)...);
+}
+
+inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
+                                    const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
+                                    const Settings &settings)
+{
+    settings.validate_rules("extract");
+    return makeExtractorWithDelegate(
+        egraph, root_eclass_id, enodeInfos, std::move(delegate),
+        InfiniteCostSkipRule(settings.is_rule_enabled("extract", "InfiniteCostSkipRule")),
+        SiblingEquivalentSkipRule(settings.is_rule_enabled("extract", "SiblingEquivalentSkipRule")));
+}
+
+inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
+                                    const std::vector<ENodeInfo> &enodeInfos, const Settings &settings)
+{
+    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings);
+}

@@ -1,38 +1,15 @@
-#include <algorithm>
-#include <cassert>
-#include <cmath>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <random>
-#include <string>
-#include <type_traits>
-#include <unordered_set>
-#include <vector>
-
+// tensor_graphs_cpp/test.cpp
 #include "core/argparse.hpp"
-#include "core/common/bench_utils.hpp"
-#include "core/cost_model.hpp"
-#include "core/graph.hpp"
-#include "core/kernels.hpp"
-#include "core/loaders/safetensors.hpp"
-#include "core/memory.hpp"
-#include "core/misc.hpp"
-#include "core/plan/planner.hpp"
-#include "core/session.hpp"
+#include "core/logging.hpp"
 #include "core/settings.hpp"
-#include "core/shape_propagator.hpp"
-#include "generated/kernels_all.gen.hpp"
 
-#include "tests/bufferize_domination.hpp"
+// Unified Pruning Test Suite (Replaces all individual domination/pruning test files)
+#include "tests/pruning/test.hpp"
+
+// Non-pruning / Structural Regression Tests
 #include "tests/constant_view_regression.hpp"
-#include "tests/dispatch_domination.hpp"
-#include "tests/dispatch_rules_benchmark.hpp"
-#include "tests/enode_domination.hpp"
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
-#include "tests/mem_cap_prune.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/shape_propagation.hpp"
@@ -42,22 +19,18 @@ int main(int argc, char *argv[])
 {
     ArgParser parser("test", "Run tests.");
     parser.add_flag({"--no-records"}, "Disable record-based testing.");
-    parser.add_option({"--cache"},
-                      "Path to cache file. If provided, only kernel calls "
-                      "present in the cache file will be tested.",
-                      "");
+    parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
-    Settings settings;
-    settings.add_to_argparser(parser);
-
-    if (!parser.parse(argc, argv))
+    std::vector<std::string> remaining_args;
+    if (!parser.parse(argc, argv, &remaining_args))
     {
         return 1;
     }
 
-    settings.load(argc, argv);
+    Settings settings;
+    settings.load(remaining_args);
 
     std::string targetKernel = parser.get_positional("targetKernel");
     bool useRecords = !parser.get_flag("--no-records");
@@ -66,13 +39,12 @@ int main(int argc, char *argv[])
 
     if (targetKernel.empty() && cachePath.empty())
     {
-        runDispatchRulesBenchmark();
+        // Auto-discovers and benchmarks all Dispatch, Bufferize, Malloc, Cache, Extract, and ENode rules
+        runPruningTests();
+
+        // Structural & Operator Correctness Tests
         runRegionMergeTests();
         runShapePropagationTests();
-        runPreExtractionMemCapTests();
-        runENodeDominationTests();
-        runDispatchDominationTests();
-        runBufferizeDominationTests();
         runInputHashconsTests();
         runViewBufferizeRegressionTests();
         runConstantViewRegressionTests();
@@ -84,6 +56,5 @@ int main(int argc, char *argv[])
     }
 
     LOG(INFO) << "finished testing";
-
     return 0;
 }

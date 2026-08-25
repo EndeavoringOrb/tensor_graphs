@@ -9,9 +9,10 @@ import sys
 import threading
 import time
 from pathlib import Path
-from tqdm import tqdm
+
 import torch
 from safetensors import safe_open
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import format_size, natural_sort_key
@@ -21,7 +22,9 @@ from common import format_size, natural_sort_key
 def force_exit_handler(signum, frame):
     # Print clean newline and exit immediately without waiting for thread joins
     try:
-        sys.stderr.write("\n\nAnalysis cancelled by user (Ctrl+C). Exiting immediately...\n")
+        sys.stderr.write(
+            "\n\nAnalysis cancelled by user (Ctrl+C). Exiting immediately...\n"
+        )
         sys.stderr.flush()
     except Exception:
         pass
@@ -41,10 +44,14 @@ def get_raw_u8_tensor(tensor: torch.Tensor) -> torch.Tensor:
         return t.view(torch.uint8).reshape(-1)
     except Exception:
         # Robust fallback for custom scalar types
-        return torch.frombuffer(t.untyped_storage().bytes(), dtype=torch.uint8).reshape(-1)
+        return torch.frombuffer(t.untyped_storage().bytes(), dtype=torch.uint8).reshape(
+            -1
+        )
 
 
-def quantize_frequencies(counts: torch.Tensor, table_log: int) -> tuple[torch.Tensor, int]:
+def quantize_frequencies(
+    counts: torch.Tensor, table_log: int
+) -> tuple[torch.Tensor, int]:
     K = counts.numel()
     if K == 0:
         return torch.empty(0, dtype=torch.int64), table_log
@@ -314,7 +321,9 @@ def main():
 
     if not args.summary_only:
         banner = "TENSOR COMPRESSIBILITY REPORT (ANS ESTIMATED)".center(len(hdr_str))
-        print(f"{'=' * len(hdr_str)}\n{banner}\n{'=' * len(hdr_str)}\n{hdr_str}\n{'-' * len(hdr_str)}")
+        print(
+            f"{'=' * len(hdr_str)}\n{banner}\n{'=' * len(hdr_str)}\n{hdr_str}\n{'-' * len(hdr_str)}"
+        )
 
     total_original_bytes = 0
     total_encoded_bytes = 0
@@ -342,10 +351,10 @@ def main():
         nonlocal total_original_bytes, total_encoded_bytes, tensors_stored_raw
         with progress_lock:
             orig_size = res_list[0]["original_size_bytes"]
-            
+
             # Select the best compression mode for this tensor
             best_mode_enc_size = min(item["encoded_size_bytes"] for item in res_list)
-            
+
             # Selective encoding: store raw if compression inflates the size
             if best_mode_enc_size < orig_size:
                 effective_enc_size = best_mode_enc_size
@@ -405,7 +414,9 @@ def main():
     print(f"\n{'=' * hdr_len}\nSummary:")
     if len(files) > 1:
         print(f"  Total Files: {len(files)}")
-    print(f"  Total Tensors: {total_tensors} (Stored uncompressed/raw: {tensors_stored_raw})")
+    print(
+        f"  Total Tensors: {total_tensors} (Stored uncompressed/raw: {tensors_stored_raw})"
+    )
     print(f"  Total Original Footprint: {format_size(total_original_bytes)}")
     print(
         f"  Total Theoretical Lossless Footprint: {format_size(total_encoded_bytes)}\n  Potential Savings: {savings_pct:.2f}% (Saved {format_size(saved)})\n{'=' * hdr_len}"

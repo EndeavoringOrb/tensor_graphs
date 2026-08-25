@@ -23,6 +23,7 @@
 #include "core/misc.hpp"
 #include "core/ops/ops.hpp"
 #include "core/plan/extractor.hpp"
+#include "core/plan/pruning.hpp"
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/cycle.hpp"
 #include "core/plan/validators/mem.hpp"
@@ -40,8 +41,103 @@ struct ExtractionResult
     std::unordered_map<EClassId, float> eclass_to_cost;
 };
 
-struct CacheIterator
+// =============================================================================
+// CacheContext -- view into CacheIterator state at check() time
+// =============================================================================
+struct CacheContext
 {
+    const Graph &graph;
+    const std::vector<LogicalId> &candidate_nodes;
+    const std::vector<MemSpace> &avail_mem_spaces;
+    const std::vector<uint32_t> &num_users;
+    const std::vector<std::vector<int>> &valid_choices;
+    const std::unordered_map<LogicalId, MemSpace> &current_cache_selection;
+    uint32_t k; // index into candidate_nodes
+    int choice; // candidate choice (0 = uncached, m = cached in avail_mem_spaces[m-1])
+};
+
+// =============================================================================
+// CacheIterator pruning rules
+// =============================================================================
+
+class SingleUseSkipRule
+{
+  public:
+    bool enabled = true;
+    SingleUseSkipRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "SingleUseSkipRule";
+    }
+    bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        if (ctx.choice <= 0)
+            return false;
+        return ctx.num_users[ctx.k] <= 1;
+    }
+};
+
+class TinyBufferSkipRule
+{
+  public:
+    bool enabled = true;
+    uint64_t min_cache_bytes = 4096;
+    TinyBufferSkipRule(bool en = true, uint64_t min_bytes = 4096) : enabled(en), min_cache_bytes(min_bytes)
+    {
+    }
+    const char *name() const
+    {
+        return "TinyBufferSkipRule";
+    }
+    bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        if (ctx.choice <= 0)
+            return false;
+        LogicalId id = ctx.candidate_nodes[ctx.k];
+        if (!ctx.graph.hasNode(id))
+            return false;
+        return static_cast<uint64_t>(ctx.graph.getNode(id).getSizeBytes()) < min_cache_bytes;
+    }
+};
+
+class StorageAnchoredSkipRule
+{
+  public:
+    bool enabled = true;
+    StorageAnchoredSkipRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "StorageAnchoredSkipRule";
+    }
+    bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        if (ctx.choice <= 0)
+            return false;
+        LogicalId id = ctx.candidate_nodes[ctx.k];
+        auto it = ctx.graph.input_data_types.find(id);
+        if (it == ctx.graph.input_data_types.end())
+            return false;
+        return it->second == InputDataType::STORAGE;
+    }
+};
+
+// =============================================================================
+// CacheIterator<Rules...>
+// =============================================================================
+template <typename... Rules> struct CacheIterator
+{
+    prune::PruningRuleSet<Rules...> rules;
+
     const Graph &graph;
     std::vector<LogicalId> candidate_nodes;
     std::vector<MemSpace> avail_mem_spaces;
@@ -58,10 +154,15 @@ struct CacheIterator
     std::unordered_map<LogicalId, MemSpace> current_cache_selection;
 
     CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
-                  const std::vector<MemSpace> &_avail_mem_spaces, std::shared_ptr<SearchDelegate> _delegate = nullptr)
-        : graph(_graph), candidate_nodes(_candidates), avail_mem_spaces(_avail_mem_spaces), delegate(_delegate)
+                  const std::vector<MemSpace> &_avail_mem_spaces, std::shared_ptr<SearchDelegate> _delegate,
+                  Rules &&..._rules)
+        : rules(std::forward<Rules>(_rules)...), graph(_graph), candidate_nodes(_candidates),
+          avail_mem_spaces(_avail_mem_spaces), delegate(std::move(_delegate))
     {
         init();
+        CacheContext ctx{graph, candidate_nodes, avail_mem_spaces, num_users, valid_choices, current_cache_selection, 0,
+                         0};
+        rules.init(ctx);
     }
 
     void init()
@@ -257,6 +358,13 @@ struct CacheIterator
                 int choice = valid_choices[k][choice_idx];
                 state[k]++;
 
+                CacheContext ctx{graph,         candidate_nodes,         avail_mem_spaces,         num_users,
+                                 valid_choices, current_cache_selection, static_cast<uint32_t>(k), choice};
+                if (rules.is_pruned(choice, choice_idx, ctx))
+                {
+                    continue;
+                }
+
                 if (choice > 0)
                 {
                     current_cache_selection[id] = avail_mem_spaces[choice - 1];
@@ -289,6 +397,43 @@ struct CacheIterator
     }
 };
 
+template <typename... Rules>
+CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
+                                                        const std::vector<MemSpace> &avail_mem_spaces, Rules &&...rules)
+{
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, nullptr,
+                                                 std::forward<Rules>(rules)...);
+}
+
+template <typename... Rules>
+CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(const Graph &graph,
+                                                                    const std::vector<LogicalId> &candidates,
+                                                                    const std::vector<MemSpace> &avail_mem_spaces,
+                                                                    std::shared_ptr<SearchDelegate> delegate,
+                                                                    Rules &&...rules)
+{
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, std::move(delegate),
+                                                 std::forward<Rules>(rules)...);
+}
+
+inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
+                                        const std::vector<MemSpace> &avail_mem_spaces,
+                                        std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+{
+    settings.validate_rules("cache");
+    return makeCacheIteratorWithDelegate(
+        graph, candidates, avail_mem_spaces, std::move(delegate),
+        SingleUseSkipRule(settings.is_rule_enabled("cache", "SingleUseSkipRule")),
+        TinyBufferSkipRule(settings.is_rule_enabled("cache", "TinyBufferSkipRule")),
+        StorageAnchoredSkipRule(settings.is_rule_enabled("cache", "StorageAnchoredSkipRule")));
+}
+
+inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
+                                        const std::vector<MemSpace> &avail_mem_spaces, const Settings &settings)
+{
+    return makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, nullptr, settings);
+}
+
 struct ENodeDominationContext
 {
     const EGraph &egraph;
@@ -298,24 +443,22 @@ struct ENodeDominationContext
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 };
 
-class IENodeDominationRule
+class MemCapENodeDominationRule
 {
   public:
-    virtual ~IENodeDominationRule() = default;
-    virtual std::string name() const = 0;
-    virtual bool is_dominated(ENodeId enodeId, const ENodeDominationContext &ctx) = 0;
-};
-
-class MemCapENodeDominationRule : public IENodeDominationRule
-{
-  public:
-    std::string name() const override
+    bool enabled = true;
+    MemCapENodeDominationRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
     {
         return "MemCapENodeDominationRule";
     }
 
-    bool is_dominated(ENodeId enodeId, const ENodeDominationContext &ctx) override
+    bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
     {
+        if (!enabled)
+            return false;
         const ENode &enode = ctx.egraph.getENode(enodeId);
         MemSpace ms = enode.getMemSpace();
 
@@ -378,16 +521,22 @@ class MemCapENodeDominationRule : public IENodeDominationRule
     }
 };
 
-class FasterEquivalentENodeDominationRule : public IENodeDominationRule
+class FasterEquivalentENodeDominationRule
 {
   public:
-    std::string name() const override
+    bool enabled = true;
+    FasterEquivalentENodeDominationRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
     {
         return "FasterEquivalentENodeDominationRule";
     }
 
-    bool is_dominated(ENodeId enodeId, const ENodeDominationContext &ctx) override
+    bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
     {
+        if (!enabled)
+            return false;
         float costA = ctx.enodeInfos[enodeId.value].cost;
         if (costA == TGConstants::INF)
             return false;
@@ -485,29 +634,57 @@ class FasterEquivalentENodeDominationRule : public IENodeDominationRule
     }
 };
 
+class DeadChildChainDominationRule
+{
+  public:
+    bool enabled = true;
+    DeadChildChainDominationRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "DeadChildChainDominationRule";
+    }
+    bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        const ENode &enode = ctx.egraph.getENode(enodeId);
+        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+            return false;
+        if (enode.getChildren().empty())
+            return false;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            const EClass &cCls = ctx.egraph.getEClass(canon_child);
+            bool any_finite = false;
+            for (ENodeId c_enode_id : cCls.enodes)
+            {
+                if (ctx.enodeInfos[c_enode_id.value].cost != TGConstants::INF)
+                {
+                    any_finite = true;
+                    break;
+                }
+            }
+            if (!any_finite)
+                return true;
+        }
+        return false;
+    }
+};
+
 struct Planner
 {
     CostModel &costModel;
-    std::vector<std::shared_ptr<IENodeDominationRule>> domination_rules;
+    prune::PruningRuleSet<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule, DeadChildChainDominationRule>
+        domination_rules;
     const Settings &settings;
-
-    void addDominationRule(std::shared_ptr<IENodeDominationRule> rule)
-    {
-        domination_rules.push_back(std::move(rule));
-    }
-
-    void clearDominationRules()
-    {
-        domination_rules.clear();
-    }
 
     void applyDominationRules(const EGraph &egraph, std::vector<ENodeInfo> &enodeInfos,
                               const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                               const std::unordered_map<LogicalId, MemSpace> &cachedNodes)
     {
-        if (domination_rules.empty())
-            return;
-
         ENodeDominationContext ctx{egraph, enodeInfos, eclassToLogical, cachedNodes, settings.mem_caps};
 
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
@@ -516,13 +693,9 @@ struct Planner
             if (enodeInfos[i].cost == TGConstants::INF)
                 continue;
 
-            for (const auto &rule : domination_rules)
+            if (domination_rules.is_pruned(enodeId, /*cand_idx=*/size_t{0}, ctx))
             {
-                if (rule->is_dominated(enodeId, ctx))
-                {
-                    enodeInfos[i].cost = TGConstants::INF;
-                    break;
-                }
+                enodeInfos[i].cost = TGConstants::INF;
             }
         }
     }
@@ -635,7 +808,7 @@ struct Planner
                         }
                     }
                     if (isDirty)
-                        logicalDirty[nodeId] = true;
+                        logicalDirty[nodeId] = isDirty;
                 }
             }
         }
@@ -663,7 +836,7 @@ struct Planner
             return a.idx < b.idx;
         });
 
-        CacheIterator cache_iter(graph, candidates, avail_mem_spaces, delegate);
+        auto cache_iter = makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, delegate, settings);
         std::unordered_map<LogicalId, MemSpace> current_cache;
         std::unordered_map<LogicalId, MemSpace> best_cache;
         float best_cost = TGConstants::INF;
@@ -784,7 +957,6 @@ struct Planner
         }
     }
 
-    // Propagate invalidity from empty EClasses upward to parent ENodes
     uint32_t deathCascade(EGraph &egraph)
     {
         uint32_t numClasses = egraph.getClasses().size();
@@ -1134,7 +1306,6 @@ struct Planner
             std::vector<ENodeId> validEnodes;
             validEnodes.reserve(cls.enodes.size());
 
-            // Remove infinite-cost nodes (which includes nodes marked INF by domination rules)
             for (ENodeId enodeId : cls.enodes)
             {
                 if (enodeInfos[enodeId.value].cost != TGConstants::INF)
@@ -1177,7 +1348,7 @@ struct Planner
         }
 
         const uint64_t numClasses = egraph.getClasses().size();
-        LOG(INFO) << "numClasses=" << numClasses;
+        LOG(DEBUG) << "numClasses=" << numClasses;
 
         if (delegate)
         {
@@ -1221,11 +1392,10 @@ struct Planner
             delegate->init_egraph(node_features, edge_src, edge_dst);
         }
 
-        Extractor extractor = Extractor(egraph, rootEClassId, enodeInfos, delegate);
-        // extractor.registerValidator(std::make_unique<CycleStepValidator>(egraph));
+        auto extractor = makeConfiguredExtractor(egraph, rootEClassId, enodeInfos, delegate, settings);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, settings.mem_caps,
-                                                                   eclassToLogical, preallocatedBuffers, delegate));
+        extractor.registerValidator(std::make_unique<MemValidator>(
+            egraph, enodeInfos, settings.mem_caps, eclassToLogical, preallocatedBuffers, delegate, &settings));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -1238,10 +1408,13 @@ struct Planner
         ProgressTimer timer(max_iters, "extracting graphs", false, false, 2.0, LogLevel::INFO);
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
-        LOG(INFO) << "entering loop";
+        LOG(DEBUG) << "entering loop";
 
         while (remaining_iters-- > 0)
         {
+            if (extractor.is_done())
+                break;
+
 #ifdef TG_DEBUG
             std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
             if (max_iters - (remaining_iters + 1) > 0)
@@ -1273,8 +1446,10 @@ struct Planner
             auto dispatch_iterator =
                 makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, delegate, settings);
 
+            bool found_order = false;
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
+                found_order = true;
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
                 if (!valid)
                     break;
@@ -1293,13 +1468,19 @@ struct Planner
                 }
             }
 
+            if (!found_order)
+            {
+                valid = false;
+                extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
+            }
+
             if (extractor.active_options == 0)
             {
                 std::cout << "finished extracting: no more graphs" << std::endl;
                 break;
             }
 
-            if (valid && stopOnFirstValid)
+            if (valid && stopOnFirstValid && best_cost < TGConstants::INF)
             {
                 break;
             }
@@ -2171,10 +2352,13 @@ struct Planner
     }
 
     Planner(CostModel &costModel, const Settings &settings = Settings::get_default())
-        : costModel(costModel), settings(settings)
+        : costModel(costModel), settings(settings),
+          domination_rules(
+              MemCapENodeDominationRule(settings.is_rule_enabled("enode", "MemCapENodeDominationRule")),
+              FasterEquivalentENodeDominationRule(
+                  settings.is_rule_enabled("enode", "FasterEquivalentENodeDominationRule")),
+              DeadChildChainDominationRule(settings.is_rule_enabled("enode", "DeadChildChainDominationRule")))
     {
-        addDominationRule(std::make_shared<MemCapENodeDominationRule>());
-        addDominationRule(std::make_shared<FasterEquivalentENodeDominationRule>());
     }
 
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,

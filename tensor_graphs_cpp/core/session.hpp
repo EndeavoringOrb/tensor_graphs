@@ -166,6 +166,12 @@ struct Session
           delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()),
           logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
     {
+        if (!settings.is_rules_defined("dispatch") || !settings.is_rules_defined("extract") ||
+            !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
+            !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
+        {
+            settings.enable_all_default_rules(true);
+        }
         ensureOutputDirectories();
         loadCache();
     }
@@ -187,6 +193,12 @@ struct Session
         settings.log_cost_calls = _logCostCalls;
         if (!_recordsPath.empty())
             settings.records_path = _recordsPath;
+        if (!settings.is_rules_defined("dispatch") || !settings.is_rules_defined("extract") ||
+            !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
+            !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
+        {
+            settings.enable_all_default_rules(true);
+        }
         ensureOutputDirectories();
         loadCache();
     }

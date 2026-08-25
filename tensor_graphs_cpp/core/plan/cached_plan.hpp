@@ -540,11 +540,14 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         }
 
         // Extractor (Level 1)
-        Extractor extractor(state->egraph, rootEClassId, state->enodeInfos, delegate);
+        Extractor<InfiniteCostSkipRule, SiblingEquivalentSkipRule> extractor(
+            state->egraph, rootEClassId, state->enodeInfos, delegate,
+            InfiniteCostSkipRule(ctx->settings.is_rule_enabled("extract", "InfiniteCostSkipRule")),
+            SiblingEquivalentSkipRule(ctx->settings.is_rule_enabled("extract", "SiblingEquivalentSkipRule")));
         extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(state->egraph, state->enodeInfos,
-                                                                   ctx->mem->getMemCaps(), state->eclassToLogical,
-                                                                   state->preallocatedBuffers, delegate));
+        extractor.registerValidator(std::make_unique<MemValidator>(
+            state->egraph, state->enodeInfos, ctx->mem->getMemCaps(), state->eclassToLogical,
+            state->preallocatedBuffers, delegate, &ctx->settings));
 
         uint32_t extract_count = 0;
         while (extractor.getNextSelection())
@@ -563,11 +566,20 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                 dispatch_count++;
 
                 // Bufferize (Level 3)
-                BufferizeIterator buf_iter(order, state->egraph, selection_map, state->enodeInfos, delegate);
-                buf_iter.addDominationRule(std::make_shared<MemSpaceMismatchInplaceRule>());
-                buf_iter.addDominationRule(std::make_shared<LinearChainInplaceDominationRule>());
-                buf_iter.addDominationRule(std::make_shared<IntervalSubsetDominationRule>());
-                buf_iter.addDominationRule(std::make_shared<CommutativeInplaceSymmetryRule>());
+                BufferizeIterator<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule,
+                                  IntervalSubsetDominationRule, CommutativeInplaceSymmetryRule,
+                                  DeadBufferReuseDominationRule>
+                    buf_iter(order, state->egraph, selection_map, state->enodeInfos, delegate,
+                             MemSpaceMismatchInplaceRule(
+                                 ctx->settings.is_rule_enabled("bufferize", "MemSpaceMismatchInplaceRule")),
+                             LinearChainInplaceDominationRule(
+                                 ctx->settings.is_rule_enabled("bufferize", "LinearChainInplaceDominationRule")),
+                             IntervalSubsetDominationRule(
+                                 ctx->settings.is_rule_enabled("bufferize", "IntervalSubsetDominationRule")),
+                             CommutativeInplaceSymmetryRule(
+                                 ctx->settings.is_rule_enabled("bufferize", "CommutativeInplaceSymmetryRule")),
+                             DeadBufferReuseDominationRule(
+                                 ctx->settings.is_rule_enabled("bufferize", "DeadBufferReuseDominationRule")));
                 uint32_t buf_count = 0;
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;

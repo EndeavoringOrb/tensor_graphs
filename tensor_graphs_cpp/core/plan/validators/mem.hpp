@@ -23,15 +23,17 @@
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "core/plan/extractor.hpp"
+#include "core/plan/pruning.hpp"
 #include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
+#include "core/settings.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
-float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
-               const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-               bool print_utilization = false)
+inline float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
+                      const std::unordered_map<EClassId, uint32_t> &selection_map,
+                      const std::vector<ENodeInfo> &enodeInfos, bool print_utilization = false)
 {
     std::unordered_map<EClassId, float> birth_times;
     std::unordered_map<Engine, float> engine_finish;
@@ -149,6 +151,9 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
     return curr;
 }
 
+// =============================================================================
+// BufferizeContext -- view into BufferizeIterator's state at check() time
+// =============================================================================
 struct BufferizeContext
 {
     const std::vector<EClassId> &ordered;
@@ -173,27 +178,27 @@ struct BufferizeContext
     }
 };
 
-class IBufferizeDominationRule
-{
-  public:
-    virtual ~IBufferizeDominationRule() = default;
-    virtual std::string name() const = 0;
-    virtual bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) = 0;
-};
+// =============================================================================
+// Bufferize pruning rules
+// =============================================================================
 
-// =============================================================================
-// Rule 1: Memory Space Incompatibility
-// =============================================================================
-class MemSpaceMismatchInplaceRule : public IBufferizeDominationRule
+class MemSpaceMismatchInplaceRule
 {
   public:
-    std::string name() const override
+    bool enabled = true;
+    MemSpaceMismatchInplaceRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
     {
         return "MemSpaceMismatchInplaceRule";
     }
 
-    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
     {
+        if (!enabled)
+            return false;
         if (candidate_choice < 0)
             return false;
 
@@ -221,19 +226,23 @@ class MemSpaceMismatchInplaceRule : public IBufferizeDominationRule
     }
 };
 
-// =============================================================================
-// Rule 2: Linear Chain In-place Domination
-// =============================================================================
-class LinearChainInplaceDominationRule : public IBufferizeDominationRule
+class LinearChainInplaceDominationRule
 {
   public:
-    std::string name() const override
+    bool enabled = true;
+    LinearChainInplaceDominationRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
     {
         return "LinearChainInplaceDominationRule";
     }
 
-    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
     {
+        if (!enabled)
+            return false;
         if (candidate_choice != -1)
             return false;
 
@@ -283,19 +292,23 @@ class LinearChainInplaceDominationRule : public IBufferizeDominationRule
     }
 };
 
-// =============================================================================
-// Rule 3: Interval-Subset Domination (Latest Birth Time)
-// =============================================================================
-class IntervalSubsetDominationRule : public IBufferizeDominationRule
+class IntervalSubsetDominationRule
 {
   public:
-    std::string name() const override
+    bool enabled = true;
+    IntervalSubsetDominationRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
     {
         return "IntervalSubsetDominationRule";
     }
 
-    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
     {
+        if (!enabled)
+            return false;
         if (candidate_choice < 0)
             return false;
 
@@ -364,19 +377,23 @@ class IntervalSubsetDominationRule : public IBufferizeDominationRule
     }
 };
 
-// =============================================================================
-// Rule 4: Commutative In-place Symmetry Breaking
-// =============================================================================
-class CommutativeInplaceSymmetryRule : public IBufferizeDominationRule
+class CommutativeInplaceSymmetryRule
 {
   public:
-    std::string name() const override
+    bool enabled = true;
+    CommutativeInplaceSymmetryRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
     {
         return "CommutativeInplaceSymmetryRule";
     }
 
-    bool is_dominated(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) override
+    bool check(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) const
     {
+        if (!enabled)
+            return false;
         if (candidate_choice < 0)
             return false;
 
@@ -446,10 +463,71 @@ class CommutativeInplaceSymmetryRule : public IBufferizeDominationRule
     }
 };
 
-struct BufferizeIterator
+class DeadBufferReuseDominationRule
 {
   public:
-    std::vector<std::shared_ptr<IBufferizeDominationRule>> domination_rules;
+    bool enabled = true;
+    DeadBufferReuseDominationRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
+    {
+        return "DeadBufferReuseDominationRule";
+    }
+
+    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+        if (candidate_choice != -1)
+            return false;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+        uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
+
+        for (int choice : ctx.current_choices)
+        {
+            if (choice < 0)
+                continue;
+            if (static_cast<size_t>(choice) >= node.getChildren().size())
+                continue;
+
+            EClassId child = ctx.egraph.findConst(node.getChildren()[choice]);
+            EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+
+            auto death_it = ctx.death_times.find(child_base);
+            if (death_it == ctx.death_times.end() || death_it->second != ctx.k)
+                continue;
+
+            EClassId target_base = ctx.get_inplace_alias(child_base);
+            auto base_sel_it = ctx.selection_map.find(target_base);
+            if (base_sel_it == ctx.selection_map.end())
+                continue;
+
+            uint32_t base_sel = base_sel_it->second;
+            const ENode &base_node = ctx.egraph.getENode(ctx.egraph.getEClass(target_base).enodes[base_sel]);
+            if (base_node.getMemSpace() != node.getMemSpace())
+                continue;
+
+            uint64_t in_size = getSizeBytes(base_node.getShape(), base_node.getDType());
+            if (out_size <= in_size)
+                return true;
+        }
+        return false;
+    }
+};
+
+// =============================================================================
+// BufferizeIterator<Rules...>
+// =============================================================================
+template <typename... Rules> struct BufferizeIterator
+{
+  public:
+    prune::PruningRuleSet<Rules...> rules;
 
     const std::vector<EClassId> &ordered;
     const EGraph &egraph;
@@ -470,21 +548,15 @@ struct BufferizeIterator
 
     BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,
                       const std::unordered_map<EClassId, uint32_t> &_selection_map,
-                      const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
-        : ordered(_ordered), egraph(_egraph), selection_map(_selection_map), enodeInfos(_enodeInfos),
-          delegate(_delegate)
+                      const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate,
+                      Rules &&..._rules)
+        : rules(std::forward<Rules>(_rules)...), ordered(_ordered), egraph(_egraph), selection_map(_selection_map),
+          enodeInfos(_enodeInfos), delegate(std::move(_delegate))
     {
         init();
-    }
-
-    void addDominationRule(std::shared_ptr<IBufferizeDominationRule> rule)
-    {
-        domination_rules.push_back(std::move(rule));
-    }
-
-    void clearDominationRules()
-    {
-        domination_rules.clear();
+        BufferizeContext ctx{ordered,       egraph, selection_map,           enodeInfos, birth_times, death_times,
+                             inplace_alias, {},     static_cast<uint32_t>(0)};
+        rules.init(ctx);
     }
 
     void init()
@@ -537,7 +609,7 @@ struct BufferizeIterator
                 continue;
             }
 
-            valid_choices[i].push_back(-1); // Always allow allocating a new buffer
+            valid_choices[i].push_back(-1);
 
             if (node.getKernelId().value != 0)
             {
@@ -757,24 +829,12 @@ struct BufferizeIterator
                 int choice = valid_choices[k][choice_idx];
                 state[k]++;
 
-                if (!domination_rules.empty())
+                BufferizeContext ctx{ordered,       egraph,           selection_map,
+                                     enodeInfos,    birth_times,      death_times,
+                                     inplace_alias, valid_choices[k], static_cast<uint32_t>(k)};
+                if (rules.is_pruned(choice, choice_idx, ctx))
                 {
-                    BufferizeContext ctx{ordered,       egraph,           selection_map,
-                                         enodeInfos,    birth_times,      death_times,
-                                         inplace_alias, valid_choices[k], static_cast<uint32_t>(k)};
-                    bool dominated = false;
-                    for (const auto &rule : domination_rules)
-                    {
-                        if (rule->is_dominated(choice, choice_idx, ctx))
-                        {
-                            dominated = true;
-                            break;
-                        }
-                    }
-                    if (dominated)
-                    {
-                        continue;
-                    }
+                    continue;
                 }
 
                 if (choice != -1)
@@ -902,63 +962,216 @@ struct BufferizeIterator
     }
 };
 
-static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
-                   std::vector<ParallelBuffer> &allocated, std::shared_ptr<SearchDelegate> delegate = nullptr)
+template <typename... Rules>
+BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIterator(
+    const std::vector<EClassId> &ordered, const EGraph &egraph,
+    const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
+    Rules &&...rules)
 {
-    LOG(INFO) << "malloc " + std::to_string(unallocated.size());
-    ProgressTimer t(0, "malloc", false, true);
-    if (unallocated.empty())
-        return true;
-    int N = static_cast<int>(unallocated.size());
+    return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, nullptr,
+                                                     std::forward<Rules>(rules)...);
+}
 
-    std::vector<int64_t> unallocated_sizes(N);
-    for (int i = 0; i < N; ++i)
-        unallocated_sizes[i] = unallocated[i].size;
+template <typename... Rules>
+BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
+    const std::vector<EClassId> &ordered, const EGraph &egraph,
+    const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
+    std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
+{
+    return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, std::move(delegate),
+                                                     std::forward<Rules>(rules)...);
+}
 
-    std::vector<std::vector<int>> adj(N);
-    for (int i = 0; i < N; ++i)
+inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
+                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                            const std::vector<ENodeInfo> &enodeInfos,
+                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+{
+    settings.validate_rules("bufferize");
+    return makeBufferizeIteratorWithDelegate(
+        ordered, egraph, selection_map, enodeInfos, std::move(delegate),
+        MemSpaceMismatchInplaceRule(settings.is_rule_enabled("bufferize", "MemSpaceMismatchInplaceRule")),
+        LinearChainInplaceDominationRule(settings.is_rule_enabled("bufferize", "LinearChainInplaceDominationRule")),
+        IntervalSubsetDominationRule(settings.is_rule_enabled("bufferize", "IntervalSubsetDominationRule")),
+        CommutativeInplaceSymmetryRule(settings.is_rule_enabled("bufferize", "CommutativeInplaceSymmetryRule")),
+        DeadBufferReuseDominationRule(settings.is_rule_enabled("bufferize", "DeadBufferReuseDominationRule")));
+}
+
+inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
+                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                            const std::vector<ENodeInfo> &enodeInfos, const Settings &settings)
+{
+    return makeConfiguredBufferizeIterator(ordered, egraph, selection_map, enodeInfos, nullptr, settings);
+}
+
+// =============================================================================
+// Malloc Context & Rules
+// =============================================================================
+struct MallocContext
+{
+    uint64_t mem_cap;
+    const std::vector<ParallelBuffer> &unallocated;
+    const std::vector<int64_t> &unallocated_sizes;
+    const std::vector<int> &avail;
+    const std::vector<int64_t> &current_offsets;
+    const std::vector<std::vector<int>> &adj;
+    const std::vector<int> &order;
+    const std::vector<int64_t> &chosen_offset;
+    const std::vector<int64_t> &global_offset_max;
+    int k;
+    int idx;
+    int64_t offset;
+    int64_t h_min;
+};
+
+class OffsetMonotoneRule
+{
+  public:
+    bool enabled = true;
+    OffsetMonotoneRule(bool en = true) : enabled(en)
     {
-        for (int j = 0; j < N; ++j)
+    }
+    const char *name() const
+    {
+        return "OffsetMonotoneRule";
+    }
+    bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
+    {
+        if (!enabled)
+            return false;
+        return c.offset < c.global_offset_max[c.k];
+    }
+};
+
+class IdMaxSymmetryRule
+{
+  public:
+    bool enabled = true;
+    IdMaxSymmetryRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "IdMaxSymmetryRule";
+    }
+    bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
+    {
+        if (!enabled)
+            return false;
+        BufferId id_max = BufferId{0};
+        for (int d = c.k - 1; d >= 0; --d)
         {
-            if (i != j && overlapsBuf(unallocated[i], unallocated[j]))
+            if (c.chosen_offset[d] == c.offset)
             {
-                adj[i].push_back(j);
+                id_max = std::max(id_max, c.unallocated[c.order[d]].id);
+            }
+            else
+            {
+                break;
             }
         }
+        return c.unallocated[c.avail[c.idx]].id < id_max;
     }
+};
 
-    if (delegate)
+class CapRespectRule
+{
+  public:
+    bool enabled = true;
+    CapRespectRule(bool en = true) : enabled(en)
     {
-        std::vector<float> node_features;
-        std::vector<uint32_t> edge_src;
-        std::vector<uint32_t> edge_dst;
+    }
+    const char *name() const
+    {
+        return "CapRespectRule";
+    }
+    bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
+    {
+        if (!enabled)
+            return false;
+        if (c.mem_cap == std::numeric_limits<uint64_t>::max())
+            return false;
+        return static_cast<uint64_t>(c.offset) + c.unallocated_sizes[c.avail[c.idx]] > c.mem_cap;
+    }
+};
 
-        for (int i = 0; i < N; ++i)
+class HMinBoundRule
+{
+  public:
+    bool enabled = true;
+    HMinBoundRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "HMinBoundRule";
+    }
+    bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
+    {
+        if (!enabled)
+            return false;
+        return c.offset >= c.h_min;
+    }
+};
+
+class LargerBufferPriorityRule
+{
+  public:
+    bool enabled = true;
+    LargerBufferPriorityRule(bool en = true) : enabled(en)
+    {
+    }
+    const char *name() const
+    {
+        return "LargerBufferPriorityRule";
+    }
+    bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
+    {
+        if (!enabled)
+            return false;
+        if (c.offset != c.global_offset_max[c.k])
+            return false;
+        int cand = c.avail[c.idx];
+        int64_t cand_size = c.unallocated_sizes[cand];
+        for (int j = c.k + 1; j < static_cast<int>(c.avail.size()); ++j)
         {
-            node_features.push_back((float)unallocated[i].size);
-            node_features.push_back((float)unallocated[i].start);
-            node_features.push_back((float)unallocated[i].end);
-
-            for (int j : adj[i])
+            int other = c.avail[j];
+            if (c.unallocated_sizes[other] > cand_size)
             {
-                edge_src.push_back(i);
-                edge_dst.push_back(j);
+                return true;
+            }
+            if (c.unallocated_sizes[other] == cand_size && c.unallocated[other].id < c.unallocated[cand].id)
+            {
+                return true;
             }
         }
-        delegate->init_malloc_graph(node_features, edge_src, edge_dst);
+        return false;
     }
+};
 
-    std::vector<int> avail(N);
-    std::iota(avail.begin(), avail.end(), 0);
+// =============================================================================
+// MallocIterator<Rules...>
+// =============================================================================
+template <typename... Rules> struct MallocIterator
+{
+  public:
+    prune::PruningRuleSet<Rules...> rules;
 
-    std::vector<int> state(N, 0);
-    state[0] = 0;
+    uint64_t mem_cap;
+    const std::vector<ParallelBuffer> &unallocated;
+    std::shared_ptr<SearchDelegate> delegate;
 
-    std::vector<int> order(N, 0);
-    std::vector<int64_t> chosen_offset(N, 0);
-    std::vector<int64_t> global_offset_max(N + 1, 0);
+    int N;
+    std::vector<int64_t> unallocated_sizes;
+    std::vector<std::vector<int>> adj;
 
-    std::vector<int64_t> current_offsets(N, 0);
+    std::vector<int> avail;
+    std::vector<int> state;
+    std::vector<int> order;
+    std::vector<int64_t> chosen_offset;
+    std::vector<int64_t> global_offset_max;
+    std::vector<int64_t> current_offsets;
+    std::vector<std::vector<uint32_t>> choice_orders;
 
     struct Backup
     {
@@ -966,149 +1179,237 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
         int64_t old_val;
     };
     std::vector<Backup> trail;
-    trail.reserve(N * 50);
-    std::vector<size_t> trail_starts(N + 1, 0);
+    std::vector<size_t> trail_starts;
 
     int k = 0;
-    while (k >= 0)
+
+    bool is_done = false;
+
+    MallocIterator(uint64_t _mem_cap, const std::vector<ParallelBuffer> &_unallocated,
+                   std::shared_ptr<SearchDelegate> _delegate, Rules &&..._rules)
+        : rules(std::forward<Rules>(_rules)...), mem_cap(_mem_cap), unallocated(_unallocated),
+          delegate(std::move(_delegate)), N(static_cast<int>(_unallocated.size()))
     {
-        if (k % 100 == 0)
+        unallocated_sizes.resize(N);
+        for (int i = 0; i < N; ++i)
+            unallocated_sizes[i] = unallocated[i].size;
+
+        adj.resize(N);
+        for (int i = 0; i < N; ++i)
         {
-            LOG(INFO) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
+            for (int j = 0; j < N; ++j)
+            {
+                if (i != j && overlapsBuf(unallocated[i], unallocated[j]))
+                {
+                    adj[i].push_back(j);
+                }
+            }
         }
 
-        if (k == N)
+        if (delegate)
         {
-            for (int d = 0; d < N; ++d)
+            std::vector<float> node_features;
+            std::vector<uint32_t> edge_src;
+            std::vector<uint32_t> edge_dst;
+
+            for (int i = 0; i < N; ++i)
             {
-                ParallelBuffer buf = unallocated[order[d]];
-                buf.offset = chosen_offset[d];
-                allocated.push_back(buf);
+                node_features.push_back((float)unallocated[i].size);
+                node_features.push_back((float)unallocated[i].start);
+                node_features.push_back((float)unallocated[i].end);
+
+                for (int j : adj[i])
+                {
+                    edge_src.push_back(i);
+                    edge_dst.push_back(j);
+                }
             }
+            delegate->init_malloc_graph(node_features, edge_src, edge_dst);
+        }
+
+        avail.resize(N);
+        std::iota(avail.begin(), avail.end(), 0);
+        state.assign(N, 0);
+        state[0] = 0;
+        order.assign(N, 0);
+        chosen_offset.assign(N, 0);
+        global_offset_max.assign(N + 1, 0);
+        current_offsets.assign(N, 0);
+        choice_orders.resize(N);
+        trail.reserve(N * 50);
+        trail_starts.assign(N + 1, 0);
+    }
+
+    bool getNextAllocation(std::vector<ParallelBuffer> &allocated)
+    {
+        if (is_done)
+            return false;
+        ProgressTimer t(0, "malloc", false, true);
+        if (unallocated.empty())
             return true;
-        }
 
-        if (state[k] == (k == 0 ? 0 : k))
+        while (k >= 0)
         {
-            if (delegate)
+            if (k % 100 == 0)
             {
-                delegate->push_state();
-            }
-        }
-
-        bool advanced = false;
-
-        int64_t h_min = std::numeric_limits<int64_t>::max();
-        for (int idx = k; idx < N; ++idx)
-        {
-            int i = avail[idx];
-            int64_t h = current_offsets[i] + unallocated_sizes[i];
-            if (h < h_min)
-                h_min = h;
-        }
-
-        while (state[k] < N)
-        {
-            uint32_t sel_idx = state[k] - k;
-            int mapped_idx = k + sel_idx;
-
-            if (delegate)
-            {
-                std::vector<ActionFeatureMalloc> features;
-                for (int idx = k; idx < N; ++idx)
-                {
-                    ActionFeatureMalloc f;
-                    f.size = unallocated[avail[idx]].size;
-                    f.start = unallocated[avail[idx]].start;
-                    f.end = unallocated[avail[idx]].end;
-                    f.mem_cap = mem_cap;
-                    features.push_back(f);
-                }
-                std::vector<uint32_t> custom_order = delegate->order_malloc(features);
-                if (sel_idx < custom_order.size())
-                {
-                    mapped_idx = k + custom_order[sel_idx];
-                }
+                LOG(DEBUG) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
             }
 
-            int idx = mapped_idx;
-            state[k]++;
-            int i = avail[idx];
-
-            int64_t offset_i = current_offsets[i];
-
-            if (offset_i < global_offset_max[k])
-                continue;
-
-            BufferId id_max = BufferId{0};
-            for (int d = k - 1; d >= 0; --d)
+            if (k == N)
             {
-                if (chosen_offset[d] == offset_i)
+                for (int d = 0; d < N; ++d)
                 {
-                    id_max = std::max(id_max, unallocated[order[d]].id);
+                    ParallelBuffer buf = unallocated[order[d]];
+                    buf.offset = chosen_offset[d];
+                    allocated.push_back(buf);
+                }
+                is_done = true;
+                return true;
+            }
+
+            if (state[k] == (k == 0 ? 0 : k))
+            {
+                if (delegate)
+                {
+                    delegate->push_state();
+
+                    std::vector<ActionFeatureMalloc> features;
+                    for (int idx = k; idx < N; ++idx)
+                    {
+                        ActionFeatureMalloc f;
+                        f.size = unallocated[avail[idx]].size;
+                        f.start = unallocated[avail[idx]].start;
+                        f.end = unallocated[avail[idx]].end;
+                        f.mem_cap = mem_cap;
+                        features.push_back(f);
+                    }
+                    choice_orders[k] = delegate->order_malloc(features);
                 }
                 else
                 {
-                    break;
+                    choice_orders[k].resize(N - k);
+                    std::iota(choice_orders[k].begin(), choice_orders[k].end(), 0u);
                 }
             }
-            if (unallocated[i].id < id_max)
-                continue;
 
-            if (offset_i >= h_min)
-                continue;
+            bool advanced = false;
 
-            if (mem_cap != std::numeric_limits<uint64_t>::max() &&
-                static_cast<uint64_t>(offset_i) + unallocated_sizes[i] > mem_cap)
-                continue;
-
-            std::swap(avail[k], avail[idx]);
-            order[k] = i;
-            chosen_offset[k] = offset_i;
-            global_offset_max[k + 1] = std::max(global_offset_max[k], offset_i);
-
-            trail_starts[k] = trail.size();
-            int64_t new_end = offset_i + unallocated_sizes[i];
-
-            for (int j : adj[i])
+            int64_t h_min = std::numeric_limits<int64_t>::max();
+            for (int idx = k; idx < N; ++idx)
             {
-                if (current_offsets[j] < new_end)
+                int i = avail[idx];
+                int64_t h = current_offsets[i] + unallocated_sizes[i];
+                if (h < h_min)
+                    h_min = h;
+            }
+
+            while (state[k] < N)
+            {
+                uint32_t sel_idx = state[k] - k;
+                int mapped_idx = k + choice_orders[k][sel_idx];
+
+                int idx = mapped_idx;
+                state[k]++;
+                int i = avail[idx];
+                int64_t offset_i = current_offsets[i];
+
+                MallocContext ctx{mem_cap,
+                                  unallocated,
+                                  unallocated_sizes,
+                                  avail,
+                                  current_offsets,
+                                  adj,
+                                  order,
+                                  chosen_offset,
+                                  global_offset_max,
+                                  static_cast<int>(k),
+                                  static_cast<int>(idx),
+                                  offset_i,
+                                  h_min};
+                if (rules.is_pruned(/*cand=*/int{}, /*cand_idx=*/size_t{}, ctx))
                 {
-                    trail.push_back({j, current_offsets[j]});
-                    current_offsets[j] = new_end;
+                    continue;
                 }
-            }
 
-            advanced = true;
-            break;
-        }
-
-        if (advanced)
-        {
-            k++;
-            if (k < N)
-                state[k] = k;
-        }
-        else
-        {
-            if (delegate)
-                delegate->pop_state();
-            k--;
-            if (k >= 0)
-            {
-                int idx = state[k] - 1;
                 std::swap(avail[k], avail[idx]);
+                order[k] = i;
+                chosen_offset[k] = offset_i;
+                global_offset_max[k + 1] = std::max(global_offset_max[k], offset_i);
 
-                size_t ts = trail_starts[k];
-                while (trail.size() > ts)
+                trail_starts[k] = trail.size();
+                int64_t new_end = offset_i + unallocated_sizes[i];
+
+                for (int j : adj[i])
                 {
-                    current_offsets[trail.back().j] = trail.back().old_val;
-                    trail.pop_back();
+                    if (current_offsets[j] < new_end)
+                    {
+                        trail.push_back({j, current_offsets[j]});
+                        current_offsets[j] = new_end;
+                    }
+                }
+
+                advanced = true;
+                break;
+            }
+
+            if (advanced)
+            {
+                k++;
+                if (k < N)
+                    state[k] = k;
+            }
+            else
+            {
+                if (delegate)
+                    delegate->pop_state();
+                k--;
+                if (k >= 0)
+                {
+                    int idx = state[k] - 1;
+                    std::swap(avail[k], avail[idx]);
+
+                    size_t ts = trail_starts[k];
+                    while (trail.size() > ts)
+                    {
+                        current_offsets[trail.back().j] = trail.back().old_val;
+                        trail.pop_back();
+                    }
                 }
             }
         }
+        return false;
     }
-    return false;
+};
+
+template <typename... Rules>
+MallocIterator<std::decay_t<Rules>...> makeMallocIterator(uint64_t mem_cap,
+                                                          const std::vector<ParallelBuffer> &unallocated,
+                                                          Rules &&...rules)
+{
+    return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, nullptr, std::forward<Rules>(rules)...);
+}
+
+template <typename... Rules>
+MallocIterator<std::decay_t<Rules>...> makeMallocIteratorWithDelegate(uint64_t mem_cap,
+                                                                      const std::vector<ParallelBuffer> &unallocated,
+                                                                      std::shared_ptr<SearchDelegate> delegate,
+                                                                      Rules &&...rules)
+{
+    return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, std::move(delegate),
+                                                  std::forward<Rules>(rules)...);
+}
+
+inline auto makeConfiguredMallocIterator(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
+                                         std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+{
+    settings.validate_rules("malloc");
+    return makeMallocIteratorWithDelegate(
+        mem_cap, unallocated, std::move(delegate),
+        OffsetMonotoneRule(settings.is_rule_enabled("malloc", "OffsetMonotoneRule")),
+        IdMaxSymmetryRule(settings.is_rule_enabled("malloc", "IdMaxSymmetryRule")),
+        CapRespectRule(settings.is_rule_enabled("malloc", "CapRespectRule")),
+        HMinBoundRule(settings.is_rule_enabled("malloc", "HMinBoundRule")),
+        LargerBufferPriorityRule(settings.is_rule_enabled("malloc", "LargerBufferPriorityRule")));
 }
 
 static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap, BufferId &overflow)
@@ -1213,7 +1514,8 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
 static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                                       std::vector<ParallelBuffer> &allocated, BufferId &overflow,
-                                      std::shared_ptr<SearchDelegate> delegate = nullptr)
+                                      std::shared_ptr<SearchDelegate> delegate = nullptr,
+                                      const Settings *settings_ptr = nullptr)
 {
     if (unallocated.empty())
         return true;
@@ -1246,7 +1548,9 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
         return a.id < b.id;
     });
 
-    if (!malloc(mem_cap, sorted_bufs, comp_allocated, delegate))
+    const Settings &active_settings = settings_ptr ? *settings_ptr : Settings::get_default();
+    auto iter = makeConfiguredMallocIterator(mem_cap, sorted_bufs, delegate, active_settings);
+    if (!iter.getNextAllocation(comp_allocated))
     {
         return false;
     }
@@ -1263,14 +1567,15 @@ struct MemValidator : public ISelectionValidator
     const std::unordered_map<EClassId, LogicalId> &eclassToLogical;
     const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers;
     std::shared_ptr<SearchDelegate> delegate;
+    const Settings *settings_ptr = nullptr;
 
     MemValidator(const EGraph &_egraph, const std::vector<ENodeInfo> &_enodeInfos,
                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
                  const std::unordered_map<EClassId, LogicalId> &_eclassToLogical,
                  const std::unordered_map<LogicalId, ParallelBuffer> &_preallocatedBuffers,
-                 std::shared_ptr<SearchDelegate> _delegate = nullptr)
+                 std::shared_ptr<SearchDelegate> _delegate = nullptr, const Settings *_settings = nullptr)
         : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps), eclassToLogical(_eclassToLogical),
-          preallocatedBuffers(_preallocatedBuffers), delegate(_delegate)
+          preallocatedBuffers(_preallocatedBuffers), delegate(_delegate), settings_ptr(_settings)
     {
     }
 
@@ -1281,11 +1586,9 @@ struct MemValidator : public ISelectionValidator
     {
         cost = get_cost(order, egraph, selection_map, enodeInfos);
 
-        BufferizeIterator buf_iter(order, egraph, selection_map, enodeInfos, delegate);
-        buf_iter.addDominationRule(std::make_shared<MemSpaceMismatchInplaceRule>());
-        buf_iter.addDominationRule(std::make_shared<LinearChainInplaceDominationRule>());
-        buf_iter.addDominationRule(std::make_shared<IntervalSubsetDominationRule>());
-        buf_iter.addDominationRule(std::make_shared<CommutativeInplaceSymmetryRule>());
+        const Settings &active_settings = settings_ptr ? *settings_ptr : Settings::get_default();
+        auto buf_iter =
+            makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, delegate, active_settings);
 
         std::vector<ParallelBuffer> unallocated_buffers;
         std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -1374,7 +1677,7 @@ struct MemValidator : public ISelectionValidator
                     (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
 
                 std::vector<ParallelBuffer> allocated;
-                if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow, delegate))
+                if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow, delegate, settings_ptr))
                 {
                     alloc_ok = false;
                     failed_ms = ms;

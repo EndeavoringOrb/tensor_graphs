@@ -161,8 +161,7 @@ inline void testInplaceAliasEraseOnNewBuffer()
         Error::throw_err("[Regression Test Failed] Could not generate dispatch order.");
     }
 
-    BufferizeIterator buf_iter(order, egraph, selection_map, enodeInfos, nullptr);
-    buf_iter.clearDominationRules();
+    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos);
 
     std::vector<ParallelBuffer> bufs;
     std::unordered_map<EClassId, BufferId> eclass_to_buf;
@@ -184,7 +183,6 @@ inline void testInplaceAliasEraseOnNewBuffer()
             else
             {
                 found_separate = true;
-                // Verify that when a new buffer is chosen, no stale alias remains for t1
                 if (buf_iter.inplace_alias.count(t1_eclass))
                 {
                     Error::throw_err("[Regression Test Failed] Stale inplace_alias mapping found for choice == -1!");
@@ -215,8 +213,8 @@ inline void testBuildBuffersCoverageAndFallback()
     settings.mem_caps = mem_caps;
 
     Graph graph;
-    LogicalId in0 = graph.input({4, 8}, DType::FLOAT32);
     // Nested view chain
+    LogicalId in0 = graph.input({4, 8}, DType::FLOAT32);
     LogicalId v1 = graph.reshape(in0, {2, 16});
     LogicalId v2 = graph.slice(v1, {0, 0}, {2, 8}, {1, 1});
     LogicalId c1 = graph.add(v2, v2);
@@ -246,7 +244,7 @@ inline void testBuildBuffersCoverageAndFallback()
         Error::throw_err("[Regression Test Failed] Failed to get dispatch order.");
     }
 
-    BufferizeIterator buf_iter(order, egraph, selection_map, enodeInfos, nullptr);
+    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos);
     std::vector<ParallelBuffer> out_buffers;
     std::unordered_map<EClassId, BufferId> out_eclass_to_buf;
 

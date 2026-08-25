@@ -18,7 +18,7 @@
 
 struct RuleBenchmarkRecord
 {
-    std::string category;  // e.g. "dispatch", "cache", "bufferize", "malloc"
+    std::string category;  // e.g. "dispatch", "cache", "bufferize", "malloc", "extract", "enode"
     std::string rule_name; // e.g. "SingleEngineDispatchDomination"
     bool was_faster = false;
     double baseline_ms = 0.0;
@@ -48,8 +48,6 @@ inline void tg_deserialize(BinaryReader &br, RuleBenchmarkRecord &val)
 
 struct Settings
 {
-    // Memory caps per MemSpace. Defaults to System::get().getBufferSizes(); individual entries can be
-    // overridden from settings.json ("mem_caps") or the command line (--mem-cap).
     std::unordered_map<MemSpace, uint64_t> mem_caps;
 
     // Category -> (RuleName -> IsEnabled)
@@ -60,7 +58,7 @@ struct Settings
     // File paths
     std::string cache_file = "";
     std::string records_path = "benchmarks/records.bin";
-    std::string rule_benchmarks_path = "benchmarks/dispatch_rules.bin";
+    std::string rule_benchmarks_path = "benchmarks/rules.bin";
     std::string settings_json_path = "settings.json";
 
     // Engine, Session, & Planner parameters
@@ -81,8 +79,6 @@ struct Settings
     {
     }
 
-    // Parses a mem space key of the form <type> or <type><idx>, e.g. "cpp", "opencl1", "cuda0".
-    // <type> must be one of: storage, cpp, opencl, cuda.
     static bool parseMemSpaceKey(const std::string &key, MemSpace &out)
     {
         struct TypeEntry
@@ -171,6 +167,10 @@ struct Settings
     {
         std::string actual_path = path.empty() ? rule_benchmarks_path : path;
         auto records = load_rule_benchmarks_file(actual_path);
+        if (records.empty() && path.empty() && actual_path != "benchmarks/dispatch_rules.bin")
+        {
+            records = load_rule_benchmarks_file("benchmarks/dispatch_rules.bin");
+        }
         if (records.empty())
             return false;
 
@@ -446,23 +446,33 @@ struct Settings
         }
     }
 
-    void load(int argc = 0, char *argv[] = nullptr, const std::string &custom_json_path = "",
+    void load(const std::vector<std::string> &args = {}, const std::string &custom_json_path = "",
               const std::string &custom_bin_path = "")
     {
-        // 1. Load from test results binary file (Lowest priority)
         load_from_binary(custom_bin_path);
-
-        // 2. Load from settings.json (Overrides test results)
         load_from_json(custom_json_path);
 
-        // 3. Load from command line arguments (Highest priority)
-        if (argc > 1 && argv != nullptr)
+        if (!args.empty())
         {
             ArgParser parser("SettingsLoader");
+            parser.set_verbose_logging(false);
             add_to_argparser(parser);
-            parser.parse(argc, argv);
+            if (!parser.parse(args))
+            {
+                Error::throw_err("Failed to parse settings command-line arguments.");
+            }
             apply_cli_args(parser);
         }
+    }
+
+    void load(int argc, char *argv[], const std::string &custom_json_path = "", const std::string &custom_bin_path = "")
+    {
+        std::vector<std::string> args;
+        for (int i = 1; i < argc; ++i)
+        {
+            args.push_back(argv[i]);
+        }
+        load(args, custom_json_path, custom_bin_path);
     }
 
     bool is_rules_defined(const std::string &category) const
@@ -479,34 +489,29 @@ struct Settings
         return is_rules_defined("dispatch");
     }
 
-    void validate_dispatch_rules() const
-    {
-        if (!is_dispatch_rules_defined())
-        {
-            Error::throw_err(
-                "[Settings Error] Activated set of dispatch iterator rules is not defined!\n"
-                "No configuration was found in:\n"
-                "  (a) Test benchmark results ('" +
-                rule_benchmarks_path +
-                "')\n"
-                "  (b) Settings JSON ('" +
-                settings_json_path +
-                "')\n"
-                "  (c) Command-line arguments (--enable-rule / --disable-rule)\n"
-                "Please run the dispatch rules benchmark test (runDispatchRulesBenchmark()) to generate benchmark "
-                "results,\n"
-                "or define the rules in 'settings.json' (e.g. {\"rules\": {\"dispatch\": "
-                "{\"SingleEngineDispatchDomination\": true, ...}}}),\n"
-                "or provide command-line flags.");
-        }
-    }
-
     void validate_rules(const std::string &category) const
     {
         if (!is_rules_defined(category))
         {
-            Error::throw_err("[Settings Error] Activated set of " + category + " iterator rules is not defined!");
+            Error::throw_err("[Settings Error] Activated set of " + category +
+                             " iterator rules is not defined!\n"
+                             "No configuration was found in:\n"
+                             "  (a) Test benchmark results ('" +
+                             rule_benchmarks_path +
+                             "')\n"
+                             "  (b) Settings JSON ('" +
+                             settings_json_path +
+                             "')\n"
+                             "  (c) Command-line arguments (--enable-rule / --disable-rule)\n"
+                             "Please run tests (runPruningTests()) to generate rule benchmark results,\n"
+                             "or define the rules in 'settings.json',\n"
+                             "or provide command-line flags.");
         }
+    }
+
+    void validate_dispatch_rules() const
+    {
+        validate_rules("dispatch");
     }
 
     bool is_rule_enabled(const std::string &category, const std::string &rule_name, bool default_val = false) const
@@ -543,6 +548,34 @@ struct Settings
         if (it != rules.end())
             return it->second;
         return empty_map;
+    }
+
+    void enable_all_default_rules(bool enabled = true)
+    {
+        const std::vector<std::pair<std::string, std::string>> defaults = {
+            {"bufferize", "MemSpaceMismatchInplaceRule"},
+            {"bufferize", "LinearChainInplaceDominationRule"},
+            {"bufferize", "IntervalSubsetDominationRule"},
+            {"bufferize", "CommutativeInplaceSymmetryRule"},
+            {"bufferize", "DeadBufferReuseDominationRule"},
+            {"malloc", "OffsetMonotoneRule"},
+            {"malloc", "IdMaxSymmetryRule"},
+            {"malloc", "CapRespectRule"},
+            {"malloc", "HMinBoundRule"},
+            {"malloc", "LargerBufferPriorityRule"},
+            {"cache", "SingleUseSkipRule"},
+            {"cache", "TinyBufferSkipRule"},
+            {"cache", "StorageAnchoredSkipRule"},
+            {"extract", "InfiniteCostSkipRule"},
+            {"extract", "SiblingEquivalentSkipRule"},
+            {"enode", "MemCapENodeDominationRule"},
+            {"enode", "FasterEquivalentENodeDominationRule"},
+            {"enode", "DeadChildChainDominationRule"},
+        };
+        for (const auto &p : defaults)
+        {
+            set_rule_enabled(p.first, p.second, enabled);
+        }
     }
 
     static Settings get_default()
