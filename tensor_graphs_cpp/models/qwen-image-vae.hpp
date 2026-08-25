@@ -4,6 +4,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -50,6 +51,8 @@ class Krea2TurboVAEModel
     Graph &g;
     MemoryManager &mem;
     const std::string w_path;
+    std::unordered_map<std::string, LogicalId> weight_cache;
+    std::unordered_map<std::string, LogicalId> conv_weight_cache;
 
     std::string resolve_weight_name(const std::string &name)
     {
@@ -67,19 +70,27 @@ class Krea2TurboVAEModel
 
     LogicalId weight(const std::string &name)
     {
+        auto it = weight_cache.find(name);
+        if (it != weight_cache.end())
+            return it->second;
         std::string resolved = resolve_weight_name(name);
         LogicalId raw_weight = g.weight(w_path, resolved);
-        return g.cast(raw_weight, DType::FLOAT32);
+        LogicalId cast_w = g.cast(raw_weight, DType::FLOAT32);
+        weight_cache[name] = cast_w;
+        return cast_w;
     }
 
     LogicalId load_conv_weight(const std::string &name, uint32_t out_c, uint32_t in_c, uint32_t k)
     {
+        auto it = conv_weight_cache.find(name);
+        if (it != conv_weight_cache.end())
+            return it->second;
         std::string resolved = resolve_weight_name(name);
         TensorMetadata meta = FileRegistry::get().getMetadata(w_path, resolved);
         LogicalId raw = g.weight(w_path, resolved);
         LogicalId raw_f32 = g.cast(raw, DType::FLOAT32);
 
-        // If weight is stored as 3D causal conv [out_c, in_c, kT, kH, kW], slice the last temporal frame
+        LogicalId res;
         if (meta.shape.size() == 5)
         {
             uint32_t kT = meta.shape[2];
@@ -88,12 +99,14 @@ class Krea2TurboVAEModel
             LogicalId sliced = g.slice(raw_f32, {0, 0, (int32_t)(kT - 1), 0, 0},
                                        {(int32_t)out_c, (int32_t)in_c, (int32_t)kT, (int32_t)kH, (int32_t)kW});
             sliced = g.contiguous(sliced);
-            return g.reshape(sliced, {(int32_t)out_c, (int32_t)(in_c * k * k)});
+            res = g.reshape(sliced, {(int32_t)out_c, (int32_t)(in_c * k * k)});
         }
         else
         {
-            return g.reshape(raw_f32, {(int32_t)out_c, (int32_t)(in_c * k * k)});
+            res = g.reshape(raw_f32, {(int32_t)out_c, (int32_t)(in_c * k * k)});
         }
+        conv_weight_cache[name] = res;
+        return res;
     }
 
     LogicalId conv2d(LogicalId x, const std::string &w_name, const std::string &b_name, uint32_t in_c, uint32_t out_c,
@@ -193,7 +206,7 @@ class Krea2TurboVAEModel
         LogicalId qkv = conv2d(norm_x, prefix + "to_qkv.weight", prefix + "to_qkv.bias", dim, 3 * dim, H, W, 1, 1, 0);
 
         LogicalId qkv_flat = g.reshape(qkv, {1, (int32_t)(3 * dim), (int32_t)(H * W)});
-        LogicalId qkv_t = g.contiguous(g.permute(qkv_flat, {0, 2, 1})); // [1, H*W, 3*dim]
+        LogicalId qkv_t = g.contiguous(g.permute(qkv_flat, {0, 2, 1}));
 
         int32_t HW = H * W;
         LogicalId q = g.contiguous(g.slice(qkv_t, {0, 0, 0}, {1, HW, (int32_t)dim}));
@@ -203,8 +216,8 @@ class Krea2TurboVAEModel
         float scale = 1.0f / std::sqrt((float)dim);
         LogicalId q_scaled = g.mul(q, g.fill(scale, {1, (uint32_t)HW, dim}));
 
-        LogicalId k_t = g.contiguous(g.permute(k, {0, 2, 1})); // [1, dim, H*W]
-        LogicalId scores = g.dot(q_scaled, k_t);               // [1, H*W, H*W]
+        LogicalId k_t = g.contiguous(g.permute(k, {0, 2, 1}));
+        LogicalId scores = g.dot(q_scaled, k_t);
 
         LogicalId max_s = g.repeat(g.max(scores, 2), (uint32_t)HW, 2);
         LogicalId shifted = g.add(scores, g.neg(max_s));
@@ -212,9 +225,9 @@ class Krea2TurboVAEModel
         LogicalId sum_exps = g.repeat(g.sum(exps, 2), (uint32_t)HW, 2);
         LogicalId probs = g.div(exps, sum_exps);
 
-        LogicalId attn_out = g.dot(probs, v); // [1, H*W, dim]
+        LogicalId attn_out = g.dot(probs, v);
 
-        LogicalId attn_t = g.contiguous(g.permute(attn_out, {0, 2, 1})); // [1, dim, H*W]
+        LogicalId attn_t = g.contiguous(g.permute(attn_out, {0, 2, 1}));
         LogicalId attn_2d = g.reshape(attn_t, {1, (int32_t)dim, (int32_t)H, (int32_t)W});
 
         LogicalId proj = conv2d(attn_2d, prefix + "proj.weight", prefix + "proj.bias", dim, dim, H, W, 1, 1, 0);
@@ -238,7 +251,6 @@ class Krea2TurboVAEModel
 
     LogicalId build_graph(LogicalId latent_id)
     {
-        // 1. Unscale input latents using pre-trained mean and standard deviation: z = z_norm * std + mean
         std::vector<float> std_data(16);
         std::vector<float> mean_data(16);
         for (int i = 0; i < 16; ++i)
@@ -254,21 +266,16 @@ class Krea2TurboVAEModel
 
         LogicalId x = g.add(g.mul(latent_id, std_exp), mean_exp);
 
-        // 2. Post-Quant 1x1 Convolution (conv2): 16 -> 16 [1, 16, H_lat, W_lat]
         uint32_t cur_h = cfg.latent_h;
         uint32_t cur_w = cfg.latent_w;
         x = conv2d(x, "conv2.weight", "conv2.bias", 16, 16, cur_h, cur_w, 1, 1, 0);
 
-        // 3. Conv In (decoder.conv1): 16 -> 384 [1, 384, H_lat, W_lat]
         x = conv2d(x, "decoder.conv1.weight", "decoder.conv1.bias", 16, 384, cur_h, cur_w, 3, 1, 1);
 
-        // 4. Middle Block: Resnet -> Attention -> Resnet
         x = residual_block(x, "decoder.middle.0.", 384, 384, cur_h, cur_w);
         x = attention_block(x, "decoder.middle.1.", 384, cur_h, cur_w);
         x = residual_block(x, "decoder.middle.2.", 384, 384, cur_h, cur_w);
 
-        // 5. Up Blocks (4 stages)
-        // Stage 0: 384 -> 384, Upsample 2x -> 192 (cur_h, cur_w: 128 -> 256)
         x = residual_block(x, "decoder.upsamples.0.", 384, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.1.", 384, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.2.", 384, 384, cur_h, cur_w);
@@ -278,7 +285,6 @@ class Krea2TurboVAEModel
         x = conv2d(x, "decoder.upsamples.3.resample.1.weight", "decoder.upsamples.3.resample.1.bias", 384, 192, cur_h,
                    cur_w, 3, 1, 1);
 
-        // Stage 1: 192 -> 384, Upsample 2x -> 192 (cur_h, cur_w: 256 -> 512)
         x = residual_block(x, "decoder.upsamples.4.", 192, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.5.", 384, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.6.", 384, 384, cur_h, cur_w);
@@ -288,7 +294,6 @@ class Krea2TurboVAEModel
         x = conv2d(x, "decoder.upsamples.7.resample.1.weight", "decoder.upsamples.7.resample.1.bias", 384, 192, cur_h,
                    cur_w, 3, 1, 1);
 
-        // Stage 2: 192 -> 192, Upsample 2x -> 96 (cur_h, cur_w: 512 -> 1024)
         x = residual_block(x, "decoder.upsamples.8.", 192, 192, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.9.", 192, 192, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.10.", 192, 192, cur_h, cur_w);
@@ -298,12 +303,10 @@ class Krea2TurboVAEModel
         x = conv2d(x, "decoder.upsamples.11.resample.1.weight", "decoder.upsamples.11.resample.1.bias", 192, 96, cur_h,
                    cur_w, 3, 1, 1);
 
-        // Stage 3: 96 -> 96 (no upsample) (cur_h, cur_w: 1024)
         x = residual_block(x, "decoder.upsamples.12.", 96, 96, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.13.", 96, 96, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.14.", 96, 96, cur_h, cur_w);
 
-        // 6. Out Norm, SiLU, Conv Out: 96 -> 3 [1, 3, height, width]
         x = rms_norm_2d(x, "decoder.head.0.gamma", 96, cur_h, cur_w);
         x = silu_2d(x, 96, cur_h, cur_w);
         return conv2d(x, "decoder.head.2.weight", "decoder.head.2.bias", 96, 3, cur_h, cur_w, 3, 1, 1);

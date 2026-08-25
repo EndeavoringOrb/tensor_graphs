@@ -187,19 +187,35 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
     else if (model_name == "krea" || model_name == "krea-2-turbo" || model_name == "krea2-turbo" ||
              model_name == "krea2")
     {
-        std::string actual_path = model_path;
+        std::string actual_dit = model_path;
         if (std::filesystem::is_directory(model_path))
         {
             if (std::filesystem::exists(model_path + "/krea.safetensors"))
-                actual_path = model_path + "/krea.safetensors";
+                actual_dit = model_path + "/krea.safetensors";
             else if (std::filesystem::exists(model_path + "/turbo.safetensors"))
-                actual_path = model_path + "/turbo.safetensors";
+                actual_dit = model_path + "/turbo.safetensors";
             else if (std::filesystem::exists(model_path + "/krea2_turbo_fp8_scaled.safetensors"))
-                actual_path = model_path + "/krea2_turbo_fp8_scaled.safetensors";
+                actual_dit = model_path + "/krea2_turbo_fp8_scaled.safetensors";
             else if (std::filesystem::exists(model_path + "/transformer"))
-                actual_path = model_path + "/transformer";
+                actual_dit = model_path + "/transformer";
         }
-        roots = build_krea2_graph(ctx->graph, *ctx->mem, actual_path, 512, 512, 128);
+        std::string actual_te = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/qwen3vl_4b_bf16.safetensors"))
+                actual_te = model_path + "/qwen3vl_4b_bf16.safetensors";
+            else if (std::filesystem::exists(model_path + "/text_encoder"))
+                actual_te = model_path + "/text_encoder";
+        }
+        std::string actual_vae = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/qwen_image_vae.safetensors"))
+                actual_vae = model_path + "/qwen_image_vae.safetensors";
+            else if (std::filesystem::exists(model_path + "/vae"))
+                actual_vae = model_path + "/vae";
+        }
+        roots = build_krea2_pipeline_graph(ctx->graph, *ctx->mem, actual_dit, actual_te, actual_vae, 512, 512, 128, 8, 1.15f);
         ctx->rootId = roots.roots[0];
         ctx->inputIdsId = roots.inputs[0];
         ctx->max_seq_len = 128;

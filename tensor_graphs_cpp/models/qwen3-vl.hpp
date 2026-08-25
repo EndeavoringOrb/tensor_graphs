@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -24,9 +25,8 @@ struct Qwen3VLConfig
     uint32_t num_key_value_heads = 8;
     uint32_t head_dim = 128;
     float rms_norm_eps = 1e-6f;
-    float rope_theta = 5000000.0f; // 5M base theta for Qwen3-VL
+    float rope_theta = 5000000.0f;
 
-    // 12 tapped decoder layers for Krea 2 multi-layer feature aggregation
     std::vector<uint32_t> select_layers = {2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35};
 };
 
@@ -38,6 +38,7 @@ class Qwen3VLModel
     Graph &g;
     MemoryManager &mem;
     const std::string w_path;
+    std::unordered_map<std::string, LogicalId> weight_cache;
 
     std::string resolve_weight_name(const std::string &name)
     {
@@ -56,21 +57,26 @@ class Qwen3VLModel
 
     LogicalId weight(const std::string &name)
     {
+        auto it = weight_cache.find(name);
+        if (it != weight_cache.end())
+        {
+            return it->second;
+        }
         std::string resolved = resolve_weight_name(name);
         TensorMetadata meta = FileRegistry::get().getMetadata(w_path, resolved);
         LogicalId raw_weight = g.weight(w_path, resolved);
         LogicalId weight_f32 = g.cast(raw_weight, DType::FLOAT32);
 
-        // Apply FP8 scalar scale if present (skipped for BF16)
         std::string scale_name = resolved + "_scale";
         if (FileRegistry::get().hasTensor(w_path, scale_name))
         {
             LogicalId raw_scale = g.weight(w_path, scale_name);
             LogicalId scale_f32 = g.cast(raw_scale, DType::FLOAT32);
             LogicalId scale_expanded = g.fill(scale_f32, meta.shape);
-            return g.mul(weight_f32, scale_expanded);
+            weight_f32 = g.mul(weight_f32, scale_expanded);
         }
 
+        weight_cache[name] = weight_f32;
         return weight_f32;
     }
 
@@ -209,8 +215,8 @@ class Qwen3VLModel
     {
         std::string prefix = "layers." + std::to_string(layer_idx) + ".self_attn.";
 
-        uint32_t q_dim = cfg.num_attention_heads * cfg.head_dim;  // 32 * 128 = 4096
-        uint32_t kv_dim = cfg.num_key_value_heads * cfg.head_dim; // 8 * 128 = 1024
+        uint32_t q_dim = cfg.num_attention_heads * cfg.head_dim;
+        uint32_t kv_dim = cfg.num_key_value_heads * cfg.head_dim;
 
         LogicalId q = linear(x, prefix + "q_proj.weight", "", cfg.hidden_size, q_dim, S);
         LogicalId k = linear(x, prefix + "k_proj.weight", "", cfg.hidden_size, kv_dim, S);
@@ -218,13 +224,13 @@ class Qwen3VLModel
 
         q = g.contiguous(
             g.permute(g.reshape(q, {1, (int32_t)S, (int32_t)cfg.num_attention_heads, (int32_t)cfg.head_dim}),
-                      {0, 2, 1, 3})); // [1, 32, S, 128]
+                      {0, 2, 1, 3}));
         k = g.contiguous(
             g.permute(g.reshape(k, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}),
-                      {0, 2, 1, 3})); // [1, 8, S, 128]
+                      {0, 2, 1, 3}));
         v = g.contiguous(
             g.permute(g.reshape(v, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}),
-                      {0, 2, 1, 3})); // [1, 8, S, 128]
+                      {0, 2, 1, 3}));
 
         q = per_head_rms_norm(q, prefix + "q_norm.weight", cfg.num_attention_heads, S, cfg.head_dim, cfg.rms_norm_eps);
         k = per_head_rms_norm(k, prefix + "k_norm.weight", cfg.num_key_value_heads, S, cfg.head_dim, cfg.rms_norm_eps);
@@ -235,7 +241,6 @@ class Qwen3VLModel
         float scale_val = 1.0f / std::sqrt(static_cast<float>(cfg.head_dim));
         q = g.mul(q, g.fill(scale_val, {1, cfg.num_attention_heads, S, cfg.head_dim}));
 
-        // GQA: Repeat KV heads (8 -> 32)
         uint32_t rep_factor = cfg.num_attention_heads / cfg.num_key_value_heads;
         LogicalId k_5d = g.repeat(
             g.reshape(k, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}), rep_factor, 2);
@@ -245,12 +250,12 @@ class Qwen3VLModel
         v = g.reshape(g.contiguous(v_5d), {1, (int32_t)cfg.num_attention_heads, (int32_t)S, (int32_t)cfg.head_dim});
 
         LogicalId k_t = g.contiguous(g.permute(k, {0, 1, 3, 2}));
-        LogicalId scores = g.dot(q, k_t); // [1, 32, S, S]
+        LogicalId scores = g.dot(q, k_t);
 
         scores = g.add(scores, g.repeat(mask, cfg.num_attention_heads, 1));
         LogicalId probs = softmax_4d(scores, S, cfg.num_attention_heads);
 
-        LogicalId attn_out = g.dot(probs, v); // [1, 32, S, 128]
+        LogicalId attn_out = g.dot(probs, v);
         LogicalId ctx_perm = g.contiguous(g.permute(attn_out, {0, 2, 1, 3}));
         LogicalId ctx_flat = g.reshape(ctx_perm, {1, (int32_t)S, (int32_t)q_dim});
 
@@ -293,7 +298,7 @@ class Qwen3VLModel
     LogicalId build_graph(LogicalId input_ids_id)
     {
         LogicalId w_emb = weight("embed_tokens.weight");
-        LogicalId h = g.gather(w_emb, input_ids_id); // [1, seq_len, 2560]
+        LogicalId h = g.gather(w_emb, input_ids_id);
 
         auto [cos_node, sin_node] = compute_rope_1d(seq_len, cfg.head_dim, cfg.rope_theta);
         LogicalId mask = compute_causal_mask(seq_len);

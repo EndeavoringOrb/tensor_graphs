@@ -55,7 +55,7 @@ def encode_prompt(tokenizer_obj, prompt: str, max_seq_len: int = 128) -> list[in
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Krea 2 Turbo Text-to-Image Generation"
+        description="Krea 2 Turbo Text-to-Image Generation (Unified Unrolled Pipeline)"
     )
     parser.add_argument(
         "--prompt_file",
@@ -133,13 +133,12 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    # Read prompt from file
     if not args.prompt_file.is_file():
         raise FileNotFoundError(f"Prompt file not found: {args.prompt_file}")
     prompt = args.prompt_file.read_text(encoding="utf-8").strip()
 
     print("=========================================================")
-    print(" Krea 2 Turbo (12B DiT + Qwen3-VL + Qwen-Image VAE)")
+    print(" Krea 2 Turbo (Unified Pipeline: Qwen3-VL + 12B DiT + VAE)")
     print(f" Prompt File: {args.prompt_file}")
     print(f" Prompt: {prompt!r}")
     print(
@@ -181,7 +180,7 @@ def main():
         delegate = HeuristicDelegate()
         args.disable_caching = True
 
-    # 1. Initialize Krea2Session (compiles Qwen3-VL, DiT, and VAE)
+    # 1. Initialize Krea2Session (compiles unified unrolled pipeline graph)
     session = tensor_graphs.Krea2Session(
         model_path=args.model_path,
         text_encoder_path=args.text_encoder_path,
@@ -189,6 +188,8 @@ def main():
         height=args.height,
         width=args.width,
         text_seq_len=128,
+        steps=args.steps,
+        mu=args.mu,
         delegate=delegate,
         min_compile_time=args.min_compile_time,
         disable_caching=args.disable_caching,
@@ -200,55 +201,20 @@ def main():
     tokenizer = load_tokenizer([tok_path, "Qwen/Qwen3-VL-4B-Instruct"])
     token_ids = encode_prompt(tokenizer, prompt, max_seq_len=128)
 
-    # 3. Encode prompt via Qwen3-VL Graph
-    t0 = time.perf_counter()
-    print("\nEncoding prompt with Qwen3-VL text encoder...")
-    text_embeddings = session.encode_text(token_ids)
-    t_text = time.perf_counter() - t0
-    print(f"Text encoding complete in {t_text * 1000:.2f} ms")
-
-    # 4. Initialize random latent noise ~ N(0, 1)
+    # 3. Initialize random latent noise ~ N(0, 1)
     latent_h = args.height // 8
     latent_w = args.width // 8
     torch.manual_seed(args.seed)
     latent = torch.randn((1, 16, latent_h, latent_w), dtype=torch.float32)
 
-    # 5. Flow-matching Euler integration
-    timesteps = torch.linspace(1.0, 0.0, args.steps + 1)
-    # Apply resolution/mu exponential shift schedule
-    exp_mu = torch.exp(torch.tensor(args.mu))
-    timesteps = exp_mu * timesteps / (1.0 + (exp_mu - 1.0) * timesteps)
+    # 4. Run end-to-end unified graph
+    print(f"\nGenerating image with {args.steps} unrolled flow-matching steps...")
+    t_start = time.perf_counter()
+    pixels = session.generate_image(token_ids, latent.flatten().tolist())
+    t_total = time.perf_counter() - t_start
+    print(f"End-to-end generation complete in {t_total * 1000:.2f} ms")
 
-    print(f"\nRunning {args.steps}-step Flow-Matching Euler sampling...")
-    t_start_diff = time.perf_counter()
-    for step in range(args.steps):
-        t_cur = timesteps[step].item()
-        t_nxt = timesteps[step + 1].item()
-        dt = t_nxt - t_cur
-
-        step_t0 = time.perf_counter()
-        v = session.predict_velocity(latent.flatten().tolist(), t_cur, text_embeddings)
-        step_ms = (time.perf_counter() - step_t0) * 1000.0
-
-        v_tensor = torch.tensor(v, dtype=torch.float32).reshape_as(latent)
-        latent = latent + dt * v_tensor
-        print(
-            f"  Step {step + 1:2d}/{args.steps} [t = {t_cur:.3f} -> {t_nxt:.3f}] - {step_ms:.2f} ms"
-        )
-
-    t_diff = time.perf_counter() - t_start_diff
-    print(
-        f"Diffusion generation complete in {t_diff * 1000:.2f} ms ({t_diff / args.steps * 1000:.2f} ms/step)"
-    )
-
-    # 6. Decode final latents to pixels through VAE Graph
-    print("\nDecoding latents to pixels with Qwen-Image VAE...")
-    t_start_vae = time.perf_counter()
-    pixels = session.decode_latent(latent.flatten().tolist())
-    t_vae = time.perf_counter() - t_start_vae
-    print(f"VAE decoding complete in {t_vae * 1000:.2f} ms")
-
-    # 7. Convert and save final image
+    # 5. Convert and save final image
     image_tensor = torch.tensor(pixels, dtype=torch.float32).reshape(
         1, 3, args.height, args.width
     )

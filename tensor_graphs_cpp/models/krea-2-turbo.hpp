@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -80,11 +81,19 @@ class Krea2TurboModel
     Graph &g;
     MemoryManager &mem;
     const std::string w_path;
+    std::unordered_map<std::string, LogicalId> weight_cache;
 
     LogicalId weight(const std::string &name)
     {
+        auto it = weight_cache.find(name);
+        if (it != weight_cache.end())
+        {
+            return it->second;
+        }
         LogicalId raw_weight = g.weight(w_path, name);
-        return g.cast(raw_weight, DType::FLOAT32);
+        LogicalId cast_w = g.cast(raw_weight, DType::FLOAT32);
+        weight_cache[name] = cast_w;
+        return cast_w;
     }
 
     LogicalId linear(LogicalId x, const std::string &w_name, const std::string &b_name, uint32_t in_d, uint32_t out_d,
@@ -161,68 +170,6 @@ class Krea2TurboModel
         LogicalId exps = g.pow(g.fill(TGConstants::E, {1, num_heads, S, S}), shifted);
         LogicalId sums = g.repeat(g.sum(exps, -1), S, 3);
         return g.div(exps, sums);
-    }
-
-    std::tuple<LogicalId, LogicalId> compute_rope_3d(uint32_t S_text, uint32_t grid_h, uint32_t grid_w,
-                                                     uint32_t head_dim)
-    {
-        uint32_t S_total = S_text + grid_h * grid_w;
-        std::vector<float> freqs_cos(S_total * head_dim);
-        std::vector<float> freqs_sin(S_total * head_dim);
-
-        // 3 axes split: T=16 (8 pairs), H=56 (28 pairs), W=56 (28 pairs) -> 128 total
-        uint32_t dim_t = 16, dim_h = 56, dim_w = 56;
-
-        for (uint32_t s = 0; s < S_total; ++s)
-        {
-            float pos_t = 0.0f, pos_h = 0.0f, pos_w = 0.0f;
-            if (s >= S_text)
-            {
-                uint32_t p = s - S_text;
-                pos_h = static_cast<float>(p / grid_w + 1);
-                pos_w = static_cast<float>(p % grid_w + 1);
-            }
-
-            uint32_t offset = 0;
-            // Axis T (dim=16)
-            for (uint32_t i = 0; i < dim_t / 2; ++i)
-            {
-                float freq = 1.0f / std::pow(cfg.rope_theta, static_cast<float>(2 * i) / static_cast<float>(dim_t));
-                float theta = pos_t * freq;
-                freqs_cos[s * head_dim + offset + 2 * i] = std::cos(theta);
-                freqs_cos[s * head_dim + offset + 2 * i + 1] = std::cos(theta);
-                freqs_sin[s * head_dim + offset + 2 * i] = std::sin(theta);
-                freqs_sin[s * head_dim + offset + 2 * i + 1] = std::sin(theta);
-            }
-            offset += dim_t;
-
-            // Axis H (dim=56)
-            for (uint32_t i = 0; i < dim_h / 2; ++i)
-            {
-                float freq = 1.0f / std::pow(cfg.rope_theta, static_cast<float>(2 * i) / static_cast<float>(dim_h));
-                float theta = pos_h * freq;
-                freqs_cos[s * head_dim + offset + 2 * i] = std::cos(theta);
-                freqs_cos[s * head_dim + offset + 2 * i + 1] = std::cos(theta);
-                freqs_sin[s * head_dim + offset + 2 * i] = std::sin(theta);
-                freqs_sin[s * head_dim + offset + 2 * i + 1] = std::sin(theta);
-            }
-            offset += dim_h;
-
-            // Axis W (dim=56)
-            for (uint32_t i = 0; i < dim_w / 2; ++i)
-            {
-                float freq = 1.0f / std::pow(cfg.rope_theta, static_cast<float>(2 * i) / static_cast<float>(dim_w));
-                float theta = pos_w * freq;
-                freqs_cos[s * head_dim + offset + 2 * i] = std::cos(theta);
-                freqs_cos[s * head_dim + offset + 2 * i + 1] = std::cos(theta);
-                freqs_sin[s * head_dim + offset + 2 * i] = std::sin(theta);
-                freqs_sin[s * head_dim + offset + 2 * i + 1] = std::sin(theta);
-            }
-        }
-
-        LogicalId cos_node = g.constant({1, 1, S_total, head_dim}, freqs_cos.data(), DType::FLOAT32);
-        LogicalId sin_node = g.constant({1, 1, S_total, head_dim}, freqs_sin.data(), DType::FLOAT32);
-        return {cos_node, sin_node};
     }
 
     LogicalId apply_rope(LogicalId x, LogicalId cos_node, LogicalId sin_node, uint32_t num_heads, uint32_t S,
@@ -309,45 +256,6 @@ class Krea2TurboModel
         return g.add(residual, mlp_out);
     }
 
-    LogicalId text_fusion(LogicalId text_raw)
-    {
-        // text_raw: [1, text_seq_len, 12, 2560]
-        uint32_t S_layerwise = cfg.text_seq_len * cfg.text_num_layers;
-        LogicalId h = g.reshape(text_raw, {1, (int32_t)S_layerwise, (int32_t)cfg.text_dim});
-
-        for (uint32_t i = 0; i < cfg.num_layerwise_blocks; ++i)
-        {
-            std::string prefix = "txtfusion.layerwise_blocks." + std::to_string(i) + ".";
-            h = text_fusion_block(h, prefix, S_layerwise);
-        }
-
-        LogicalId h_4d =
-            g.reshape(h, {1, (int32_t)cfg.text_seq_len, (int32_t)cfg.text_num_layers, (int32_t)cfg.text_dim});
-        // Permute to [1, text_seq_len, 2560, 12] for linear projection across layer axis
-        LogicalId h_perm = g.contiguous(g.permute(h_4d, {0, 1, 3, 2}));
-        LogicalId h_proj_in =
-            g.reshape(h_perm, {1, (int32_t)(cfg.text_seq_len * cfg.text_dim), (int32_t)cfg.text_num_layers});
-
-        LogicalId proj_w = weight("txtfusion.projector.weight");
-        LogicalId proj_w_3d = g.reshape(proj_w, {1, (int32_t)cfg.text_num_layers, 1});
-        LogicalId h_collapsed = g.dot(h_proj_in, proj_w_3d);
-
-        LogicalId fused = g.reshape(h_collapsed, {1, (int32_t)cfg.text_seq_len, (int32_t)cfg.text_dim});
-
-        for (uint32_t i = 0; i < cfg.num_refiner_blocks; ++i)
-        {
-            std::string prefix = "txtfusion.refiner_blocks." + std::to_string(i) + ".";
-            fused = text_fusion_block(fused, prefix, cfg.text_seq_len);
-        }
-
-        // Full multi-layer txtmlp: txtmlp.0.scale -> txtmlp.1 -> silu -> txtmlp.3
-        LogicalId h_norm = rms_norm(fused, "txtmlp.0.scale", cfg.text_seq_len, cfg.text_dim, cfg.rms_eps);
-        LogicalId h_mid =
-            linear(h_norm, "txtmlp.1.weight", "txtmlp.1.bias", cfg.text_dim, cfg.hidden_size, cfg.text_seq_len);
-        h_mid = silu(h_mid, {1, cfg.text_seq_len, cfg.hidden_size});
-        return linear(h_mid, "txtmlp.3.weight", "txtmlp.3.bias", cfg.hidden_size, cfg.hidden_size, cfg.text_seq_len);
-    }
-
     LogicalId patchify_latents(LogicalId latents)
     {
         // latents: [1, 16, H_lat, W_lat] -> [1, 16, Gh, 2, Gw, 2]
@@ -376,7 +284,6 @@ class Krea2TurboModel
         uint32_t S = cfg.total_seq_len;
         LogicalId residual = x;
 
-        // AdaLN modulation vector: blocks.N.mod.lin [36864]
         LogicalId mod_lin = weight(prefix + "mod.lin");
         LogicalId mod_lin_3d = g.reshape(mod_lin, {1, 1, 36864});
         LogicalId mod = g.mul(t_mod, mod_lin_3d);
@@ -394,12 +301,10 @@ class Krea2TurboModel
         LogicalId postshift = get_chunk(4);
         LogicalId postgate = get_chunk(5);
 
-        // Pre-norm & Modulation
         LogicalId h = rms_norm(x, prefix + "prenorm.scale", S, cfg.hidden_size, cfg.rms_eps);
         LogicalId one = g.fill(1.0f, {1, S, cfg.hidden_size});
         h = g.add(g.mul(g.add(one, prescale), h), preshift);
 
-        // Attention projections
         LogicalId q = linear(h, prefix + "attn.wq.weight", "", cfg.hidden_size, cfg.num_heads * cfg.head_dim, S);
         LogicalId k = linear(h, prefix + "attn.wk.weight", "", cfg.hidden_size, cfg.num_kv_heads * cfg.head_dim, S);
         LogicalId v = linear(h, prefix + "attn.wv.weight", "", cfg.hidden_size, cfg.num_kv_heads * cfg.head_dim, S);
@@ -420,7 +325,6 @@ class Krea2TurboModel
         float scale_val = 1.0f / std::sqrt((float)cfg.head_dim);
         q = g.mul(q, g.fill(scale_val, {1, cfg.num_heads, S, cfg.head_dim}));
 
-        // GQA Repeat KV heads 12 -> 48
         uint32_t rep_factor = cfg.num_heads / cfg.num_kv_heads;
         LogicalId k_5d =
             g.repeat(g.reshape(k, {1, (int32_t)cfg.num_kv_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}), rep_factor, 2);
@@ -444,7 +348,6 @@ class Krea2TurboModel
         x = g.add(residual, g.mul(pregate, attn_proj));
         residual = x;
 
-        // Post-norm & SwiGLU MLP
         LogicalId h2 = rms_norm(x, prefix + "postnorm.scale", S, cfg.hidden_size, cfg.rms_eps);
         h2 = g.add(g.mul(g.add(one, postscale), h2), postshift);
 
@@ -462,46 +365,128 @@ class Krea2TurboModel
     {
     }
 
-    LogicalId build_graph(LogicalId latent_id, LogicalId timestep_id, LogicalId text_id)
+    std::tuple<LogicalId, LogicalId> compute_rope_3d(uint32_t S_text, uint32_t grid_h, uint32_t grid_w,
+                                                     uint32_t head_dim)
     {
-        // 1. Timestep conditioning vector vec: [1, 1, 6144] and modulation projection: [1, 1, 36864]
+        uint32_t S_total = S_text + grid_h * grid_w;
+        std::vector<float> freqs_cos(S_total * head_dim);
+        std::vector<float> freqs_sin(S_total * head_dim);
+
+        uint32_t dim_t = 16, dim_h = 56, dim_w = 56;
+
+        for (uint32_t s = 0; s < S_total; ++s)
+        {
+            float pos_t = 0.0f, pos_h = 0.0f, pos_w = 0.0f;
+            if (s >= S_text)
+            {
+                uint32_t p = s - S_text;
+                pos_h = static_cast<float>(p / grid_w + 1);
+                pos_w = static_cast<float>(p % grid_w + 1);
+            }
+
+            uint32_t offset = 0;
+            for (uint32_t i = 0; i < dim_t / 2; ++i)
+            {
+                float freq = 1.0f / std::pow(cfg.rope_theta, static_cast<float>(2 * i) / static_cast<float>(dim_t));
+                float theta = pos_t * freq;
+                freqs_cos[s * head_dim + offset + 2 * i] = std::cos(theta);
+                freqs_cos[s * head_dim + offset + 2 * i + 1] = std::cos(theta);
+                freqs_sin[s * head_dim + offset + 2 * i] = std::sin(theta);
+                freqs_sin[s * head_dim + offset + 2 * i + 1] = std::sin(theta);
+            }
+            offset += dim_t;
+
+            for (uint32_t i = 0; i < dim_h / 2; ++i)
+            {
+                float freq = 1.0f / std::pow(cfg.rope_theta, static_cast<float>(2 * i) / static_cast<float>(dim_h));
+                float theta = pos_h * freq;
+                freqs_cos[s * head_dim + offset + 2 * i] = std::cos(theta);
+                freqs_cos[s * head_dim + offset + 2 * i + 1] = std::cos(theta);
+                freqs_sin[s * head_dim + offset + 2 * i] = std::sin(theta);
+                freqs_sin[s * head_dim + offset + 2 * i + 1] = std::sin(theta);
+            }
+            offset += dim_h;
+
+            for (uint32_t i = 0; i < dim_w / 2; ++i)
+            {
+                float freq = 1.0f / std::pow(cfg.rope_theta, static_cast<float>(2 * i) / static_cast<float>(dim_w));
+                float theta = pos_w * freq;
+                freqs_cos[s * head_dim + offset + 2 * i] = std::cos(theta);
+                freqs_cos[s * head_dim + offset + 2 * i + 1] = std::cos(theta);
+                freqs_sin[s * head_dim + offset + 2 * i] = std::sin(theta);
+                freqs_sin[s * head_dim + offset + 2 * i + 1] = std::sin(theta);
+            }
+        }
+
+        LogicalId cos_node = g.constant({1, 1, S_total, head_dim}, freqs_cos.data(), DType::FLOAT32);
+        LogicalId sin_node = g.constant({1, 1, S_total, head_dim}, freqs_sin.data(), DType::FLOAT32);
+        return {cos_node, sin_node};
+    }
+
+    LogicalId text_fusion(LogicalId text_raw)
+    {
+        uint32_t S_layerwise = cfg.text_seq_len * cfg.text_num_layers;
+        LogicalId h = g.reshape(text_raw, {1, (int32_t)S_layerwise, (int32_t)cfg.text_dim});
+
+        for (uint32_t i = 0; i < cfg.num_layerwise_blocks; ++i)
+        {
+            std::string prefix = "txtfusion.layerwise_blocks." + std::to_string(i) + ".";
+            h = text_fusion_block(h, prefix, S_layerwise);
+        }
+
+        LogicalId h_4d =
+            g.reshape(h, {1, (int32_t)cfg.text_seq_len, (int32_t)cfg.text_num_layers, (int32_t)cfg.text_dim});
+        LogicalId h_perm = g.contiguous(g.permute(h_4d, {0, 1, 3, 2}));
+        LogicalId h_proj_in =
+            g.reshape(h_perm, {1, (int32_t)(cfg.text_seq_len * cfg.text_dim), (int32_t)cfg.text_num_layers});
+
+        LogicalId proj_w = weight("txtfusion.projector.weight");
+        LogicalId proj_w_3d = g.reshape(proj_w, {1, (int32_t)cfg.text_num_layers, 1});
+        LogicalId h_collapsed = g.dot(h_proj_in, proj_w_3d);
+
+        LogicalId fused = g.reshape(h_collapsed, {1, (int32_t)cfg.text_seq_len, (int32_t)cfg.text_dim});
+
+        for (uint32_t i = 0; i < cfg.num_refiner_blocks; ++i)
+        {
+            std::string prefix = "txtfusion.refiner_blocks." + std::to_string(i) + ".";
+            fused = text_fusion_block(fused, prefix, cfg.text_seq_len);
+        }
+
+        LogicalId h_norm = rms_norm(fused, "txtmlp.0.scale", cfg.text_seq_len, cfg.text_dim, cfg.rms_eps);
+        LogicalId h_mid =
+            linear(h_norm, "txtmlp.1.weight", "txtmlp.1.bias", cfg.text_dim, cfg.hidden_size, cfg.text_seq_len);
+        h_mid = silu(h_mid, {1, cfg.text_seq_len, cfg.hidden_size});
+        return linear(h_mid, "txtmlp.3.weight", "txtmlp.3.bias", cfg.hidden_size, cfg.hidden_size, cfg.text_seq_len);
+    }
+
+    LogicalId predict_velocity_step(LogicalId latent_id, LogicalId timestep_id, LogicalId txt_tokens,
+                                    LogicalId cos_node, LogicalId sin_node)
+    {
         LogicalId vec = compute_timestep_embedding(timestep_id);
         LogicalId t_mod = linear(vec, "tproj.1.weight", "tproj.1.bias", cfg.time_mlp_dim, 36864, 1);
 
-        // 2. Text fusion tokens: [1, text_seq_len, 6144]
-        LogicalId txt_tokens = text_fusion(text_id);
-
-        // 3. Patchify latents: [1, num_patches, 6144]
         LogicalId img_tokens = patchify_latents(latent_id);
-
-        // 4. Concatenate tokens: [1, text_seq_len + num_patches, 6144]
         LogicalId x = g.concat({txt_tokens, img_tokens}, 1);
 
-        // 5. 3D Axial RoPE tables
-        auto [cos_node, sin_node] = compute_rope_3d(cfg.text_seq_len, cfg.grid_h, cfg.grid_w, cfg.head_dim);
-
-        // 6. 28 SingleStreamBlocks
         for (uint32_t i = 0; i < cfg.num_layers; ++i)
         {
             x = single_stream_block(x, i, t_mod, cos_node, sin_node);
         }
 
-        // 7. Extract image token slice: [1, num_patches, 6144]
         LogicalId x_img =
             g.slice(x, {0, (int32_t)cfg.text_seq_len, 0}, {1, (int32_t)cfg.total_seq_len, (int32_t)cfg.hidden_size});
         x_img = g.contiguous(x_img);
 
-        // 8. Final modulation and projection
         LogicalId x_norm = rms_norm(x_img, "last.norm.scale", cfg.num_patches, cfg.hidden_size, cfg.rms_eps);
 
-        LogicalId last_mod_lin = weight("last.modulation.lin"); // [2, 6144]
+        LogicalId last_mod_lin = weight("last.modulation.lin");
         LogicalId last_scale = g.slice(last_mod_lin, {0, 0}, {1, (int32_t)cfg.hidden_size});
         LogicalId last_shift = g.slice(last_mod_lin, {1, 0}, {2, (int32_t)cfg.hidden_size});
         last_scale = g.reshape(last_scale, {1, 1, (int32_t)cfg.hidden_size});
         last_shift = g.reshape(last_shift, {1, 1, (int32_t)cfg.hidden_size});
 
-        LogicalId scale_vec = g.mul(vec, last_scale); // [1, 1, 6144]
-        LogicalId shift_vec = g.mul(vec, last_shift); // [1, 1, 6144]
+        LogicalId scale_vec = g.mul(vec, last_scale);
+        LogicalId shift_vec = g.mul(vec, last_shift);
 
         LogicalId scale_exp = g.repeat(scale_vec, cfg.num_patches, 1);
         LogicalId shift_exp = g.repeat(shift_vec, cfg.num_patches, 1);
@@ -512,7 +497,45 @@ class Krea2TurboModel
         LogicalId v_patches =
             linear(x_norm, "last.linear.weight", "last.linear.bias", cfg.hidden_size, cfg.patch_dim, cfg.num_patches);
 
-        // 9. Unpatchify back to latent velocity: [1, 16, H_lat, W_lat]
         return unpatchify_latents(v_patches);
+    }
+
+    LogicalId build_graph(LogicalId latent_id, LogicalId timestep_id, LogicalId text_id)
+    {
+        LogicalId txt_tokens = text_fusion(text_id);
+        auto [cos_node, sin_node] = compute_rope_3d(cfg.text_seq_len, cfg.grid_h, cfg.grid_w, cfg.head_dim);
+        return predict_velocity_step(latent_id, timestep_id, txt_tokens, cos_node, sin_node);
+    }
+
+    LogicalId build_unrolled_dit(LogicalId initial_latent, LogicalId text_embeddings, uint32_t steps = 8,
+                                 float mu = 1.15f)
+    {
+        LogicalId txt_tokens = text_fusion(text_embeddings);
+        auto [cos_node, sin_node] = compute_rope_3d(cfg.text_seq_len, cfg.grid_h, cfg.grid_w, cfg.head_dim);
+
+        std::vector<float> timesteps(steps + 1);
+        float exp_mu = std::exp(mu);
+        for (uint32_t i = 0; i <= steps; ++i)
+        {
+            float s = 1.0f - static_cast<float>(i) / static_cast<float>(steps);
+            timesteps[i] = (exp_mu * s) / (1.0f + (exp_mu - 1.0f) * s);
+        }
+
+        LogicalId cur_latent = initial_latent;
+        for (uint32_t step = 0; step < steps; ++step)
+        {
+            float t_cur = timesteps[step];
+            float t_nxt = timesteps[step + 1];
+            float dt = t_nxt - t_cur;
+
+            LogicalId t_node = g.constant({1}, &t_cur, DType::FLOAT32);
+            LogicalId v = predict_velocity_step(cur_latent, t_node, txt_tokens, cos_node, sin_node);
+
+            LogicalId dt_node = g.fill(dt, {1, cfg.latent_channels, cfg.latent_h, cfg.latent_w});
+            LogicalId delta = g.mul(v, dt_node);
+            cur_latent = g.add(cur_latent, delta);
+        }
+
+        return cur_latent;
     }
 };
