@@ -104,7 +104,13 @@ struct DispatchContext
 // =============================================================================
 class DispatchCostPruningRule
 {
-    bool enabled = true;
+  public:
+    TG_PRUNING_RULE(DispatchCostPruningRule)
+    DispatchCostPruningRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
     std::unordered_map<Engine, float> engine_finish;
     std::unordered_map<Engine, float> remaining_work_per_engine;
     std::vector<float> node_finish;
@@ -120,14 +126,6 @@ class DispatchCostPruningRule
     std::vector<UndoState> undo_stack;
 
 public:
-    DispatchCostPruningRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "DispatchCostPruningRule";
-    }
 
     void init(const DispatchContext &ctx)
     {
@@ -383,16 +381,10 @@ struct DispatchNodeMeta
 
 class InputDispatchDominationRule
 {
-    bool enabled = true;
-
-public:
+  public:
+    TG_PRUNING_RULE(InputDispatchDominationRule)
     InputDispatchDominationRule(bool en = true) : enabled(en)
     {
-    }
-
-    const char *name() const
-    {
-        return "InputDispatchDominationRule";
     }
 
     bool check(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
@@ -432,13 +424,14 @@ public:
 
 class UnifiedMemoryExchangeableDispatchRule
 {
-    bool enabled = true;
+  public:
+    TG_PRUNING_RULE(UnifiedMemoryExchangeableDispatchRule)
+    UnifiedMemoryExchangeableDispatchRule(bool en = true) : enabled(en) {}
+
+  private:
     std::vector<uint32_t> remaining_users; // Tracks R(P) for each EClass
 
 public:
-    UnifiedMemoryExchangeableDispatchRule(bool en = true) : enabled(en) {}
-
-    const char *name() const { return "UnifiedMemoryExchangeableDispatchRule"; }
 
     // 1. BEFORE DFS: Initialize remaining user counts from selection_map
     void init(const DispatchContext &ctx)
@@ -587,7 +580,11 @@ public:
 
 class MemoryPressureDispatchRule
 {
-    bool enabled = true;
+  public:
+    TG_PRUNING_RULE(MemoryPressureDispatchRule)
+    MemoryPressureDispatchRule(bool en = true) : enabled(en) {}
+
+  private:
     std::unordered_map<MemSpace, uint64_t> current_live_mem;
     std::vector<uint32_t> remaining_users;
 
@@ -601,9 +598,6 @@ class MemoryPressureDispatchRule
     std::vector<UndoState> undo_stack;
 
 public:
-    MemoryPressureDispatchRule(bool en = true) : enabled(en) {}
-
-    const char *name() const { return "MemoryPressureDispatchRule"; }
 
     void init(const DispatchContext &ctx)
     {
@@ -1146,6 +1140,25 @@ DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
                                                     nullptr, std::forward<Rules>(rules)...);
 }
 
+using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule,
+                                        MemoryPressureDispatchRule, DispatchCostPruningRule>;
+
+template <typename BoolTuple>
+inline auto makeConfiguredDispatchIteratorFromBools(const EGraph &egraph,
+                                                    const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                                    const std::vector<ENodeInfo> &enodeInfos,
+                                                    std::shared_ptr<SearchDelegate> delegate,
+                                                    const BoolTuple &bool_flags,
+                                                    const float *best_cost = nullptr)
+{
+    return std::apply(
+        [&](auto &&...rs) {
+            return makeDispatchIteratorWithDelegate(egraph, selection_map, enodeInfos, std::move(delegate),
+                                                    best_cost, rs...);
+        },
+        prune::instantiate_from_bools<AllDispatchRuleTypes>(bool_flags));
+}
+
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
                                            const std::vector<ENodeInfo> &enodeInfos,
@@ -1153,12 +1166,9 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const float *best_cost = nullptr)
 {
     settings.validate_dispatch_rules();
-    return makeDispatchIteratorWithDelegate(
-        egraph, selection_map, enodeInfos, std::move(delegate), best_cost,
-        InputDispatchDominationRule(settings.is_rule_enabled("dispatch", "InputDispatchDominationRule")),
-        UnifiedMemoryExchangeableDispatchRule(settings.is_rule_enabled("dispatch", "UnifiedMemoryExchangeableDispatchRule")),
-        MemoryPressureDispatchRule(settings.is_rule_enabled("dispatch", "MemoryPressureDispatchRule")),
-        DispatchCostPruningRule(settings.is_rule_enabled("dispatch", "DispatchCostPruningRule")));
+    auto bool_flags = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
+    return makeConfiguredDispatchIteratorFromBools(egraph, selection_map, enodeInfos, std::move(delegate),
+                                                  bool_flags, best_cost);
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
@@ -1190,7 +1200,13 @@ struct ExtractContext
 
 class ExtractorJacksonCarlierRule
 {
-    bool enabled = true;
+  public:
+    TG_PRUNING_RULE(ExtractorJacksonCarlierRule)
+    ExtractorJacksonCarlierRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
     std::vector<float> node_q;
     std::unordered_map<Engine, float> engine_selected_work;
     std::unordered_map<Engine, std::vector<SchrageTask>> engine_tasks;
@@ -1206,14 +1222,6 @@ class ExtractorJacksonCarlierRule
     std::vector<UndoState> undo_stack;
 
 public:
-    ExtractorJacksonCarlierRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "ExtractorJacksonCarlierRule";
-    }
 
     void init(const ExtractContext &ctx)
     {
@@ -1403,13 +1411,9 @@ public:
 class InfiniteCostSkipRule
 {
 public:
-    bool enabled = true;
+    TG_PRUNING_RULE(InfiniteCostSkipRule)
     InfiniteCostSkipRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "InfiniteCostSkipRule";
     }
     bool check(ENodeId /*cand*/, size_t /*cand_idx*/, const ExtractContext &ctx) const
     {
@@ -1431,13 +1435,9 @@ public:
 class SiblingEquivalentSkipRule
 {
 public:
-    bool enabled = true;
+    TG_PRUNING_RULE(SiblingEquivalentSkipRule)
     SiblingEquivalentSkipRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "SiblingEquivalentSkipRule";
     }
     bool check(ENodeId /*cand*/, size_t /*cand_idx*/, const ExtractContext &ctx) const
     {
@@ -1823,16 +1823,31 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(const EGraph &egraph
                                              nullptr, std::forward<Rules>(rules)...);
 }
 
+using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule>;
+
+template <typename BoolTuple>
+inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,
+                                             const std::vector<ENodeInfo> &enodeInfos,
+                                             std::shared_ptr<SearchDelegate> delegate,
+                                             const BoolTuple &bool_flags,
+                                             const float *best_cost = nullptr)
+{
+    return std::apply(
+        [&](auto &&...rs) {
+            return makeExtractorWithDelegate(egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
+                                             rs...);
+        },
+        prune::instantiate_from_bools<AllExtractRuleTypes>(bool_flags));
+}
+
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
                                     const Settings &settings, const float *best_cost = nullptr)
 {
     settings.validate_rules("extract");
-    return makeExtractorWithDelegate(
-        egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
-        InfiniteCostSkipRule(settings.is_rule_enabled("extract", "InfiniteCostSkipRule")),
-        SiblingEquivalentSkipRule(settings.is_rule_enabled("extract", "SiblingEquivalentSkipRule")),
-        ExtractorJacksonCarlierRule(settings.is_rule_enabled("extract", "ExtractorJacksonCarlierRule")));
+    auto bool_flags = prune::extract_enabled_states<AllExtractRuleTypes>("extract", settings);
+    return makeConfiguredExtractorFromBools(egraph, root_eclass_id, enodeInfos, std::move(delegate), bool_flags,
+                                           best_cost);
 }
 
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,

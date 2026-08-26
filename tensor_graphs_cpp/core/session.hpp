@@ -15,6 +15,7 @@
 #include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
+#include "core/plan/rule_registry.hpp"
 #include "core/repo.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
@@ -170,7 +171,7 @@ struct Session
             !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
             !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
         {
-            settings.enable_all_default_rules(true);
+            enableAllDefaultRules(settings, true);
         }
         ensureOutputDirectories();
         loadCache();
@@ -197,7 +198,7 @@ struct Session
             !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
             !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
         {
-            settings.enable_all_default_rules(true);
+            enableAllDefaultRules(settings, true);
         }
         ensureOutputDirectories();
         loadCache();

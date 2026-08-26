@@ -53,6 +53,22 @@
 #include <typeinfo>
 #include <utility>
 
+#define TG_PRUNING_RULE(Name)                                                                                  \
+    static constexpr const char *kName = #Name;                                                                        \
+    const char *name() const                                                                                           \
+    {                                                                                                                  \
+        return kName;                                                                                                  \
+    }                                                                                                                  \
+    bool enabled = true;
+
+#define TG_PRUNING_RULE(Name)                                                                                  \
+    static constexpr const char *kName = #Name;                                                                        \
+    const char *name() const                                                                                           \
+    {                                                                                                                  \
+        return kName;                                                                                                  \
+    }                                                                                                                  \
+    bool enabled = true;
+
 namespace prune
 {
 
@@ -93,6 +109,7 @@ template <class R, class Ctx>
 using leaf_expr = decltype(std::declval<R &>().validate_leaf(std::declval<const Ctx &>()));
 
 template <class R> using name_expr = decltype(std::declval<const R &>().name());
+template <class R> using static_kname_expr = decltype(R::kName);
 
 template <class R, class Ctx> constexpr bool has_init_v = is_detected_v<init_expr, R, Ctx>;
 template <class R, class Node, class Ctx> constexpr bool has_push_v = is_detected_v<push_expr, R, Node, Ctx>;
@@ -100,6 +117,92 @@ template <class R, class Node, class Ctx> constexpr bool has_pop_v = is_detected
 template <class R, class Cand, class Ctx> constexpr bool has_check_v = is_detected_v<check_expr, R, Cand, Ctx>;
 template <class R, class Ctx> constexpr bool has_leaf_v = is_detected_v<leaf_expr, R, Ctx>;
 template <class R> constexpr bool has_name_v = is_detected_v<name_expr, R>;
+template <class R> constexpr bool has_static_kname_v = is_detected_v<static_kname_expr, R>;
+
+template <typename R>
+constexpr const char *rule_name_v()
+{
+    if constexpr (has_static_kname_v<R>)
+        return R::kName;
+    else if constexpr (has_name_v<R>)
+        return R{}.name();
+    else
+        return typeid(R).name();
+}
+
+struct RuleSpec
+{
+    const char *category;
+    const char *rule_name;
+};
+
+template <typename Tuple, size_t... Is>
+constexpr auto make_category_specs_impl(const char *category, std::index_sequence<Is...>)
+{
+    using std::tuple_element_t;
+    return std::array<RuleSpec, sizeof...(Is)>{
+        RuleSpec{category, rule_name_v<tuple_element_t<Is, Tuple>>()}...};
+}
+
+template <typename Tuple>
+constexpr auto make_category_specs(const char *category)
+{
+    return make_category_specs_impl<Tuple>(category, std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+}
+
+template <typename T, size_t N1, size_t N2>
+constexpr std::array<T, N1 + N2> concat_arrays(const std::array<T, N1> &a, const std::array<T, N2> &b)
+{
+    std::array<T, N1 + N2> result{};
+    for (size_t i = 0; i < N1; ++i)
+        result[i] = a[i];
+    for (size_t i = 0; i < N2; ++i)
+        result[N1 + i] = b[i];
+    return result;
+}
+
+template <typename T, size_t N1, size_t N2, typename... Rest>
+constexpr auto concat_arrays(const std::array<T, N1> &a, const std::array<T, N2> &b, const Rest &...rest)
+{
+    return concat_arrays(concat_arrays(a, b), rest...);
+}
+
+template <typename Tuple, typename SettingsT, size_t... Is>
+auto extract_enabled_states_impl(const std::string &category, const SettingsT &settings, std::index_sequence<Is...>)
+{
+    using std::tuple_element_t;
+    return std::make_tuple(
+        settings.is_rule_enabled(category, rule_name_v<tuple_element_t<Is, Tuple>>())...);
+}
+
+template <typename Tuple, typename SettingsT>
+auto extract_enabled_states(const std::string &category, const SettingsT &settings)
+{
+    constexpr size_t N = std::tuple_size_v<Tuple>;
+    return extract_enabled_states_impl<Tuple>(category, settings, std::make_index_sequence<N>{});
+}
+
+template <typename RulesTuple, typename BoolTuple, size_t... Is>
+auto instantiate_from_bools_impl(const BoolTuple &bools, std::index_sequence<Is...>)
+{
+    using std::tuple_element_t;
+    return std::make_tuple(
+        tuple_element_t<Is, RulesTuple>(std::get<Is>(bools))...);
+}
+
+template <typename RulesTuple, typename BoolTuple>
+auto instantiate_from_bools(const BoolTuple &bools)
+{
+    constexpr size_t N = std::tuple_size_v<RulesTuple>;
+    return instantiate_from_bools_impl<RulesTuple>(bools, std::make_index_sequence<N>{});
+}
+
+template <typename RulesTuple, typename SettingsT>
+auto instantiate_rules(const std::string &category, const SettingsT &settings)
+{
+    auto bools = extract_enabled_states<RulesTuple>(category, settings);
+    return instantiate_from_bools<RulesTuple>(bools);
+}
 
 // =============================================================================
 // PruningRuleSet -- compile-time list of rules with zero-overhead dispatch.
@@ -110,8 +213,16 @@ template <typename... Rules> struct PruningRuleSet
 
     PruningRuleSet() = default;
 
-    template <typename... Rs, std::enable_if_t<sizeof...(Rs) == sizeof...(Rules) && (sizeof...(Rs) > 0), int> = 0>
-    explicit PruningRuleSet(Rs &&...rs) : rules(std::forward<Rs>(rs)...)
+    // Constructor taking a std::tuple of rules (e.g. from instantiate_rules)
+    explicit PruningRuleSet(std::tuple<Rules...> t) : rules(std::move(t))
+    {
+    }
+
+    // Variadic constructor taking individual rule instances
+    template <typename First, typename... Rest,
+              std::enable_if_t<!std::is_same_v<std::decay_t<First>, std::tuple<Rules...>>, int> = 0>
+    explicit PruningRuleSet(First &&first, Rest &&...rest)
+        : rules(std::forward<First>(first), std::forward<Rest>(rest)...)
     {
     }
 

@@ -63,13 +63,9 @@ struct CacheContext
 class SingleUseSkipRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(SingleUseSkipRule)
     SingleUseSkipRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "SingleUseSkipRule";
     }
     bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
     {
@@ -84,14 +80,10 @@ class SingleUseSkipRule
 class TinyBufferSkipRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(TinyBufferSkipRule)
     uint64_t min_cache_bytes = 4096;
     TinyBufferSkipRule(bool en = true, uint64_t min_bytes = 4096) : enabled(en), min_cache_bytes(min_bytes)
     {
-    }
-    const char *name() const
-    {
-        return "TinyBufferSkipRule";
     }
     bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
     {
@@ -109,13 +101,9 @@ class TinyBufferSkipRule
 class StorageAnchoredSkipRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(StorageAnchoredSkipRule)
     StorageAnchoredSkipRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "StorageAnchoredSkipRule";
     }
     bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
     {
@@ -416,17 +404,29 @@ CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(const Graph 
     return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, std::move(delegate),
                                                  std::forward<Rules>(rules)...);
 }
+using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, StorageAnchoredSkipRule>;
+
+
+template <typename BoolTuple>
+inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::vector<LogicalId> &candidates,
+                                                const std::vector<MemSpace> &avail_mem_spaces,
+                                                std::shared_ptr<SearchDelegate> delegate,
+                                                const BoolTuple &bool_flags)
+{
+    return std::apply(
+        [&](auto &&...rs) {
+            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, std::move(delegate), rs...);
+        },
+        prune::instantiate_from_bools<AllCacheRuleTypes>(bool_flags));
+}
 
 inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
                                         const std::vector<MemSpace> &avail_mem_spaces,
                                         std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
 {
     settings.validate_rules("cache");
-    return makeCacheIteratorWithDelegate(
-        graph, candidates, avail_mem_spaces, std::move(delegate),
-        SingleUseSkipRule(settings.is_rule_enabled("cache", "SingleUseSkipRule")),
-        TinyBufferSkipRule(settings.is_rule_enabled("cache", "TinyBufferSkipRule")),
-        StorageAnchoredSkipRule(settings.is_rule_enabled("cache", "StorageAnchoredSkipRule")));
+    auto bool_flags = prune::extract_enabled_states<AllCacheRuleTypes>("cache", settings);
+    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, std::move(delegate), bool_flags);
 }
 
 inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
@@ -447,13 +447,9 @@ struct ENodeDominationContext
 class MemCapENodeDominationRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(MemCapENodeDominationRule)
     MemCapENodeDominationRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "MemCapENodeDominationRule";
     }
 
     bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
@@ -525,13 +521,9 @@ class MemCapENodeDominationRule
 class FasterEquivalentENodeDominationRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(FasterEquivalentENodeDominationRule)
     FasterEquivalentENodeDominationRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "FasterEquivalentENodeDominationRule";
     }
 
     bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
@@ -638,13 +630,9 @@ class FasterEquivalentENodeDominationRule
 class DeadChildChainDominationRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(DeadChildChainDominationRule)
     DeadChildChainDominationRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "DeadChildChainDominationRule";
     }
     bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
     {
@@ -674,6 +662,9 @@ class DeadChildChainDominationRule
         return false;
     }
 };
+
+using AllENodeDominationRuleTypes =
+    std::tuple<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule, DeadChildChainDominationRule>;
 
 struct Planner
 {
@@ -1437,7 +1428,12 @@ struct Planner
         std::vector<ParallelBuffer> best_buffers;
         std::unordered_map<EClassId, BufferId> best_eclass_to_buf;
 
-        auto extractor = makeConfiguredExtractor(egraph, rootEClassId, enodeInfos, delegate, settings, &best_cost);
+        auto extract_bools = prune::extract_enabled_states<AllExtractRuleTypes>("extract", settings);
+        auto dispatch_bools = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
+        auto bufferize_bools = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
+
+        auto extractor =
+            makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools, &best_cost);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
 
         int max_iters = 10'000'000;
@@ -1474,16 +1470,16 @@ struct Planner
             std::vector<EClassId> order;
             float cost = TGConstants::INF;
 
-            auto dispatch_iterator =
-                makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, delegate, settings, &best_cost);
+            auto dispatch_iterator = makeConfiguredDispatchIteratorFromBools(
+                egraph, selection_map, enodeInfos, delegate, dispatch_bools, &best_cost);
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 if (is_time_expired())
                     break;
 
-                auto buf_iter = makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, reduced_caps,
-                                                                delegate, settings);
+                auto buf_iter = makeConfiguredBufferizeIteratorFromBools(
+                    order, egraph, selection_map, enodeInfos, reduced_caps, delegate, bufferize_bools);
 
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -2435,11 +2431,7 @@ struct Planner
 
     Planner(CostModel &costModel, const Settings &settings = Settings::get_default())
         : costModel(costModel), settings(settings),
-          domination_rules(
-              MemCapENodeDominationRule(settings.is_rule_enabled("enode", "MemCapENodeDominationRule")),
-              FasterEquivalentENodeDominationRule(
-                  settings.is_rule_enabled("enode", "FasterEquivalentENodeDominationRule")),
-              DeadChildChainDominationRule(settings.is_rule_enabled("enode", "DeadChildChainDominationRule")))
+          domination_rules(prune::instantiate_rules<AllENodeDominationRuleTypes>("enode", settings))
     {
     }
 

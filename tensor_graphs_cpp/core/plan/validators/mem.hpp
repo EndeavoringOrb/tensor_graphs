@@ -185,7 +185,13 @@ struct BufferizeContext
 
 class PeakMemoryPruningRule
 {
-    bool enabled = true;
+  public:
+    TG_PRUNING_RULE(PeakMemoryPruningRule)
+    PeakMemoryPruningRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
     std::unordered_map<MemSpace, std::vector<uint64_t>> mem_usage;
     std::unordered_map<EClassId, uint32_t> max_death_time;
 
@@ -199,14 +205,6 @@ class PeakMemoryPruningRule
     std::vector<UndoState> undo_stack;
 
   public:
-    PeakMemoryPruningRule(bool en = true) : enabled(en)
-    {
-    }
-
-    const char *name() const
-    {
-        return "PeakMemoryPruningRule";
-    }
 
     void init(const BufferizeContext &ctx)
     {
@@ -408,14 +406,9 @@ class PeakMemoryPruningRule
 class MemSpaceMismatchInplaceRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(MemSpaceMismatchInplaceRule)
     MemSpaceMismatchInplaceRule(bool en = true) : enabled(en)
     {
-    }
-
-    const char *name() const
-    {
-        return "MemSpaceMismatchInplaceRule";
     }
 
     bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
@@ -452,14 +445,9 @@ class MemSpaceMismatchInplaceRule
 class LinearChainInplaceDominationRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(LinearChainInplaceDominationRule)
     LinearChainInplaceDominationRule(bool en = true) : enabled(en)
     {
-    }
-
-    const char *name() const
-    {
-        return "LinearChainInplaceDominationRule";
     }
 
     bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
@@ -518,14 +506,9 @@ class LinearChainInplaceDominationRule
 class IntervalSubsetDominationRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(IntervalSubsetDominationRule)
     IntervalSubsetDominationRule(bool en = true) : enabled(en)
     {
-    }
-
-    const char *name() const
-    {
-        return "IntervalSubsetDominationRule";
     }
 
     bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
@@ -603,14 +586,9 @@ class IntervalSubsetDominationRule
 class CommutativeInplaceSymmetryRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(CommutativeInplaceSymmetryRule)
     CommutativeInplaceSymmetryRule(bool en = true) : enabled(en)
     {
-    }
-
-    const char *name() const
-    {
-        return "CommutativeInplaceSymmetryRule";
     }
 
     bool check(int candidate_choice, size_t candidate_choice_idx, const BufferizeContext &ctx) const
@@ -689,14 +667,9 @@ class CommutativeInplaceSymmetryRule
 class DeadBufferReuseDominationRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(DeadBufferReuseDominationRule)
     DeadBufferReuseDominationRule(bool en = true) : enabled(en)
     {
-    }
-
-    const char *name() const
-    {
-        return "DeadBufferReuseDominationRule";
     }
 
     bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
@@ -1225,6 +1198,26 @@ BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
                                                      std::move(delegate), std::forward<Rules>(rules)...);
 }
 
+using AllBufferizeRuleTypes =
+    std::tuple<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule, IntervalSubsetDominationRule,
+               CommutativeInplaceSymmetryRule, DeadBufferReuseDominationRule, PeakMemoryPruningRule>;
+
+template <typename BoolTuple>
+inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId> &ordered, const EGraph &egraph,
+                                                    const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                                    const std::vector<ENodeInfo> &enodeInfos,
+                                                    const std::unordered_map<MemSpace, uint64_t> &mem_caps,
+                                                    std::shared_ptr<SearchDelegate> delegate,
+                                                    const BoolTuple &bool_flags)
+{
+    return std::apply(
+        [&](auto &&...rs) {
+            return makeBufferizeIteratorWithDelegate(ordered, egraph, selection_map, enodeInfos, mem_caps,
+                                                     std::move(delegate), rs...);
+        },
+        prune::instantiate_from_bools<AllBufferizeRuleTypes>(bool_flags));
+}
+
 inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                             const std::unordered_map<EClassId, uint32_t> &selection_map,
                                             const std::vector<ENodeInfo> &enodeInfos,
@@ -1232,14 +1225,9 @@ inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered
                                             std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
 {
     settings.validate_rules("bufferize");
-    return makeBufferizeIteratorWithDelegate(
-        ordered, egraph, selection_map, enodeInfos, mem_caps, std::move(delegate),
-        MemSpaceMismatchInplaceRule(settings.is_rule_enabled("bufferize", "MemSpaceMismatchInplaceRule")),
-        LinearChainInplaceDominationRule(settings.is_rule_enabled("bufferize", "LinearChainInplaceDominationRule")),
-        IntervalSubsetDominationRule(settings.is_rule_enabled("bufferize", "IntervalSubsetDominationRule")),
-        CommutativeInplaceSymmetryRule(settings.is_rule_enabled("bufferize", "CommutativeInplaceSymmetryRule")),
-        DeadBufferReuseDominationRule(settings.is_rule_enabled("bufferize", "DeadBufferReuseDominationRule")),
-        PeakMemoryPruningRule(settings.is_rule_enabled("bufferize", "PeakMemoryPruningRule")));
+    auto bool_flags = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
+    return makeConfiguredBufferizeIteratorFromBools(ordered, egraph, selection_map, enodeInfos, mem_caps,
+                                                   std::move(delegate), bool_flags);
 }
 
 inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
@@ -1274,13 +1262,9 @@ struct MallocContext
 class OffsetMonotoneRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(OffsetMonotoneRule)
     OffsetMonotoneRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "OffsetMonotoneRule";
     }
     bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
     {
@@ -1293,13 +1277,9 @@ class OffsetMonotoneRule
 class IdMaxSymmetryRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(IdMaxSymmetryRule)
     IdMaxSymmetryRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "IdMaxSymmetryRule";
     }
     bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
     {
@@ -1324,13 +1304,9 @@ class IdMaxSymmetryRule
 class CapRespectRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(CapRespectRule)
     CapRespectRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "CapRespectRule";
     }
     bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
     {
@@ -1345,13 +1321,9 @@ class CapRespectRule
 class HMinBoundRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(HMinBoundRule)
     HMinBoundRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "HMinBoundRule";
     }
     bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
     {
@@ -1364,13 +1336,9 @@ class HMinBoundRule
 class LargerBufferPriorityRule
 {
   public:
-    bool enabled = true;
+    TG_PRUNING_RULE(LargerBufferPriorityRule)
     LargerBufferPriorityRule(bool en = true) : enabled(en)
     {
-    }
-    const char *name() const
-    {
-        return "LargerBufferPriorityRule";
     }
     bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
     {
@@ -1651,16 +1619,27 @@ MallocIterator<std::decay_t<Rules>...> makeMallocIteratorWithDelegate(uint64_t m
                                                   std::forward<Rules>(rules)...);
 }
 
+using AllMallocRuleTypes = std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, HMinBoundRule, LargerBufferPriorityRule>;
+
+template <typename BoolTuple>
+inline auto makeConfiguredMallocIteratorFromBools(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
+                                                 std::shared_ptr<SearchDelegate> delegate,
+                                                 const BoolTuple &bool_flags)
+{
+    return std::apply(
+        [&](auto &&...rs) {
+            return makeMallocIteratorWithDelegate(mem_cap, unallocated, std::move(delegate), CapRespectRule(true),
+                                                  rs...);
+        },
+        prune::instantiate_from_bools<AllMallocRuleTypes>(bool_flags));
+}
+
 inline auto makeConfiguredMallocIterator(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                                          std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
 {
     settings.validate_rules("malloc");
-    return makeMallocIteratorWithDelegate(
-        mem_cap, unallocated, std::move(delegate), CapRespectRule(true),
-        OffsetMonotoneRule(settings.is_rule_enabled("malloc", "OffsetMonotoneRule")),
-        IdMaxSymmetryRule(settings.is_rule_enabled("malloc", "IdMaxSymmetryRule")),
-        HMinBoundRule(settings.is_rule_enabled("malloc", "HMinBoundRule")),
-        LargerBufferPriorityRule(settings.is_rule_enabled("malloc", "LargerBufferPriorityRule")));
+    auto bool_flags = prune::extract_enabled_states<AllMallocRuleTypes>("malloc", settings);
+    return makeConfiguredMallocIteratorFromBools(mem_cap, unallocated, std::move(delegate), bool_flags);
 }
 
 static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap, BufferId &overflow)

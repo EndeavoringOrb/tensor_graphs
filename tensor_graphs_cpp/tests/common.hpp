@@ -15,15 +15,7 @@
 
 inline void setupTestSettings(Settings &settings, bool enable_rules = true)
 {
-    for (const auto &spec : kAllRuleSpecs)
-    {
-        settings.set_rule_enabled(spec.category, spec.rule_name, enable_rules);
-    }
-    // Explicitly mark all categories as defined for testing (including empty categories like dispatch)
-    for (const std::string &cat : {"dispatch", "bufferize", "malloc", "cache", "extract", "enode"})
-    {
-        settings.category_defined[cat] = true;
-    }
+    enableAllDefaultRules(settings, enable_rules);
 }
 
 inline Region makeRegion(std::initializer_list<Dim> dims)
