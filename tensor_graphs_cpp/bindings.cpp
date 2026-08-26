@@ -88,6 +88,11 @@ class PySearchDelegate : public SearchDelegate
     {
         PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_malloc, avail_buffers);
     }
+
+    std::vector<uint32_t> order_frontier(const std::vector<ActionFeatureFrontier> &frontier) override
+    {
+        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_frontier, frontier);
+    }
 };
 
 class LLMSession
@@ -578,6 +583,15 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("end", &ActionFeatureMalloc::end)
         .def_readwrite("mem_cap", &ActionFeatureMalloc::mem_cap);
 
+    py::class_<ActionFeatureFrontier>(m, "ActionFeatureFrontier")
+        .def_readwrite("eclass_id", &ActionFeatureFrontier::eclass_id)
+        .def_readwrite("num_enodes", &ActionFeatureFrontier::num_enodes)
+        .def_readwrite("min_dp_cp_cost", &ActionFeatureFrontier::min_dp_cp_cost)
+        .def_readwrite("min_dp_cost", &ActionFeatureFrontier::min_dp_cost)
+        .def_readwrite("size", &ActionFeatureFrontier::size)
+        .def_readwrite("dtype", &ActionFeatureFrontier::dtype)
+        .def_readwrite("mem_space", &ActionFeatureFrontier::mem_space);
+
     // Search Delegate
     py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")
         .def(py::init<>())
@@ -593,7 +607,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("order_enodes", &SearchDelegate::order_enodes)
         .def("order_dispatch", &SearchDelegate::order_dispatch)
         .def("order_bufferize", &SearchDelegate::order_bufferize)
-        .def("order_malloc", &SearchDelegate::order_malloc);
+        .def("order_malloc", &SearchDelegate::order_malloc)
+        .def("order_frontier", &SearchDelegate::order_frontier);
 
     py::class_<HeuristicSearchDelegate, SearchDelegate, std::shared_ptr<HeuristicSearchDelegate>>(
         m, "HeuristicSearchDelegate")

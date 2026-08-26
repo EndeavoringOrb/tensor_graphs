@@ -703,7 +703,7 @@ public:
         initOrderState(selection_map);
 
         DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, 0,
-                            DispatchContext::empty_mem_caps(), best_cost};
+                            DispatchContext::empty_mem_caps(), best_cost}; // TODO: pass in actual mem_caps here
         rules.init(ctx);
     }
 
@@ -1695,6 +1695,44 @@ public:
 
         while (!to_process.empty())
         {
+            if (to_process.size() > 1 && delegate)
+            {
+                std::vector<ActionFeatureFrontier> features;
+                features.reserve(to_process.size());
+
+                for (EClassId cid : to_process)
+                {
+                    const auto &cls = egraph.getEClass(cid);
+                    ActionFeatureFrontier f;
+                    f.eclass_id = cid.value;
+                    f.num_enodes = static_cast<uint32_t>(cls.enodes.size());
+                    f.size = getSizeBytes(cls.shape, cls.dtype);
+                    f.dtype = cls.dtype;
+                    f.mem_space = cls.mem_space;
+
+                    float min_cp = TGConstants::INF;
+                    float min_dp = TGConstants::INF;
+                    for (ENodeId eid : cls.enodes)
+                    {
+                        if (eid.value < enodeInfos.size())
+                        {
+                            min_cp = std::min(min_cp, enodeInfos[eid.value].dp_cp_cost);
+                            min_dp = std::min(min_dp, enodeInfos[eid.value].dp_cost);
+                        }
+                    }
+                    f.min_dp_cp_cost = (min_cp == TGConstants::INF) ? 0.0f : min_cp;
+                    f.min_dp_cost = (min_dp == TGConstants::INF) ? 0.0f : min_dp;
+                    features.push_back(f);
+                }
+
+                std::vector<uint32_t> order = delegate->order_frontier(features);
+                if (!order.empty() && order[0] < to_process.size())
+                {
+                    // Swap highest-priority choice to the back so pop_back() takes it
+                    std::swap(to_process[order[0]], to_process.back());
+                }
+            }
+
             EClassId current = to_process.back();
             to_process.pop_back();
 

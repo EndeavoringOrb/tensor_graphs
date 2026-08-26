@@ -44,6 +44,17 @@ struct ActionFeatureBufferize
     float parent_birth_time;
 };
 
+struct ActionFeatureFrontier
+{
+    uint32_t eclass_id = 0;
+    uint32_t num_enodes = 0;
+    float min_dp_cp_cost = 0.0f;
+    float min_dp_cost = 0.0f;
+    uint64_t size = 0; // bytes
+    DType dtype = DType::FLOAT32;
+    MemSpace mem_space;
+};
+
 class SearchDelegate
 {
   public:
@@ -128,6 +139,14 @@ class SearchDelegate
             res[i] = i;
         return res;
     }
+
+    virtual std::vector<uint32_t> order_frontier(const std::vector<ActionFeatureFrontier> &frontier)
+    {
+        std::vector<uint32_t> res(frontier.size());
+        for (uint32_t i = 0; i < frontier.size(); ++i)
+            res[i] = i;
+        return res;
+    }
 };
 
 class HeuristicSearchDelegate : public SearchDelegate
@@ -179,6 +198,25 @@ class HeuristicSearchDelegate : public SearchDelegate
         std::iota(res.begin(), res.end(), 0);
         std::stable_sort(res.begin(), res.end(),
                          [&](uint32_t a, uint32_t b) { return avail_buffers[a].size > avail_buffers[b].size; });
+        return res;
+    }
+
+    std::vector<uint32_t> order_frontier(const std::vector<ActionFeatureFrontier> &frontier) override
+    {
+        std::vector<uint32_t> res(frontier.size());
+        std::iota(res.begin(), res.end(), 0);
+        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+            // 1. Minimum Remaining Values (MRV): fewest candidate ENodes first
+            if (frontier[a].num_enodes != frontier[b].num_enodes)
+                return frontier[a].num_enodes < frontier[b].num_enodes;
+
+            // 2. Critical Path First: highest critical path cost first (Fail-First)
+            if (frontier[a].min_dp_cp_cost != frontier[b].min_dp_cp_cost)
+                return frontier[a].min_dp_cp_cost > frontier[b].min_dp_cp_cost;
+
+            // 3. Tie-breaker: largest buffer size first
+            return frontier[a].size > frontier[b].size;
+        });
         return res;
     }
 };
