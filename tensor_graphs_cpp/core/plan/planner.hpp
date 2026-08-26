@@ -905,8 +905,6 @@ struct Planner
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo, &costModel};
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
-        rules.emplace_back(std::make_unique<FlattenBatchDot>());
-        rules.emplace_back(std::make_unique<FlattenElementwise>());
         rules.emplace_back(std::make_unique<DotSplitRule>());
         rules.emplace_back(std::make_unique<RemoveContiguous>());
         rules.emplace_back(std::make_unique<RemoveCopyChains>());
@@ -2150,8 +2148,9 @@ struct Planner
             }
             else
             {
-                std::vector<EClassId> slicedInputs;
-                std::vector<TensorNode> dummyInputNodes;
+                std::vector<EClassId> slicedInputs_contig;
+                std::vector<EClassId> slicedInputs_non_contig;
+                std::vector<TensorNode> dummyInputNodes; // Will store NON-contiguous
                 std::vector<MemSpace> dummyInputMemSpaces;
 
                 for (uint64_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
@@ -2226,6 +2225,8 @@ struct Planner
                         egraph.addENode(pSliceEClass, sn);
                     }
 
+                    slicedInputs_non_contig.push_back(pSliceEClass);
+
                     EClassId pContigEClass = egraph.addEClass(pPartialShape, calcContiguousStrides(pPartialShape),
                                                               pClass.dtype, pClass.mem_space);
 
@@ -2251,13 +2252,13 @@ struct Planner
                         egraph.addENode(pContigEClass, cn);
                     }
 
-                    slicedInputs.push_back(pContigEClass);
+                    slicedInputs_contig.push_back(pContigEClass);
 
                     TensorNode dummyIn;
                     dummyIn.opType = OpType::INPUT;
                     dummyIn.setShape(pPartialShape);
                     dummyIn.dtype = pClass.dtype;
-                    dummyIn.strides = calcContiguousStrides(pPartialShape);
+                    dummyIn.strides = pSliceStrides; // NON-CONTIG
                     dummyInputNodes.push_back(dummyIn);
                     dummyInputMemSpaces.push_back(pClass.mem_space);
                 }
@@ -2271,11 +2272,12 @@ struct Planner
 
                 auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName,
                                                                         dummyInputNodes, dummyOut, true,
-                                                                        target_mem_space, dummyInputMemSpaces, {cpu});
+                                                                        target_mem_space, dummyInputMemSpaces, {cpu},
+                                                                        false, false, false, true); // ignore_input_contig=true
                 if (opRefs.size() == 0)
                 {
                     Error::throw_err("[Planner.injectPartialPath] couldn't find any "
-                                     "slice kernels for op " +
+                                     "kernels for op " +
                                      toString(sourceNode.opType));
                 }
 
@@ -2283,7 +2285,20 @@ struct Planner
                                                 target_mem_space);
                 for (KernelId uid : opRefs)
                 {
-                    ENode sn(uid, sourceNode.opType, sourceNode.opName, slicedInputs, partialShape,
+                    const auto &kernel = KernelRegistry::get().getKernel(uid);
+                    std::vector<EClassId> actual_inputs;
+                    for (uint64_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
+                    {
+                        bool reqContig = false;
+                        if (p_idx < kernel.requiresContiguous.size())
+                            reqContig = kernel.requiresContiguous[p_idx];
+                        
+                        if (reqContig && !isContiguous(dummyInputNodes[p_idx]))
+                            actual_inputs.push_back(slicedInputs_contig[p_idx]);
+                        else
+                            actual_inputs.push_back(slicedInputs_non_contig[p_idx]);
+                    }
+                    ENode sn(uid, sourceNode.opType, sourceNode.opName, actual_inputs, partialShape,
                              calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
                     egraph.addENode(slicedEClass, sn);
                 }

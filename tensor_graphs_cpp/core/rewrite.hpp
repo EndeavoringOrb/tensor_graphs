@@ -1233,15 +1233,11 @@ struct SlicePushDownElementwise : public Rule
                 EClassId opEClass = addOpToEGraph(egraph, op, newChildren, sliceShape, sliceContigStrides,
                                                   sliceNode.getDType(), sliceNode.getMemSpace());
 
-                EClassId contigSlicedOp =
-                    addOpToEGraph(egraph, OpType::CONTIGUOUS, {opEClass}, sliceShape, sliceContigStrides,
-                                  sliceNode.getDType(), sliceNode.getMemSpace());
-
                 EClassId op_cache = createCacheInputNode(egraph, srcClass, ctx.eclassToLogical);
 
                 const EClass srcEClass = egraph.getEClass(srcClass);
                 EClassId scatterClass =
-                    addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId},
+                    addOpToEGraph(egraph, OpType::SCATTER, {op_cache, opEClass, startsId, endsId, stepsId},
                                   srcEClass.shape, srcEClass.strides, opNode.getDType(), opNode.getMemSpace());
 
                 egraph.merge(srcClass, scatterClass);
@@ -1507,258 +1503,16 @@ struct SlicePushDownDot : public Rule
                 EClassId dotEClass = addOpToEGraph(egraph, OpType::DOT, {aSliced, bSliced}, sliceShape,
                                                    sliceContigStrides, sliceNode.getDType(), sliceNode.getMemSpace());
 
-                EClassId contigSlicedOp =
-                    addOpToEGraph(egraph, OpType::CONTIGUOUS, {dotEClass}, sliceShape, sliceContigStrides,
-                                  sliceNode.getDType(), sliceNode.getMemSpace());
-
                 EClassId op_cache = createCacheInputNode(egraph, srcClass, ctx.eclassToLogical);
 
                 const EClass srcEClass = egraph.getEClass(srcClass);
                 EClassId scatterClass =
-                    addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId},
+                    addOpToEGraph(egraph, OpType::SCATTER, {op_cache, dotEClass, startsId, endsId, stepsId},
                                   srcEClass.shape, srcEClass.strides, dotNode.getDType(), dotNode.getMemSpace());
 
                 egraph.merge(srcClass, scatterClass);
             }
         }
-    }
-};
-
-// Flatten rank4@rank4 -> rank3@rank3 when the first dim of rank4 is 1 for A and B
-struct FlattenBatchDot : public Rule
-{
-    std::unordered_set<uint32_t> visited;
-
-    std::string name() const override
-    {
-        return "FlattenBatchDot";
-    }
-
-    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
-    {
-        const EGraph &egraph = ctx.egraph;
-        if (eNodeIdx >= egraph.getENodes().size())
-            return false;
-        const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (enode.getOpType() != OpType::DOT)
-            return false;
-
-        if (visited.count(eNodeIdx))
-            return false;
-
-        const std::vector<uint32_t> &outShape = enode.getShape();
-        if (outShape.size() != 4 || outShape[0] != 1)
-            return false;
-
-        EClassId aClass = egraph.findConst(enode.getChildren()[0]);
-        EClassId bClass = egraph.findConst(enode.getChildren()[1]);
-        const EClass aCls = egraph.getEClass(aClass);
-        const EClass bCls = egraph.getEClass(bClass);
-
-        if (aCls.shape.size() != 4 || aCls.shape[0] != 1)
-            return false;
-        if (bCls.shape.size() != 4 || bCls.shape[0] != 1)
-            return false;
-        if (aCls.shape[1] != bCls.shape[1])
-            return false;
-        if (aCls.shape[3] != bCls.shape[2])
-            return false;
-
-        if (outShape[1] != aCls.shape[1] || outShape[2] != aCls.shape[2] || outShape[3] != bCls.shape[3])
-            return false;
-
-        if (!isContiguous(aCls) || !isContiguous(bCls))
-            return false;
-        if (!isContiguous(egraph.getEClass(egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx})))))
-            return false;
-
-        if (aCls.mem_space != enode.getMemSpace() || bCls.mem_space != enode.getMemSpace())
-            return false;
-
-        return true;
-    }
-
-    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
-    {
-        EGraph &egraph = ctx.egraph;
-        const ENode dotNode = egraph.getENode(ENodeId{eNodeIdx});
-        EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
-
-        if (!visited.insert(eNodeIdx).second)
-            return;
-
-        EClassId aClass = egraph.findConst(dotNode.getChildren()[0]);
-        EClassId bClass = egraph.findConst(dotNode.getChildren()[1]);
-        const EClass aCls = egraph.getEClass(aClass);
-        const EClass bCls = egraph.getEClass(bClass);
-
-        std::vector<uint32_t> a3 = {aCls.shape[1], aCls.shape[2], aCls.shape[3]};
-        std::vector<uint32_t> b3 = {bCls.shape[1], bCls.shape[2], bCls.shape[3]};
-        std::vector<uint32_t> y3 = {aCls.shape[1], aCls.shape[2], bCls.shape[3]};
-
-        std::vector<int32_t> a3_int(a3.begin(), a3.end());
-        std::vector<int32_t> b3_int(b3.begin(), b3.end());
-        std::vector<int32_t> y3_int(y3.begin(), y3.end());
-
-        EClassId a3_shape_id = egraph.addIntConst(a3_int);
-        EClassId b3_shape_id = egraph.addIntConst(b3_int);
-        EClassId y3_shape_id = egraph.addIntConst(y3_int);
-
-        std::vector<uint64_t> a3_strides = calcContiguousStrides(a3);
-        EClassId rA = addOpToEGraph(egraph, OpType::RESHAPE, {aClass, a3_shape_id}, a3, a3_strides, dotNode.getDType(),
-                                    dotNode.getMemSpace());
-
-        std::vector<uint64_t> b3_strides = calcContiguousStrides(b3);
-        EClassId rB = addOpToEGraph(egraph, OpType::RESHAPE, {bClass, b3_shape_id}, b3, b3_strides, dotNode.getDType(),
-                                    dotNode.getMemSpace());
-
-        std::vector<uint64_t> y3_strides = calcContiguousStrides(y3);
-        EClassId rY =
-            addOpToEGraph(egraph, OpType::DOT, {rA, rB}, y3, y3_strides, dotNode.getDType(), dotNode.getMemSpace());
-
-        const EClass outCls = egraph.getEClass(egraph.findConst(e_class_id));
-        std::vector<int32_t> out4_int(outCls.shape.begin(), outCls.shape.end());
-        EClassId out4_shape_id = egraph.addIntConst(out4_int);
-        EClassId outReshape = addOpToEGraph(egraph, OpType::RESHAPE, {rY, out4_shape_id}, outCls.shape, outCls.strides,
-                                            dotNode.getDType(), dotNode.getMemSpace());
-
-        egraph.merge(e_class_id, outReshape);
-    }
-};
-
-struct FlattenElementwise : public Rule
-{
-    std::unordered_set<uint32_t> visited;
-
-    std::string name() const override
-    {
-        return "FlattenElementwise";
-    }
-
-    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
-    {
-        const EGraph &egraph = ctx.egraph;
-        if (eNodeIdx >= egraph.getENodes().size())
-            return false;
-        const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (!isElementwise(enode.getOpType()))
-            return false;
-        if (visited.count(eNodeIdx))
-            return false;
-
-        const std::vector<uint32_t> &outShape = enode.getShape();
-        if (outShape.size() < 2)
-            return false;
-
-        uint64_t total = 1;
-        for (uint32_t d : outShape)
-            total *= d;
-        if (total == 0)
-            return false;
-
-        TensorNode shapeConst;
-        shapeConst.setShape({1});
-        shapeConst.strides = {1};
-        shapeConst.dtype = DType::INT32;
-
-        for (EClassId childId : enode.getChildren())
-        {
-            const EClass &childCls = egraph.getEClass(egraph.findConst(childId));
-            if (childCls.shape != outShape)
-                return false;
-            if (!isContiguous(childCls))
-                return false;
-
-            // Check if RESHAPE is supported in this child's memory space
-            TensorNode inChild;
-            inChild.setShape(childCls.shape);
-            inChild.strides = childCls.strides;
-            inChild.dtype = childCls.dtype;
-
-            TensorNode outFlat;
-            outFlat.setShape({static_cast<uint32_t>(total)});
-            outFlat.strides = {1};
-            outFlat.dtype = childCls.dtype;
-
-            auto matches = KernelRegistry::get().findMatchingKernels(
-                OpType::RESHAPE, "", {inChild, shapeConst}, outFlat, false, childCls.mem_space,
-                {childCls.mem_space, MemSpace{1, HandleType::CPP}}, {});
-            if (matches.empty())
-                return false;
-        }
-
-        const EClass &outCls = egraph.getEClass(egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx})));
-        if (!isContiguous(outCls))
-            return false;
-
-        // Check if output RESHAPE is supported in outCls.mem_space
-        TensorNode inFlat;
-        inFlat.setShape({static_cast<uint32_t>(total)});
-        inFlat.strides = {1};
-        inFlat.dtype = outCls.dtype;
-
-        TensorNode shapeConstOut;
-        shapeConstOut.setShape({static_cast<uint32_t>(outShape.size())});
-        shapeConstOut.strides = {1};
-        shapeConstOut.dtype = DType::INT32;
-
-        TensorNode outOrig;
-        outOrig.setShape(outCls.shape);
-        outOrig.strides = outCls.strides;
-        outOrig.dtype = outCls.dtype;
-
-        auto outMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::RESHAPE, "", {inFlat, shapeConstOut}, outOrig, false, outCls.mem_space,
-            {outCls.mem_space, MemSpace{1, HandleType::CPP}}, {});
-        if (outMatches.empty())
-            return false;
-
-        return true;
-    }
-
-    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
-    {
-        EGraph &egraph = ctx.egraph;
-        const ENode opNode = egraph.getENode(ENodeId{eNodeIdx});
-        EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
-
-        if (!visited.insert(eNodeIdx).second)
-            return;
-
-        const EClass outCls = egraph.getEClass(egraph.findConst(e_class_id));
-        const std::vector<uint32_t> &outShape = outCls.shape;
-
-        uint64_t total = 1;
-        for (uint32_t d : outShape)
-            total *= d;
-        if (total == 0)
-            return;
-
-        std::vector<uint32_t> flatShape = {(uint32_t)total};
-        std::vector<int32_t> flat_int = {(int32_t)total};
-        std::vector<int32_t> out_int(outShape.begin(), outShape.end());
-        EClassId flat_shape_id = egraph.addIntConst(flat_int);
-        EClassId out_shape_id = egraph.addIntConst(out_int);
-
-        std::vector<uint64_t> flatStrides = {1};
-
-        std::vector<EClassId> flatChildren;
-        for (EClassId childId : opNode.getChildren())
-        {
-            EClassId canonChild = egraph.findConst(childId);
-            const EClass childCls = egraph.getEClass(canonChild);
-            EClassId r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides,
-                                       childCls.dtype, childCls.mem_space);
-            flatChildren.push_back(r);
-        }
-
-        EClassId flatOut = addOpToEGraph(egraph, opNode.getOpType(), flatChildren, flatShape, flatStrides,
-                                         opNode.getDType(), opNode.getMemSpace());
-
-        EClassId outReshape = addOpToEGraph(egraph, OpType::RESHAPE, {flatOut, out_shape_id}, outCls.shape,
-                                            outCls.strides, opNode.getDType(), opNode.getMemSpace());
-
-        egraph.merge(e_class_id, outReshape);
     }
 };
 
