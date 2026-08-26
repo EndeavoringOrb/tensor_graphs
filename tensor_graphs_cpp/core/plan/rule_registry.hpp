@@ -41,9 +41,11 @@ namespace dispatch_rules
 using InputDispatchDominationRuleT = InputDispatchDominationRule;
 using UnifiedMemoryExchangeableDispatchRuleT = UnifiedMemoryExchangeableDispatchRule;
 using MemoryPressureDispatchRuleT = MemoryPressureDispatchRule;
+using DispatchCostPruningRuleT = DispatchCostPruningRule;
 } // namespace dispatch_rules
 
-using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule, MemoryPressureDispatchRule>;
+using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule,
+                                        MemoryPressureDispatchRule, DispatchCostPruningRule>;
 
 // =============================================================================
 // BufferizeIterator rules
@@ -94,9 +96,10 @@ namespace extractRules
 {
 using InfiniteCostSkipRuleT = InfiniteCostSkipRule;
 using SiblingEquivalentSkipRuleT = SiblingEquivalentSkipRule;
+using ExtractorJacksonCarlierRuleT = ExtractorJacksonCarlierRule;
 } // namespace extractRules
 
-using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule>;
+using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule>;
 
 // =============================================================================
 // Pre-extraction ENode domination rules (run by Planner.applyDominationRules).
@@ -143,6 +146,7 @@ inline constexpr RuleSpec kAllRuleSpecs[] = {
     {"dispatch", "InputDispatchDominationRule"},
     {"dispatch", "UnifiedMemoryExchangeableDispatchRule"},
     {"dispatch", "MemoryPressureDispatchRule"},
+    {"dispatch", "DispatchCostPruningRule"},
     // bufferize
     {"bufferize", "MemSpaceMismatchInplaceRule"},
     {"bufferize", "LinearChainInplaceDominationRule"},
@@ -162,6 +166,7 @@ inline constexpr RuleSpec kAllRuleSpecs[] = {
     // extract (DFS)
     {"extract", "InfiniteCostSkipRule"},
     {"extract", "SiblingEquivalentSkipRule"},
+    {"extract", "ExtractorJacksonCarlierRule"},
     // extract (pre-extraction ENode domination)
     {"enode", "MemCapENodeDominationRule"},
     {"enode", "FasterEquivalentENodeDominationRule"},

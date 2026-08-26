@@ -3,7 +3,8 @@
     "dispatch": {
       "InputDispatchDominationRule": true,
       "UnifiedMemoryExchangeableDispatchRule": true,
-      "MemoryPressureDispatchRule": true
+      "MemoryPressureDispatchRule": true,
+      "DispatchCostPruningRule": true
     },
     "bufferize": {
       "MemSpaceMismatchInplaceRule": true,
@@ -26,7 +27,8 @@
     },
     "extract": {
       "InfiniteCostSkipRule": true,
-      "SiblingEquivalentSkipRule": true
+      "SiblingEquivalentSkipRule": true,
+      "ExtractorJacksonCarlierRule": true
     },
     "enode": {
       "MemCapENodeDominationRule": true,

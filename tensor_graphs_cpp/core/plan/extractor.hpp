@@ -33,8 +33,54 @@ struct ENodeInfo
     float cost;
     bool is_view;
     float dp_cost = 0.0f;
+    float dp_cp_cost = 0.0f;
 };
 
+// =============================================================================
+// Helper: Single-Machine Schrage / Carlier Preemptive Window Bound
+// =============================================================================
+struct SchrageTask
+{
+    float r; // release time (earliest start from inputs)
+    float c; // processing duration
+    float q; // delivery tail (earliest duration to root output)
+};
+
+inline float computeSchragePreemptiveBound(const std::vector<SchrageTask> &tasks)
+{
+    if (tasks.empty())
+        return 0.0f;
+    if (tasks.size() == 1)
+        return tasks[0].r + tasks[0].c + tasks[0].q;
+
+    // Exact maximum over all task intervals [r_a, q_b]
+    float max_bound = 0.0f;
+    for (size_t a = 0; a < tasks.size(); ++a)
+    {
+        float r_a = tasks[a].r;
+        for (size_t b = 0; b < tasks.size(); ++b)
+        {
+            float q_b = tasks[b].q;
+            float sum_c = 0.0f;
+            for (size_t k = 0; k < tasks.size(); ++k)
+            {
+                if (tasks[k].r >= r_a && tasks[k].q >= q_b)
+                {
+                    sum_c += tasks[k].c;
+                }
+            }
+            if (sum_c > 0.0f)
+            {
+                max_bound = std::max(max_bound, r_a + sum_c + q_b);
+            }
+        }
+    }
+    return max_bound;
+}
+
+// =============================================================================
+// Updated DispatchContext with best_cost pointer
+// =============================================================================
 struct DispatchContext
 {
     const EGraph &egraph;
@@ -44,6 +90,7 @@ struct DispatchContext
     const std::vector<EClassId> &current_ready;
     uint32_t pos;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps = empty_mem_caps();
+    const float *best_cost = nullptr;
 
     static const std::unordered_map<MemSpace, uint64_t> &empty_mem_caps()
     {
@@ -53,8 +100,242 @@ struct DispatchContext
 };
 
 // =============================================================================
-// Dispatch pruning rules (unified pattern, see core/plan/pruning.hpp)
+// Dispatch Pruning Rule: Makespan / Workload & Delivery Tail Pruning
 // =============================================================================
+class DispatchCostPruningRule
+{
+    bool enabled = true;
+    std::unordered_map<Engine, float> engine_finish;
+    std::unordered_map<Engine, float> remaining_work_per_engine;
+    std::vector<float> node_finish;
+    std::vector<float> tail_q;
+
+    struct UndoState
+    {
+        EClassId node;
+        float prev_node_finish;
+        std::vector<std::pair<Engine, float>> prev_engine_finish;
+        std::vector<std::pair<Engine, float>> prev_rem_work;
+    };
+    std::vector<UndoState> undo_stack;
+
+public:
+    DispatchCostPruningRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
+    {
+        return "DispatchCostPruningRule";
+    }
+
+    void init(const DispatchContext &ctx)
+    {
+        uint32_t max_classes = static_cast<uint32_t>(ctx.egraph.getClasses().size());
+        node_finish.assign(max_classes, 0.0f);
+        tail_q.assign(max_classes, 0.0f);
+        engine_finish.clear();
+        remaining_work_per_engine.clear();
+        undo_stack.clear();
+
+        for (const auto &kv : ctx.selection_map)
+        {
+            EClassId canon = ctx.egraph.findConst(kv.first);
+            uint32_t sel = kv.second;
+            ENodeId enode_id = ctx.egraph.getEClass(canon).enodes[sel];
+            const ENode &enode = ctx.egraph.getENode(enode_id);
+            float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
+            if (cost == TGConstants::INF)
+                continue;
+
+            for (const auto &eng : enode.getEngines())
+            {
+                remaining_work_per_engine[eng] += cost;
+            }
+        }
+
+        // Compute reverse topological delivery tails (q)
+        std::vector<std::vector<EClassId>> dependents(max_classes);
+        std::vector<uint32_t> out_degree(max_classes, 0);
+
+        for (const auto &kv : ctx.selection_map)
+        {
+            EClassId parent = ctx.egraph.findConst(kv.first);
+            uint32_t sel = kv.second;
+            ENodeId enode_id = ctx.egraph.getEClass(parent).enodes[sel];
+            const ENode &enode = ctx.egraph.getENode(enode_id);
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = ctx.egraph.findConst(child);
+                if (canon_child != parent && ctx.selection_map.count(canon_child))
+                {
+                    dependents[canon_child.value].push_back(parent);
+                    out_degree[canon_child.value]++;
+                }
+            }
+        }
+
+        std::vector<EClassId> q_worklist;
+        for (const auto &kv : ctx.selection_map)
+        {
+            EClassId node = ctx.egraph.findConst(kv.first);
+            if (out_degree[node.value] == 0)
+            {
+                q_worklist.push_back(node);
+                tail_q[node.value] = 0.0f;
+            }
+        }
+
+        while (!q_worklist.empty())
+        {
+            EClassId node = q_worklist.back();
+            q_worklist.pop_back();
+
+            uint32_t sel = ctx.selection_map.at(node);
+            ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
+            const ENode &enode = ctx.egraph.getENode(enode_id);
+            float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
+            if (cost == TGConstants::INF)
+                cost = 0.0f;
+
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = ctx.egraph.findConst(child);
+                if (canon_child != node && ctx.selection_map.count(canon_child))
+                {
+                    tail_q[canon_child.value] = std::max(tail_q[canon_child.value], tail_q[node.value] + cost);
+                    out_degree[canon_child.value]--;
+                    if (out_degree[canon_child.value] == 0)
+                    {
+                        q_worklist.push_back(canon_child);
+                    }
+                }
+            }
+        }
+    }
+
+    bool check(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
+    {
+        if (!enabled || !ctx.best_cost)
+            return false;
+
+        float best_c = *ctx.best_cost;
+        if (best_c >= TGConstants::INF)
+            return false;
+
+        uint32_t sel = ctx.selection_map.at(cand);
+        ENodeId enode_id = ctx.egraph.getEClass(cand).enodes[sel];
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+        float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
+        if (cost == TGConstants::INF)
+            return true;
+
+        float children_finish = 0.0f;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (canon_child.value < node_finish.size())
+                children_finish = std::max(children_finish, node_finish[canon_child.value]);
+        }
+
+        auto engines = enode.getEngines();
+        float engine_ready = 0.0f;
+        for (const auto &eng : engines)
+        {
+            auto it = engine_finish.find(eng);
+            if (it != engine_finish.end())
+                engine_ready = std::max(engine_ready, it->second);
+        }
+
+        float start_time = std::max(children_finish, engine_ready);
+        float finish_time = start_time + cost;
+
+        // 1. Delivery tail bound
+        float lb_tail = finish_time + tail_q[cand.value];
+        if (lb_tail >= best_c)
+            return true;
+
+        // 2. Scheduled engine remaining workload bound
+        for (const auto &eng : engines)
+        {
+            auto it = remaining_work_per_engine.find(eng);
+            float rem_work = (it != remaining_work_per_engine.end()) ? it->second : 0.0f;
+            float eng_lb = finish_time + (rem_work - cost);
+            if (eng_lb >= best_c)
+                return true;
+        }
+
+        return false;
+    }
+
+    void on_push(EClassId node, const DispatchContext &ctx)
+    {
+        if (!enabled)
+            return;
+
+        uint32_t sel = ctx.selection_map.at(node);
+        ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+        float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
+        if (cost == TGConstants::INF)
+            cost = 0.0f;
+
+        float children_finish = 0.0f;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (canon_child.value < node_finish.size())
+                children_finish = std::max(children_finish, node_finish[canon_child.value]);
+        }
+
+        auto engines = enode.getEngines();
+        float engine_ready = 0.0f;
+        for (const auto &eng : engines)
+        {
+            auto it = engine_finish.find(eng);
+            if (it != engine_finish.end())
+                engine_ready = std::max(engine_ready, it->second);
+        }
+
+        float start_time = std::max(children_finish, engine_ready);
+        float finish_time = start_time + cost;
+
+        UndoState undo;
+        undo.node = node;
+        undo.prev_node_finish = node_finish[node.value];
+        node_finish[node.value] = finish_time;
+
+        for (const auto &eng : engines)
+        {
+            undo.prev_engine_finish.push_back({eng, engine_finish[eng]});
+            engine_finish[eng] = finish_time;
+
+            undo.prev_rem_work.push_back({eng, remaining_work_per_engine[eng]});
+            remaining_work_per_engine[eng] -= cost;
+        }
+
+        undo_stack.push_back(std::move(undo));
+    }
+
+    void on_pop(EClassId /*node*/, const DispatchContext &/*ctx*/)
+    {
+        if (!enabled || undo_stack.empty())
+            return;
+
+        UndoState undo = std::move(undo_stack.back());
+        undo_stack.pop_back();
+
+        node_finish[undo.node.value] = undo.prev_node_finish;
+        for (const auto &p : undo.prev_engine_finish)
+        {
+            engine_finish[p.first] = p.second;
+        }
+        for (const auto &p : undo.prev_rem_work)
+        {
+            remaining_work_per_engine[p.first] = p.second;
+        }
+    }
+};
 
 struct DispatchNodeMeta
 {
@@ -457,17 +738,20 @@ struct DispatchIterator
 {
 public:
     prune::PruningRuleSet<Rules...> rules;
+    const float *best_cost = nullptr;
 
     template <typename... Rs>
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &_enode_infos, std::shared_ptr<SearchDelegate> _delegate,
-                     Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), egraph(_egraph), enodeInfos(_enode_infos), delegate(std::move(_delegate))
+                     const float *_best_cost, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), egraph(_egraph), enodeInfos(_enode_infos),
+          delegate(std::move(_delegate))
     {
         selection_map_ref = &selection_map;
         initOrderState(selection_map);
 
-        DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, 0};
+        DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, 0,
+                            DispatchContext::empty_mem_caps(), best_cost};
         rules.init(ctx);
     }
 
@@ -839,8 +1123,18 @@ DispatchIterator<std::decay_t<Rules>...> makeDispatchIterator(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos, Rules &&...rules)
 {
-    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, nullptr,
+    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, nullptr, nullptr,
                                                     std::forward<Rules>(rules)...);
+}
+
+template <typename... Rules>
+DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
+    const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
+    const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
+    const float *best_cost, Rules &&...rules)
+{
+    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate),
+                                                    best_cost, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
@@ -849,27 +1143,30 @@ DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
 {
     return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate),
-                                                    std::forward<Rules>(rules)...);
+                                                    nullptr, std::forward<Rules>(rules)...);
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
                                            const std::vector<ENodeInfo> &enodeInfos,
-                                           std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+                                           std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
+                                           const float *best_cost = nullptr)
 {
     settings.validate_dispatch_rules();
     return makeDispatchIteratorWithDelegate(
-        egraph, selection_map, enodeInfos, std::move(delegate),
+        egraph, selection_map, enodeInfos, std::move(delegate), best_cost,
         InputDispatchDominationRule(settings.is_rule_enabled("dispatch", "InputDispatchDominationRule")),
         UnifiedMemoryExchangeableDispatchRule(settings.is_rule_enabled("dispatch", "UnifiedMemoryExchangeableDispatchRule")),
-    MemoryPressureDispatchRule(settings.is_rule_enabled("dispatch", "MemoryPressureDispatchRule")));
+        MemoryPressureDispatchRule(settings.is_rule_enabled("dispatch", "MemoryPressureDispatchRule")),
+        DispatchCostPruningRule(settings.is_rule_enabled("dispatch", "DispatchCostPruningRule")));
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
-                                           const std::vector<ENodeInfo> &enodeInfos, const Settings &settings)
+                                           const std::vector<ENodeInfo> &enodeInfos, const Settings &settings,
+                                           const float *best_cost = nullptr)
 {
-    return makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, nullptr, settings);
+    return makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, nullptr, settings, best_cost);
 }
 
 // =============================================================================
@@ -883,11 +1180,223 @@ struct ExtractContext
     const std::vector<EClassId> &path;
     EClassId current; // EClass being decided
     uint32_t sel;     // index into current's enodes of the candidate ENode
+    const std::vector<EClassId> *to_process = nullptr;
+    const float *best_cost = nullptr;
 };
 
 // =============================================================================
 // Extractor pruning rules (plain structs; conform to prune::PruningRuleSet)
 // =============================================================================
+
+class ExtractorJacksonCarlierRule
+{
+    bool enabled = true;
+    std::vector<float> node_q;
+    std::unordered_map<Engine, float> engine_selected_work;
+    std::unordered_map<Engine, std::vector<SchrageTask>> engine_tasks;
+
+    struct UndoState
+    {
+        EClassId current;
+        float prev_q;
+        std::vector<std::pair<EClassId, float>> modified_children_q;
+        std::vector<std::pair<Engine, float>> prev_eng_work;
+        std::vector<Engine> eng_pushed;
+    };
+    std::vector<UndoState> undo_stack;
+
+public:
+    ExtractorJacksonCarlierRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
+    {
+        return "ExtractorJacksonCarlierRule";
+    }
+
+    void init(const ExtractContext &ctx)
+    {
+        uint32_t num_classes = static_cast<uint32_t>(ctx.egraph.getClasses().size());
+        node_q.assign(num_classes, 0.0f);
+        engine_selected_work.clear();
+        engine_tasks.clear();
+        undo_stack.clear();
+    }
+
+    bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
+    {
+        if (!enabled || !ctx.best_cost)
+            return false;
+
+        float best_c = *ctx.best_cost;
+        if (best_c >= TGConstants::INF)
+            return false;
+
+        const ENode &cand_enode = ctx.egraph.getENode(cand);
+        float cand_cost = (cand.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[cand.value].cost : 0.0f;
+        if (cand_cost == TGConstants::INF)
+            return true;
+
+        EClassId current = ctx.current;
+        float current_q = (current.value < node_q.size()) ? node_q[current.value] : 0.0f;
+
+        // 1. Candidate Critical Path Bound
+        float cand_cp = (cand.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[cand.value].dp_cp_cost : 0.0f;
+        if (current_q + cand_cp >= best_c)
+        {
+            return true;
+        }
+
+        // 2. Unselected Frontier Critical Path Bound
+        if (ctx.to_process)
+        {
+            for (EClassId frontier_cls : *ctx.to_process)
+            {
+                EClassId canon_f = ctx.egraph.findConst(frontier_cls);
+                if (canon_f == current || ctx.selection_map.count(canon_f))
+                    continue;
+
+                float f_q = (canon_f.value < node_q.size()) ? node_q[canon_f.value] : 0.0f;
+                float min_f_cp = TGConstants::INF;
+                for (ENodeId f_eid : ctx.egraph.getEClass(canon_f).enodes)
+                {
+                    if (f_eid.value < ctx.enodeInfos.size())
+                    {
+                        min_f_cp = std::min(min_f_cp, ctx.enodeInfos[f_eid.value].dp_cp_cost);
+                    }
+                }
+                if (min_f_cp != TGConstants::INF && f_q + min_f_cp >= best_c)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 3. Engine Workload Bound
+        auto engines = cand_enode.getEngines();
+        for (const auto &eng : engines)
+        {
+            auto it = engine_selected_work.find(eng);
+            float sel_w = (it != engine_selected_work.end()) ? it->second : 0.0f;
+            if (sel_w + cand_cost >= best_c)
+            {
+                return true;
+            }
+        }
+
+        // 4. Jackson / Carlier Window Relaxation on Selected Tasks + Candidate
+        for (const auto &eng : engines)
+        {
+            auto it = engine_tasks.find(eng);
+            size_t existing_count = (it != engine_tasks.end()) ? it->second.size() : 0;
+            if (existing_count >= 1)
+            {
+                std::vector<SchrageTask> tasks;
+                tasks.reserve(existing_count + 1);
+                if (it != engine_tasks.end())
+                    tasks = it->second;
+
+                float cand_r = 0.0f;
+                for (EClassId child : cand_enode.getChildren())
+                {
+                    EClassId canon_child = ctx.egraph.findConst(child);
+                    float min_child_dp = TGConstants::INF;
+                    for (ENodeId c_eid : ctx.egraph.getEClass(canon_child).enodes)
+                    {
+                        if (c_eid.value < ctx.enodeInfos.size())
+                            min_child_dp = std::min(min_child_dp, ctx.enodeInfos[c_eid.value].dp_cp_cost);
+                    }
+                    if (min_child_dp != TGConstants::INF)
+                        cand_r = std::max(cand_r, min_child_dp);
+                }
+                tasks.push_back({cand_r, cand_cost, current_q});
+
+                float jps = computeSchragePreemptiveBound(tasks);
+                if (jps >= best_c)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    void on_push(ENodeId enode_id, const ExtractContext &ctx)
+    {
+        if (!enabled)
+            return;
+
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+        float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
+        if (cost == TGConstants::INF)
+            cost = 0.0f;
+
+        EClassId current = ctx.current;
+        float current_q = (current.value < node_q.size()) ? node_q[current.value] : 0.0f;
+
+        UndoState undo;
+        undo.current = current;
+        undo.prev_q = current_q;
+
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (canon_child.value < node_q.size())
+            {
+                undo.modified_children_q.push_back({canon_child, node_q[canon_child.value]});
+                node_q[canon_child.value] = std::max(node_q[canon_child.value], current_q + cost);
+            }
+        }
+
+        float cand_r = 0.0f;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            float min_child_dp = TGConstants::INF;
+            for (ENodeId c_eid : ctx.egraph.getEClass(canon_child).enodes)
+            {
+                if (c_eid.value < ctx.enodeInfos.size())
+                    min_child_dp = std::min(min_child_dp, ctx.enodeInfos[c_eid.value].dp_cp_cost);
+            }
+            if (min_child_dp != TGConstants::INF)
+                cand_r = std::max(cand_r, min_child_dp);
+        }
+
+        auto engines = enode.getEngines();
+        for (const auto &eng : engines)
+        {
+            undo.prev_eng_work.push_back({eng, engine_selected_work[eng]});
+            engine_selected_work[eng] += cost;
+            engine_tasks[eng].push_back({cand_r, cost, current_q});
+            undo.eng_pushed.push_back(eng);
+        }
+
+        undo_stack.push_back(std::move(undo));
+    }
+
+    void on_pop(ENodeId /*enode_id*/, const ExtractContext &/*ctx*/)
+    {
+        if (!enabled || undo_stack.empty())
+            return;
+
+        UndoState undo = std::move(undo_stack.back());
+        undo_stack.pop_back();
+
+        for (const auto &p : undo.modified_children_q)
+        {
+            node_q[p.first.value] = p.second;
+        }
+        for (const auto &p : undo.prev_eng_work)
+        {
+            engine_selected_work[p.first] = p.second;
+        }
+        for (const auto &eng : undo.eng_pushed)
+        {
+            if (!engine_tasks[eng].empty())
+                engine_tasks[eng].pop_back();
+        }
+    }
+};
 
 // Rule: Skip ENodes whose cost has already been marked INF by the cost model /
 // pre-extraction domination rules. Reduces dead-branch exploration.
@@ -986,6 +1495,7 @@ private:
 
 public:
     prune::PruningRuleSet<Rules...> rules;
+    const float *best_cost = nullptr;
 
     std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
@@ -1004,12 +1514,13 @@ public:
 
     template <typename... Rs>
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
-              std::shared_ptr<SearchDelegate> _delegate, Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), egraph(_egraph), enodeInfos(_enodeInfos), delegate(std::move(_delegate)),
-          numClasses(_egraph.classes.size()), to_process({root_eclass_id}), in_path(_egraph.classes.size(), false),
-          path_pos(_egraph.classes.size(), -1), has_options(_egraph.classes.size(), false)
+              std::shared_ptr<SearchDelegate> _delegate, const float *_best_cost, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), egraph(_egraph), enodeInfos(_enodeInfos),
+          delegate(std::move(_delegate)), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
+          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
+          has_options(_egraph.classes.size(), false)
     {
-        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX}, 0};
+        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX}, 0, &to_process, best_cost};
         rules.init(ctx);
     }
 
@@ -1129,7 +1640,7 @@ public:
                 uint32_t chosen_sel = current_orders[current][sel];
                 ENodeId enode_id = enodes[chosen_sel];
 
-                ExtractContext pctx{egraph, enodeInfos, selection_map, path, current, chosen_sel};
+                ExtractContext pctx{egraph, enodeInfos, selection_map, path, current, chosen_sel, &to_process, best_cost};
                 if (rules.is_pruned(enode_id, static_cast<size_t>(chosen_sel), pctx))
                 {
                     continue;
@@ -1150,6 +1661,7 @@ public:
 
                 if (step_valid)
                 {
+                    rules.on_push(enode_id, pctx);
                     found_valid = true;
                     break;
                 }
@@ -1213,6 +1725,10 @@ public:
 
             uint32_t chosen_sel = selection_map[current];
             const auto &enodes = egraph.getEClass(current).enodes;
+            ENodeId popped_enode = enodes[chosen_sel];
+
+            ExtractContext pop_ctx{egraph, enodeInfos, selection_map, path, current, chosen_sel, &to_process, best_cost};
+            rules.on_pop(popped_enode, pop_ctx);
 
             uint32_t iteration_index = chosen_sel;
             auto it = std::find(current_orders[current].begin(), current_orders[current].end(), chosen_sel);
@@ -1224,7 +1740,6 @@ public:
             if (iteration_index + 1 < enodes.size())
             {
                 next_sel[current] = iteration_index + 1;
-
                 selection_map.erase(current);
 
                 if (enodes.size() <= iteration_index + 2)
@@ -1285,8 +1800,18 @@ template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                                 const std::vector<ENodeInfo> &enodeInfos, Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr,
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr, nullptr,
                                              std::forward<Rules>(rules)...);
+}
+
+template <typename... Rules>
+Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(const EGraph &egraph, EClassId root_eclass_id,
+                                                            const std::vector<ENodeInfo> &enodeInfos,
+                                                            std::shared_ptr<SearchDelegate> delegate,
+                                                            const float *best_cost, Rules &&...rules)
+{
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate),
+                                             best_cost, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
@@ -1295,22 +1820,24 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(const EGraph &egraph
                                                             std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
 {
     return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate),
-                                             std::forward<Rules>(rules)...);
+                                             nullptr, std::forward<Rules>(rules)...);
 }
 
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
-                                    const Settings &settings)
+                                    const Settings &settings, const float *best_cost = nullptr)
 {
     settings.validate_rules("extract");
     return makeExtractorWithDelegate(
-        egraph, root_eclass_id, enodeInfos, std::move(delegate),
+        egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
         InfiniteCostSkipRule(settings.is_rule_enabled("extract", "InfiniteCostSkipRule")),
-        SiblingEquivalentSkipRule(settings.is_rule_enabled("extract", "SiblingEquivalentSkipRule")));
+        SiblingEquivalentSkipRule(settings.is_rule_enabled("extract", "SiblingEquivalentSkipRule")),
+        ExtractorJacksonCarlierRule(settings.is_rule_enabled("extract", "ExtractorJacksonCarlierRule")));
 }
 
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
-                                    const std::vector<ENodeInfo> &enodeInfos, const Settings &settings)
+                                    const std::vector<ENodeInfo> &enodeInfos, const Settings &settings,
+                                    const float *best_cost = nullptr)
 {
-    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings);
+    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings, best_cost);
 }

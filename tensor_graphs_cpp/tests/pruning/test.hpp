@@ -235,13 +235,14 @@ template <typename... RuleTypes> struct DispatchBench
                     std::min(baseline_cost, get_cost(order, mock.egraph, mock.selection_map, mock.enodeInfos));
             }
 
+            float rule_cost = TGConstants::INF;
             auto rule_iter = std::apply(
                 [&](auto &&...rs) {
-                    return makeDispatchIterator(mock.egraph, mock.selection_map, mock.enodeInfos, rs...);
+                    return makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos, nullptr,
+                                                            &rule_cost, rs...);
                 },
                 rules_tuple);
 
-            float rule_cost = TGConstants::INF;
             while (rule_iter.getNextDispatchOrder(mock.selection_map, order))
             {
                 if (check_timeout())
@@ -281,7 +282,8 @@ template <typename... RuleTypes> struct DispatchBench
             auto make_rule = [&]() {
                 return std::apply(
                     [&](auto &&...rs) {
-                        return makeDispatchIterator(mock.egraph, mock.selection_map, mock.enodeInfos, rs...);
+                        return makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos, nullptr,
+                                                                &baseline_cost, rs...);
                     },
                     rules_tuple);
             };
@@ -888,11 +890,11 @@ template <typename... RuleTypes> struct ExtractBench
                 base_extractor.ascend();
             }
 
+            float rule_cost = TGConstants::INF;
             auto rule_extractor =
-                std::apply([&](auto &&...rs) { return makeExtractor(mock.egraph, rootEClass, mock.enodeInfos, rs...); },
+                std::apply([&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &rule_cost, rs...); },
                            rules_tuple);
 
-            float rule_cost = TGConstants::INF;
             while (rule_extractor.getNextSelection())
             {
                 if (check_timeout())
@@ -945,7 +947,7 @@ template <typename... RuleTypes> struct ExtractBench
 
             auto make_rule = [&]() {
                 return std::apply(
-                    [&](auto &&...rs) { return makeExtractor(mock.egraph, rootEClass, mock.enodeInfos, rs...); },
+                    [&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &baseline_cost, rs...); },
                     rules_tuple);
             };
             auto yield_rule = [&](auto &it) {

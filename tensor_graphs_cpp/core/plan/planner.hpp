@@ -1222,8 +1222,9 @@ struct Planner
 
         applyDominationRules(egraph, enodeInfos, eclassToLogical, cachedNodes);
 
-        // DP pass for subtree cost approximation
+        // DP pass for subtree cost approximation (workload sum & critical path)
         std::vector<float> eclass_dp_cost(egraph.getClasses().size(), TGConstants::INF);
+        std::vector<float> eclass_dp_cp_cost(egraph.getClasses().size(), TGConstants::INF);
         for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
         {
             EClassId cid = egraph.findConst(EClassId{i});
@@ -1235,7 +1236,9 @@ struct Planner
                         egraph.getENode(enodeId).getOpType() == OpType::CACHE)
                     {
                         eclass_dp_cost[i] = 0.0f;
+                        eclass_dp_cp_cost[i] = 0.0f;
                         enodeInfos[enodeId.value].dp_cost = 0.0f;
+                        enodeInfos[enodeId.value].dp_cp_cost = 0.0f;
                     }
                 }
             }
@@ -1257,6 +1260,7 @@ struct Planner
                     continue;
 
                 float sum_child_cost = 0.0f;
+                float max_child_cp_cost = 0.0f;
                 bool all_children_ready = true;
                 for (EClassId child : enode.getChildren())
                 {
@@ -1267,14 +1271,20 @@ struct Planner
                         break;
                     }
                     sum_child_cost += eclass_dp_cost[canon.value];
+                    max_child_cp_cost = std::max(max_child_cp_cost, eclass_dp_cp_cost[canon.value]);
                 }
 
                 if (all_children_ready)
                 {
                     float total_cost = cost + sum_child_cost;
-                    if (total_cost < enodeInfos[i].dp_cost)
+                    float total_cp_cost = cost + max_child_cp_cost;
+
+                    if (total_cost < enodeInfos[i].dp_cost || total_cp_cost < enodeInfos[i].dp_cp_cost)
                     {
-                        enodeInfos[i].dp_cost = total_cost;
+                        if (total_cost < enodeInfos[i].dp_cost)
+                            enodeInfos[i].dp_cost = total_cost;
+                        if (total_cp_cost < enodeInfos[i].dp_cp_cost)
+                            enodeInfos[i].dp_cp_cost = total_cp_cost;
                         changed = true;
 
                         EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
@@ -1282,6 +1292,10 @@ struct Planner
                         if (total_cost < eclass_dp_cost[canon.value])
                         {
                             eclass_dp_cost[canon.value] = total_cost;
+                        }
+                        if (total_cp_cost < eclass_dp_cp_cost[canon.value])
+                        {
+                            eclass_dp_cp_cost[canon.value] = total_cp_cost;
                         }
                     }
                 }
@@ -1391,9 +1405,6 @@ struct Planner
             delegate->init_egraph(node_features, edge_src, edge_dst);
         }
 
-        auto extractor = makeConfiguredExtractor(egraph, rootEClassId, enodeInfos, delegate, settings);
-        extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-
         std::unordered_map<MemSpace, uint64_t> reduced_caps;
         std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
         for (const auto &kv : settings.mem_caps)
@@ -1425,6 +1436,9 @@ struct Planner
         std::vector<EClassId> best_order;
         std::vector<ParallelBuffer> best_buffers;
         std::unordered_map<EClassId, BufferId> best_eclass_to_buf;
+
+        auto extractor = makeConfiguredExtractor(egraph, rootEClassId, enodeInfos, delegate, settings, &best_cost);
+        extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
 
         int max_iters = 10'000'000;
         int remaining_iters = max_iters;
@@ -1461,7 +1475,7 @@ struct Planner
             float cost = TGConstants::INF;
 
             auto dispatch_iterator =
-                makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, delegate, settings);
+                makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, delegate, settings, &best_cost);
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
