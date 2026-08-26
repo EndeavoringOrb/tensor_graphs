@@ -37,48 +37,6 @@ struct ENodeInfo
 };
 
 // =============================================================================
-// Helper: Single-Machine Schrage / Carlier Preemptive Window Bound
-// =============================================================================
-struct SchrageTask
-{
-    float r; // release time (earliest start from inputs)
-    float c; // processing duration
-    float q; // delivery tail (earliest duration to root output)
-};
-
-inline float computeSchragePreemptiveBound(const std::vector<SchrageTask> &tasks)
-{
-    if (tasks.empty())
-        return 0.0f;
-    if (tasks.size() == 1)
-        return tasks[0].r + tasks[0].c + tasks[0].q;
-
-    // Exact maximum over all task intervals [r_a, q_b]
-    float max_bound = 0.0f;
-    for (size_t a = 0; a < tasks.size(); ++a)
-    {
-        float r_a = tasks[a].r;
-        for (size_t b = 0; b < tasks.size(); ++b)
-        {
-            float q_b = tasks[b].q;
-            float sum_c = 0.0f;
-            for (size_t k = 0; k < tasks.size(); ++k)
-            {
-                if (tasks[k].r >= r_a && tasks[k].q >= q_b)
-                {
-                    sum_c += tasks[k].c;
-                }
-            }
-            if (sum_c > 0.0f)
-            {
-                max_bound = std::max(max_bound, r_a + sum_c + q_b);
-            }
-        }
-    }
-    return max_bound;
-}
-
-// =============================================================================
 // Updated DispatchContext with best_cost pointer
 // =============================================================================
 struct DispatchContext
@@ -1198,6 +1156,99 @@ struct ExtractContext
 // Extractor pruning rules (plain structs; conform to prune::PruningRuleSet)
 // =============================================================================
 
+// =============================================================================
+// Helper: Fast O(T log T) Schrage Preemptive Bound (Jackson's Preemptive Schedule)
+// =============================================================================
+struct SchrageTask
+{
+    float r; // release time (earliest start from inputs)
+    float c; // processing duration
+    float q; // delivery tail (earliest duration to root output)
+};
+
+inline float computeSchragePreemptiveBound(
+    const std::vector<SchrageTask> &tasks,
+    std::vector<uint32_t> &sorted_by_r,
+    std::vector<std::pair<float, float>> &heap) // max-heap of (q, rem_c)
+{
+    size_t n = tasks.size();
+    if (n == 0)
+        return 0.0f;
+    if (n == 1)
+        return tasks[0].r + tasks[0].c + tasks[0].q;
+
+    sorted_by_r.resize(n);
+    std::iota(sorted_by_r.begin(), sorted_by_r.end(), 0u);
+    std::sort(sorted_by_r.begin(), sorted_by_r.end(), [&](uint32_t a, uint32_t b) {
+        if (tasks[a].r != tasks[b].r)
+            return tasks[a].r < tasks[b].r;
+        return tasks[a].q > tasks[b].q;
+    });
+
+    heap.clear();
+
+    float t = tasks[sorted_by_r[0]].r;
+    float max_cmax = 0.0f;
+    size_t r_idx = 0;
+
+    auto heap_comp = [](const std::pair<float, float> &a, const std::pair<float, float> &b) {
+        return a.first < b.first; // max-heap prioritized by delivery tail q
+    };
+
+    while (r_idx < n || !heap.empty())
+    {
+        if (heap.empty() && r_idx < n && t < tasks[sorted_by_r[r_idx]].r)
+        {
+            t = tasks[sorted_by_r[r_idx]].r;
+        }
+
+        while (r_idx < n && tasks[sorted_by_r[r_idx]].r <= t)
+        {
+            uint32_t idx = sorted_by_r[r_idx++];
+            if (tasks[idx].c > 0.0f)
+            {
+                heap.push_back({tasks[idx].q, tasks[idx].c});
+                std::push_heap(heap.begin(), heap.end(), heap_comp);
+            }
+            else
+            {
+                max_cmax = std::max(max_cmax, t + tasks[idx].q);
+            }
+        }
+
+        if (heap.empty())
+            continue;
+
+        std::pop_heap(heap.begin(), heap.end(), heap_comp);
+        auto cur = heap.back();
+        heap.pop_back();
+
+        float cur_q = cur.first;
+        float cur_rem_c = cur.second;
+
+        float next_r = (r_idx < n) ? tasks[sorted_by_r[r_idx]].r : std::numeric_limits<float>::infinity();
+        float time_to_next = next_r - t;
+
+        if (cur_rem_c <= time_to_next)
+        {
+            t += cur_rem_c;
+            max_cmax = std::max(max_cmax, t + cur_q);
+        }
+        else
+        {
+            cur_rem_c -= time_to_next;
+            t = next_r;
+            heap.push_back({cur_q, cur_rem_c});
+            std::push_heap(heap.begin(), heap.end(), heap_comp);
+        }
+    }
+
+    return max_cmax;
+}
+
+// =============================================================================
+// Extractor Pruning Rule: ExtractorJacksonCarlierRule (Optimized)
+// =============================================================================
 class ExtractorJacksonCarlierRule
 {
   public:
@@ -1207,29 +1258,92 @@ class ExtractorJacksonCarlierRule
     }
 
   private:
-    std::vector<float> node_q;
-    std::unordered_map<Engine, float> engine_selected_work;
-    std::unordered_map<Engine, std::vector<SchrageTask>> engine_tasks;
+    struct EngineState
+    {
+        Engine engine;
+        float selected_work = 0.0f;
+        float max_r = 0.0f;
+        float max_q = 0.0f;
+        std::vector<SchrageTask> tasks;
+    };
 
-    struct UndoState
+    std::vector<float> node_q;
+    std::vector<float> class_min_cp;
+    std::vector<EngineState> engines_state;
+    std::unordered_map<Engine, uint32_t> engine_map;
+
+    struct QTrailEntry
+    {
+        EClassId node;
+        float old_q;
+    };
+
+    struct UndoFrame
     {
         EClassId current;
         float prev_q;
-        std::vector<std::pair<EClassId, float>> modified_children_q;
-        std::vector<std::pair<Engine, float>> prev_eng_work;
-        std::vector<Engine> eng_pushed;
+        uint32_t q_trail_start;
+        std::vector<uint32_t> eng_indices;
     };
-    std::vector<UndoState> undo_stack;
 
-public:
+    std::vector<QTrailEntry> q_trail;
+    std::vector<UndoFrame> undo_stack;
 
+    mutable std::vector<uint32_t> tmp_sorted_by_r;
+    mutable std::vector<std::pair<float, float>> tmp_heap;
+
+  public:
     void init(const ExtractContext &ctx)
     {
         uint32_t num_classes = static_cast<uint32_t>(ctx.egraph.getClasses().size());
         node_q.assign(num_classes, 0.0f);
-        engine_selected_work.clear();
-        engine_tasks.clear();
+        class_min_cp.assign(num_classes, TGConstants::INF);
+        q_trail.clear();
         undo_stack.clear();
+        engines_state.clear();
+        engine_map.clear();
+
+        // 1. Precompute class_min_cp for O(1) critical-path queries
+        for (uint32_t i = 0; i < num_classes; ++i)
+        {
+            EClassId canon = ctx.egraph.findConst(EClassId{i});
+            if (canon.value != i)
+                continue;
+            const EClass &cls = ctx.egraph.getEClass(canon);
+            float min_cp = TGConstants::INF;
+            for (ENodeId eid : cls.enodes)
+            {
+                if (eid.value < ctx.enodeInfos.size())
+                {
+                    min_cp = std::min(min_cp, ctx.enodeInfos[eid.value].dp_cp_cost);
+                }
+            }
+            class_min_cp[i] = min_cp;
+        }
+        for (uint32_t i = 0; i < num_classes; ++i)
+        {
+            EClassId canon = ctx.egraph.findConst(EClassId{i});
+            if (canon.value != i)
+            {
+                class_min_cp[i] = class_min_cp[canon.value];
+            }
+        }
+
+        // 2. Discover engines and initialize flat EngineState array
+        for (const auto &enode : ctx.egraph.getENodes())
+        {
+            for (const auto &eng : enode.getEngines())
+            {
+                if (engine_map.find(eng) == engine_map.end())
+                {
+                    uint32_t idx = static_cast<uint32_t>(engines_state.size());
+                    engine_map[eng] = idx;
+                    EngineState es;
+                    es.engine = eng;
+                    engines_state.push_back(std::move(es));
+                }
+            }
+        }
     }
 
     bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
@@ -1266,14 +1380,7 @@ public:
                     continue;
 
                 float f_q = (canon_f.value < node_q.size()) ? node_q[canon_f.value] : 0.0f;
-                float min_f_cp = TGConstants::INF;
-                for (ENodeId f_eid : ctx.egraph.getEClass(canon_f).enodes)
-                {
-                    if (f_eid.value < ctx.enodeInfos.size())
-                    {
-                        min_f_cp = std::min(min_f_cp, ctx.enodeInfos[f_eid.value].dp_cp_cost);
-                    }
-                }
+                float min_f_cp = (canon_f.value < class_min_cp.size()) ? class_min_cp[canon_f.value] : TGConstants::INF;
                 if (min_f_cp != TGConstants::INF && f_q + min_f_cp >= best_c)
                 {
                     return true;
@@ -1282,48 +1389,59 @@ public:
         }
 
         // 3. Engine Workload Bound
-        auto engines = cand_enode.getEngines();
+        const auto &engines = cand_enode.getEngines();
         for (const auto &eng : engines)
         {
-            auto it = engine_selected_work.find(eng);
-            float sel_w = (it != engine_selected_work.end()) ? it->second : 0.0f;
-            if (sel_w + cand_cost >= best_c)
+            auto it = engine_map.find(eng);
+            if (it != engine_map.end())
             {
-                return true;
+                float sel_w = engines_state[it->second].selected_work;
+                if (sel_w + cand_cost >= best_c)
+                {
+                    return true;
+                }
             }
         }
 
         // 4. Jackson / Carlier Window Relaxation on Selected Tasks + Candidate
         for (const auto &eng : engines)
         {
-            auto it = engine_tasks.find(eng);
-            size_t existing_count = (it != engine_tasks.end()) ? it->second.size() : 0;
-            if (existing_count >= 1)
-            {
-                std::vector<SchrageTask> tasks;
-                tasks.reserve(existing_count + 1);
-                if (it != engine_tasks.end())
-                    tasks = it->second;
+            auto it = engine_map.find(eng);
+            if (it == engine_map.end())
+                continue;
 
-                float cand_r = 0.0f;
-                for (EClassId child : cand_enode.getChildren())
+            auto &es = const_cast<EngineState &>(engines_state[it->second]);
+            if (es.tasks.empty())
+                continue;
+
+            float cand_r = 0.0f;
+            for (EClassId child : cand_enode.getChildren())
+            {
+                EClassId canon_child = ctx.egraph.findConst(child);
+                if (canon_child.value < class_min_cp.size())
                 {
-                    EClassId canon_child = ctx.egraph.findConst(child);
-                    float min_child_dp = TGConstants::INF;
-                    for (ENodeId c_eid : ctx.egraph.getEClass(canon_child).enodes)
-                    {
-                        if (c_eid.value < ctx.enodeInfos.size())
-                            min_child_dp = std::min(min_child_dp, ctx.enodeInfos[c_eid.value].dp_cp_cost);
-                    }
+                    float min_child_dp = class_min_cp[canon_child.value];
                     if (min_child_dp != TGConstants::INF)
                         cand_r = std::max(cand_r, min_child_dp);
                 }
-                tasks.push_back({cand_r, cand_cost, current_q});
-
-                float jps = computeSchragePreemptiveBound(tasks);
-                if (jps >= best_c)
-                    return true;
             }
+
+            // O(1) Upper-Bound Filter: skip running full Schrage if theoretical max < best_c
+            float total_w = es.selected_work + cand_cost;
+            float max_r = std::max(es.max_r, cand_r);
+            float max_q = std::max(es.max_q, current_q);
+            if (max_r + total_w + max_q < best_c)
+            {
+                continue;
+            }
+
+            // Execute Schrage in-place without heap allocations
+            es.tasks.push_back({cand_r, cand_cost, current_q});
+            float jps = computeSchragePreemptiveBound(es.tasks, tmp_sorted_by_r, tmp_heap);
+            es.tasks.pop_back();
+
+            if (jps >= best_c)
+                return true;
         }
 
         return false;
@@ -1342,17 +1460,22 @@ public:
         EClassId current = ctx.current;
         float current_q = (current.value < node_q.size()) ? node_q[current.value] : 0.0f;
 
-        UndoState undo;
-        undo.current = current;
-        undo.prev_q = current_q;
+        UndoFrame frame;
+        frame.current = current;
+        frame.prev_q = current_q;
+        frame.q_trail_start = static_cast<uint32_t>(q_trail.size());
 
         for (EClassId child : enode.getChildren())
         {
             EClassId canon_child = ctx.egraph.findConst(child);
             if (canon_child.value < node_q.size())
             {
-                undo.modified_children_q.push_back({canon_child, node_q[canon_child.value]});
-                node_q[canon_child.value] = std::max(node_q[canon_child.value], current_q + cost);
+                float new_q = current_q + cost;
+                if (new_q > node_q[canon_child.value])
+                {
+                    q_trail.push_back({canon_child, node_q[canon_child.value]});
+                    node_q[canon_child.value] = new_q;
+                }
             }
         }
 
@@ -1360,26 +1483,30 @@ public:
         for (EClassId child : enode.getChildren())
         {
             EClassId canon_child = ctx.egraph.findConst(child);
-            float min_child_dp = TGConstants::INF;
-            for (ENodeId c_eid : ctx.egraph.getEClass(canon_child).enodes)
+            if (canon_child.value < class_min_cp.size())
             {
-                if (c_eid.value < ctx.enodeInfos.size())
-                    min_child_dp = std::min(min_child_dp, ctx.enodeInfos[c_eid.value].dp_cp_cost);
+                float min_child_dp = class_min_cp[canon_child.value];
+                if (min_child_dp != TGConstants::INF)
+                    cand_r = std::max(cand_r, min_child_dp);
             }
-            if (min_child_dp != TGConstants::INF)
-                cand_r = std::max(cand_r, min_child_dp);
         }
 
-        auto engines = enode.getEngines();
-        for (const auto &eng : engines)
+        for (const auto &eng : enode.getEngines())
         {
-            undo.prev_eng_work.push_back({eng, engine_selected_work[eng]});
-            engine_selected_work[eng] += cost;
-            engine_tasks[eng].push_back({cand_r, cost, current_q});
-            undo.eng_pushed.push_back(eng);
+            auto it = engine_map.find(eng);
+            if (it != engine_map.end())
+            {
+                uint32_t eidx = it->second;
+                auto &es = engines_state[eidx];
+                es.selected_work += cost;
+                es.max_r = std::max(es.max_r, cand_r);
+                es.max_q = std::max(es.max_q, current_q);
+                es.tasks.push_back({cand_r, cost, current_q});
+                frame.eng_indices.push_back(eidx);
+            }
         }
 
-        undo_stack.push_back(std::move(undo));
+        undo_stack.push_back(std::move(frame));
     }
 
     void on_pop(ENodeId /*enode_id*/, const ExtractContext &/*ctx*/)
@@ -1387,21 +1514,33 @@ public:
         if (!enabled || undo_stack.empty())
             return;
 
-        UndoState undo = std::move(undo_stack.back());
+        UndoFrame frame = std::move(undo_stack.back());
         undo_stack.pop_back();
 
-        for (const auto &p : undo.modified_children_q)
+        while (q_trail.size() > frame.q_trail_start)
         {
-            node_q[p.first.value] = p.second;
+            const auto &entry = q_trail.back();
+            node_q[entry.node.value] = entry.old_q;
+            q_trail.pop_back();
         }
-        for (const auto &p : undo.prev_eng_work)
+
+        for (uint32_t eidx : frame.eng_indices)
         {
-            engine_selected_work[p.first] = p.second;
-        }
-        for (const auto &eng : undo.eng_pushed)
-        {
-            if (!engine_tasks[eng].empty())
-                engine_tasks[eng].pop_back();
+            auto &es = engines_state[eidx];
+            if (!es.tasks.empty())
+            {
+                float popped_c = es.tasks.back().c;
+                es.tasks.pop_back();
+                es.selected_work -= popped_c;
+
+                es.max_r = 0.0f;
+                es.max_q = 0.0f;
+                for (const auto &t : es.tasks)
+                {
+                    es.max_r = std::max(es.max_r, t.r);
+                    es.max_q = std::max(es.max_q, t.q);
+                }
+            }
         }
     }
 };
