@@ -40,9 +40,10 @@ namespace dispatch_rules
 {
 using InputDispatchDominationRuleT = InputDispatchDominationRule;
 using UnifiedMemoryExchangeableDispatchRuleT = UnifiedMemoryExchangeableDispatchRule;
+using MemoryPressureDispatchRuleT = MemoryPressureDispatchRule;
 } // namespace dispatch_rules
 
-using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule>;
+using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule, MemoryPressureDispatchRule>;
 
 // =============================================================================
 // BufferizeIterator rules
@@ -141,6 +142,7 @@ inline constexpr RuleSpec kAllRuleSpecs[] = {
     // dispatch
     {"dispatch", "InputDispatchDominationRule"},
     {"dispatch", "UnifiedMemoryExchangeableDispatchRule"},
+    {"dispatch", "MemoryPressureDispatchRule"},
     // bufferize
     {"bufferize", "MemSpaceMismatchInplaceRule"},
     {"bufferize", "LinearChainInplaceDominationRule"},

@@ -423,6 +423,12 @@ struct MemSpace
     {
         return !(*this == other);
     }
+    bool operator<(const MemSpace &other) const
+    {
+        if (type != other.type)
+            return type < other.type;
+        return idx < other.idx;
+    }
 };
 
 namespace tg_hash
@@ -558,6 +564,12 @@ struct Engine
     bool operator!=(const Engine &other) const
     {
         return !(*this == other);
+    }
+    bool operator<(const Engine &other) const
+    {
+        if (type != other.type)
+            return type < other.type;
+        return idx < other.idx;
     }
 };
 

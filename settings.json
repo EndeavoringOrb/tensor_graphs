@@ -2,7 +2,8 @@
   "rules": {
     "dispatch": {
       "InputDispatchDominationRule": true,
-      "UnifiedMemoryExchangeableDispatchRule": true
+      "UnifiedMemoryExchangeableDispatchRule": true,
+      "MemoryPressureDispatchRule": true
     },
     "bufferize": {
       "MemSpaceMismatchInplaceRule": true,

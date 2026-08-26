@@ -163,6 +163,53 @@ struct Settings
         return records;
     }
 
+    void print_rules_summary() const
+    {
+        std::vector<std::string> categories = {"dispatch", "bufferize", "malloc", "cache", "extract", "enode"};
+        for (const auto &pair : rules)
+        {
+            if (std::find(categories.begin(), categories.end(), pair.first) == categories.end())
+            {
+                categories.push_back(pair.first);
+            }
+        }
+        for (const auto &cat : categories)
+        {
+            std::vector<std::string> active;
+            auto it = rules.find(cat);
+            if (it != rules.end())
+            {
+                for (const auto &[rname, enabled] : it->second)
+                {
+                    if (enabled)
+                        active.push_back(rname);
+                }
+            }
+            std::sort(active.begin(), active.end());
+            std::string active_str;
+            for (size_t i = 0; i < active.size(); ++i)
+            {
+                if (i > 0)
+                    active_str += "+";
+                active_str += active[i];
+            }
+            if (active_str.empty())
+                active_str = "(none)";
+
+            std::cout << "[Settings] Category '" << cat << "' active rules: " << active_str;
+            auto bIt = benchmark_records.find(cat);
+            if (bIt != benchmark_records.end())
+            {
+                auto rIt = bIt->second.find(active_str);
+                if (rIt != bIt->second.end() && rIt->second.speedup > 1.0)
+                {
+                    std::cout << " (speedup: " << rIt->second.speedup << "x)";
+                }
+            }
+            std::cout << "\n";
+        }
+    }
+
     bool load_from_binary(const std::string &path = "")
     {
         std::string actual_path = path.empty() ? rule_benchmarks_path : path;
@@ -223,9 +270,6 @@ struct Settings
                     if (!token.empty())
                         active_rules.insert(token);
                 }
-                std::cout << "[Settings] Category '" << category
-                          << "' activated best combination: " << best_rec->rule_name
-                          << " (speedup: " << best_rec->speedup << "x)\n";
             }
 
             for (const auto &rule_name : all_known_rules)
@@ -516,6 +560,8 @@ struct Settings
             }
             apply_cli_args(parser);
         }
+
+        print_rules_summary();
     }
 
     void load(int argc, char *argv[], const std::string &custom_json_path = "", const std::string &custom_bin_path = "")
@@ -608,6 +654,7 @@ struct Settings
         const std::vector<std::pair<std::string, std::string>> defaults = {
             {"dispatch", "InputDispatchDominationRule"},
             {"dispatch", "UnifiedMemoryExchangeableDispatchRule"},
+            {"dispatch", "MemoryPressureDispatchRule"},
             {"bufferize", "MemSpaceMismatchInplaceRule"},
             {"bufferize", "LinearChainInplaceDominationRule"},
             {"bufferize", "IntervalSubsetDominationRule"},

@@ -1435,8 +1435,18 @@ struct Planner
         auto start_time = std::chrono::high_resolution_clock::now();
         LOG(DEBUG) << "entering loop";
 
+        auto is_time_expired = [&]() -> bool {
+            if (minCompileSeconds <= 0.0f)
+                return false;
+            if (best_cost == TGConstants::INF)
+                return false; // Ensure at least one valid extraction exists before aborting
+            return timer.getElapsed() >= minCompileSeconds;
+        };
+
         while (remaining_iters-- > 0)
         {
+            if (is_time_expired())
+                break;
             if (extractor.is_done())
                 break;
             if (!extractor.getNextSelection())
@@ -1457,6 +1467,9 @@ struct Planner
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
+                if (is_time_expired())
+                    break;
+
                 auto buf_iter = makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, reduced_caps,
                                                                 delegate, settings);
 
@@ -1465,6 +1478,8 @@ struct Planner
 
                 while (buf_iter.getNextBufferization(unallocated_buffers, eclass_to_buf_local))
                 {
+                    if (is_time_expired())
+                        break;
                     std::unordered_set<BufferId> preallocated_buf_ids;
                     std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
 
@@ -1553,12 +1568,18 @@ struct Planner
                             best_eclass_to_buf = std::move(eclass_to_buf_local);
                             LOG(INFO) << "new best cost " << best_cost;
                         }
-                        if (stopOnFirstValid)
+                        if (stopOnFirstValid || is_time_expired())
                             break;
                     }
                 }
-                if (valid && stopOnFirstValid)
+                
+                if ((valid && stopOnFirstValid) || is_time_expired())
                     break;
+
+                uint32_t failure_pos = static_cast<uint32_t>(std::max(0, buf_iter.k));
+                dispatch_iterator.ascend_to(failure_pos);
+                continue;
+                
             }
 
             if (extractor.active_options == 0)
@@ -1566,7 +1587,7 @@ struct Planner
                 break;
             }
 
-            if (valid && stopOnFirstValid && best_cost < TGConstants::INF)
+            if ((valid && stopOnFirstValid && best_cost < TGConstants::INF) || is_time_expired())
                 break;
 
             if (valid && minCompileSeconds > 0.0f)
