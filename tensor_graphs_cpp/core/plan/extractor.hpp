@@ -142,6 +142,161 @@ class InputDispatchDominationRule
     }
 };
 
+class UnifiedMemoryExchangeableDispatchRule
+{
+    bool enabled = true;
+    std::vector<uint32_t> remaining_users; // Tracks R(P) for each EClass
+
+public:
+    UnifiedMemoryExchangeableDispatchRule(bool en = true) : enabled(en) {}
+
+    const char* name() const { return "UnifiedMemoryExchangeableDispatchRule"; }
+
+    // 1. BEFORE DFS: Initialize remaining user counts from selection_map
+    void init(const DispatchContext &ctx)
+    {
+        uint32_t max_class_id = static_cast<uint32_t>(ctx.egraph.getClasses().size());
+        remaining_users.assign(max_class_id, 0);
+
+        for (const auto &kv : ctx.selection_map)
+        {
+            EClassId node = ctx.egraph.findConst(kv.first);
+            uint32_t sel = kv.second;
+            ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
+            const ENode &enode = ctx.egraph.getENode(enode_id);
+
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = ctx.egraph.findConst(child);
+                if (canon_child.value < max_class_id)
+                {
+                    remaining_users[canon_child.value]++;
+                }
+            }
+        }
+    }
+
+    // 2. DURING DFS: O(1) decrements when a node is committed
+    void on_push(EClassId node, const DispatchContext &ctx)
+    {
+        uint32_t sel = ctx.selection_map.at(node);
+        ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (canon_child.value < remaining_users.size())
+            {
+                remaining_users[canon_child.value]--;
+            }
+        }
+    }
+
+    // 3. DURING DFS: O(1) increments when backtracking
+    void on_pop(EClassId node, const DispatchContext &ctx)
+    {
+        uint32_t sel = ctx.selection_map.at(node);
+        ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (canon_child.value < remaining_users.size())
+            {
+                remaining_users[canon_child.value]++;
+            }
+        }
+    }
+
+    // Computes the multiset of input buffer sizes that die on this step
+    std::vector<std::pair<MemSpace, uint64_t>> get_freed_inputs(
+        const ENode &node, EClassId sibling_node, const DispatchContext &ctx) const
+    {
+        std::vector<std::pair<MemSpace, uint64_t>> freed;
+        
+        // Find sibling's children to check for shared parents
+        uint32_t sib_sel = ctx.selection_map.at(sibling_node);
+        const ENode &sib_enode = ctx.egraph.getENode(ctx.egraph.getEClass(sibling_node).enodes[sib_sel]);
+        const auto &sib_children = sib_enode.getChildren();
+
+        for (EClassId child : node.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            
+            // If the parent is shared with the sibling, it won't die on Step 1 in either order
+            bool is_shared = false;
+            for (EClassId sib_child : sib_children)
+            {
+                if (ctx.egraph.findConst(sib_child) == canon_child)
+                {
+                    is_shared = true;
+                    break;
+                }
+            }
+            if (is_shared)
+                continue;
+
+            // If this is the last consumer (R(P) == 1), this buffer dies immediately
+            if (canon_child.value < remaining_users.size() && remaining_users[canon_child.value] == 1)
+            {
+                const EClass &cCls = ctx.egraph.getEClass(canon_child);
+                uint64_t size = getSizeBytes(cCls.shape, cCls.dtype);
+                freed.push_back({cCls.mem_space, size});
+            }
+        }
+        std::sort(freed.begin(), freed.end());
+        return freed;
+    }
+
+    // 4. PER-CANDIDATE PRUNING CHECK
+    bool check(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
+    {
+        if (!enabled || ctx.current_ready.size() <= 1)
+            return false;
+
+        uint32_t sel_cand = ctx.selection_map.at(cand);
+        ENodeId enode_cand_id = ctx.egraph.getEClass(cand).enodes[sel_cand];
+        const ENode &enode_cand = ctx.egraph.getENode(enode_cand_id);
+
+        uint64_t cand_out_size = getSizeBytes(enode_cand.getShape(), enode_cand.getDType());
+        MemSpace cand_ms = enode_cand.getMemSpace();
+
+        for (EClassId other : ctx.current_ready)
+        {
+            // Canonical tie-breaker: only prune cand if another exchangeable node has smaller ID
+            if (other.value >= cand.value)
+                continue;
+
+            uint32_t sel_other = ctx.selection_map.at(other);
+            ENodeId enode_other_id = ctx.egraph.getEClass(other).enodes[sel_other];
+            const ENode &enode_other = ctx.egraph.getENode(enode_other_id);
+
+            // 1. Hardware target equivalence
+            if (enode_other.getMemSpace() != cand_ms)
+                continue;
+            if (enode_other.getEngines() != enode_cand.getEngines())
+                continue;
+
+            // 2. Output allocation equivalence
+            if (getSizeBytes(enode_other.getShape(), enode_other.getDType()) != cand_out_size)
+                continue;
+
+            // 3. Immediate deallocation equivalence
+            auto freed_cand = get_freed_inputs(enode_cand, other, ctx);
+            auto freed_other = get_freed_inputs(enode_other, cand, ctx);
+
+            if (freed_cand == freed_other)
+            {
+                return true; // Symmetric transition profile -> Prune candidate
+            }
+        }
+
+        return false;
+    }
+};
+
 // =============================================================================
 // DispatchIterator
 // =============================================================================
@@ -542,7 +697,8 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
     settings.validate_dispatch_rules();
     return makeDispatchIteratorWithDelegate(
         egraph, selection_map, enodeInfos, std::move(delegate),
-        InputDispatchDominationRule(settings.is_rule_enabled("dispatch", "InputDispatchDominationRule")));
+        InputDispatchDominationRule(settings.is_rule_enabled("dispatch", "InputDispatchDominationRule")),
+    UnifiedMemoryExchangeableDispatchRule(settings.is_rule_enabled("dispatch", "UnifiedMemoryExchangeableDispatchRule")));
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,

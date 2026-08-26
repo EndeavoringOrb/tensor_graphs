@@ -1,5 +1,9 @@
 {
   "rules": {
+    "dispatch": {
+      "InputDispatchDominationRule": true,
+      "UnifiedMemoryExchangeableDispatchRule": true
+    },
     "bufferize": {
       "MemSpaceMismatchInplaceRule": true,
       "LinearChainInplaceDominationRule": true,

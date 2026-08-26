@@ -607,6 +607,7 @@ struct Settings
     {
         const std::vector<std::pair<std::string, std::string>> defaults = {
             {"dispatch", "InputDispatchDominationRule"},
+            {"dispatch", "UnifiedMemoryExchangeableDispatchRule"},
             {"bufferize", "MemSpaceMismatchInplaceRule"},
             {"bufferize", "LinearChainInplaceDominationRule"},
             {"bufferize", "IntervalSubsetDominationRule"},
