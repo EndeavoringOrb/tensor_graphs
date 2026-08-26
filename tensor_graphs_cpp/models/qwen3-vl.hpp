@@ -222,15 +222,12 @@ class Qwen3VLModel
         LogicalId k = linear(x, prefix + "k_proj.weight", "", cfg.hidden_size, kv_dim, S);
         LogicalId v = linear(x, prefix + "v_proj.weight", "", cfg.hidden_size, kv_dim, S);
 
-        q = g.contiguous(
-            g.permute(g.reshape(q, {1, (int32_t)S, (int32_t)cfg.num_attention_heads, (int32_t)cfg.head_dim}),
-                      {0, 2, 1, 3}));
-        k = g.contiguous(
-            g.permute(g.reshape(k, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}),
-                      {0, 2, 1, 3}));
-        v = g.contiguous(
-            g.permute(g.reshape(v, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}),
-                      {0, 2, 1, 3}));
+        q = g.contiguous(g.permute(
+            g.reshape(q, {1, (int32_t)S, (int32_t)cfg.num_attention_heads, (int32_t)cfg.head_dim}), {0, 2, 1, 3}));
+        k = g.contiguous(g.permute(
+            g.reshape(k, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}), {0, 2, 1, 3}));
+        v = g.contiguous(g.permute(
+            g.reshape(v, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}), {0, 2, 1, 3}));
 
         q = per_head_rms_norm(q, prefix + "q_norm.weight", cfg.num_attention_heads, S, cfg.head_dim, cfg.rms_norm_eps);
         k = per_head_rms_norm(k, prefix + "k_norm.weight", cfg.num_key_value_heads, S, cfg.head_dim, cfg.rms_norm_eps);

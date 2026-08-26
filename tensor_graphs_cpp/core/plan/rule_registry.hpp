@@ -38,9 +38,10 @@
 // =============================================================================
 namespace dispatch_rules
 {
+using InputDispatchDominationRuleT = InputDispatchDominationRule;
 } // namespace dispatch_rules
 
-using AllDispatchRuleTypes = std::tuple<>;
+using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule>;
 
 // =============================================================================
 // BufferizeIterator rules
@@ -52,11 +53,12 @@ using LinearChainInplaceDominationRuleT = LinearChainInplaceDominationRule;
 using IntervalSubsetDominationRuleT = IntervalSubsetDominationRule;
 using CommutativeInplaceSymmetryRuleT = CommutativeInplaceSymmetryRule;
 using DeadBufferReuseDominationRuleT = DeadBufferReuseDominationRule;
+using PeakMemoryPruningRuleT = PeakMemoryPruningRule;
 } // namespace bufferizeRules
 
 using AllBufferizeRuleTypes =
     std::tuple<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule, IntervalSubsetDominationRule,
-               CommutativeInplaceSymmetryRule, DeadBufferReuseDominationRule>;
+               CommutativeInplaceSymmetryRule, DeadBufferReuseDominationRule, PeakMemoryPruningRule>;
 
 // =============================================================================
 // MallocIterator rules
@@ -65,13 +67,11 @@ namespace mallocRules
 {
 using OffsetMonotoneRuleT = OffsetMonotoneRule;
 using IdMaxSymmetryRuleT = IdMaxSymmetryRule;
-using CapRespectRuleT = CapRespectRule;
 using HMinBoundRuleT = HMinBoundRule;
 using LargerBufferPriorityRuleT = LargerBufferPriorityRule;
 } // namespace mallocRules
 
-using AllMallocRuleTypes =
-    std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, CapRespectRule, HMinBoundRule, LargerBufferPriorityRule>;
+using AllMallocRuleTypes = std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, HMinBoundRule, LargerBufferPriorityRule>;
 
 // =============================================================================
 // CacheIterator rules
@@ -137,16 +137,18 @@ struct RuleSpec
 // Compile-time list of rule specs per category. Keep in lock-step with the
 // `All*RuleTypes` aliases above.
 inline constexpr RuleSpec kAllRuleSpecs[] = {
+    // dispatch
+    {"dispatch", "InputDispatchDominationRule"},
     // bufferize
     {"bufferize", "MemSpaceMismatchInplaceRule"},
     {"bufferize", "LinearChainInplaceDominationRule"},
     {"bufferize", "IntervalSubsetDominationRule"},
     {"bufferize", "CommutativeInplaceSymmetryRule"},
     {"bufferize", "DeadBufferReuseDominationRule"},
+    {"bufferize", "PeakMemoryPruningRule"},
     // malloc
     {"malloc", "OffsetMonotoneRule"},
     {"malloc", "IdMaxSymmetryRule"},
-    {"malloc", "CapRespectRule"},
     {"malloc", "HMinBoundRule"},
     {"malloc", "LargerBufferPriorityRule"},
     // cache

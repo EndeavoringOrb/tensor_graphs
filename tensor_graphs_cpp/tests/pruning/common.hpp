@@ -223,7 +223,8 @@ struct MockCtx
     Settings settings;
     std::unordered_map<EClassId, uint32_t> selection_map;
 
-    MockCtx() : costModel(false, ""), mem_caps({{MemSpace{1, HandleType::CPP}, 1024ULL * 1024 * 1024}})
+    MockCtx(uint64_t default_mem_cap = 1024ULL * 1024 * 1024)
+        : costModel(false, ""), mem_caps({{MemSpace{1, HandleType::CPP}, default_mem_cap}})
     {
         settings.mem_caps = mem_caps;
         setupTestSettings(settings, true);
@@ -353,7 +354,7 @@ inline std::vector<ParallelBuffer> buildMallocBuffers(int scale = 1)
         b.mem_space = MemSpace{1, HandleType::CPP};
         b.size = ((i % 4) + 1) * 1024ULL * 1024;
         b.start = static_cast<uint32_t>(i / 2);
-        b.end = b.start + 3;
+        b.end = b.start + 2;
         b.offset = -1;
         unallocated.push_back(b);
     }
@@ -459,8 +460,11 @@ inline void extendFmaTwinsEGraph(const FmaTwins &twins, EGraph &egraph_to_extend
                  DType::FLOAT32, MemSpace{1, HandleType::CPP}, {Engine{0, EngineType::CPU}});
         ENode v2(KernelId{MockKernels::kFmaV2}, OpType::FUSED, "fma_v2", {in0_cls, in1_cls}, {8, 8}, {8, 1},
                  DType::FLOAT32, MemSpace{1, HandleType::CPP}, {Engine{0, EngineType::CPU}});
+        ENode v3(KernelId{MockKernels::kAddBigOutplace}, OpType::ADD, "", {in0_cls, in1_cls}, {1024, 1024}, {1024, 1},
+                 DType::FLOAT32, MemSpace{1, HandleType::CPP}, {Engine{0, EngineType::CPU}});
         egraph_to_extend.addENode(r_cls, v1);
         egraph_to_extend.addENode(r_cls, v2);
+        egraph_to_extend.addENode(r_cls, v3);
     }
 }
 

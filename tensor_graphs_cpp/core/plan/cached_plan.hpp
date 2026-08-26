@@ -215,7 +215,8 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
             else if (std::filesystem::exists(model_path + "/vae"))
                 actual_vae = model_path + "/vae";
         }
-        roots = build_krea2_pipeline_graph(ctx->graph, *ctx->mem, actual_dit, actual_te, actual_vae, 512, 512, 128, 8, 1.15f);
+        roots = build_krea2_pipeline_graph(ctx->graph, *ctx->mem, actual_dit, actual_te, actual_vae, 512, 512, 128, 8,
+                                           1.15f);
         ctx->rootId = roots.roots[0];
         ctx->inputIdsId = roots.inputs[0];
         ctx->max_seq_len = 128;
@@ -399,7 +400,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         return a.idx < b.idx;
     });
 
-    CacheIterator cache_iter(ctx->graph, candidates, avail_mem_spaces, delegate);
+    auto cache_iter = makeConfiguredCacheIterator(ctx->graph, candidates, avail_mem_spaces, delegate, ctx->settings);
     std::unordered_map<LogicalId, MemSpace> cachedNodes;
 
     std::vector<float> all_costs;
@@ -555,15 +556,36 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             delegate->init_egraph(node_features, edge_src, edge_dst);
         }
 
-        // Extractor (Level 1)
-        Extractor<InfiniteCostSkipRule, SiblingEquivalentSkipRule> extractor(
-            state->egraph, rootEClassId, state->enodeInfos, delegate,
-            InfiniteCostSkipRule(ctx->settings.is_rule_enabled("extract", "InfiniteCostSkipRule")),
-            SiblingEquivalentSkipRule(ctx->settings.is_rule_enabled("extract", "SiblingEquivalentSkipRule")));
+        std::unordered_map<MemSpace, uint64_t> reduced_caps;
+        std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
+        for (const auto &kv : ctx->mem->getMemCaps())
+        {
+            reduced_caps[kv.first] = kv.second;
+        }
+        for (const auto &kv : state->preallocatedBuffers)
+        {
+            uint64_t extent = static_cast<uint64_t>(kv.second.offset) + kv.second.size;
+            reserved_per_ms[kv.second.mem_space] = std::max(reserved_per_ms[kv.second.mem_space], extent);
+        }
+        for (const auto &kv : reserved_per_ms)
+        {
+            if (reduced_caps.count(kv.first))
+            {
+                if (kv.second >= reduced_caps[kv.first])
+                {
+                    reduced_caps[kv.first] = 0;
+                }
+                else
+                {
+                    reduced_caps[kv.first] -= kv.second;
+                }
+            }
+        }
+
+        auto extractor =
+            makeConfiguredExtractor(state->egraph, rootEClassId, state->enodeInfos, delegate, ctx->settings);
         extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(
-            state->egraph, state->enodeInfos, ctx->mem->getMemCaps(), state->eclassToLogical,
-            state->preallocatedBuffers, delegate, &ctx->settings));
+        // Note: NO MemValidator here!
 
         uint32_t extract_count = 0;
         while (extractor.getNextSelection())
@@ -582,20 +604,9 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                 dispatch_count++;
 
                 // Bufferize (Level 3)
-                BufferizeIterator<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule,
-                                  IntervalSubsetDominationRule, CommutativeInplaceSymmetryRule,
-                                  DeadBufferReuseDominationRule>
-                    buf_iter(order, state->egraph, selection_map, state->enodeInfos, delegate,
-                             MemSpaceMismatchInplaceRule(
-                                 ctx->settings.is_rule_enabled("bufferize", "MemSpaceMismatchInplaceRule")),
-                             LinearChainInplaceDominationRule(
-                                 ctx->settings.is_rule_enabled("bufferize", "LinearChainInplaceDominationRule")),
-                             IntervalSubsetDominationRule(
-                                 ctx->settings.is_rule_enabled("bufferize", "IntervalSubsetDominationRule")),
-                             CommutativeInplaceSymmetryRule(
-                                 ctx->settings.is_rule_enabled("bufferize", "CommutativeInplaceSymmetryRule")),
-                             DeadBufferReuseDominationRule(
-                                 ctx->settings.is_rule_enabled("bufferize", "DeadBufferReuseDominationRule")));
+                auto buf_iter = makeConfiguredBufferizeIterator(order, state->egraph, selection_map, state->enodeInfos,
+                                                                reduced_caps, delegate, ctx->settings);
+
                 uint32_t buf_count = 0;
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -607,7 +618,6 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                     // Malloc (Level 4)
                     std::unordered_set<BufferId> preallocated_buf_ids;
                     std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
-                    std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
 
                     for (EClassId eclass : order)
                     {
@@ -630,19 +640,12 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                         BufferId buf_id = eclass_to_buf_local.at(eclass);
                         preallocated_buf_ids.insert(buf_id);
                         preallocated_overrides[buf_id] = preIt->second;
-
-                        const ParallelBuffer &pre = preIt->second;
-                        uint64_t extent = static_cast<uint64_t>(pre.offset) + pre.size;
-                        uint64_t &cur = reserved_per_ms[pre.mem_space];
-                        cur = std::max(cur, extent);
                     }
 
                     std::unordered_map<MemSpace, std::vector<ParallelBuffer>> buf_by_mem_space;
                     for (auto &buf : unallocated_buffers)
                     {
-                        if (buf.mem_space.type == HandleType::STORAGE)
-                            continue;
-                        if (preallocated_buf_ids.count(buf.id))
+                        if (buf.mem_space.type == HandleType::STORAGE || preallocated_buf_ids.count(buf.id))
                             continue;
                         buf_by_mem_space[buf.mem_space].push_back(buf);
                     }
@@ -652,15 +655,10 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                     for (auto &kv : buf_by_mem_space)
                     {
                         MemSpace ms = kv.first;
-                        auto &bufs = kv.second;
-                        uint64_t cap = ctx->mem->getMemCaps().count(ms) ? ctx->mem->getMemCaps().at(ms)
-                                                                        : std::numeric_limits<uint64_t>::max();
-                        uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
-                        uint64_t reduced_cap =
-                            (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
-
+                        uint64_t cap =
+                            reduced_caps.count(ms) ? reduced_caps.at(ms) : std::numeric_limits<uint64_t>::max();
                         std::vector<ParallelBuffer> allocated;
-                        if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow, delegate))
+                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &ctx->settings))
                         {
                             alloc_ok = false;
                             break;
@@ -675,18 +673,14 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                     }
 
                     if (delegate)
-                    {
                         delegate->on_leaf_evaluated(cost);
-                    }
 
                     if (buf_count >= num_bufferize)
                         break;
                 }
-
                 if (dispatch_count >= num_dispatch)
                     break;
             }
-
             extractor.ascend();
             if (extract_count >= num_extract)
                 break;

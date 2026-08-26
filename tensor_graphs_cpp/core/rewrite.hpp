@@ -45,8 +45,7 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
-    {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -406,7 +405,8 @@ struct FusionRule : public Rule
                     pattern.graph, pattern.rootId, inputNodes, outputNode, false, target_ms, {}, {}, true,
                     ignoreInputMemSpaces, true, true);
 
-                std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>> matched_kernels;
+                std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>>
+                    matched_kernels;
                 for (KernelId uid : kernelMatches)
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
@@ -436,11 +436,11 @@ struct FusionRule : public Rule
         float cost = std::numeric_limits<float>::infinity();
     };
 
-    void addFusedCandidates(RuleCtx &ctx,
-                            const std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>> &matched_kernels,
-                            MemSpace target_mem_space,
-                            const std::vector<EClassId> &child_ids,
-                            ENodeId eNodeIdx)
+    void addFusedCandidates(
+        RuleCtx &ctx,
+        const std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>>
+            &matched_kernels,
+        MemSpace target_mem_space, const std::vector<EClassId> &child_ids, ENodeId eNodeIdx)
     {
         EGraph &egraph = ctx.egraph;
         const ENode oldENode = egraph.getENode(eNodeIdx);
@@ -481,12 +481,15 @@ struct FusionRule : public Rule
                 EClassId pid = child_ids[i];
                 const EClass parent = egraph.getEClass(egraph.findConst(pid));
 
-                MemSpace expectedMemSpace = (i < mapped_input_spaces.size()) ? mapped_input_spaces[i] : target_mem_space;
+                MemSpace expectedMemSpace =
+                    (i < mapped_input_spaces.size()) ? mapped_input_spaces[i] : target_mem_space;
                 bool foundMemSpace = (parent.mem_space == expectedMemSpace);
                 bool needCopy = !foundMemSpace;
                 bool needContig = false;
 
-                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(kernel->requiresContiguous.empty() ? 0 : kernel->requiresContiguous.size() - 1));
+                uint64_t ruleIdx =
+                    std::min(i, static_cast<uint64_t>(
+                                    kernel->requiresContiguous.empty() ? 0 : kernel->requiresContiguous.size() - 1));
                 if (ruleIdx < kernel->requiresContiguous.size())
                 {
                     needContig = (kernel->requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
@@ -507,7 +510,8 @@ struct FusionRule : public Rule
                     dummyNode.setShape(parent.shape);
                     dummyNode.strides = parent.strides;
 
-                    cand.child_mem_paths[i] = findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, mapped_engines);
+                    cand.child_mem_paths[i] =
+                        findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, mapped_engines);
                     if (cand.child_mem_paths[i].empty())
                     {
                         valid_paths = false;
@@ -537,13 +541,15 @@ struct FusionRule : public Rule
             if (!valid_paths)
                 continue;
 
-            std::vector<uint64_t> actualOutStrides = kernel->is_view ? oldENode.getStrides() : calcContiguousStrides(outShape);
+            std::vector<uint64_t> actualOutStrides =
+                kernel->is_view ? oldENode.getStrides() : calcContiguousStrides(outShape);
 
             if (ctx.costModel)
             {
-                cand.cost = ctx.costModel->estimateCost(kernel->uid, outShape, actualOutStrides, outDtype,
-                                                        actualInShapes, actualInStrides, actualInDTypes, actualInConstants,
-                                                        /*exactRecordOnly=*/true);
+                cand.cost =
+                    ctx.costModel->estimateCost(kernel->uid, outShape, actualOutStrides, outDtype, actualInShapes,
+                                                actualInStrides, actualInDTypes, actualInConstants,
+                                                /*exactRecordOnly=*/true);
             }
 
             candidates.push_back(std::move(cand));
@@ -637,8 +643,8 @@ struct FusionRule : public Rule
                         for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
                         {
                             MemSpace next_ms = path[p_idx];
-                            pathPid = addOpToEGraph(egraph, OpType::COPY_TO, {pathPid}, pathClass.shape, pathClass.strides,
-                                                    pathClass.dtype, next_ms,
+                            pathPid = addOpToEGraph(egraph, OpType::COPY_TO, {pathPid}, pathClass.shape,
+                                                    pathClass.strides, pathClass.dtype, next_ms,
                                                     (p_idx == path.size() - 1) ? finalTargetClass : EClassId());
                             if (p_idx == path.size() - 1)
                             {
@@ -656,8 +662,8 @@ struct FusionRule : public Rule
             std::vector<uint64_t> strides =
                 cand.kernel->is_view ? oldENode.getStrides() : calcContiguousStrides(oldENode.getShape());
 
-            ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, adapted_children, oldENode.getShape(), strides,
-                        oldENode.getDType(), cand.target_mem_space, cand.mapped_engines);
+            ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, adapted_children,
+                        oldENode.getShape(), strides, oldENode.getDType(), cand.target_mem_space, cand.mapped_engines);
 
             MemSpace originalMemSpace = egraph.getEClass(egraph.findConst(e_class_id)).mem_space;
             if (cand.target_mem_space == originalMemSpace)
@@ -680,8 +686,8 @@ struct FusionRule : public Rule
                 }
 
                 const EClass copySrcCls = egraph.getEClass(egraph.findConst(srcForCopy));
-                addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides, copySrcCls.dtype,
-                              originalMemSpace, e_class_id);
+                addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides,
+                              copySrcCls.dtype, originalMemSpace, e_class_id);
             }
         }
     }
@@ -1473,8 +1479,7 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId)
-                {
+                                       EClassId stId, EClassId enId, EClassId stepId) {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -2059,8 +2064,7 @@ struct RemoveContiguous : public Rule
         std::vector<std::vector<EClassId>> childCombinations;
         std::vector<EClassId> currentCombination(children.size());
 
-        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped)
-        {
+        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
             if (pos == children.size())
             {
                 if (hasUnwrapped)

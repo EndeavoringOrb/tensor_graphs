@@ -1,0 +1,32 @@
+{
+  "rules": {
+    "bufferize": {
+      "MemSpaceMismatchInplaceRule": true,
+      "LinearChainInplaceDominationRule": true,
+      "IntervalSubsetDominationRule": true,
+      "CommutativeInplaceSymmetryRule": true,
+      "DeadBufferReuseDominationRule": true,
+      "PeakMemoryPruningRule": true
+    },
+    "malloc": {
+      "OffsetMonotoneRule": true,
+      "IdMaxSymmetryRule": true,
+      "HMinBoundRule": true,
+      "LargerBufferPriorityRule": true
+    },
+    "cache": {
+      "SingleUseSkipRule": true,
+      "TinyBufferSkipRule": true,
+      "StorageAnchoredSkipRule": true
+    },
+    "extract": {
+      "InfiniteCostSkipRule": true,
+      "SiblingEquivalentSkipRule": true
+    },
+    "enode": {
+      "MemCapENodeDominationRule": true,
+      "FasterEquivalentENodeDominationRule": true,
+      "DeadChildChainDominationRule": true
+    }
+  }
+}

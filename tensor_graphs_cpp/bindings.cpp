@@ -336,8 +336,8 @@ class Krea2Session
         mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
-        auto roots = build_krea2_pipeline_graph(*g, *mem, actual_dit_path, actual_te_path, actual_vae_path,
-                                                height, width, text_seq_len, steps, mu);
+        auto roots = build_krea2_pipeline_graph(*g, *mem, actual_dit_path, actual_te_path, actual_vae_path, height,
+                                                width, text_seq_len, steps, mu);
         imageOutputId = roots.roots[0];
         inputIdsId = roots.inputs[0];
         latentInputId = roots.inputs[1];
@@ -629,10 +629,9 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
                       uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
-             py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128,
-             py::arg("steps") = 8, py::arg("mu") = 1.15f, py::arg("delegate") = nullptr,
-             py::arg("min_compile_time") = 0.0f, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false, py::arg("threads") = 0)
+             py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
+             py::arg("mu") = 1.15f, py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
+             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0)
         .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"));
 }

@@ -350,6 +350,8 @@ template <typename... RuleTypes> struct BufferizeBench
 
         std::vector<double> base_times;
         std::vector<double> rule_times;
+        // Tight memory limit: 16 KB (4 buffers of 4KB each, exactly matching minimum required peak for in-place)
+        uint64_t tight_mem_cap = 16384ULL;
 
         for (double s : scales)
         {
@@ -362,7 +364,7 @@ template <typename... RuleTypes> struct BufferizeBench
                 return r;
             }
 
-            MockCtx mock;
+            MockCtx mock(tight_mem_cap);
             Graph g;
             LogicalId root = buildLinearChain(g, static_cast<int>(s));
             mock.build(g, root);
@@ -377,7 +379,8 @@ template <typename... RuleTypes> struct BufferizeBench
             }
             uint64_t mem_cap = mock.settings.mem_caps.at(MemSpace{1, HandleType::CPP});
 
-            auto base_iter = makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos);
+            auto base_iter =
+                makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos, mock.settings.mem_caps);
             std::vector<ParallelBuffer> bufs;
             std::unordered_map<EClassId, BufferId> eclass_to_buf;
             float baseline_cost = TGConstants::INF;
@@ -398,7 +401,8 @@ template <typename... RuleTypes> struct BufferizeBench
 
             auto rule_iter = std::apply(
                 [&](auto &&...rs) {
-                    return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos, rs...);
+                    return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos,
+                                                 mock.settings.mem_caps, rs...);
                 },
                 rules_tuple);
 
@@ -427,7 +431,8 @@ template <typename... RuleTypes> struct BufferizeBench
             }
 
             auto make_base = [&]() {
-                return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos);
+                return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos,
+                                             mock.settings.mem_caps);
             };
             auto yield_base = [&](auto &it) {
                 if (check_timeout())
@@ -448,7 +453,8 @@ template <typename... RuleTypes> struct BufferizeBench
             auto make_rule = [&]() {
                 return std::apply(
                     [&](auto &&...rs) {
-                        return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos, rs...);
+                        return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos,
+                                                     mock.settings.mem_caps, rs...);
                     },
                     rules_tuple);
             };
@@ -518,7 +524,8 @@ template <typename... RuleTypes> struct MallocBench
 
         std::vector<double> base_times;
         std::vector<double> rule_times;
-        uint64_t mem_cap = 64ULL * 1024 * 1024;
+        // Tight memory limit: 18 MB (minimum theoretical peak overlap is 17 MB)
+        uint64_t mem_cap = 18ULL * 1024 * 1024;
 
         for (double s : scales)
         {
@@ -533,8 +540,9 @@ template <typename... RuleTypes> struct MallocBench
 
             std::vector<ParallelBuffer> unallocated = buildMallocBuffers(static_cast<int>(s));
 
-            auto test_iter =
-                std::apply([&](auto &&...rs) { return makeMallocIterator(mem_cap, unallocated, rs...); }, rules_tuple);
+            auto test_iter = std::apply(
+                [&](auto &&...rs) { return makeMallocIterator(mem_cap, unallocated, CapRespectRule(true), rs...); },
+                rules_tuple);
 
             std::vector<ParallelBuffer> allocated;
             if (!test_iter.getNextAllocation(allocated))
@@ -575,7 +583,7 @@ template <typename... RuleTypes> struct MallocBench
                 }
             }
 
-            auto make_base = [&]() { return makeMallocIterator(mem_cap, unallocated); };
+            auto make_base = [&]() { return makeMallocIterator(mem_cap, unallocated, CapRespectRule(true)); };
             auto yield_base = [&](auto &it) {
                 if (check_timeout())
                     return false;
@@ -592,8 +600,9 @@ template <typename... RuleTypes> struct MallocBench
             base_times.push_back(base_res.test_ms);
 
             auto make_rule = [&]() {
-                return std::apply([&](auto &&...rs) { return makeMallocIterator(mem_cap, unallocated, rs...); },
-                                  rules_tuple);
+                return std::apply(
+                    [&](auto &&...rs) { return makeMallocIterator(mem_cap, unallocated, CapRespectRule(true), rs...); },
+                    rules_tuple);
             };
             auto yield_rule = [&](auto &it) {
                 if (check_timeout())
@@ -1013,6 +1022,8 @@ template <typename... RuleTypes> struct ENodeDominationBench
 
         std::vector<double> base_times;
         std::vector<double> rule_times;
+        // Tight memory limit: 2 MB (prunes 4MB big add kernel)
+        uint64_t tight_mem_cap = 2ULL * 1024 * 1024;
 
         for (double s : scales)
         {
@@ -1025,7 +1036,7 @@ template <typename... RuleTypes> struct ENodeDominationBench
                 return r;
             }
 
-            MockCtx mock;
+            MockCtx mock(tight_mem_cap);
             Graph g;
             auto twins = buildFmaTwins(g, static_cast<int>(s));
             LogicalId root = twins.root;
@@ -1334,15 +1345,19 @@ inline void runPruningTests(const std::string &results_path = "benchmarks/prunin
     auto completed = loadCompletedRecords(bench_binary_path);
     std::cout << "  Resuming: " << completed.size() << " previously completed rules found.\n";
 
-    std::vector<double> scales = {1.0, 2.0, 3.0};
+    std::vector<double> scales = {1.0, 2.0};
 
     // 1. Dispatch Rules
     runCategoryFromTuple<DispatchBench>(AllDispatchRuleTypes{}, "dispatch", scales, completed, results_path,
                                         bench_binary_path, timeout_seconds);
 
+    scales = {1.0, 2.0, 3.0, 4.0};
+
     // 2. Bufferize Rules
     runCategoryFromTuple<BufferizeBench>(AllBufferizeRuleTypes{}, "bufferize", scales, completed, results_path,
                                          bench_binary_path, timeout_seconds);
+
+    scales = {1.0, 2.0};
 
     // 3. Malloc Rules
     runCategoryFromTuple<MallocBench>(AllMallocRuleTypes{}, "malloc", scales, completed, results_path,

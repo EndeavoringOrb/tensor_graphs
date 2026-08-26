@@ -165,6 +165,7 @@ struct BufferizeContext
     const std::unordered_map<EClassId, EClassId> &inplace_alias;
     const std::vector<int> &current_choices;
     uint32_t k;
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 
     EClassId get_inplace_alias(EClassId id) const
     {
@@ -181,6 +182,228 @@ struct BufferizeContext
 // =============================================================================
 // Bufferize pruning rules
 // =============================================================================
+
+class PeakMemoryPruningRule
+{
+    bool enabled = true;
+    std::unordered_map<MemSpace, std::vector<uint64_t>> mem_usage;
+    std::unordered_map<EClassId, uint32_t> max_death_time;
+
+    struct UndoState
+    {
+        int choice;
+        EClassId target_base;
+        uint32_t old_death;
+        uint32_t new_death;
+    };
+    std::vector<UndoState> undo_stack;
+
+  public:
+    PeakMemoryPruningRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
+    {
+        return "PeakMemoryPruningRule";
+    }
+
+    void init(const BufferizeContext &ctx)
+    {
+        mem_usage.clear();
+        max_death_time.clear();
+        undo_stack.clear();
+
+        uint32_t T = ctx.ordered.size();
+        for (const auto &kv : ctx.mem_caps)
+        {
+            if (kv.first.type == HandleType::STORAGE)
+                continue;
+            mem_usage[kv.first].assign(T + 2, 0);
+        }
+    }
+
+    bool check(int candidate_choice, size_t, const BufferizeContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+        MemSpace ms = node.getMemSpace();
+
+        // 1. STORAGE is file-backed and does not consume RAM/VRAM capacity
+        if (ms.type == HandleType::STORAGE)
+            return false;
+
+        // 2. INPUT and CACHE nodes are preallocated in reserved memory
+        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+            return false;
+
+        auto cap_it = ctx.mem_caps.find(ms);
+        if (cap_it == ctx.mem_caps.end())
+            return false;
+        uint64_t cap = cap_it->second;
+        if (cap == std::numeric_limits<uint64_t>::max())
+            return false;
+
+        auto usage_it = mem_usage.find(ms);
+        if (usage_it == mem_usage.end())
+            return false;
+        const auto &usage = usage_it->second;
+
+        uint64_t size = getSizeBytes(node.getShape(), node.getDType());
+        size = (size + 4095) & ~4095ULL;
+
+        uint32_t d_time = ctx.death_times.count(eclass) ? ctx.death_times.at(eclass) : 1;
+
+        if (candidate_choice == -1)
+        {
+            uint32_t b_time = ctx.birth_times.count(eclass) ? ctx.birth_times.at(eclass) : 0;
+            for (uint32_t t = b_time; t <= d_time && t < usage.size(); ++t)
+            {
+                if (usage[t] + size > cap)
+                {
+                    LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size();
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            EClassId child = ctx.egraph.findConst(node.getChildren()[candidate_choice]);
+            EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+            EClassId target_base = ctx.get_inplace_alias(child_base);
+
+            auto death_it = max_death_time.find(target_base);
+            uint32_t old_death = (death_it != max_death_time.end()) ? death_it->second : 0xFFFFFFFF;
+
+            if (old_death != 0xFFFFFFFF && d_time > old_death)
+            {
+                for (uint32_t t = old_death; t <= d_time && t < usage.size(); ++t)
+                {
+                    if (usage[t] + size > cap)
+                    {
+                        LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size();
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    void on_push(int choice, const BufferizeContext &ctx)
+    {
+        if (!enabled)
+            return;
+
+        EClassId eclass = ctx.ordered[ctx.k];
+        uint32_t sel = ctx.selection_map.at(eclass);
+        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = ctx.egraph.getENode(enode_id);
+        MemSpace ms = node.getMemSpace();
+
+        if (ms.type == HandleType::STORAGE || node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+        {
+            undo_stack.push_back({choice, EClassId{UINT32_MAX}, 0, 0});
+            return;
+        }
+
+        uint64_t size = getSizeBytes(node.getShape(), node.getDType());
+        size = (size + 4095) & ~4095ULL;
+
+        uint32_t d_time = ctx.death_times.count(eclass) ? ctx.death_times.at(eclass) : 1;
+
+        UndoState state{choice, EClassId{UINT32_MAX}, 0, 0};
+
+        if (choice == -1)
+        {
+            uint32_t b_time = ctx.birth_times.count(eclass) ? ctx.birth_times.at(eclass) : 0;
+            state.target_base = eclass;
+            state.old_death = b_time;
+            state.new_death = d_time;
+            max_death_time[eclass] = d_time;
+
+            if (mem_usage.count(ms))
+            {
+                for (uint32_t t = b_time; t <= d_time && t < mem_usage[ms].size(); ++t)
+                {
+                    mem_usage[ms][t] += size;
+                }
+            }
+        }
+        else
+        {
+            EClassId child = ctx.egraph.findConst(node.getChildren()[choice]);
+            EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+            EClassId target_base = ctx.get_inplace_alias(child_base);
+
+            auto death_it = max_death_time.find(target_base);
+            if (death_it != max_death_time.end())
+            {
+                uint32_t old_death = death_it->second;
+                if (d_time > old_death)
+                {
+                    state.target_base = target_base;
+                    state.old_death = old_death;
+                    state.new_death = d_time;
+                    max_death_time[target_base] = d_time;
+
+                    if (mem_usage.count(ms))
+                    {
+                        for (uint32_t t = old_death; t <= d_time && t < mem_usage[ms].size(); ++t)
+                        {
+                            mem_usage[ms][t] += size;
+                        }
+                    }
+                }
+            }
+        }
+        undo_stack.push_back(state);
+    }
+
+    void on_pop(int choice, const BufferizeContext &ctx)
+    {
+        if (!enabled)
+            return;
+
+        UndoState state = undo_stack.back();
+        undo_stack.pop_back();
+
+        if (state.target_base.value != UINT32_MAX)
+        {
+            EClassId eclass = ctx.ordered[ctx.k];
+            uint32_t sel = ctx.selection_map.at(eclass);
+            ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
+            const ENode &node = ctx.egraph.getENode(enode_id);
+            MemSpace ms = node.getMemSpace();
+
+            uint64_t size = getSizeBytes(node.getShape(), node.getDType());
+            size = (size + 4095) & ~4095ULL;
+
+            if (state.choice == -1)
+            {
+                max_death_time.erase(state.target_base);
+            }
+            else
+            {
+                max_death_time[state.target_base] = state.old_death;
+            }
+
+            if (mem_usage.count(ms))
+            {
+                for (uint32_t t = state.old_death; t <= state.new_death && t < mem_usage[ms].size(); ++t)
+                {
+                    mem_usage[ms][t] -= size;
+                }
+            }
+        }
+    }
+};
 
 class MemSpaceMismatchInplaceRule
 {
@@ -545,18 +768,22 @@ template <typename... Rules> struct BufferizeIterator
     std::vector<int> state;
     std::vector<std::vector<uint32_t>> choice_orders;
     std::unordered_map<EClassId, EClassId> inplace_alias;
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 
     template <typename... Rs>
     BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,
                       const std::unordered_map<EClassId, uint32_t> &_selection_map,
-                      const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate,
-                      Rs &&..._rules)
+                      const std::vector<ENodeInfo> &_enodeInfos,
+                      const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
+                      std::shared_ptr<SearchDelegate> _delegate, Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), ordered(_ordered), egraph(_egraph), selection_map(_selection_map),
-          enodeInfos(_enodeInfos), delegate(std::move(_delegate))
+          enodeInfos(_enodeInfos), mem_caps(_mem_caps), delegate(std::move(_delegate))
     {
         init();
-        BufferizeContext ctx{ordered,       egraph, selection_map,           enodeInfos, birth_times, death_times,
-                             inplace_alias, {},     static_cast<uint32_t>(0)};
+        BufferizeContext ctx{ordered,       egraph,      selection_map,
+                             enodeInfos,    birth_times, death_times,
+                             inplace_alias, {},          static_cast<uint32_t>(0),
+                             mem_caps};
         rules.init(ctx);
     }
 
@@ -725,6 +952,16 @@ template <typename... Rules> struct BufferizeIterator
             }
 
             EClassId eclass = ordered[k];
+
+            // Pop the rule state!
+            uint32_t choice_idx = choice_orders[k][state[k] - 1];
+            int choice = valid_choices[k][choice_idx];
+            BufferizeContext pop_ctx{ordered,       egraph,           selection_map,
+                                     enodeInfos,    birth_times,      death_times,
+                                     inplace_alias, valid_choices[k], static_cast<uint32_t>(k),
+                                     mem_caps};
+            rules.on_pop(choice, pop_ctx);
+
             inplace_alias.erase(eclass);
 
             if (state[k] < valid_choices[k].size())
@@ -740,6 +977,7 @@ template <typename... Rules> struct BufferizeIterator
     bool getNextBufferization(std::vector<ParallelBuffer> &out_buffers,
                               std::unordered_map<EClassId, BufferId> &out_eclass_to_buf)
     {
+        LOG(DEBUG) << "getNextBufferization";
         if (is_done)
             return false;
         if (!first_yield)
@@ -832,11 +1070,15 @@ template <typename... Rules> struct BufferizeIterator
 
                 BufferizeContext ctx{ordered,       egraph,           selection_map,
                                      enodeInfos,    birth_times,      death_times,
-                                     inplace_alias, valid_choices[k], static_cast<uint32_t>(k)};
+                                     inplace_alias, valid_choices[k], static_cast<uint32_t>(k),
+                                     mem_caps};
                 if (rules.is_pruned(choice, choice_idx, ctx))
                 {
                     continue;
                 }
+
+                // Push the rule state
+                rules.on_push(choice, ctx);
 
                 if (choice != -1)
                 {
@@ -967,9 +1209,9 @@ template <typename... Rules>
 BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIterator(
     const std::vector<EClassId> &ordered, const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-    Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps, Rules &&...rules)
 {
-    return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, nullptr,
+    return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, mem_caps, nullptr,
                                                      std::forward<Rules>(rules)...);
 }
 
@@ -977,32 +1219,36 @@ template <typename... Rules>
 BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
     const std::vector<EClassId> &ordered, const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-    std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps, std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
 {
-    return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, std::move(delegate),
-                                                     std::forward<Rules>(rules)...);
+    return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, mem_caps,
+                                                     std::move(delegate), std::forward<Rules>(rules)...);
 }
 
 inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                             const std::unordered_map<EClassId, uint32_t> &selection_map,
                                             const std::vector<ENodeInfo> &enodeInfos,
+                                            const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                             std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
 {
     settings.validate_rules("bufferize");
     return makeBufferizeIteratorWithDelegate(
-        ordered, egraph, selection_map, enodeInfos, std::move(delegate),
+        ordered, egraph, selection_map, enodeInfos, mem_caps, std::move(delegate),
         MemSpaceMismatchInplaceRule(settings.is_rule_enabled("bufferize", "MemSpaceMismatchInplaceRule")),
         LinearChainInplaceDominationRule(settings.is_rule_enabled("bufferize", "LinearChainInplaceDominationRule")),
         IntervalSubsetDominationRule(settings.is_rule_enabled("bufferize", "IntervalSubsetDominationRule")),
         CommutativeInplaceSymmetryRule(settings.is_rule_enabled("bufferize", "CommutativeInplaceSymmetryRule")),
-        DeadBufferReuseDominationRule(settings.is_rule_enabled("bufferize", "DeadBufferReuseDominationRule")));
+        DeadBufferReuseDominationRule(settings.is_rule_enabled("bufferize", "DeadBufferReuseDominationRule")),
+        PeakMemoryPruningRule(settings.is_rule_enabled("bufferize", "PeakMemoryPruningRule")));
 }
 
 inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                             const std::unordered_map<EClassId, uint32_t> &selection_map,
-                                            const std::vector<ENodeInfo> &enodeInfos, const Settings &settings)
+                                            const std::vector<ENodeInfo> &enodeInfos,
+                                            const std::unordered_map<MemSpace, uint64_t> &mem_caps,
+                                            const Settings &settings)
 {
-    return makeConfiguredBufferizeIterator(ordered, egraph, selection_map, enodeInfos, nullptr, settings);
+    return makeConfiguredBufferizeIterator(ordered, egraph, selection_map, enodeInfos, mem_caps, nullptr, settings);
 }
 
 // =============================================================================
@@ -1410,10 +1656,9 @@ inline auto makeConfiguredMallocIterator(uint64_t mem_cap, const std::vector<Par
 {
     settings.validate_rules("malloc");
     return makeMallocIteratorWithDelegate(
-        mem_cap, unallocated, std::move(delegate),
+        mem_cap, unallocated, std::move(delegate), CapRespectRule(true),
         OffsetMonotoneRule(settings.is_rule_enabled("malloc", "OffsetMonotoneRule")),
         IdMaxSymmetryRule(settings.is_rule_enabled("malloc", "IdMaxSymmetryRule")),
-        CapRespectRule(settings.is_rule_enabled("malloc", "CapRespectRule")),
         HMinBoundRule(settings.is_rule_enabled("malloc", "HMinBoundRule")),
         LargerBufferPriorityRule(settings.is_rule_enabled("malloc", "LargerBufferPriorityRule")));
 }
@@ -1593,8 +1838,8 @@ struct MemValidator : public ISelectionValidator
         cost = get_cost(order, egraph, selection_map, enodeInfos);
 
         const Settings &active_settings = settings_ptr ? *settings_ptr : Settings::get_default();
-        auto buf_iter =
-            makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, delegate, active_settings);
+        auto buf_iter = makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, mem_caps, delegate,
+                                                        active_settings);
 
         std::vector<ParallelBuffer> unallocated_buffers;
         std::unordered_map<EClassId, BufferId> eclass_to_buf_local;

@@ -158,8 +158,8 @@ class HeuristicSearchDelegate : public SearchDelegate
         std::iota(res.begin(), res.end(), 0);
         std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
             if (ready_nodes[a].dp_cost != ready_nodes[b].dp_cost)
-                return ready_nodes[a].dp_cost > ready_nodes[b].dp_cost;
-            return ready_nodes[a].cost > ready_nodes[b].cost;
+                return ready_nodes[a].dp_cost < ready_nodes[b].dp_cost;
+            return ready_nodes[a].cost < ready_nodes[b].cost;
         });
         return res;
     }
@@ -169,7 +169,7 @@ class HeuristicSearchDelegate : public SearchDelegate
         std::vector<uint32_t> res(choices.size());
         std::iota(res.begin(), res.end(), 0);
         std::stable_sort(res.begin(), res.end(),
-                         [&](uint32_t a, uint32_t b) { return choices[a].is_new_buffer > choices[b].is_new_buffer; });
+                         [&](uint32_t a, uint32_t b) { return choices[a].is_new_buffer < choices[b].is_new_buffer; });
         return res;
     }
 

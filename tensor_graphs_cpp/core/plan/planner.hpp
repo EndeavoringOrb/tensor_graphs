@@ -1395,8 +1395,32 @@ struct Planner
 
         auto extractor = makeConfiguredExtractor(egraph, rootEClassId, enodeInfos, delegate, settings);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(
-            egraph, enodeInfos, settings.mem_caps, eclassToLogical, preallocatedBuffers, delegate, &settings));
+
+        std::unordered_map<MemSpace, uint64_t> reduced_caps;
+        std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
+        for (const auto &kv : settings.mem_caps)
+        {
+            reduced_caps[kv.first] = kv.second;
+        }
+        for (const auto &kv : preallocatedBuffers)
+        {
+            uint64_t extent = kv.second.offset + kv.second.size;
+            reserved_per_ms[kv.second.mem_space] = std::max(reserved_per_ms[kv.second.mem_space], extent);
+        }
+        for (const auto &kv : reserved_per_ms)
+        {
+            if (reduced_caps.count(kv.first))
+            {
+                if (kv.second >= reduced_caps[kv.first])
+                {
+                    reduced_caps[kv.first] = 0;
+                }
+                else
+                {
+                    reduced_caps[kv.first] -= kv.second;
+                }
+            }
+        }
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -1415,135 +1439,142 @@ struct Planner
         {
             if (extractor.is_done())
                 break;
-
-#ifdef TG_DEBUG
-            std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
-            if (max_iters - (remaining_iters + 1) > 0)
-            {
-                std::cout << ", avg loop "
-                          << std::to_string(timer.getElapsed() * 1000 / (max_iters - (remaining_iters + 1))) << "ms";
-            }
-            std::cout << std::endl;
-            loopTimer.reset();
-#endif
-
             if (!extractor.getNextSelection())
             {
                 extractor.ascend();
                 timer.tick();
                 continue;
             }
-            LOG(DEBUG) << "got selection";
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
 
-            bool valid = true;
+            bool valid = false;
             std::vector<EClassId> order;
-            std::vector<ParallelBuffer> buffers;
-            std::unordered_map<EClassId, BufferId> eclass_to_buf;
             float cost = TGConstants::INF;
-            std::vector<EClassId> conflict_nodes;
 
             auto dispatch_iterator =
                 makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, delegate, settings);
 
-            bool found_order = false;
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
-                found_order = true;
-                valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
-                if (!valid)
-                    break;
-                if (cost < best_cost)
-                {
-                    best_cost = cost;
-                    best_selection_map = selection_map;
-                    best_order = order;
-                    best_buffers = buffers;
-                    best_eclass_to_buf = eclass_to_buf;
-                    LOG(INFO) << "new best cost " << best_cost;
-                }
-                if (stopOnFirstValid)
-                {
-                    break;
-                }
-            }
+                auto buf_iter = makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, reduced_caps,
+                                                                delegate, settings);
 
-            if (!found_order)
-            {
-                valid = false;
-                extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
+                std::vector<ParallelBuffer> unallocated_buffers;
+                std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
+
+                while (buf_iter.getNextBufferization(unallocated_buffers, eclass_to_buf_local))
+                {
+                    std::unordered_set<BufferId> preallocated_buf_ids;
+                    std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
+
+                    for (EClassId eclass : order)
+                    {
+                        auto logicalIt = eclassToLogical.find(eclass);
+                        if (logicalIt == eclassToLogical.end())
+                            continue;
+                        auto sel_it = selection_map.find(eclass);
+                        if (sel_it == selection_map.end())
+                            continue;
+                        uint32_t sel = sel_it->second;
+                        ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
+                        const ENode &node = egraph.getENode(enode_id);
+                        if (node.getOpType() != OpType::INPUT && node.getOpType() != OpType::CACHE)
+                            continue;
+
+                        auto preIt = preallocatedBuffers.find(logicalIt->second);
+                        if (preIt == preallocatedBuffers.end())
+                            continue;
+
+                        BufferId buf_id = eclass_to_buf_local.at(eclass);
+                        preallocated_buf_ids.insert(buf_id);
+                        preallocated_overrides[buf_id] = preIt->second;
+                    }
+
+                    std::unordered_map<MemSpace, std::vector<ParallelBuffer>> buf_by_mem_space;
+                    for (auto &buf : unallocated_buffers)
+                    {
+                        if (buf.mem_space.type == HandleType::STORAGE || preallocated_buf_ids.count(buf.id))
+                            continue;
+                        buf_by_mem_space[buf.mem_space].push_back(buf);
+                    }
+
+                    std::vector<ParallelBuffer> current_buffers;
+                    current_buffers.reserve(unallocated_buffers.size());
+
+                    for (auto &buf : unallocated_buffers)
+                    {
+                        if (buf.mem_space.type == HandleType::STORAGE)
+                        {
+                            buf.offset = 0;
+                            current_buffers.push_back(buf);
+                        }
+                        else if (preallocated_buf_ids.count(buf.id))
+                        {
+                            buf.offset = preallocated_overrides.at(buf.id).offset;
+                            current_buffers.push_back(buf);
+                        }
+                    }
+
+                    bool alloc_ok = true;
+                    BufferId overflow;
+
+                    for (auto &kv : buf_by_mem_space)
+                    {
+                        MemSpace ms = kv.first;
+                        uint64_t cap =
+                            reduced_caps.count(ms) ? reduced_caps.at(ms) : std::numeric_limits<uint64_t>::max();
+                        uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
+
+                        std::vector<ParallelBuffer> allocated;
+                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &settings))
+                        {
+                            alloc_ok = false;
+                            break;
+                        }
+                        for (auto &buf : allocated)
+                        {
+                            buf.offset += static_cast<int64_t>(reserved);
+                        }
+                        current_buffers.insert(current_buffers.end(), std::make_move_iterator(allocated.begin()),
+                                               std::make_move_iterator(allocated.end()));
+                    }
+
+                    if (alloc_ok)
+                    {
+                        valid = true;
+                        cost = get_cost(order, egraph, selection_map, enodeInfos);
+                        if (cost < best_cost)
+                        {
+                            best_cost = cost;
+                            best_selection_map = selection_map;
+                            best_order = order;
+                            best_buffers = std::move(current_buffers);
+                            best_eclass_to_buf = std::move(eclass_to_buf_local);
+                            LOG(INFO) << "new best cost " << best_cost;
+                        }
+                        if (stopOnFirstValid)
+                            break;
+                    }
+                }
+                if (valid && stopOnFirstValid)
+                    break;
             }
 
             if (extractor.active_options == 0)
             {
-                std::cout << "finished extracting: no more graphs" << std::endl;
                 break;
             }
 
             if (valid && stopOnFirstValid && best_cost < TGConstants::INF)
-            {
                 break;
-            }
 
             if (valid && minCompileSeconds > 0.0f)
             {
                 auto current_time = std::chrono::high_resolution_clock::now();
-                float elapsed = std::chrono::duration<float>(current_time - start_time).count();
-                if (elapsed >= minCompileSeconds)
-                {
-                    std::cout << "finished extracting: hit minimum required compile time" << std::endl;
-                    break;
-                }
-            }
-
-            if (!valid)
-            {
-                if (delegate && delegate->fast_fail())
+                if (std::chrono::duration<float>(current_time - start_time).count() >= minCompileSeconds)
                 {
                     break;
-                }
-                int max_conflict_path_pos = -1;
-                int best_conflict_pos = -1;
-
-                for (EClassId c_node : conflict_nodes)
-                {
-                    int pos = extractor.path_pos[c_node.value];
-                    if (pos != -1)
-                    {
-                        if (pos > max_conflict_path_pos)
-                        {
-                            max_conflict_path_pos = pos;
-                        }
-
-                        auto sel_it = selection_map.find(c_node);
-                        if (sel_it != selection_map.end())
-                        {
-                            uint32_t sel_idx = sel_it->second;
-                            if (sel_idx + 1 < egraph.getEClass(c_node).enodes.size())
-                            {
-                                if (pos > best_conflict_pos)
-                                {
-                                    best_conflict_pos = pos;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (best_conflict_pos != -1)
-                {
-                    extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
-                    LOG(INFO) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                              << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
-                              << " (path index " << best_conflict_pos << ") to resolve OOM.";
-                }
-                else if (max_conflict_path_pos != -1)
-                {
-                    extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
-                    LOG(INFO) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                              << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
-                              << " (path index " << max_conflict_path_pos << ")";
                 }
             }
 

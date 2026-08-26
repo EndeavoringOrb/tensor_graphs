@@ -662,8 +662,7 @@ struct CostModel
                        const std::vector<uint64_t> &outStrides, DType outDType,
                        const std::vector<std::vector<uint32_t>> &inShapes,
                        const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
-                       const std::vector<std::vector<uint8_t>> &inConstants,
-                       bool exactRecordOnly = false)
+                       const std::vector<std::vector<uint8_t>> &inConstants, bool exactRecordOnly = false)
     {
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())

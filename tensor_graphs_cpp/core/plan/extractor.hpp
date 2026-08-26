@@ -93,6 +93,55 @@ struct DispatchNodeMeta
     }
 };
 
+class InputDispatchDominationRule
+{
+    bool enabled = true;
+
+  public:
+    InputDispatchDominationRule(bool en = true) : enabled(en)
+    {
+    }
+
+    const char *name() const
+    {
+        return "InputDispatchDominationRule";
+    }
+
+    bool check(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+
+        // O(1) early-exit: immediately ignore any non-input/non-cache compute node
+        uint32_t sel_cand = ctx.selection_map.at(cand);
+        ENodeId enode_cand_id = ctx.egraph.getEClass(cand).enodes[sel_cand];
+        const ENode &enode_cand = ctx.egraph.getENode(enode_cand_id);
+        OpType cand_op = enode_cand.getOpType();
+
+        if (cand_op != OpType::INPUT && cand_op != OpType::CACHE)
+            return false;
+
+        // Enforce strictly monotonic ordering (by EClassId) among all ready INPUT and CACHE nodes
+        for (EClassId other : ctx.current_ready)
+        {
+            if (other.value >= cand.value)
+                continue;
+
+            uint32_t sel_other = ctx.selection_map.at(other);
+            ENodeId enode_other_id = ctx.egraph.getEClass(other).enodes[sel_other];
+            const ENode &enode_other = ctx.egraph.getENode(enode_other_id);
+            OpType other_op = enode_other.getOpType();
+
+            if (other_op == OpType::INPUT || other_op == OpType::CACHE)
+            {
+                return true; // Prune: `other` has smaller EClassId and must be dispatched first
+            }
+        }
+
+        return false;
+    }
+};
+
 // =============================================================================
 // DispatchIterator
 // =============================================================================
@@ -491,7 +540,9 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
 {
     settings.validate_dispatch_rules();
-    return makeDispatchIteratorWithDelegate(egraph, selection_map, enodeInfos, std::move(delegate));
+    return makeDispatchIteratorWithDelegate(
+        egraph, selection_map, enodeInfos, std::move(delegate),
+        InputDispatchDominationRule(settings.is_rule_enabled("dispatch", "InputDispatchDominationRule")));
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
@@ -752,15 +803,11 @@ template <typename... Rules> struct Extractor
             }
 
             bool found_valid = false;
-            int max_conflict_path_pos = -1;
-            std::vector<EClassId> aggregate_conflicts;
-
             for (; sel < enodes.size(); ++sel)
             {
                 uint32_t chosen_sel = current_orders[current][sel];
                 ENodeId enode_id = enodes[chosen_sel];
 
-                // Apply DFS pruning rules -- skip candidate if pruned.
                 ExtractContext pctx{egraph, enodeInfos, selection_map, path, current, chosen_sel};
                 if (rules.is_pruned(enode_id, static_cast<size_t>(chosen_sel), pctx))
                 {
@@ -770,11 +817,10 @@ template <typename... Rules> struct Extractor
                 selection_map[current] = chosen_sel;
 
                 bool step_valid = true;
-                std::vector<EClassId> conflict_nodes;
-
+                std::vector<EClassId> dummy_conflict;
                 for (const auto &validator : validators)
                 {
-                    if (!validator->validateStep(current, enode_id, selection_map, conflict_nodes))
+                    if (!validator->validateStep(current, enode_id, selection_map, dummy_conflict))
                     {
                         step_valid = false;
                         break;
@@ -788,17 +834,6 @@ template <typename... Rules> struct Extractor
                 }
                 else
                 {
-                    aggregate_conflicts.insert(aggregate_conflicts.end(), conflict_nodes.begin(), conflict_nodes.end());
-                    for (EClassId c_node : conflict_nodes)
-                    {
-                        if (c_node != current && path_pos[c_node.value] != -1)
-                        {
-                            if (path_pos[c_node.value] > max_conflict_path_pos)
-                            {
-                                max_conflict_path_pos = path_pos[c_node.value];
-                            }
-                        }
-                    }
                     selection_map.erase(current);
                 }
             }
@@ -814,36 +849,6 @@ template <typename... Rules> struct Extractor
                     return false;
                 }
 
-                int best_conflict_pos = -1;
-                for (EClassId c_node : aggregate_conflicts)
-                {
-                    int pos = path_pos[c_node.value];
-                    if (pos != -1 && c_node != current)
-                    {
-                        auto sel_it = selection_map.find(c_node);
-                        if (sel_it != selection_map.end())
-                        {
-                            uint32_t sel_idx = sel_it->second;
-                            if (sel_idx + 1 < egraph.getEClass(c_node).enodes.size())
-                            {
-                                if (pos > best_conflict_pos)
-                                {
-                                    best_conflict_pos = pos;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (best_conflict_pos != -1)
-                {
-                    target_backtrack_eclass = path[best_conflict_pos];
-                }
-                else
-                {
-                    if (max_conflict_path_pos != -1)
-                        target_backtrack_eclass = path[max_conflict_path_pos];
-                }
                 return false;
             }
 
@@ -875,7 +880,6 @@ template <typename... Rules> struct Extractor
     void ascend()
     {
         LOG(DEBUG) << "ascend";
-        bool skip_increment = (target_backtrack_eclass != EClassId{UINT32_MAX});
 
         while (!path.empty())
         {
@@ -885,12 +889,6 @@ template <typename... Rules> struct Extractor
 
             if (selection_map.find(current) == selection_map.end())
                 continue;
-
-            if (skip_increment && current == target_backtrack_eclass)
-            {
-                LOG(DEBUG) << "skipped back to path size " << std::to_string(path.size()) << std::endl;
-                skip_increment = false;
-            }
 
             uint32_t chosen_sel = selection_map[current];
             const auto &enodes = egraph.getEClass(current).enodes;
@@ -902,10 +900,7 @@ template <typename... Rules> struct Extractor
                 iteration_index = static_cast<uint32_t>(std::distance(current_orders[current].begin(), it));
             }
 
-            ENodeId enode_id = enodes[chosen_sel];
-            const ENode &node = egraph.getENode(enode_id);
-
-            if (!skip_increment && iteration_index + 1 < enodes.size())
+            if (iteration_index + 1 < enodes.size())
             {
                 next_sel[current] = iteration_index + 1;
 

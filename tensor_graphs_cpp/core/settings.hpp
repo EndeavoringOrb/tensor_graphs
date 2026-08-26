@@ -223,8 +223,9 @@ struct Settings
                     if (!token.empty())
                         active_rules.insert(token);
                 }
-                std::cout << "[Settings] Category '" << category << "' activated best combination: "
-                          << best_rec->rule_name << " (speedup: " << best_rec->speedup << "x)\n";
+                std::cout << "[Settings] Category '" << category
+                          << "' activated best combination: " << best_rec->rule_name
+                          << " (speedup: " << best_rec->speedup << "x)\n";
             }
 
             for (const auto &rule_name : all_known_rules)
@@ -605,6 +606,7 @@ struct Settings
     void enable_all_default_rules(bool enabled = true)
     {
         const std::vector<std::pair<std::string, std::string>> defaults = {
+            {"dispatch", "InputDispatchDominationRule"},
             {"bufferize", "MemSpaceMismatchInplaceRule"},
             {"bufferize", "LinearChainInplaceDominationRule"},
             {"bufferize", "IntervalSubsetDominationRule"},
@@ -612,7 +614,6 @@ struct Settings
             {"bufferize", "DeadBufferReuseDominationRule"},
             {"malloc", "OffsetMonotoneRule"},
             {"malloc", "IdMaxSymmetryRule"},
-            {"malloc", "CapRespectRule"},
             {"malloc", "HMinBoundRule"},
             {"malloc", "LargerBufferPriorityRule"},
             {"cache", "SingleUseSkipRule"},

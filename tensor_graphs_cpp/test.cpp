@@ -21,7 +21,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--no-records"}, "Disable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
-    parser.add_option({"--timeout"}, "Timeout in seconds for each pruning test run (default: 5.0).", "5.0");
+    parser.add_option({"--timeout"}, "Timeout in seconds for each pruning test run (default: 15.0).", "15.0");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;

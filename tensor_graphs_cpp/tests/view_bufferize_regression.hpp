@@ -161,7 +161,7 @@ inline void testInplaceAliasEraseOnNewBuffer()
         Error::throw_err("[Regression Test Failed] Could not generate dispatch order.");
     }
 
-    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos);
+    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos, settings.mem_caps);
 
     std::vector<ParallelBuffer> bufs;
     std::unordered_map<EClassId, BufferId> eclass_to_buf;
@@ -244,7 +244,7 @@ inline void testBuildBuffersCoverageAndFallback()
         Error::throw_err("[Regression Test Failed] Failed to get dispatch order.");
     }
 
-    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos);
+    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos, settings.mem_caps);
     std::vector<ParallelBuffer> out_buffers;
     std::unordered_map<EClassId, BufferId> out_eclass_to_buf;
 
@@ -290,10 +290,189 @@ inline void testBuildBuffersCoverageAndFallback()
     }
 }
 
+// =============================================================================
+// Regression Test 4: PeakMemoryPruningRule Under Tight Memory Limits
+// =============================================================================
+inline void testPeakMemoryPruningUnderTightCap()
+{
+    std::cout << "  - running testPeakMemoryPruningUnderTightCap..." << std::endl;
+
+    CostModel costModel(false, "");
+    Settings settings = Settings::get_default();
+
+    // 16 KB cap: exactly fits in-place chain (4 buffers = 16384 bytes)
+    uint64_t tight_cap = 16384ULL;
+    settings.mem_caps = {{MemSpace{1, HandleType::CPP}, tight_cap}};
+
+    Graph graph;
+    LogicalId in0 = graph.input({8, 8}, DType::FLOAT32);
+    LogicalId in1 = graph.input({8, 8}, DType::FLOAT32);
+    LogicalId b1 = graph.add(in0, in1);
+    LogicalId b2 = graph.mul(in0, in1);
+    LogicalId curr = graph.add(b1, b2);
+    LogicalId out = graph.neg(curr);
+
+    std::vector<LogicalId> topo = topologicalSort({out}, graph);
+    Planner planner(costModel, settings);
+    planner.initBaseEGraph(out, graph, topo, nullptr);
+    populateDummyRecords(costModel, planner.baseState.egraph);
+
+    EGraph egraph = planner.baseState.egraph;
+    auto enodeInfos = planner.computeENodeInfos(egraph, planner.baseState.eclassToLogical, {}, false);
+
+    std::unordered_map<EClassId, uint32_t> selection_map;
+    for (const auto &cls : egraph.getClasses())
+    {
+        EClassId canon = egraph.findConst(cls.id);
+        if (!egraph.getEClass(canon).enodes.empty())
+            selection_map[canon] = 0;
+    }
+
+    auto dispatch_iter = makeDispatchIterator(egraph, selection_map, enodeInfos);
+    std::vector<EClassId> order;
+    if (!dispatch_iter.getNextDispatchOrder(selection_map, order))
+    {
+        Error::throw_err("[Regression Test Failed] Could not generate dispatch order.");
+    }
+
+    // 1. Verify PeakMemoryPruningRule prunes all out-of-place choices under 16KB cap
+    auto buf_iter =
+        makeBufferizeIterator(order, egraph, selection_map, enodeInfos, settings.mem_caps, PeakMemoryPruningRule(true));
+    std::vector<ParallelBuffer> bufs;
+    std::unordered_map<EClassId, BufferId> eclass_to_buf;
+
+    uint32_t yield_count = 0;
+    while (buf_iter.getNextBufferization(bufs, eclass_to_buf))
+    {
+        yield_count++;
+        BufferId overflow;
+        if (!check_peak_memory(bufs, tight_cap, overflow))
+        {
+            Error::throw_err(
+                "[Regression Test Failed] PeakMemoryPruningRule yielded a bufferization exceeding mem_cap!");
+        }
+    }
+
+    if (yield_count == 0)
+    {
+        Error::throw_err("[Regression Test Failed] PeakMemoryPruningRule pruned all valid in-place bufferizations!");
+    }
+
+    // 2. Verify clean rejection when mem_cap is lower than minimum feasible peak (8 KB < 16 KB)
+    std::unordered_map<MemSpace, uint64_t> impossible_caps = {{MemSpace{1, HandleType::CPP}, 8192ULL}};
+    auto impossible_iter =
+        makeBufferizeIterator(order, egraph, selection_map, enodeInfos, impossible_caps, PeakMemoryPruningRule(true));
+    if (impossible_iter.getNextBufferization(bufs, eclass_to_buf))
+    {
+        Error::throw_err(
+            "[Regression Test Failed] BufferizeIterator yielded a bufferization under an impossible 8KB cap!");
+    }
+}
+
+// =============================================================================
+// Regression Test 5: Malloc Under Tight Memory Limits
+// =============================================================================
+inline void testMallocUnderTightCap()
+{
+    std::cout << "  - running testMallocUnderTightCap..." << std::endl;
+
+    // 8 overlapping buffers with 17 MB peak demand
+    std::vector<ParallelBuffer> unallocated = prune_test::buildMallocBuffers(1);
+
+    // 1. Tight feasible cap (18 MB >= 17 MB peak)
+    uint64_t tight_cap = 18ULL * 1024 * 1024;
+    Settings settings = Settings::get_default();
+    auto iter = makeConfiguredMallocIterator(tight_cap, unallocated, nullptr, settings);
+
+    std::vector<ParallelBuffer> allocated;
+    if (!iter.getNextAllocation(allocated))
+    {
+        Error::throw_err("[Regression Test Failed] Malloc failed to find valid allocation under 18 MB tight cap!");
+    }
+
+    int64_t max_peak = 0;
+    for (const auto &b : allocated)
+    {
+        max_peak = std::max<int64_t>(max_peak, b.offset + b.size);
+    }
+    if (max_peak > static_cast<int64_t>(tight_cap))
+    {
+        Error::throw_err("[Regression Test Failed] Allocated buffers exceeded 18 MB tight cap!");
+    }
+
+    // 2. Infeasible cap (12 MB < 17 MB peak)
+    uint64_t impossible_cap = 12ULL * 1024 * 1024;
+    auto impossible_iter = makeConfiguredMallocIterator(impossible_cap, unallocated, nullptr, settings);
+    std::vector<ParallelBuffer> impossible_alloc;
+    if (impossible_iter.getNextAllocation(impossible_alloc))
+    {
+        Error::throw_err("[Regression Test Failed] Malloc yielded an allocation under impossible 12 MB cap!");
+    }
+}
+
+// =============================================================================
+// Regression Test 6: MemCapENodeDomination Under Tight Memory Limits
+// =============================================================================
+inline void testMemCapENodeDomination()
+{
+    std::cout << "  - running testMemCapENodeDomination..." << std::endl;
+
+    uint64_t tight_mem_cap = 2ULL * 1024 * 1024; // 2 MB
+    prune_test::MockCtx mock(tight_mem_cap);
+
+    Graph g;
+    auto twins = prune_test::buildFmaTwins(g, 1);
+    mock.build(g, twins.root, false, [&](EGraph &egraph, const std::unordered_map<LogicalId, EClassId> &n2e) {
+        prune_test::extendFmaTwinsEGraph(twins, egraph, n2e);
+    });
+
+    std::unordered_map<EClassId, LogicalId> emptyMap;
+    std::unordered_map<LogicalId, MemSpace> emptyCached;
+    ENodeDominationContext ctx{mock.egraph, mock.enodeInfos, emptyMap, emptyCached, mock.settings.mem_caps};
+
+    MemCapENodeDominationRule rule(true);
+
+    bool found_4mb_pruned = false;
+    bool found_small_kept = false;
+
+    for (uint32_t i = 0; i < mock.egraph.getENodes().size(); ++i)
+    {
+        ENodeId enodeId{i};
+        const ENode &enode = mock.egraph.getENode(enodeId);
+        bool should_prune = rule.check(enodeId, 0, ctx);
+
+        if (enode.getKernelId() == KernelId{prune_test::MockKernels::kAddBigOutplace})
+        {
+            if (!should_prune)
+            {
+                Error::throw_err("[Regression Test Failed] 4MB AddBigOutplace kernel was not pruned under 2MB cap!");
+            }
+            found_4mb_pruned = true;
+        }
+        else if (enode.getKernelId() == KernelId{prune_test::MockKernels::kFmaV2})
+        {
+            if (should_prune)
+            {
+                Error::throw_err(
+                    "[Regression Test Failed] 256-byte FmaV2 kernel was incorrectly pruned under 2MB cap!");
+            }
+            found_small_kept = true;
+        }
+    }
+
+    if (!found_4mb_pruned || !found_small_kept)
+    {
+        Error::throw_err("[Regression Test Failed] Did not evaluate both large and small kernel candidates!");
+    }
+}
+
 inline void runViewBufferizeRegressionTests()
 {
     std::cout << "view & bufferize regression tests" << std::endl << std::flush;
     testViewNotEmittedIntoInstructions();
     testInplaceAliasEraseOnNewBuffer();
     testBuildBuffersCoverageAndFallback();
+    testPeakMemoryPruningUnderTightCap();
+    testMallocUnderTightCap();
+    testMemCapENodeDomination();
 }
