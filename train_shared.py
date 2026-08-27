@@ -13,6 +13,8 @@ import numpy as np
 import tensor_graphs
 import torch
 
+from train_models import PolicyValueRNN
+
 torch.set_float32_matmul_precision("high")
 
 
@@ -1036,3 +1038,290 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
 
 HeuristicDelegate = tensor_graphs.HeuristicSearchDelegate
+
+
+@dataclasses.dataclass
+class RNNTransition:
+    hidden: np.ndarray  # [hidden_dim]
+    global_feat: np.ndarray  # [global_dim]
+    action_feats: np.ndarray  # [A, feat_dim]
+    phase_id: int
+    chosen_idx: int
+    log_prob: float
+    value: float
+
+
+@dataclasses.dataclass
+class RNNEpisode:
+    transitions: list[RNNTransition]
+    cost: float
+    reward: float
+
+
+class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
+    """
+    Search Delegate for REINFORCE.
+    Maintains the RNN hidden state on a push/pop stack as the C++ planner
+    explores and backtracks through the search space tree.
+    """
+
+    PHASE_MAP = {
+        "cache": 0,
+        "extract": 1,
+        "dispatch": 2,
+        "bufferize": 3,
+        "malloc": 4,
+        "frontier": 5,
+    }
+
+    def __init__(
+        self,
+        model: PolicyValueRNN,
+        mem_caps: dict[int, int] | None = None,
+        temperature: float = 1.0,
+        is_training: bool = True,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        self.model = model
+        self.device = (
+            device if device is not None else next(model.parameters()).device
+        )
+        self.temperature = max(1e-4, float(temperature))
+        self.is_training = is_training
+        self.mem_caps = mem_caps or {}
+
+        # Precompute normalized memory caps vector: [cpp, cuda, opencl, ...]
+        self.log_mem_cpp = math.log1p(
+            max(0.0, float(self.mem_caps.get(1, 16 * 1024 * 1024 * 1024)))
+        ) / 25.0
+        self.log_mem_cuda = math.log1p(
+            max(0.0, float(self.mem_caps.get(2, 24 * 1024 * 1024 * 1024)))
+        ) / 25.0
+        self.log_mem_opencl = math.log1p(
+            max(0.0, float(self.mem_caps.get(3, 1024 * 1024 * 1024)))
+        ) / 25.0
+
+        # State management
+        self.root_hidden = self.model.init_hidden(batch_size=1, device=self.device)
+        self.current_hidden = self.root_hidden.clone()
+        self.hidden_stack: list[torch.Tensor] = []
+        self.active_path: list[RNNTransition] = []
+        self.completed_episodes: list[RNNEpisode] = []
+
+    def reset_for_episode(self, mem_caps: dict[int, int] | None = None):
+        if mem_caps is not None:
+            self.mem_caps = mem_caps
+            self.log_mem_cpp = math.log1p(
+                max(0.0, float(self.mem_caps.get(1, 16 * 1024 * 1024 * 1024)))
+            ) / 25.0
+            self.log_mem_cuda = math.log1p(
+                max(0.0, float(self.mem_caps.get(2, 24 * 1024 * 1024 * 1024)))
+            ) / 25.0
+            self.log_mem_opencl = math.log1p(
+                max(0.0, float(self.mem_caps.get(3, 1024 * 1024 * 1024)))
+            ) / 25.0
+
+        self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
+        self.hidden_stack.clear()
+        self.active_path.clear()
+        self.completed_episodes.clear()
+
+    def fast_fail(self) -> bool:
+        return False
+
+    def push_state(self):
+        self.hidden_stack.append(self.current_hidden.clone())
+
+    def pop_state(self):
+        if self.hidden_stack:
+            self.current_hidden = self.hidden_stack.pop()
+        if self.active_path:
+            self.active_path.pop()
+
+    def on_leaf_evaluated(self, cost: float):
+        cost_val = float(cost)
+        if cost_val < float("inf") and not math.isnan(cost_val):
+            reward = 1000.0 / (cost_val + 1.0)
+        else:
+            reward = -1.0
+
+        if self.active_path:
+            self.completed_episodes.append(
+                RNNEpisode(
+                    transitions=list(self.active_path),
+                    cost=cost_val,
+                    reward=reward,
+                )
+            )
+
+    def _get_global_feature(self, phase_id: int) -> np.ndarray:
+        depth = float(len(self.active_path)) / 100.0
+        return np.array(
+            [
+                self.log_mem_cpp,
+                self.log_mem_cuda,
+                self.log_mem_opencl,
+                depth,
+                float(phase_id),
+                0.0,
+                0.0,
+                1.0,
+            ],
+            dtype=np.float32,
+        )
+
+    @torch.inference_mode()
+    def _order_items(self, items, phase_name: str, extract_fn) -> list[int]:
+        num_actions = len(items)
+        if num_actions <= 1:
+            return list(range(num_actions))
+
+        phase_id = self.PHASE_MAP[phase_name]
+        action_feats = extract_fn(items)
+        if isinstance(action_feats, torch.Tensor):
+            action_feats_np = action_feats.cpu().numpy()
+        else:
+            action_feats_np = np.array(action_feats, dtype=np.float32)
+
+        global_feat_np = self._get_global_feature(phase_id)
+
+        g_t = torch.tensor(global_feat_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+        a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+        logits, value = self.model.evaluate_candidates(
+            self.current_hidden, g_t, a_t, phase_id
+        )
+        scores = logits[0].cpu().numpy()
+        val_item = value[0, 0].item()
+
+        if self.is_training:
+            probs = torch.softmax(logits[0] / self.temperature, dim=-1).cpu().numpy()
+            probs = np.nan_to_num(probs, nan=1.0 / num_actions)
+            probs = probs / probs.sum()
+
+            chosen_idx = int(np.random.choice(num_actions, p=probs))
+            log_prob = float(np.log(max(1e-8, probs[chosen_idx])))
+
+            # Order: chosen action first, followed by others sorted by probability
+            remaining = [i for i in range(num_actions) if i != chosen_idx]
+            remaining.sort(key=lambda idx: -probs[idx])
+            order = [chosen_idx] + remaining
+        else:
+            order = np.argsort(-scores).tolist()
+            chosen_idx = order[0]
+            probs = torch.softmax(logits[0], dim=-1).cpu().numpy()
+            log_prob = float(np.log(max(1e-8, probs[chosen_idx])))
+
+        # Record step in active path
+        self.active_path.append(
+            RNNTransition(
+                hidden=self.current_hidden[0].detach().cpu().numpy(),
+                global_feat=global_feat_np,
+                action_feats=action_feats_np,
+                phase_id=phase_id,
+                chosen_idx=chosen_idx,
+                log_prob=log_prob,
+                value=val_item,
+            )
+        )
+
+        # Transition the hidden state for the selected branch
+        chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
+        _, self.current_hidden = self.model.step(
+            self.current_hidden, g_t, chosen_a_t, phase_id
+        )
+
+        return order
+
+    def order_cache(self, choices):
+        return self._order_items(choices, "cache", self._extract_cache_features)
+
+    def order_enodes(self, enodes):
+        return self._order_items(enodes, "extract", self._extract_dispatch_features)
+
+    def order_dispatch(self, ready_nodes):
+        return self._order_items(ready_nodes, "dispatch", self._extract_dispatch_features)
+
+    def order_bufferize(self, choices):
+        return self._order_items(choices, "bufferize", self._extract_bufferize_features)
+
+    def order_malloc(self, avail_buffers):
+        return self._order_items(avail_buffers, "malloc", self._extract_malloc_features)
+
+    def order_frontier(self, frontier):
+        return self._order_items(frontier, "frontier", self._extract_frontier_features)
+
+    def _extract_cache_features(self, items):
+        feats = []
+        for f in items:
+            mem_type = float(f.mem_space.type) if hasattr(f, "mem_space") else 0.0
+            feats.append(
+                [
+                    float(f.is_cached),
+                    math.log1p(max(0.0, float(f.size))),
+                    mem_type,
+                    float(f.op_type),
+                    float(f.num_users),
+                ]
+            )
+        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+
+    def _extract_dispatch_features(self, items):
+        feats = []
+        for f in items:
+            num_nodes = len(f.graph.nodes) if hasattr(f, "graph") and f.graph else 0
+            num_edges = sum(len(n.child_ids) for n in f.graph.nodes.values()) if num_nodes else 0
+            mem_type = float(f.mem_space.type) if hasattr(f, "mem_space") else 0.0
+            eng_len = float(len(f.engine_idxs)) if hasattr(f, "engine_idxs") else 0.0
+            feats.append(
+                [
+                    math.log1p(max(0.0, float(f.cost))),
+                    math.log1p(max(0.0, float(getattr(f, "dp_cost", 0.0)))),
+                    math.log1p(max(0.0, float(f.size))),
+                    mem_type,
+                    eng_len,
+                    float(num_nodes),
+                    float(num_edges),
+                ]
+            )
+        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+
+    def _extract_bufferize_features(self, items):
+        feats = [
+            [
+                float(f.is_new_buffer),
+                math.log1p(max(0.0, float(f.size))),
+                math.log1p(max(0.0, float(f.parent_size))),
+                float(f.parent_birth_time),
+            ]
+            for f in items
+        ]
+        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+
+    def _extract_malloc_features(self, items):
+        feats = [
+            [
+                math.log1p(max(0.0, float(f.size))),
+                float(f.start),
+                float(f.end),
+                math.log1p(max(0.0, float(getattr(f, "mem_cap", 0.0)))),
+            ]
+            for f in items
+        ]
+        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+
+    def _extract_frontier_features(self, items):
+        feats = [
+            [
+                float(f.eclass_id),
+                float(f.num_enodes),
+                math.log1p(max(0.0, float(f.min_dp_cp_cost))),
+                math.log1p(max(0.0, float(f.min_dp_cost))),
+                math.log1p(max(0.0, float(f.size))),
+                float(f.dtype),
+                float(f.mem_space.type) if hasattr(f, "mem_space") else 0.0,
+            ]
+            for f in items
+        ]
+        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)

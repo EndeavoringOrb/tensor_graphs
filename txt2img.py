@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# File: txt2img.py
 import argparse
 import time
 from pathlib import Path
@@ -9,8 +10,13 @@ import torch
 from PIL import Image
 from safetensors.torch import load_file
 
-from train_models import AlphaZeroTransformer
-from train_shared import ActorDelegate, HeuristicDelegate, TrainConfig
+from train_models import AlphaZeroTransformer, PolicyValueRNN
+from train_shared import (
+    ActorDelegate,
+    HeuristicDelegate,
+    RNNREINFORCEDelegate,
+    TrainConfig,
+)
 from utils.decode import load_tokenizer
 
 PROMPT_TEMPLATE_ENCODE_PREFIX = (
@@ -36,15 +42,12 @@ def encode_prompt(tokenizer_obj, prompt: str, max_seq_len: int = 128) -> list[in
     else:
         raise ValueError("Unsupported tokenizer object")
 
-    # Drop the system template prefix tokens dynamically
     token_ids = token_ids[prefix_len:]
 
-    # Append assistant suffix tokens
     enc_suf = raw_tok.encode(PROMPT_TEMPLATE_ENCODE_SUFFIX)
     suffix_ids = enc_suf.ids if hasattr(enc_suf, "ids") else enc_suf
     token_ids = list(token_ids) + list(suffix_ids)
 
-    # Pad or truncate to max_seq_len
     if len(token_ids) < max_seq_len:
         token_ids = token_ids + [0] * (max_seq_len - len(token_ids))
     else:
@@ -157,30 +160,34 @@ def main():
             except Exception as e:
                 print(f"Warning: Failed to load config from {config_file}: {e}")
 
-        agent = AlphaZeroTransformer(
-            d_model=cfg.d_model,
-            nhead=cfg.nhead,
-            num_layers=cfg.num_layers,
-            max_feat_dim=cfg.max_feat_dim,
-        )
-
         model_file = run_dir_path / "model.safetensors"
         if model_file.exists():
-            agent.load_state_dict(load_file(model_file))
-            print(f"Loaded trained delegate agent from {model_file}")
+            state_dict = load_file(model_file)
+            if "rnn_cell.weight_ih" in state_dict or "action_encoders.0.0.weight" in state_dict:
+                model = PolicyValueRNN(hidden_dim=cfg.d_model, global_dim=8)
+                model.load_state_dict(state_dict)
+                model.eval()
+                delegate = RNNREINFORCEDelegate(model=model, is_training=False)
+                print(f"Loaded trained PolicyValueRNN agent from {model_file}")
+            else:
+                agent = AlphaZeroTransformer(
+                    d_model=cfg.d_model,
+                    nhead=cfg.nhead,
+                    num_layers=cfg.num_layers,
+                    max_feat_dim=cfg.max_feat_dim,
+                )
+                agent.load_state_dict(state_dict)
+                agent.eval()
+                delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+                print(f"Loaded trained AlphaZeroTransformer agent from {model_file}")
         else:
-            print(
-                f"Warning: Model weights not found at {model_file}, using initialized agent."
-            )
-
-        agent.eval()
-        delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+            print(f"Warning: Model file not found at {model_file}, using HeuristicDelegate.")
+            delegate = HeuristicDelegate()
     else:
         print("No --run-dir specified. Using HeuristicDelegate (caching disabled).")
         delegate = HeuristicDelegate()
         args.disable_caching = True
 
-    # 1. Initialize Krea2Session (compiles unified unrolled pipeline graph)
     session = tensor_graphs.Krea2Session(
         model_path=args.model_path,
         text_encoder_path=args.text_encoder_path,
@@ -196,25 +203,21 @@ def main():
         threads=args.threads,
     )
 
-    # 2. Tokenize prompt with Qwen3-VL chat template
     tok_path = args.text_encoder_path if args.text_encoder_path else args.model_path
     tokenizer = load_tokenizer([tok_path, "Qwen/Qwen3-VL-4B-Instruct"])
     token_ids = encode_prompt(tokenizer, prompt, max_seq_len=128)
 
-    # 3. Initialize random latent noise ~ N(0, 1)
     latent_h = args.height // 8
     latent_w = args.width // 8
     torch.manual_seed(args.seed)
     latent = torch.randn((1, 16, latent_h, latent_w), dtype=torch.float32)
 
-    # 4. Run end-to-end unified graph
     print(f"\nGenerating image with {args.steps} unrolled flow-matching steps...")
     t_start = time.perf_counter()
     pixels = session.generate_image(token_ids, latent.flatten().tolist())
     t_total = time.perf_counter() - t_start
     print(f"End-to-end generation complete in {t_total * 1000:.2f} ms")
 
-    # 5. Convert and save final image
     image_tensor = torch.tensor(pixels, dtype=torch.float32).reshape(
         1, 3, args.height, args.width
     )
