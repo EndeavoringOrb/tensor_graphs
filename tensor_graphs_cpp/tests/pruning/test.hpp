@@ -282,8 +282,8 @@ template <typename... RuleTypes> struct DispatchBench
             auto make_rule = [&]() {
                 return std::apply(
                     [&](auto &&...rs) {
-                        return makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos, nullptr,
-                                                                &baseline_cost, rs...);
+                        return makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos,
+                                                                nullptr, &baseline_cost, rs...);
                     },
                     rules_tuple);
             };
@@ -891,9 +891,12 @@ template <typename... RuleTypes> struct ExtractBench
             }
 
             float rule_cost = TGConstants::INF;
-            auto rule_extractor =
-                std::apply([&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &rule_cost, nullptr, rs...); },
-                           rules_tuple);
+            auto rule_extractor = std::apply(
+                [&](auto &&...rs) {
+                    return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &rule_cost,
+                                                     nullptr, rs...);
+                },
+                rules_tuple);
 
             while (rule_extractor.getNextSelection())
             {
@@ -947,7 +950,10 @@ template <typename... RuleTypes> struct ExtractBench
 
             auto make_rule = [&]() {
                 return std::apply(
-                    [&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &baseline_cost, nullptr, rs...); },
+                    [&](auto &&...rs) {
+                        return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr,
+                                                         &baseline_cost, nullptr, rs...);
+                    },
                     rules_tuple);
             };
             auto yield_rule = [&](auto &it) {

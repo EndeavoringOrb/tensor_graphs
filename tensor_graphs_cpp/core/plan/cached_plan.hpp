@@ -582,9 +582,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             }
         }
 
-        auto extractor =
-            makeConfiguredExtractor(state->egraph, rootEClassId, state->enodeInfos, delegate, ctx->settings, nullptr,
-                                    &reduced_caps);
+        auto extractor = makeConfiguredExtractor(state->egraph, rootEClassId, state->enodeInfos, delegate,
+                                                 ctx->settings, nullptr, &reduced_caps);
         extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
         // Note: NO MemValidator here!
 
@@ -596,8 +595,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
             // Dispatch (Level 2) -- unconstrained (empty pruning rule set)
             auto dispatch_iterator = makeConfiguredDispatchIterator(state->egraph, selection_map, state->enodeInfos,
-                                                                    delegate, ctx->settings, nullptr,
-                                                                    &reduced_caps);
+                                                                    delegate, ctx->settings, nullptr, &reduced_caps);
             uint32_t dispatch_count = 0;
             std::vector<EClassId> order;
 

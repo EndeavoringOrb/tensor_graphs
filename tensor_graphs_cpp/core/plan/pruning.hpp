@@ -53,7 +53,7 @@
 #include <typeinfo>
 #include <utility>
 
-#define TG_PRUNING_RULE(Name)                                                                                  \
+#define TG_PRUNING_RULE(Name)                                                                                          \
     static constexpr const char *kName = #Name;                                                                        \
     const char *name() const                                                                                           \
     {                                                                                                                  \
@@ -61,7 +61,7 @@
     }                                                                                                                  \
     bool enabled = true;
 
-#define TG_PRUNING_RULE(Name)                                                                                  \
+#define TG_PRUNING_RULE(Name)                                                                                          \
     static constexpr const char *kName = #Name;                                                                        \
     const char *name() const                                                                                           \
     {                                                                                                                  \
@@ -119,8 +119,7 @@ template <class R, class Ctx> constexpr bool has_leaf_v = is_detected_v<leaf_exp
 template <class R> constexpr bool has_name_v = is_detected_v<name_expr, R>;
 template <class R> constexpr bool has_static_kname_v = is_detected_v<static_kname_expr, R>;
 
-template <typename R>
-constexpr const char *rule_name_v()
+template <typename R> constexpr const char *rule_name_v()
 {
     if constexpr (has_static_kname_v<R>)
         return R::kName;
@@ -140,12 +139,10 @@ template <typename Tuple, size_t... Is>
 constexpr auto make_category_specs_impl(const char *category, std::index_sequence<Is...>)
 {
     using std::tuple_element_t;
-    return std::array<RuleSpec, sizeof...(Is)>{
-        RuleSpec{category, rule_name_v<tuple_element_t<Is, Tuple>>()}...};
+    return std::array<RuleSpec, sizeof...(Is)>{RuleSpec{category, rule_name_v<tuple_element_t<Is, Tuple>>()}...};
 }
 
-template <typename Tuple>
-constexpr auto make_category_specs(const char *category)
+template <typename Tuple> constexpr auto make_category_specs(const char *category)
 {
     return make_category_specs_impl<Tuple>(category, std::make_index_sequence<std::tuple_size_v<Tuple>>{});
 }
@@ -171,8 +168,7 @@ template <typename Tuple, typename SettingsT, size_t... Is>
 auto extract_enabled_states_impl(const std::string &category, const SettingsT &settings, std::index_sequence<Is...>)
 {
     using std::tuple_element_t;
-    return std::make_tuple(
-        settings.is_rule_enabled(category, rule_name_v<tuple_element_t<Is, Tuple>>())...);
+    return std::make_tuple(settings.is_rule_enabled(category, rule_name_v<tuple_element_t<Is, Tuple>>())...);
 }
 
 template <typename Tuple, typename SettingsT>
@@ -186,12 +182,10 @@ template <typename RulesTuple, typename BoolTuple, size_t... Is>
 auto instantiate_from_bools_impl(const BoolTuple &bools, std::index_sequence<Is...>)
 {
     using std::tuple_element_t;
-    return std::make_tuple(
-        tuple_element_t<Is, RulesTuple>(std::get<Is>(bools))...);
+    return std::make_tuple(tuple_element_t<Is, RulesTuple>(std::get<Is>(bools))...);
 }
 
-template <typename RulesTuple, typename BoolTuple>
-auto instantiate_from_bools(const BoolTuple &bools)
+template <typename RulesTuple, typename BoolTuple> auto instantiate_from_bools(const BoolTuple &bools)
 {
     constexpr size_t N = std::tuple_size_v<RulesTuple>;
     return instantiate_from_bools_impl<RulesTuple>(bools, std::make_index_sequence<N>{});

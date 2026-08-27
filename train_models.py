@@ -18,7 +18,9 @@ class GlobalLocalGraphAttention(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
-        assert d_model % nhead == 0, f"d_model ({d_model}) must be divisible by nhead ({nhead})"
+        assert d_model % nhead == 0, (
+            f"d_model ({d_model}) must be divisible by nhead ({nhead})"
+        )
 
         self.d_model = d_model
         self.nhead = nhead
@@ -56,9 +58,21 @@ class GlobalLocalGraphAttention(nn.Module):
         device = x_nodes.device
 
         if N == 0:
-            q_g = self.q_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-            k_g = self.k_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-            v_g = self.v_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+            q_g = (
+                self.q_proj(x_global)
+                .view(B, G, self.nhead, self.head_dim)
+                .transpose(1, 2)
+            )
+            k_g = (
+                self.k_proj(x_global)
+                .view(B, G, self.nhead, self.head_dim)
+                .transpose(1, 2)
+            )
+            v_g = (
+                self.v_proj(x_global)
+                .view(B, G, self.nhead, self.head_dim)
+                .transpose(1, 2)
+            )
             scores_g = torch.matmul(q_g, k_g.transpose(-2, -1)) * self.scale
             attn_g = F.softmax(scores_g, dim=-1)
             out_g = torch.matmul(attn_g, v_g).transpose(1, 2).contiguous().view(B, G, D)
@@ -69,9 +83,15 @@ class GlobalLocalGraphAttention(nn.Module):
         dst = edges[1].long()
         E = src.size(0)
 
-        q_g = self.q_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-        k_g = self.k_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-        v_g = self.v_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        q_g = (
+            self.q_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        )
+        k_g = (
+            self.k_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        )
+        v_g = (
+            self.v_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        )
 
         q_n = self.q_proj(x_nodes).view(B, N, self.nhead, self.head_dim).transpose(1, 2)
         k_n = self.k_proj(x_nodes).view(B, N, self.nhead, self.head_dim).transpose(1, 2)
@@ -135,7 +155,9 @@ class GlobalLocalGraphAttention(nn.Module):
             dim=2, index=dst_msg_expanded, src=msg, reduce="sum", include_self=False
         )
 
-        out_n = (out_n_from_g + out_n_from_local).transpose(1, 2).contiguous().view(B, N, D)
+        out_n = (
+            (out_n_from_g + out_n_from_local).transpose(1, 2).contiguous().view(B, N, D)
+        )
         out_n = self.out_proj(out_n)
 
         return out_g, out_n
@@ -396,10 +418,14 @@ class PolicyValueRNN(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def init_hidden(self, batch_size: int = 1, device: torch.device | None = None) -> torch.Tensor:
+    def init_hidden(
+        self, batch_size: int = 1, device: torch.device | None = None
+    ) -> torch.Tensor:
         if device is None:
             device = next(self.parameters()).device
-        return torch.zeros((batch_size, self.hidden_dim), dtype=torch.float32, device=device)
+        return torch.zeros(
+            (batch_size, self.hidden_dim), dtype=torch.float32, device=device
+        )
 
     def encode_global(self, global_feat: torch.Tensor) -> torch.Tensor:
         """
@@ -416,7 +442,9 @@ class PolicyValueRNN(nn.Module):
         if action_feat.shape[-1] < expected_dim:
             pad_shape = list(action_feat.shape)
             pad_shape[-1] = expected_dim - action_feat.shape[-1]
-            pad = torch.zeros(pad_shape, dtype=action_feat.dtype, device=action_feat.device)
+            pad = torch.zeros(
+                pad_shape, dtype=action_feat.dtype, device=action_feat.device
+            )
             action_feat = torch.cat([action_feat, pad], dim=-1)
         elif action_feat.shape[-1] > expected_dim:
             action_feat = action_feat[..., :expected_dim]

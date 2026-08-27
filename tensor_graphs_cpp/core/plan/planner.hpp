@@ -406,12 +406,10 @@ CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(const Graph 
 }
 using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, StorageAnchoredSkipRule>;
 
-
 template <typename BoolTuple>
 inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                                const std::vector<MemSpace> &avail_mem_spaces,
-                                                std::shared_ptr<SearchDelegate> delegate,
-                                                const BoolTuple &bool_flags)
+                                                 const std::vector<MemSpace> &avail_mem_spaces,
+                                                 std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags)
 {
     return std::apply(
         [&](auto &&...rs) {
@@ -1432,9 +1430,8 @@ struct Planner
         auto dispatch_bools = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
         auto bufferize_bools = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
 
-        auto extractor =
-            makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools, &best_cost,
-                                             &reduced_caps);
+        auto extractor = makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools,
+                                                          &best_cost, &reduced_caps);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
 
         int max_iters = 10'000'000;
@@ -1479,8 +1476,8 @@ struct Planner
                 if (is_time_expired())
                     break;
 
-                auto buf_iter = makeConfiguredBufferizeIteratorFromBools(
-                    order, egraph, selection_map, enodeInfos, reduced_caps, delegate, bufferize_bools);
+                auto buf_iter = makeConfiguredBufferizeIteratorFromBools(order, egraph, selection_map, enodeInfos,
+                                                                         reduced_caps, delegate, bufferize_bools);
 
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -1581,14 +1578,13 @@ struct Planner
                             break;
                     }
                 }
-                
+
                 if ((valid && stopOnFirstValid) || is_time_expired())
                     break;
 
                 uint32_t failure_pos = static_cast<uint32_t>(std::max(0, buf_iter.k));
                 dispatch_iterator.ascend_to(failure_pos);
                 continue;
-                
             }
 
             if (extractor.active_options == 0)
@@ -2281,10 +2277,9 @@ struct Planner
                 dummyOut.dtype = sourceNode.dtype;
                 dummyOut.strides = calcContiguousStrides(partialShape);
 
-                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName,
-                                                                        dummyInputNodes, dummyOut, true,
-                                                                        target_mem_space, dummyInputMemSpaces, {cpu},
-                                                                        false, false, false, true); // ignore_input_contig=true
+                auto opRefs = KernelRegistry::get().findMatchingKernels(
+                    sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, true, target_mem_space,
+                    dummyInputMemSpaces, {cpu}, false, false, false, true); // ignore_input_contig=true
                 if (opRefs.size() == 0)
                 {
                     Error::throw_err("[Planner.injectPartialPath] couldn't find any "
@@ -2303,7 +2298,7 @@ struct Planner
                         bool reqContig = false;
                         if (p_idx < kernel.requiresContiguous.size())
                             reqContig = kernel.requiresContiguous[p_idx];
-                        
+
                         if (reqContig && !isContiguous(dummyInputNodes[p_idx]))
                             actual_inputs.push_back(slicedInputs_contig[p_idx]);
                         else

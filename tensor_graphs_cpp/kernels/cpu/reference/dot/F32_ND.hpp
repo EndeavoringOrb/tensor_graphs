@@ -11,13 +11,17 @@ inline bool matchDotF32_ND(const std::vector<TensorNode> &inputs, const TensorNo
         return false;
     if (sA.size() != sB.size() || sA.size() != sC.size())
         return false;
-    
+
     size_t rank = sA.size();
-    for (size_t i = 0; i < rank - 2; ++i) {
-        if (sA[i] != sB[i] || sA[i] != sC[i]) return false;
+    for (size_t i = 0; i < rank - 2; ++i)
+    {
+        if (sA[i] != sB[i] || sA[i] != sC[i])
+            return false;
     }
-    if (sA[rank - 1] != sB[rank - 2]) return false;
-    if (sC[rank - 2] != sA[rank - 2] || sC[rank - 1] != sB[rank - 1]) return false;
+    if (sA[rank - 1] != sB[rank - 2])
+        return false;
+    if (sC[rank - 2] != sA[rank - 2] || sC[rank - 1] != sB[rank - 1])
+        return false;
     return true;
 }
 
@@ -37,7 +41,8 @@ inline void runDotF32_ND(const KernelContext &ctx)
     uint32_t N = viewB.getShape()[rank - 1];
 
     uint64_t outer_iters = 1;
-    for (size_t i = 0; i < rank - 2; ++i) {
+    for (size_t i = 0; i < rank - 2; ++i)
+    {
         outer_iters *= viewA.getShape()[i];
     }
 
@@ -52,7 +57,8 @@ inline void runDotF32_ND(const KernelContext &ctx)
     {
         uint64_t offsetA = 0, offsetB = 0, offsetC = 0;
         uint64_t temp = o;
-        for (int i = static_cast<int>(rank) - 3; i >= 0; --i) {
+        for (int i = static_cast<int>(rank) - 3; i >= 0; --i)
+        {
             uint64_t coord = temp % viewA.getShape()[i];
             temp /= viewA.getShape()[i];
             offsetA += coord * viewA.strides[i];

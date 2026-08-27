@@ -205,7 +205,6 @@ class PeakMemoryPruningRule
     std::vector<UndoState> undo_stack;
 
   public:
-
     void init(const BufferizeContext &ctx)
     {
         mem_usage.clear();
@@ -1204,11 +1203,11 @@ using AllBufferizeRuleTypes =
 
 template <typename BoolTuple>
 inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId> &ordered, const EGraph &egraph,
-                                                    const std::unordered_map<EClassId, uint32_t> &selection_map,
-                                                    const std::vector<ENodeInfo> &enodeInfos,
-                                                    const std::unordered_map<MemSpace, uint64_t> &mem_caps,
-                                                    std::shared_ptr<SearchDelegate> delegate,
-                                                    const BoolTuple &bool_flags)
+                                                     const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                                     const std::vector<ENodeInfo> &enodeInfos,
+                                                     const std::unordered_map<MemSpace, uint64_t> &mem_caps,
+                                                     std::shared_ptr<SearchDelegate> delegate,
+                                                     const BoolTuple &bool_flags)
 {
     return std::apply(
         [&](auto &&...rs) {
@@ -1227,7 +1226,7 @@ inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered
     settings.validate_rules("bufferize");
     auto bool_flags = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
     return makeConfiguredBufferizeIteratorFromBools(ordered, egraph, selection_map, enodeInfos, mem_caps,
-                                                   std::move(delegate), bool_flags);
+                                                    std::move(delegate), bool_flags);
 }
 
 inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
@@ -1623,8 +1622,7 @@ using AllMallocRuleTypes = std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, HMi
 
 template <typename BoolTuple>
 inline auto makeConfiguredMallocIteratorFromBools(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
-                                                 std::shared_ptr<SearchDelegate> delegate,
-                                                 const BoolTuple &bool_flags)
+                                                  std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags)
 {
     return std::apply(
         [&](auto &&...rs) {

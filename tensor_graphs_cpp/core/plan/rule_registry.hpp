@@ -7,8 +7,7 @@
 inline constexpr auto kAllRuleSpecsArray = prune::concat_arrays(
     prune::make_category_specs<AllDispatchRuleTypes>("dispatch"),
     prune::make_category_specs<AllBufferizeRuleTypes>("bufferize"),
-    prune::make_category_specs<AllMallocRuleTypes>("malloc"),
-    prune::make_category_specs<AllCacheRuleTypes>("cache"),
+    prune::make_category_specs<AllMallocRuleTypes>("malloc"), prune::make_category_specs<AllCacheRuleTypes>("cache"),
     prune::make_category_specs<AllExtractRuleTypes>("extract"),
     prune::make_category_specs<AllENodeDominationRuleTypes>("enode"));
 

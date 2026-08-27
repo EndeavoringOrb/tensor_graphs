@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 import os
 import queue
 import sys
@@ -8,7 +9,7 @@ import time
 import traceback
 from collections import defaultdict
 from pathlib import Path
-import math
+
 import psutil
 import torch
 import torch.multiprocessing as mp
@@ -20,8 +21,6 @@ import tensor_graphs
 
 from train_models import AlphaZeroTransformer, PolicyValueRNN
 from train_shared import (
-    ActorDelegate,
-    GumbelActorDelegate,
     RNNREINFORCEDelegate,
     TrainConfig,
     TrajectoryCodec,
@@ -92,7 +91,9 @@ def reinforce_worker(
     current_version = -1
 
     graph_provider = get_graph_provider(config, worker_rank=rank)
-    logger.info(f"{LOG_PREFIX} [Worker {rank}] Initialized REINFORCE worker on graph source: {config.graph_source}")
+    logger.info(
+        f"{LOG_PREFIX} [Worker {rank}] Initialized REINFORCE worker on graph source: {config.graph_source}"
+    )
 
     episode = 0
     delegate = RNNREINFORCEDelegate(
@@ -106,7 +107,9 @@ def reinforce_worker(
         if weights_event.is_set() or current_version == -1:
             if weights_path.exists():
                 try:
-                    loaded = torch.load(weights_path, map_location="cpu", weights_only=True)
+                    loaded = torch.load(
+                        weights_path, map_location="cpu", weights_only=True
+                    )
                     if isinstance(loaded, dict) and "state_dict" in loaded:
                         model.load_state_dict(loaded["state_dict"], strict=False)
                         current_version = loaded.get("version", current_version + 1)
@@ -114,20 +117,26 @@ def reinforce_worker(
                         model.load_state_dict(loaded, strict=False)
                         current_version += 1
                 except Exception as e:
-                    logger.info(f"{LOG_PREFIX} [Worker {rank}] Weight reload error: {e}")
+                    logger.info(
+                        f"{LOG_PREFIX} [Worker {rank}] Weight reload error: {e}"
+                    )
             if rank == 0:
                 weights_event.clear()
 
         try:
             egraph_context = graph_provider.get_context(config, episode=episode)
         except Exception as e:
-            logger.info(f"{LOG_PREFIX} [Worker {rank}] Error obtaining E-Graph context at episode {episode}: {e}")
+            logger.info(
+                f"{LOG_PREFIX} [Worker {rank}] Error obtaining E-Graph context at episode {episode}: {e}"
+            )
             traceback.print_exc()
             break
 
         num_buckets = getattr(egraph_context, "num_buckets", 1)
         bucket_idx = (
-            config.bucket_idx if config.bucket_idx >= 0 else (rank % max(1, num_buckets))
+            config.bucket_idx
+            if config.bucket_idx >= 0
+            else (rank % max(1, num_buckets))
         )
 
         delegate.reset_for_episode(mem_caps={1: 16 * 1024 * 1024 * 1024})
@@ -230,7 +239,9 @@ def rnn_mcts_worker(
         if weights_event.is_set() or current_version == -1:
             if weights_path.exists():
                 try:
-                    loaded = torch.load(weights_path, map_location="cpu", weights_only=True)
+                    loaded = torch.load(
+                        weights_path, map_location="cpu", weights_only=True
+                    )
                     if isinstance(loaded, dict) and "state_dict" in loaded:
                         model.load_state_dict(loaded["state_dict"], strict=False)
                         current_version = loaded.get("version", current_version + 1)
@@ -238,7 +249,9 @@ def rnn_mcts_worker(
                         model.load_state_dict(loaded, strict=False)
                         current_version += 1
                 except Exception as e:
-                    logger.info(f"{LOG_PREFIX} [Worker {rank}] Weight reload error: {e}")
+                    logger.info(
+                        f"{LOG_PREFIX} [Worker {rank}] Weight reload error: {e}"
+                    )
             if rank == 0:
                 weights_event.clear()
 
@@ -253,7 +266,9 @@ def rnn_mcts_worker(
 
         num_buckets = getattr(egraph_context, "num_buckets", 1)
         bucket_idx = (
-            config.bucket_idx if config.bucket_idx >= 0 else (rank % max(1, num_buckets))
+            config.bucket_idx
+            if config.bucket_idx >= 0
+            else (rank % max(1, num_buckets))
         )
 
         best_cost = float("inf")
@@ -300,7 +315,11 @@ def rnn_mcts_worker(
             best_Z = -1.0
 
         packed_payload = TrajectoryCodec.pack_episode(
-            mcts_tree, best_Z, delegate.prefix_registry, algo=config.algo, model_type="rnn"
+            mcts_tree,
+            best_Z,
+            delegate.prefix_registry,
+            algo=config.algo,
+            model_type="rnn",
         )
 
         num_transitions = len(packed_payload["transitions"])
@@ -654,7 +673,9 @@ def client_worker(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Modular TensorGraph Worker Client (AlphaZero / Gumbel / REINFORCE)")
+    parser = argparse.ArgumentParser(
+        description="Modular TensorGraph Worker Client (AlphaZero / Gumbel / REINFORCE)"
+    )
     parser.add_argument(
         "--algo",
         type=str,
@@ -729,7 +750,12 @@ def main():
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
-    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for REINFORCE")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for REINFORCE",
+    )
 
     args = parser.parse_args()
 
@@ -1023,7 +1049,9 @@ def main():
 
         print("=========================================================")
         print(f" Algorithm: {config.algo.upper()}")
-        print(f" Model: TRANSFORMER (d_model={config.d_model}, nhead={config.nhead}, layers={config.num_layers})")
+        print(
+            f" Model: TRANSFORMER (d_model={config.d_model}, nhead={config.nhead}, layers={config.num_layers})"
+        )
         print(f" Starting {config.workers} Client Worker Process(es)")
         print(f" C++ Threads / Worker: {config.cpp_threads}")
         print(f" Inference Device: {target_device}")
@@ -1091,7 +1119,8 @@ def main():
 
                         with episodes_lock:
                             ready_to_update = (current_version == -1) or (
-                                server_version > current_version and episodes_completed > 0
+                                server_version > current_version
+                                and episodes_completed > 0
                             )
 
                         if ready_to_update:
@@ -1191,4 +1220,3 @@ def main():
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     main()
-

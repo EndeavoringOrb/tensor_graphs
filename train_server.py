@@ -238,7 +238,9 @@ def accept_loop(server_sock, conn_type_label, replay_queue, config: TrainConfig)
 def rnn_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
     global global_version
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Learner] RNN Search Optimizer ({config.algo.upper()}) running on device: {device}")
+    print(
+        f"[Learner] RNN Search Optimizer ({config.algo.upper()}) running on device: {device}"
+    )
 
     model = PolicyValueRNN(hidden_dim=config.d_model, global_dim=8).to(device)
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
@@ -354,7 +356,9 @@ def rnn_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 device=device,
             )
 
-            padded_actions = torch.zeros((B_p, max_A, feat_dim), dtype=torch.float32, device=device)
+            padded_actions = torch.zeros(
+                (B_p, max_A, feat_dim), dtype=torch.float32, device=device
+            )
             padded_pis = torch.zeros((B_p, max_A), dtype=torch.float32, device=device)
             action_mask = torch.zeros((B_p, max_A), dtype=torch.bool, device=device)
 
@@ -368,13 +372,17 @@ def rnn_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 )
                 action_mask[i, :A_len] = True
 
-            logits, values = model.evaluate_candidates(h_batch, g_batch, padded_actions, phase_id)
+            logits, values = model.evaluate_candidates(
+                h_batch, g_batch, padded_actions, phase_id
+            )
             values = values.squeeze(-1)
 
             masked_logits = logits.masked_fill(~action_mask, -1e9)
             log_probs = F.log_softmax(masked_logits, dim=-1)
 
-            safe_log_probs = torch.where(action_mask, log_probs, torch.zeros_like(log_probs))
+            safe_log_probs = torch.where(
+                action_mask, log_probs, torch.zeros_like(log_probs)
+            )
             policy_loss = -(padded_pis * safe_log_probs).sum(dim=-1).mean()
             value_loss = F.smooth_l1_loss(values, z_batch)
 
@@ -487,7 +495,11 @@ def rnn_reinforce_learner_process(config: TrainConfig, replay_queue: queue.Queue
                             if ep.cost < float("inf"):
                                 cost_count += 1
                                 with open(costs_bin_path, "ab") as f_bin:
-                                    f_bin.write(struct.pack(pack_fmt, cost_count, float(ep.cost)))
+                                    f_bin.write(
+                                        struct.pack(
+                                            pack_fmt, cost_count, float(ep.cost)
+                                        )
+                                    )
                                     f_bin.flush()
             except queue.Empty:
                 break
@@ -558,7 +570,9 @@ def rnn_reinforce_learner_process(config: TrainConfig, replay_queue: queue.Queue
                 device=device,
             )
 
-            padded_actions = torch.zeros((B_p, max_A, feat_dim), dtype=torch.float32, device=device)
+            padded_actions = torch.zeros(
+                (B_p, max_A, feat_dim), dtype=torch.float32, device=device
+            )
             action_mask = torch.zeros((B_p, max_A), dtype=torch.bool, device=device)
 
             for i, (tr, _) in enumerate(items):
@@ -568,14 +582,18 @@ def rnn_reinforce_learner_process(config: TrainConfig, replay_queue: queue.Queue
                 )
                 action_mask[i, :A_len] = True
 
-            logits, values = model.evaluate_candidates(h_batch, g_batch, padded_actions, phase_id)
+            logits, values = model.evaluate_candidates(
+                h_batch, g_batch, padded_actions, phase_id
+            )
             values = values.squeeze(-1)
 
             masked_logits = logits.masked_fill(~action_mask, -1e9)
             log_probs = F.log_softmax(masked_logits, dim=-1)
             probs = F.softmax(masked_logits, dim=-1)
 
-            selected_log_probs = log_probs.gather(1, chosen_indices.unsqueeze(-1)).squeeze(-1)
+            selected_log_probs = log_probs.gather(
+                1, chosen_indices.unsqueeze(-1)
+            ).squeeze(-1)
 
             # Normalized Advantage Calculation
             advantages = returns_batch - values.detach()
@@ -596,7 +614,9 @@ def rnn_reinforce_learner_process(config: TrainConfig, replay_queue: queue.Queue
 
             # Entropy Regularization
             safe_probs = torch.where(action_mask, probs, torch.zeros_like(probs))
-            safe_log_probs = torch.where(action_mask, log_probs, torch.zeros_like(log_probs))
+            safe_log_probs = torch.where(
+                action_mask, log_probs, torch.zeros_like(log_probs)
+            )
             entropy_loss = -(safe_probs * safe_log_probs).sum()
 
             phase_total_loss = (
@@ -645,7 +665,9 @@ def rnn_reinforce_learner_process(config: TrainConfig, replay_queue: queue.Queue
 def transformer_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
     global global_version
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Learner] AlphaZero Transformer Search Optimizer ({config.algo.upper()}) running on device: {device}")
+    print(
+        f"[Learner] AlphaZero Transformer Search Optimizer ({config.algo.upper()}) running on device: {device}"
+    )
 
     agent = AlphaZeroTransformer(
         d_model=config.d_model,
@@ -947,8 +969,12 @@ def main():
     parser.add_argument("--decay-episodes", type=int, default=500)
     parser.add_argument("--depth-gamma", type=float, default=0.99)
     parser.add_argument("--clip-eps", type=float, default=0.2, help="PPO clip epsilon")
-    parser.add_argument("--value-coef", type=float, default=0.5, help="Value loss coefficient")
-    parser.add_argument("--entropy-coef", type=float, default=0.01, help="Entropy coefficient")
+    parser.add_argument(
+        "--value-coef", type=float, default=0.5, help="Value loss coefficient"
+    )
+    parser.add_argument(
+        "--entropy-coef", type=float, default=0.01, help="Entropy coefficient"
+    )
     parser.add_argument(
         "--threads",
         type=int,

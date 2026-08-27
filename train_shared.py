@@ -512,7 +512,9 @@ class TrajectoryCodec:
             counts = node_data["N"]
             total_counts = float(counts.sum())
             prior_p = node_data["P"]
-            is_gumbel = node_data.get("is_gumbel", False) or (algo == "gumbel_alphazero")
+            is_gumbel = node_data.get("is_gumbel", False) or (
+                algo == "gumbel_alphazero"
+            )
 
             if is_gumbel and "logits" in node_data:
                 logits = node_data["logits"]
@@ -722,10 +724,25 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def reset_for_episode(self, mem_caps: dict[int, int] | None = None):
         if self.model is not None:
             if mem_caps is not None:
-                self.log_mem_cpp = math.log1p(max(0.0, float(mem_caps.get(1, 16 * 1024 * 1024 * 1024)))) / 25.0
-                self.log_mem_cuda = math.log1p(max(0.0, float(mem_caps.get(2, 24 * 1024 * 1024 * 1024)))) / 25.0
-                self.log_mem_opencl = math.log1p(max(0.0, float(mem_caps.get(3, 1024 * 1024 * 1024)))) / 25.0
-            self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
+                self.log_mem_cpp = (
+                    math.log1p(
+                        max(0.0, float(mem_caps.get(1, 16 * 1024 * 1024 * 1024)))
+                    )
+                    / 25.0
+                )
+                self.log_mem_cuda = (
+                    math.log1p(
+                        max(0.0, float(mem_caps.get(2, 24 * 1024 * 1024 * 1024)))
+                    )
+                    / 25.0
+                )
+                self.log_mem_opencl = (
+                    math.log1p(max(0.0, float(mem_caps.get(3, 1024 * 1024 * 1024))))
+                    / 25.0
+                )
+            self.current_hidden = self.model.init_hidden(
+                batch_size=1, device=self.device
+            )
             self.hidden_stack.clear()
 
     def fast_fail(self) -> bool:
@@ -850,16 +867,24 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def init_malloc_graph(self, node_features, edge_src, edge_dst):
         self._store_raw_graph("malloc", node_features, edge_src, edge_dst)
 
-    def _evaluate_node(self, phase_name: str, action_feats_np: np.ndarray, prefix_key: int):
+    def _evaluate_node(
+        self, phase_name: str, action_feats_np: np.ndarray, prefix_key: int
+    ):
         phase_id = self.PHASE_MAP[phase_name]
 
         if self.model is not None:
             # In-Process PolicyValueRNN Evaluation
             global_feat = self._get_global_feature(phase_id)
-            g_t = torch.tensor(global_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
-            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            g_t = torch.tensor(
+                global_feat, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            a_t = torch.tensor(
+                action_feats_np, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
             with torch.inference_mode():
-                logits, val = self.model.evaluate_candidates(self.current_hidden, g_t, a_t, phase_id)
+                logits, val = self.model.evaluate_candidates(
+                    self.current_hidden, g_t, a_t, phase_id
+                )
             scores = logits[0].cpu().numpy()
             v = val[0, 0].item()
             self.phase_values[phase_name] = v
@@ -1001,7 +1026,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
 
         if state_key not in self.mcts_tree:
-            scores, v, phase_id, global_feat, hidden = self._evaluate_node(phase_name, action_feats_np, prefix_key)
+            scores, v, phase_id, global_feat, hidden = self._evaluate_node(
+                phase_name, action_feats_np, prefix_key
+            )
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
             v = self.phase_values.get(phase_name, 0.0)
@@ -1062,11 +1089,17 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         if self.model is not None:
             phase_id = self.PHASE_MAP[phase_name]
             g_feat = self._get_global_feature(phase_id)
-            g_t = torch.tensor(g_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
-            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            g_t = torch.tensor(
+                g_feat, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            a_t = torch.tensor(
+                action_feats_np, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
             chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
             with torch.inference_mode():
-                _, self.current_hidden = self.model.step(self.current_hidden, g_t, chosen_a_t, phase_id)
+                _, self.current_hidden = self.model.step(
+                    self.current_hidden, g_t, chosen_a_t, phase_id
+                )
 
         self.active_stack.append((state_key, chosen_idx))
         return order
@@ -1184,7 +1217,9 @@ class GumbelActorDelegate(ActorDelegate):
         state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
 
         if state_key not in self.mcts_tree:
-            scores, v, phase_id, global_feat, hidden = self._evaluate_node(phase_name, action_feats_np, prefix_key)
+            scores, v, phase_id, global_feat, hidden = self._evaluate_node(
+                phase_name, action_feats_np, prefix_key
+            )
 
             current_depth = len(self.active_stack)
             effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
@@ -1194,7 +1229,9 @@ class GumbelActorDelegate(ActorDelegate):
             u = np.random.uniform(1e-7, 1.0 - 1e-7, size=num_a).astype(np.float32)
             gumbel_noise = -np.log(-np.log(u))
             effective_gumbel = (
-                effective_noise * gumbel_noise if effective_noise > 0.001 else np.zeros(num_a, dtype=np.float32)
+                effective_noise * gumbel_noise
+                if effective_noise > 0.001
+                else np.zeros(num_a, dtype=np.float32)
             )
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
@@ -1248,11 +1285,17 @@ class GumbelActorDelegate(ActorDelegate):
         if self.model is not None:
             phase_id = self.PHASE_MAP[phase_name]
             g_feat = self._get_global_feature(phase_id)
-            g_t = torch.tensor(g_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
-            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            g_t = torch.tensor(
+                g_feat, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            a_t = torch.tensor(
+                action_feats_np, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
             chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
             with torch.inference_mode():
-                _, self.current_hidden = self.model.step(self.current_hidden, g_t, chosen_a_t, phase_id)
+                _, self.current_hidden = self.model.step(
+                    self.current_hidden, g_t, chosen_a_t, phase_id
+                )
 
         self.active_stack.append((state_key, chosen_idx))
         return order
@@ -1305,23 +1348,23 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
     ):
         super().__init__()
         self.model = model
-        self.device = (
-            device if device is not None else next(model.parameters()).device
-        )
+        self.device = device if device is not None else next(model.parameters()).device
         self.temperature = max(1e-4, float(temperature))
         self.is_training = is_training
         self.mem_caps = mem_caps or {}
 
         # Precompute normalized memory caps vector: [cpp, cuda, opencl, ...]
-        self.log_mem_cpp = math.log1p(
-            max(0.0, float(self.mem_caps.get(1, 16 * 1024 * 1024 * 1024)))
-        ) / 25.0
-        self.log_mem_cuda = math.log1p(
-            max(0.0, float(self.mem_caps.get(2, 24 * 1024 * 1024 * 1024)))
-        ) / 25.0
-        self.log_mem_opencl = math.log1p(
-            max(0.0, float(self.mem_caps.get(3, 1024 * 1024 * 1024)))
-        ) / 25.0
+        self.log_mem_cpp = (
+            math.log1p(max(0.0, float(self.mem_caps.get(1, 16 * 1024 * 1024 * 1024))))
+            / 25.0
+        )
+        self.log_mem_cuda = (
+            math.log1p(max(0.0, float(self.mem_caps.get(2, 24 * 1024 * 1024 * 1024))))
+            / 25.0
+        )
+        self.log_mem_opencl = (
+            math.log1p(max(0.0, float(self.mem_caps.get(3, 1024 * 1024 * 1024)))) / 25.0
+        )
 
         # State management
         self.root_hidden = self.model.init_hidden(batch_size=1, device=self.device)
@@ -1333,15 +1376,22 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
     def reset_for_episode(self, mem_caps: dict[int, int] | None = None):
         if mem_caps is not None:
             self.mem_caps = mem_caps
-            self.log_mem_cpp = math.log1p(
-                max(0.0, float(self.mem_caps.get(1, 16 * 1024 * 1024 * 1024)))
-            ) / 25.0
-            self.log_mem_cuda = math.log1p(
-                max(0.0, float(self.mem_caps.get(2, 24 * 1024 * 1024 * 1024)))
-            ) / 25.0
-            self.log_mem_opencl = math.log1p(
-                max(0.0, float(self.mem_caps.get(3, 1024 * 1024 * 1024)))
-            ) / 25.0
+            self.log_mem_cpp = (
+                math.log1p(
+                    max(0.0, float(self.mem_caps.get(1, 16 * 1024 * 1024 * 1024)))
+                )
+                / 25.0
+            )
+            self.log_mem_cuda = (
+                math.log1p(
+                    max(0.0, float(self.mem_caps.get(2, 24 * 1024 * 1024 * 1024)))
+                )
+                / 25.0
+            )
+            self.log_mem_opencl = (
+                math.log1p(max(0.0, float(self.mem_caps.get(3, 1024 * 1024 * 1024))))
+                / 25.0
+            )
 
         self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
         self.hidden_stack.clear()
@@ -1422,8 +1472,12 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
 
         global_feat_np = self._get_global_feature(phase_id)
 
-        g_t = torch.tensor(global_feat_np, dtype=torch.float32, device=self.device).unsqueeze(0)
-        a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+        g_t = torch.tensor(
+            global_feat_np, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
+        a_t = torch.tensor(
+            action_feats_np, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
 
         logits, value = self.model.evaluate_candidates(
             self.current_hidden, g_t, a_t, phase_id
@@ -1477,7 +1531,9 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
         return self._order_items(enodes, "extract", self._extract_dispatch_features)
 
     def order_dispatch(self, ready_nodes):
-        return self._order_items(ready_nodes, "dispatch", self._extract_dispatch_features)
+        return self._order_items(
+            ready_nodes, "dispatch", self._extract_dispatch_features
+        )
 
     def order_bufferize(self, choices):
         return self._order_items(choices, "bufferize", self._extract_bufferize_features)
@@ -1501,13 +1557,19 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
                     float(f.num_users),
                 ]
             )
-        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+        return torch.nan_to_num(
+            torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
+        )
 
     def _extract_dispatch_features(self, items):
         feats = []
         for f in items:
             num_nodes = len(f.graph.nodes) if hasattr(f, "graph") and f.graph else 0
-            num_edges = sum(len(n.child_ids) for n in f.graph.nodes.values()) if num_nodes else 0
+            num_edges = (
+                sum(len(n.child_ids) for n in f.graph.nodes.values())
+                if num_nodes
+                else 0
+            )
             mem_type = float(f.mem_space.type) if hasattr(f, "mem_space") else 0.0
             eng_len = float(len(f.engine_idxs)) if hasattr(f, "engine_idxs") else 0.0
             feats.append(
@@ -1521,7 +1583,9 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
                     float(num_edges),
                 ]
             )
-        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+        return torch.nan_to_num(
+            torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
+        )
 
     def _extract_bufferize_features(self, items):
         feats = [
@@ -1533,7 +1597,9 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
             ]
             for f in items
         ]
-        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+        return torch.nan_to_num(
+            torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
+        )
 
     def _extract_malloc_features(self, items):
         feats = [
@@ -1545,7 +1611,9 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
             ]
             for f in items
         ]
-        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+        return torch.nan_to_num(
+            torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
+        )
 
     def _extract_frontier_features(self, items):
         feats = [
@@ -1560,7 +1628,9 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
             ]
             for f in items
         ]
-        return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+        return torch.nan_to_num(
+            torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
+        )
 
 
 def create_search_delegate(
@@ -1586,7 +1656,9 @@ def create_search_delegate(
     algo = getattr(config, "algo", "gumbel_alphazero").lower().replace("-", "_")
     if algo in ["reinforce", "ppo", "rnn"]:
         if model is None:
-            raise ValueError("PolicyValueRNN model must be provided for REINFORCE delegate.")
+            raise ValueError(
+                "PolicyValueRNN model must be provided for REINFORCE delegate."
+            )
         return RNNREINFORCEDelegate(
             model=model,
             temperature=temperature,

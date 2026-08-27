@@ -111,7 +111,10 @@ def main():
         if model_file.exists():
             state_dict = load_file(model_file)
             # Detect model architecture from state_dict keys
-            if "rnn_cell.weight_ih" in state_dict or "action_encoders.0.0.weight" in state_dict:
+            if (
+                "rnn_cell.weight_ih" in state_dict
+                or "action_encoders.0.0.weight" in state_dict
+            ):
                 model = PolicyValueRNN(hidden_dim=cfg.d_model, global_dim=8)
                 model.load_state_dict(state_dict)
                 model.eval()
@@ -129,7 +132,9 @@ def main():
                 delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
                 print(f"Loaded trained AlphaZeroTransformer agent from {model_file}")
         else:
-            print(f"Warning: Model file not found at {model_file}, using default HeuristicDelegate.")
+            print(
+                f"Warning: Model file not found at {model_file}, using default HeuristicDelegate."
+            )
             delegate = HeuristicDelegate()
     else:
         print("No --run-dir specified. Using HeuristicDelegate (caching disabled).")
