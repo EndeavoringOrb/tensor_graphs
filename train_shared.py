@@ -20,6 +20,8 @@ torch.set_float32_matmul_precision("high")
 
 @dataclasses.dataclass
 class TrainConfig:
+    algo: str = "gumbel_alphazero"  # "gumbel_alphazero", "alphazero", "reinforce"
+    model_type: str = "rnn"  # "rnn" or "transformer"
     run_dir: str = "runs"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
@@ -38,7 +40,7 @@ class TrainConfig:
     random_seed: int | None = None
     resample_graph_every: int = 1
 
-    # Transformer Architecture Config
+    # Transformer / Model Architecture Config
     d_model: int = 32
     nhead: int = 2
     num_layers: int = 2
@@ -51,12 +53,18 @@ class TrainConfig:
     workers: int = 4
     cpp_threads: int = 1
 
-    # PUCT & Noise Annealing Config
+    # PUCT & Gumbel Noise Annealing Config
     c_puct: float = 1.25
     base_noise: float = 0.25
     min_noise: float = 0.01
     decay_episodes: int = 500
     depth_gamma: float = 0.99
+
+    # REINFORCE / PPO hyperparameters
+    clip_eps: float = 0.2
+    value_coef: float = 0.5
+    entropy_coef: float = 0.01
+    temperature: float = 1.0
 
     # Networking Config
     host: str = "127.0.0.1"
@@ -489,20 +497,47 @@ class TrajectoryCodec:
         prefix_registry: dict[int, PrefixData],
         tau: float = 1.25,
         blend_k: float = 2.0,
+        algo: str = "gumbel_alphazero",
+        model_type: str = "rnn",
     ) -> dict:
         referenced_prefixes = {}
         transitions = []
 
         for _, node_data in mcts_tree.items():
-            pkey = node_data["prefix_key"]
-            if pkey in prefix_registry and pkey not in referenced_prefixes:
-                referenced_prefixes[pkey] = prefix_registry[pkey]
+            pkey = node_data.get("prefix_key", 0)
+            if model_type == "transformer":
+                if pkey in prefix_registry and pkey not in referenced_prefixes:
+                    referenced_prefixes[pkey] = prefix_registry[pkey]
 
             counts = node_data["N"]
             total_counts = float(counts.sum())
             prior_p = node_data["P"]
+            is_gumbel = node_data.get("is_gumbel", False) or (algo == "gumbel_alphazero")
 
-            if total_counts > 0:
+            if is_gumbel and "logits" in node_data:
+                logits = node_data["logits"]
+                W_sa = node_data["W"]
+                v_s = node_data.get("v", 0.0)
+                Q_sa = np.where(counts > 0, W_sa / np.maximum(counts, 1.0), v_s)
+                visited_mask = counts > 0
+                if np.any(visited_mask):
+                    min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
+                    max_q = max(float(v_s), float(np.max(Q_sa[visited_mask])))
+                    if max_q > min_q:
+                        Q_norm = (Q_sa - min_q) / (max_q - min_q)
+                    else:
+                        Q_norm = np.full_like(Q_sa, 0.5)
+                else:
+                    Q_norm = np.zeros_like(Q_sa)
+
+                max_visit = float(np.max(counts)) if len(counts) > 0 else 0.0
+                c_visit = 50.0
+                c_scale = 1.0
+                sigma_q = (c_visit + max_visit) * c_scale * Q_norm
+                improved_logits = logits + sigma_q
+                exp_l = np.exp(improved_logits - np.max(improved_logits))
+                pi = exp_l / np.maximum(1e-8, exp_l.sum())
+            elif total_counts > 0:
                 # Target temperature softening to avoid extreme one-hot targets on low sim counts
                 smoothed_counts = np.power(counts, 1.0 / max(1e-4, tau))
                 sum_smoothed = smoothed_counts.sum()
@@ -518,17 +553,22 @@ class TrajectoryCodec:
             else:
                 pi = prior_p.copy()
 
-            transitions.append(
-                {
-                    "prefix_key": pkey,
-                    "action_features": node_data["action_features"],
-                    "phase_id": node_data.get("phase_id", 0),
-                    "pis": pi.astype(np.float32),
-                    "z": best_Z,
-                }
-            )
+            tr = {
+                "prefix_key": pkey,
+                "action_features": node_data["action_features"],
+                "phase_id": node_data.get("phase_id", 0),
+                "pis": pi.astype(np.float32),
+                "z": best_Z,
+            }
+            if "hidden" in node_data and node_data["hidden"] is not None:
+                tr["hidden"] = node_data["hidden"]
+            if "global_feat" in node_data and node_data["global_feat"] is not None:
+                tr["global_feat"] = node_data["global_feat"]
+
+            transitions.append(tr)
 
         return {
+            "model_type": model_type,
             "prefixes": referenced_prefixes,
             "transitions": transitions,
         }
@@ -602,6 +642,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def __init__(
         self,
         agent=None,
+        model: PolicyValueRNN | None = None,
         req_queue=None,
         resp_queue=None,
         worker_id: int = 0,
@@ -617,9 +658,11 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         shared_action_feats: torch.Tensor | None = None,
         shared_logits: torch.Tensor | None = None,
         shared_v: torch.Tensor | None = None,
+        device: torch.device | None = None,
     ):
         super().__init__()
         self.agent = agent
+        self.model = model
         self.req_queue = req_queue
         self.resp_queue = resp_queue
         self.worker_id = worker_id
@@ -631,6 +674,23 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.min_noise = min_noise
         self.depth_gamma = depth_gamma
         self.version = version
+
+        if device is not None:
+            self.device = device
+        elif model is not None:
+            self.device = next(model.parameters()).device
+        elif agent is not None:
+            self.device = next(agent.parameters()).device
+        else:
+            self.device = torch.device("cpu")
+
+        if self.model is not None:
+            self.root_hidden = self.model.init_hidden(batch_size=1, device=self.device)
+            self.current_hidden = self.root_hidden.clone()
+            self.hidden_stack: list[torch.Tensor] = []
+            self.log_mem_cpp = 0.5
+            self.log_mem_cuda = 0.5
+            self.log_mem_opencl = 0.5
 
         # Shared memory references
         self.shared_action_feats = shared_action_feats
@@ -659,15 +719,27 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.prefix_cache_v = {}
         self.worker_registered_prefixes = set()
 
+    def reset_for_episode(self, mem_caps: dict[int, int] | None = None):
+        if self.model is not None:
+            if mem_caps is not None:
+                self.log_mem_cpp = math.log1p(max(0.0, float(mem_caps.get(1, 16 * 1024 * 1024 * 1024)))) / 25.0
+                self.log_mem_cuda = math.log1p(max(0.0, float(mem_caps.get(2, 24 * 1024 * 1024 * 1024)))) / 25.0
+                self.log_mem_opencl = math.log1p(max(0.0, float(mem_caps.get(3, 1024 * 1024 * 1024)))) / 25.0
+            self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
+            self.hidden_stack.clear()
+
     def fast_fail(self) -> bool:
         return True
 
     def push_state(self):
-        pass
+        if self.model is not None:
+            self.hidden_stack.append(self.current_hidden.clone())
 
     def pop_state(self):
         if self.active_stack:
             self.active_stack.pop()
+        if self.model is not None and self.hidden_stack:
+            self.current_hidden = self.hidden_stack.pop()
 
     def on_leaf_evaluated(self, cost: float):
         cost_val = float(cost)
@@ -678,8 +750,29 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 self.mcts_tree[state_key]["N"][act] += 1.0
                 self.mcts_tree[state_key]["W"][act] += z
 
+    def _get_global_feature(self, phase_id: int) -> np.ndarray:
+        depth = float(len(self.active_stack)) / 100.0
+        return np.array(
+            [
+                getattr(self, "log_mem_cpp", 0.5),
+                getattr(self, "log_mem_cuda", 0.5),
+                getattr(self, "log_mem_opencl", 0.5),
+                depth,
+                float(phase_id),
+                0.0,
+                0.0,
+                1.0,
+            ],
+            dtype=np.float32,
+        )
+
     def _store_raw_graph(self, phase_name, node_features, edge_src, edge_dst):
         phase_id = self.PHASE_MAP[phase_name]
+        if self.model is not None:
+            # RNN mode: full graph structure is not processed by RNN; no graph serialization or RPC needed!
+            self.current_prefix_keys[phase_name] = phase_id
+            return
+
         dim_map = {
             "cache": 5,
             "extract": 5,
@@ -757,6 +850,141 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def init_malloc_graph(self, node_features, edge_src, edge_dst):
         self._store_raw_graph("malloc", node_features, edge_src, edge_dst)
 
+    def _evaluate_node(self, phase_name: str, action_feats_np: np.ndarray, prefix_key: int):
+        phase_id = self.PHASE_MAP[phase_name]
+
+        if self.model is not None:
+            # In-Process PolicyValueRNN Evaluation
+            global_feat = self._get_global_feature(phase_id)
+            g_t = torch.tensor(global_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
+            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            with torch.inference_mode():
+                logits, val = self.model.evaluate_candidates(self.current_hidden, g_t, a_t, phase_id)
+            scores = logits[0].cpu().numpy()
+            v = val[0, 0].item()
+            self.phase_values[phase_name] = v
+            hidden_np = self.current_hidden[0].detach().cpu().numpy()
+            return scores, v, phase_id, global_feat, hidden_np
+
+        cache_key = (self.version, prefix_key)
+        if self.agent is not None:
+            # Local In-Process AlphaZeroTransformer Evaluation
+            device = next(self.agent.parameters()).device
+            ctx = self.prefix_cache_ctx[cache_key]
+            v = self.prefix_cache_v[cache_key]
+
+            A_len = action_feats_np.shape[0]
+            padded_actions = torch.zeros(
+                (1, A_len, 8), dtype=torch.float32, device=device
+            )
+            padded_pid = torch.full(
+                (1, A_len), phase_id, dtype=torch.int64, device=device
+            )
+
+            dim_feat = min(7, action_feats_np.shape[1])
+            padded_actions[0, :A_len, 1 : 1 + dim_feat] = torch.tensor(
+                action_feats_np[:, :dim_feat], dtype=torch.float32, device=device
+            )
+            padded_actions[0, :A_len, 0] = torch.arange(
+                A_len, dtype=torch.float32, device=device
+            )
+
+            with (
+                torch.inference_mode(),
+                torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+            ):
+                logits = self.agent.evaluate_actions(
+                    padded_actions, padded_pid, context=ctx
+                )
+            scores = logits[0, :A_len].cpu().float().numpy()
+        else:
+            if self.shared_action_feats is not None:
+                # Shared Memory Fast-Path (Remote Evaluator)
+                A_len = action_feats_np.shape[0]
+                max_actions = self.shared_action_feats.shape[1]
+
+                if A_len > max_actions:
+                    A_len = max_actions
+                    action_feats_np = action_feats_np[:A_len]
+
+                dim_feat = min(7, action_feats_np.shape[1])
+
+                # Zero out the active buffer slice first
+                self.shared_action_feats[self.worker_id, :A_len, :].zero_()
+                self.shared_action_feats[self.worker_id, :A_len, :dim_feat].copy_(
+                    torch.from_numpy(action_feats_np[:, :dim_feat])
+                )
+
+                self.req_queue.put(
+                    (
+                        "evaluate_shm",
+                        self.version,
+                        prefix_key,
+                        A_len,
+                        phase_id,
+                        self.worker_id,
+                    )
+                )
+                status, *data = self.resp_queue.get()
+
+                if status == "error" and data[0] == "missing_prefix":
+                    pdata = self.prefix_registry[prefix_key]
+                    self.req_queue.put(
+                        ("register_prefix", self.version, prefix_key, pdata)
+                    )
+                    self.worker_registered_prefixes.add(cache_key)
+                    self.req_queue.put(
+                        (
+                            "evaluate_shm",
+                            self.version,
+                            prefix_key,
+                            A_len,
+                            phase_id,
+                            self.worker_id,
+                        )
+                    )
+                    status, *data = self.resp_queue.get()
+
+                scores = self.shared_logits[self.worker_id, :A_len].clone().numpy()
+                v = self.shared_v[self.worker_id].item()
+                self.phase_values[phase_name] = v
+            else:
+                # Queue Fallback
+                self.req_queue.put(
+                    (
+                        "evaluate",
+                        self.version,
+                        prefix_key,
+                        action_feats_np,
+                        phase_id,
+                        self.worker_id,
+                    )
+                )
+                status, *data = self.resp_queue.get()
+
+                if status == "error" and data[0] == "missing_prefix":
+                    pdata = self.prefix_registry[prefix_key]
+                    self.req_queue.put(
+                        ("register_prefix", self.version, prefix_key, pdata)
+                    )
+                    self.worker_registered_prefixes.add(cache_key)
+                    self.req_queue.put(
+                        (
+                            "evaluate",
+                            self.version,
+                            prefix_key,
+                            action_feats_np,
+                            phase_id,
+                            self.worker_id,
+                        )
+                    )
+                    status, *data = self.resp_queue.get()
+
+                scores, v = data
+                self.phase_values[phase_name] = v
+
+        return scores, v, phase_id, None, None
+
     @torch.inference_mode()
     def _order_items(self, items, phase_name, extract_fn):
         num_actions = len(items)
@@ -773,124 +1001,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
 
         if state_key not in self.mcts_tree:
-            phase_id = self.PHASE_MAP[phase_name]
-            cache_key = (self.version, prefix_key)
-
-            if self.agent is not None:
-                # Local In-Process Evaluation
-                device = next(self.agent.parameters()).device
-                ctx = self.prefix_cache_ctx[cache_key]
-                v = self.prefix_cache_v[cache_key]
-
-                A_len = action_feats_np.shape[0]
-                padded_actions = torch.zeros(
-                    (1, A_len, 8), dtype=torch.float32, device=device
-                )
-                padded_pid = torch.full(
-                    (1, A_len), phase_id, dtype=torch.int64, device=device
-                )
-
-                dim_feat = min(7, action_feats_np.shape[1])
-                padded_actions[0, :A_len, 1 : 1 + dim_feat] = torch.tensor(
-                    action_feats_np[:, :dim_feat], dtype=torch.float32, device=device
-                )
-                padded_actions[0, :A_len, 0] = torch.arange(
-                    A_len, dtype=torch.float32, device=device
-                )
-
-                with (
-                    torch.inference_mode(),
-                    torch.autocast(device_type=device.type, dtype=torch.bfloat16),
-                ):
-                    logits = self.agent.evaluate_actions(
-                        padded_actions, padded_pid, context=ctx
-                    )
-                scores = logits[0, :A_len].cpu().float().numpy()
-            else:
-                if self.shared_action_feats is not None:
-                    # Shared Memory Fast-Path (Remote Evaluator)
-                    A_len = action_feats_np.shape[0]
-                    max_actions = self.shared_action_feats.shape[1]
-
-                    if A_len > max_actions:
-                        A_len = max_actions
-                        action_feats_np = action_feats_np[:A_len]
-
-                    dim_feat = min(7, action_feats_np.shape[1])
-
-                    # Zero out the active buffer slice first
-                    self.shared_action_feats[self.worker_id, :A_len, :].zero_()
-                    self.shared_action_feats[self.worker_id, :A_len, :dim_feat].copy_(
-                        torch.from_numpy(action_feats_np[:, :dim_feat])
-                    )
-
-                    self.req_queue.put(
-                        (
-                            "evaluate_shm",
-                            self.version,
-                            prefix_key,
-                            A_len,
-                            phase_id,
-                            self.worker_id,
-                        )
-                    )
-                    status, *data = self.resp_queue.get()
-
-                    if status == "error" and data[0] == "missing_prefix":
-                        pdata = self.prefix_registry[prefix_key]
-                        self.req_queue.put(
-                            ("register_prefix", self.version, prefix_key, pdata)
-                        )
-                        self.worker_registered_prefixes.add(cache_key)
-                        self.req_queue.put(
-                            (
-                                "evaluate_shm",
-                                self.version,
-                                prefix_key,
-                                A_len,
-                                phase_id,
-                                self.worker_id,
-                            )
-                        )
-                        status, *data = self.resp_queue.get()
-
-                    scores = self.shared_logits[self.worker_id, :A_len].clone().numpy()
-                    v = self.shared_v[self.worker_id].item()
-                    self.phase_values[phase_name] = v
-                else:
-                    # Queue Fallback
-                    self.req_queue.put(
-                        (
-                            "evaluate",
-                            self.version,
-                            prefix_key,
-                            action_feats_np,
-                            phase_id,
-                            self.worker_id,
-                        )
-                    )
-                    status, *data = self.resp_queue.get()
-
-                    if status == "error" and data[0] == "missing_prefix":
-                        pdata = self.prefix_registry[prefix_key]
-                        self.req_queue.put(
-                            ("register_prefix", self.version, prefix_key, pdata)
-                        )
-                        self.worker_registered_prefixes.add(cache_key)
-                        self.req_queue.put(
-                            (
-                                "evaluate",
-                                self.version,
-                                prefix_key,
-                                action_feats_np,
-                                phase_id,
-                                self.worker_id,
-                            )
-                        )
-                        status, *data = self.resp_queue.get()
-
-                    scores, v = data
-                    self.phase_values[phase_name] = v
+            scores, v, phase_id, global_feat, hidden = self._evaluate_node(phase_name, action_feats_np, prefix_key)
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
             v = self.phase_values.get(phase_name, 0.0)
@@ -918,6 +1029,8 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 "prefix_key": prefix_key,
                 "phase_id": phase_id,
                 "action_features": action_feats_np,
+                "global_feat": global_feat,
+                "hidden": hidden,
             }
 
         node_data = self.mcts_tree[state_key]
@@ -944,8 +1057,18 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
         puct_scores = Q_norm + U_sa
         order = np.argsort(-puct_scores).tolist()
+        chosen_idx = order[0]
 
-        self.active_stack.append((state_key, order[0]))
+        if self.model is not None:
+            phase_id = self.PHASE_MAP[phase_name]
+            g_feat = self._get_global_feature(phase_id)
+            g_t = torch.tensor(g_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
+            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
+            with torch.inference_mode():
+                _, self.current_hidden = self.model.step(self.current_hidden, g_t, chosen_a_t, phase_id)
+
+        self.active_stack.append((state_key, chosen_idx))
         return order
 
     def order_cache(self, choices):
@@ -1035,6 +1158,104 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         return torch.nan_to_num(
             torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
         )
+
+
+class GumbelActorDelegate(ActorDelegate):
+    """
+    Gumbel AlphaZero Search Delegate.
+    Replaces PUCT exploration and Dirichlet noise with Gumbel noise sampled directly onto policy logits.
+    Uses Sequential Halving / completed Q value transform for search decisions and analytical policy targets.
+    Supports both in-process PolicyValueRNN and AlphaZeroTransformer architectures.
+    """
+
+    @torch.inference_mode()
+    def _order_items(self, items, phase_name, extract_fn):
+        num_actions = len(items)
+        if num_actions <= 1:
+            return list(range(num_actions))
+
+        action_feats = extract_fn(items)
+        if isinstance(action_feats, torch.Tensor):
+            action_feats_np = action_feats.cpu().numpy()
+        else:
+            action_feats_np = np.array(action_feats, dtype=np.float32)
+
+        prefix_key = self.current_prefix_keys[phase_name]
+        state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
+
+        if state_key not in self.mcts_tree:
+            scores, v, phase_id, global_feat, hidden = self._evaluate_node(phase_name, action_feats_np, prefix_key)
+
+            current_depth = len(self.active_stack)
+            effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
+
+            num_a = len(scores)
+            # Sample Gumbel(0, 1) noise: -log(-log(Uniform(0, 1)))
+            u = np.random.uniform(1e-7, 1.0 - 1e-7, size=num_a).astype(np.float32)
+            gumbel_noise = -np.log(-np.log(u))
+            effective_gumbel = (
+                effective_noise * gumbel_noise if effective_noise > 0.001 else np.zeros(num_a, dtype=np.float32)
+            )
+
+            P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
+
+            self.mcts_tree[state_key] = {
+                "N": np.zeros(num_actions, dtype=np.float32),
+                "W": np.zeros(num_actions, dtype=np.float32),
+                "P": P,
+                "logits": scores.astype(np.float32),
+                "gumbel_noise": effective_gumbel,
+                "v": float(v),
+                "prefix_key": prefix_key,
+                "phase_id": phase_id,
+                "action_features": action_feats_np,
+                "is_gumbel": True,
+                "global_feat": global_feat,
+                "hidden": hidden,
+            }
+
+        node_data = self.mcts_tree[state_key]
+        N_sa = node_data["N"]
+        W_sa = node_data["W"]
+        logits = node_data["logits"]
+        gumbel = node_data["gumbel_noise"]
+        v_s = node_data["v"]
+
+        # Completed Q-values: q(s, a) = W / N if N > 0 else v(s)
+        Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
+
+        visited_mask = N_sa > 0
+        if np.any(visited_mask):
+            min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
+            max_q = max(float(v_s), float(np.max(Q_sa[visited_mask])))
+            if max_q > min_q:
+                Q_norm = (Q_sa - min_q) / (max_q - min_q)
+            else:
+                Q_norm = np.full_like(Q_sa, 0.5)
+        else:
+            Q_norm = np.zeros_like(Q_sa)
+
+        # Gumbel value transform sigma(q)
+        max_visit = float(np.max(N_sa)) if len(N_sa) > 0 else 0.0
+        c_visit = 50.0
+        c_scale = self.c_puct
+        sigma_q = (c_visit + max_visit) * c_scale * Q_norm
+
+        gumbel_scores = logits + gumbel + sigma_q
+        order = np.argsort(-gumbel_scores).tolist()
+        chosen_idx = order[0]
+
+        if self.model is not None:
+            phase_id = self.PHASE_MAP[phase_name]
+            g_feat = self._get_global_feature(phase_id)
+            g_t = torch.tensor(g_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
+            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
+            with torch.inference_mode():
+                _, self.current_hidden = self.model.step(self.current_hidden, g_t, chosen_a_t, phase_id)
+
+        self.active_stack.append((state_key, chosen_idx))
+        return order
 
 
 HeuristicDelegate = tensor_graphs.HeuristicSearchDelegate
@@ -1138,6 +1359,21 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
             self.current_hidden = self.hidden_stack.pop()
         if self.active_path:
             self.active_path.pop()
+
+    def init_cache_graph(self, node_features, edge_src, edge_dst):
+        pass
+
+    def init_egraph(self, node_features, edge_src, edge_dst):
+        pass
+
+    def init_dispatch_graph(self, node_features, edge_src, edge_dst):
+        pass
+
+    def init_bufferize_graph(self, node_features, edge_src, edge_dst):
+        pass
+
+    def init_malloc_graph(self, node_features, edge_src, edge_dst):
+        pass
 
     def on_leaf_evaluated(self, cost: float):
         cost_val = float(cost)
@@ -1325,3 +1561,75 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
             for f in items
         ]
         return torch.nan_to_num(torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9)
+
+
+def create_search_delegate(
+    config: TrainConfig,
+    agent=None,
+    model: PolicyValueRNN | None = None,
+    req_queue=None,
+    resp_queue=None,
+    worker_id: int = 0,
+    mcts_tree: dict | None = None,
+    episode: int = 0,
+    version: int = 0,
+    shared_action_feats: torch.Tensor | None = None,
+    shared_logits: torch.Tensor | None = None,
+    shared_v: torch.Tensor | None = None,
+    temperature: float = 1.0,
+    is_training: bool = True,
+    device: torch.device | None = None,
+):
+    """
+    Factory function to instantiate the appropriate SearchDelegate based on TrainConfig.algo.
+    """
+    algo = getattr(config, "algo", "gumbel_alphazero").lower().replace("-", "_")
+    if algo in ["reinforce", "ppo", "rnn"]:
+        if model is None:
+            raise ValueError("PolicyValueRNN model must be provided for REINFORCE delegate.")
+        return RNNREINFORCEDelegate(
+            model=model,
+            temperature=temperature,
+            is_training=is_training,
+            device=device,
+        )
+    elif algo in ["alphazero", "az", "puct"]:
+        return ActorDelegate(
+            agent=agent,
+            model=model,
+            req_queue=req_queue,
+            resp_queue=resp_queue,
+            worker_id=worker_id,
+            mcts_tree=mcts_tree,
+            c_puct=config.c_puct,
+            episode=episode,
+            decay_episodes=config.decay_episodes,
+            base_noise=config.base_noise,
+            min_noise=config.min_noise,
+            depth_gamma=config.depth_gamma,
+            version=version,
+            shared_action_feats=shared_action_feats,
+            shared_logits=shared_logits,
+            shared_v=shared_v,
+            device=device,
+        )
+    else:  # "gumbel_alphazero" (default)
+        return GumbelActorDelegate(
+            agent=agent,
+            model=model,
+            req_queue=req_queue,
+            resp_queue=resp_queue,
+            worker_id=worker_id,
+            mcts_tree=mcts_tree,
+            c_puct=config.c_puct,
+            episode=episode,
+            decay_episodes=config.decay_episodes,
+            base_noise=config.base_noise,
+            min_noise=config.min_noise,
+            depth_gamma=config.depth_gamma,
+            version=version,
+            shared_action_feats=shared_action_feats,
+            shared_logits=shared_logits,
+            shared_v=shared_v,
+            device=device,
+        )
