@@ -892,7 +892,7 @@ template <typename... RuleTypes> struct ExtractBench
 
             float rule_cost = TGConstants::INF;
             auto rule_extractor =
-                std::apply([&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &rule_cost, rs...); },
+                std::apply([&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &rule_cost, nullptr, rs...); },
                            rules_tuple);
 
             while (rule_extractor.getNextSelection())
@@ -947,7 +947,7 @@ template <typename... RuleTypes> struct ExtractBench
 
             auto make_rule = [&]() {
                 return std::apply(
-                    [&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &baseline_cost, rs...); },
+                    [&](auto &&...rs) { return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &baseline_cost, nullptr, rs...); },
                     rules_tuple);
             };
             auto yield_rule = [&](auto &it) {

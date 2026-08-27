@@ -691,19 +691,21 @@ struct DispatchIterator
 public:
     prune::PruningRuleSet<Rules...> rules;
     const float *best_cost = nullptr;
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 
     template <typename... Rs>
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &_enode_infos, std::shared_ptr<SearchDelegate> _delegate,
-                     const float *_best_cost, Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), egraph(_egraph), enodeInfos(_enode_infos),
-          delegate(std::move(_delegate))
+                     const float *_best_cost,
+                     const std::unordered_map<MemSpace, uint64_t> *_mem_caps = nullptr, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost),
+          mem_caps(_mem_caps ? *_mem_caps : DispatchContext::empty_mem_caps()), egraph(_egraph),
+          enodeInfos(_enode_infos), delegate(std::move(_delegate))
     {
         selection_map_ref = &selection_map;
         initOrderState(selection_map);
 
-        DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, 0,
-                            DispatchContext::empty_mem_caps(), best_cost}; // TODO: pass in actual mem_caps here
+        DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, 0, mem_caps, best_cost};
         rules.init(ctx);
     }
 
@@ -737,7 +739,8 @@ public:
 
             if (pos == total_nodes)
             {
-                DispatchContext leaf_ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos};
+                DispatchContext leaf_ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos, mem_caps,
+                                         best_cost};
                 if (rules.validate_leaf(leaf_ctx))
                 {
                     out_order = ordered;
@@ -821,7 +824,8 @@ public:
                 EClassId node = current_ready[choice];
 
                 {
-                    DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos};
+                    DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos, mem_caps,
+                                        best_cost};
                     if (rules.is_pruned(node, choice, ctx))
                     {
                         continue;
@@ -846,7 +850,8 @@ public:
                 }
 
                 {
-                    DispatchContext push_ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos};
+                    DispatchContext push_ctx{egraph, selection_map, enodeInfos, ordered, current_ready, pos,
+                                             mem_caps, best_cost};
                     rules.on_push(node, push_ctx);
                 }
                 chosen = true;
@@ -1042,7 +1047,8 @@ private:
 
         EClassId undone = ordered.back();
         {
-            DispatchContext pop_ctx{egraph, *selection_map_ref, enodeInfos, ordered, current_ready, pos - 1};
+            DispatchContext pop_ctx{egraph, *selection_map_ref, enodeInfos, ordered, current_ready, pos - 1,
+                                    mem_caps, best_cost};
             rules.on_pop(undone, pop_ctx);
         }
         ordered.pop_back();
@@ -1073,9 +1079,10 @@ private:
 template <typename... Rules>
 DispatchIterator<std::decay_t<Rules>...> makeDispatchIterator(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
-    const std::vector<ENodeInfo> &enodeInfos, Rules &&...rules)
+    const std::vector<ENodeInfo> &enodeInfos,
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, Rules &&...rules)
 {
-    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, nullptr, nullptr,
+    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, nullptr, nullptr, mem_caps,
                                                     std::forward<Rules>(rules)...);
 }
 
@@ -1083,19 +1090,21 @@ template <typename... Rules>
 DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
-    const float *best_cost, Rules &&...rules)
+    const float *best_cost,
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, Rules &&...rules)
 {
     return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate),
-                                                    best_cost, std::forward<Rules>(rules)...);
+                                                    best_cost, mem_caps, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
-    const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
+    const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, Rules &&...rules)
 {
-    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate),
-                                                    nullptr, std::forward<Rules>(rules)...);
+    return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate), nullptr,
+                                                    mem_caps, std::forward<Rules>(rules)...);
 }
 
 using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule,
@@ -1107,12 +1116,13 @@ inline auto makeConfiguredDispatchIteratorFromBools(const EGraph &egraph,
                                                     const std::vector<ENodeInfo> &enodeInfos,
                                                     std::shared_ptr<SearchDelegate> delegate,
                                                     const BoolTuple &bool_flags,
-                                                    const float *best_cost = nullptr)
+                                                    const float *best_cost = nullptr,
+                                                    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
             return makeDispatchIteratorWithDelegate(egraph, selection_map, enodeInfos, std::move(delegate),
-                                                    best_cost, rs...);
+                                                    best_cost, mem_caps, rs...);
         },
         prune::instantiate_from_bools<AllDispatchRuleTypes>(bool_flags));
 }
@@ -1121,12 +1131,15 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
                                            const std::vector<ENodeInfo> &enodeInfos,
                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
-                                           const float *best_cost = nullptr)
+                                           const float *best_cost = nullptr,
+                                           const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
 {
     settings.validate_dispatch_rules();
+    if (mem_caps == nullptr)
+        mem_caps = &settings.mem_caps;
     auto bool_flags = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
     return makeConfiguredDispatchIteratorFromBools(egraph, selection_map, enodeInfos, std::move(delegate),
-                                                  bool_flags, best_cost);
+                                                  bool_flags, best_cost, mem_caps);
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
@@ -1150,11 +1163,256 @@ struct ExtractContext
     uint32_t sel;     // index into current's enodes of the candidate ENode
     const std::vector<EClassId> *to_process = nullptr;
     const float *best_cost = nullptr;
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr;
 };
 
 // =============================================================================
 // Extractor pruning rules (plain structs; conform to prune::PruningRuleSet)
 // =============================================================================
+
+class ExtractorDynamicMinCutRule
+{
+  public:
+    TG_PRUNING_RULE(ExtractorDynamicMinCutRule)
+    ExtractorDynamicMinCutRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
+    struct UndoFrame
+    {
+        EClassId current;
+        MemSpace current_ms;
+        bool was_open;
+        std::vector<std::pair<MemSpace, EClassId>> newly_opened_children;
+    };
+
+    std::vector<uint64_t> class_sizes;
+    std::vector<MemSpace> class_mem_spaces;
+    std::unordered_map<MemSpace, uint64_t> open_bytes_per_ms;
+    std::unordered_map<MemSpace, std::unordered_map<EClassId, uint32_t>> open_tensors_per_ms;
+    std::vector<UndoFrame> undo_stack;
+
+    bool is_open(EClassId node, MemSpace ms) const
+    {
+        auto it_ms = open_tensors_per_ms.find(ms);
+        if (it_ms == open_tensors_per_ms.end())
+            return false;
+        auto it = it_ms->second.find(node);
+        return it != it_ms->second.end() && it->second > 0;
+    }
+
+  public:
+    void init(const ExtractContext &ctx)
+    {
+        open_bytes_per_ms.clear();
+        open_tensors_per_ms.clear();
+        undo_stack.clear();
+
+        uint32_t num_classes = static_cast<uint32_t>(ctx.egraph.getClasses().size());
+        class_sizes.assign(num_classes, 0);
+        class_mem_spaces.assign(num_classes, MemSpace{1, HandleType::CPP});
+
+        for (uint32_t i = 0; i < num_classes; ++i)
+        {
+            EClassId canon = ctx.egraph.findConst(EClassId{i});
+            if (canon.value < num_classes)
+            {
+                const EClass &cls = ctx.egraph.getEClass(canon);
+                uint64_t sz = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
+                class_sizes[i] = sz;
+                class_mem_spaces[i] = cls.mem_space;
+            }
+        }
+    }
+
+    bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
+    {
+        if (!enabled || !ctx.mem_caps)
+            return false;
+
+        const ENode &enode = ctx.egraph.getENode(cand);
+        MemSpace ms = enode.getMemSpace();
+
+        if (ms.type == HandleType::STORAGE)
+            return false;
+
+        auto cap_it = ctx.mem_caps->find(ms);
+        if (cap_it == ctx.mem_caps->end() || cap_it->second == std::numeric_limits<uint64_t>::max())
+            return false;
+        uint64_t cap = cap_it->second;
+
+        uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
+
+        bool is_view = (cand.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[cand.value].is_view : false;
+        bool can_be_inplace = is_view;
+
+        if (!can_be_inplace && enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
+        {
+            const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
+            for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
+            {
+                if (inplace_idx < enode.getChildren().size())
+                {
+                    EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
+                    if (class_mem_spaces[child.value] == ms)
+                    {
+                        uint64_t in_size = class_sizes[child.value];
+                        if (out_size <= in_size)
+                        {
+                            can_be_inplace = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        uint64_t input_sum_in_ms = 0;
+        std::unordered_set<EClassId> seen_children;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (seen_children.insert(canon_child).second)
+            {
+                if (class_mem_spaces[canon_child.value] == ms)
+                {
+                    input_sum_in_ms += class_sizes[canon_child.value];
+                }
+            }
+        }
+
+        // 1. Single Node Execution Peak Memory
+        uint64_t local_peak = (can_be_inplace ? 0 : out_size) + input_sum_in_ms;
+        if (local_peak > cap)
+        {
+            LOG(INFO) << "OOM at path size " << ctx.path.size();
+            return true; // Prune: single node OOM
+        }
+
+        // 2. Cut Memory Lower Bound (Active Bypass Frontier + Current Node Demand)
+        uint64_t live_bypass_bytes = 0;
+        auto open_it = open_bytes_per_ms.find(ms);
+        if (open_it != open_bytes_per_ms.end())
+        {
+            live_bypass_bytes = open_it->second;
+            if (ctx.current.value != UINT32_MAX)
+            {
+                EClassId canon_curr = ctx.egraph.findConst(ctx.current);
+                if (class_mem_spaces[canon_curr.value] == ms && is_open(canon_curr, ms))
+                {
+                    if (live_bypass_bytes >= class_sizes[canon_curr.value])
+                    {
+                        live_bypass_bytes -= class_sizes[canon_curr.value];
+                    }
+                }
+            }
+        }
+
+        uint64_t total_cut_memory = live_bypass_bytes + local_peak;
+        if (total_cut_memory > cap)
+        {
+            LOG(INFO) << "OOM at path size " << ctx.path.size();
+            return true; // Prune: Cut lower bound exceeds memory cap
+        }
+
+        return false;
+    }
+
+    void on_push(ENodeId enode_id, const ExtractContext &ctx)
+    {
+        if (!enabled)
+            return;
+
+        UndoFrame frame;
+        frame.current = EClassId{UINT32_MAX};
+        frame.was_open = false;
+
+        if (ctx.current.value != UINT32_MAX)
+        {
+            EClassId canon_curr = ctx.egraph.findConst(ctx.current);
+            frame.current = canon_curr;
+            frame.current_ms = class_mem_spaces[canon_curr.value];
+            frame.was_open = is_open(canon_curr, frame.current_ms);
+
+            // If canon_curr was open, close it (its definition is now expanded)
+            if (frame.was_open)
+            {
+                open_tensors_per_ms[frame.current_ms][canon_curr]--;
+                if (open_tensors_per_ms[frame.current_ms][canon_curr] == 0)
+                {
+                    open_bytes_per_ms[frame.current_ms] -= class_sizes[canon_curr.value];
+                }
+            }
+        }
+
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+        std::unordered_set<EClassId> seen_children;
+
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (seen_children.insert(canon_child).second)
+            {
+                MemSpace child_ms = class_mem_spaces[canon_child.value];
+                if (child_ms.type != HandleType::STORAGE)
+                {
+                    if (open_tensors_per_ms[child_ms][canon_child] == 0)
+                    {
+                        open_bytes_per_ms[child_ms] += class_sizes[canon_child.value];
+                        frame.newly_opened_children.push_back({child_ms, canon_child});
+                    }
+                    open_tensors_per_ms[child_ms][canon_child]++;
+                }
+            }
+        }
+
+        undo_stack.push_back(std::move(frame));
+    }
+
+    void on_pop(ENodeId enode_id, const ExtractContext &ctx)
+    {
+        if (!enabled || undo_stack.empty())
+            return;
+
+        UndoFrame frame = std::move(undo_stack.back());
+        undo_stack.pop_back();
+
+        // Revert newly opened children
+        for (const auto &p : frame.newly_opened_children)
+        {
+            open_bytes_per_ms[p.first] -= class_sizes[p.second.value];
+        }
+
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+        std::unordered_set<EClassId> seen_children;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (seen_children.insert(canon_child).second)
+            {
+                MemSpace child_ms = class_mem_spaces[canon_child.value];
+                if (child_ms.type != HandleType::STORAGE)
+                {
+                    if (open_tensors_per_ms[child_ms][canon_child] > 0)
+                    {
+                        open_tensors_per_ms[child_ms][canon_child]--;
+                    }
+                }
+            }
+        }
+
+        // Restore current node if it was open
+        if (frame.current.value != UINT32_MAX && frame.was_open)
+        {
+            if (open_tensors_per_ms[frame.current_ms][frame.current] == 0)
+            {
+                open_bytes_per_ms[frame.current_ms] += class_sizes[frame.current.value];
+            }
+            open_tensors_per_ms[frame.current_ms][frame.current]++;
+        }
+    }
+};
 
 // =============================================================================
 // Helper: Fast O(T log T) Schrage Preemptive Bound (Jackson's Preemptive Schedule)
@@ -1635,6 +1893,7 @@ private:
 public:
     prune::PruningRuleSet<Rules...> rules;
     const float *best_cost = nullptr;
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr;
 
     std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
@@ -1653,13 +1912,14 @@ public:
 
     template <typename... Rs>
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
-              std::shared_ptr<SearchDelegate> _delegate, const float *_best_cost, Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), egraph(_egraph), enodeInfos(_enodeInfos),
-          delegate(std::move(_delegate)), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
-          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
-          has_options(_egraph.classes.size(), false)
+              std::shared_ptr<SearchDelegate> _delegate, const float *_best_cost,
+              const std::unordered_map<MemSpace, uint64_t> *_mem_caps, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), mem_caps(_mem_caps), egraph(_egraph),
+          enodeInfos(_enodeInfos), delegate(std::move(_delegate)), numClasses(_egraph.classes.size()),
+          to_process({root_eclass_id}), in_path(_egraph.classes.size(), false),
+          path_pos(_egraph.classes.size(), -1), has_options(_egraph.classes.size(), false)
     {
-        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX}, 0, &to_process, best_cost};
+        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX}, 0, &to_process, best_cost, mem_caps};
         rules.init(ctx);
     }
 
@@ -1728,11 +1988,10 @@ public:
                 std::vector<uint32_t> order = delegate->order_frontier(features);
                 if (!order.empty() && order[0] < to_process.size())
                 {
-                    // Swap highest-priority choice to the back so pop_back() takes it
                     std::swap(to_process[order[0]], to_process.back());
                 }
             }
-
+            
             EClassId current = to_process.back();
             to_process.pop_back();
 
@@ -1817,7 +2076,7 @@ public:
                 uint32_t chosen_sel = current_orders[current][sel];
                 ENodeId enode_id = enodes[chosen_sel];
 
-                ExtractContext pctx{egraph, enodeInfos, selection_map, path, current, chosen_sel, &to_process, best_cost};
+                ExtractContext pctx{egraph, enodeInfos, selection_map, path, current, chosen_sel, &to_process, best_cost, mem_caps};
                 if (rules.is_pruned(enode_id, static_cast<size_t>(chosen_sel), pctx))
                 {
                     continue;
@@ -1904,7 +2163,7 @@ public:
             const auto &enodes = egraph.getEClass(current).enodes;
             ENodeId popped_enode = enodes[chosen_sel];
 
-            ExtractContext pop_ctx{egraph, enodeInfos, selection_map, path, current, chosen_sel, &to_process, best_cost};
+            ExtractContext pop_ctx{egraph, enodeInfos, selection_map, path, current, chosen_sel, &to_process, best_cost, mem_caps};
             rules.on_pop(popped_enode, pop_ctx);
 
             uint32_t iteration_index = chosen_sel;
@@ -1975,9 +2234,11 @@ public:
 // =============================================================================
 template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractor(const EGraph &egraph, EClassId root_eclass_id,
-                                                const std::vector<ENodeInfo> &enodeInfos, Rules &&...rules)
+                                                const std::vector<ENodeInfo> &enodeInfos,
+                                                const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                                Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr, nullptr,
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr, nullptr, mem_caps,
                                              std::forward<Rules>(rules)...);
 }
 
@@ -1985,46 +2246,54 @@ template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(const EGraph &egraph, EClassId root_eclass_id,
                                                             const std::vector<ENodeInfo> &enodeInfos,
                                                             std::shared_ptr<SearchDelegate> delegate,
-                                                            const float *best_cost, Rules &&...rules)
+                                                            const float *best_cost,
+                                                            const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                                            Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate),
-                                             best_cost, std::forward<Rules>(rules)...);
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
+                                             mem_caps, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(const EGraph &egraph, EClassId root_eclass_id,
                                                             const std::vector<ENodeInfo> &enodeInfos,
-                                                            std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
+                                                            std::shared_ptr<SearchDelegate> delegate,
+                                                            const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                                            Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate),
-                                             nullptr, std::forward<Rules>(rules)...);
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), nullptr,
+                                             mem_caps, std::forward<Rules>(rules)...);
 }
 
-using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule>;
+using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,
                                              const std::vector<ENodeInfo> &enodeInfos,
                                              std::shared_ptr<SearchDelegate> delegate,
                                              const BoolTuple &bool_flags,
-                                             const float *best_cost = nullptr)
+                                             const float *best_cost = nullptr,
+                                             const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
             return makeExtractorWithDelegate(egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
-                                             rs...);
+                                             mem_caps, rs...);
         },
         prune::instantiate_from_bools<AllExtractRuleTypes>(bool_flags));
 }
 
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
-                                    const Settings &settings, const float *best_cost = nullptr)
+                                    const Settings &settings, const float *best_cost = nullptr,
+                                    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
 {
     settings.validate_rules("extract");
+    if (mem_caps == nullptr)
+        mem_caps = &settings.mem_caps;
     auto bool_flags = prune::extract_enabled_states<AllExtractRuleTypes>("extract", settings);
     return makeConfiguredExtractorFromBools(egraph, root_eclass_id, enodeInfos, std::move(delegate), bool_flags,
-                                           best_cost);
+                                           best_cost, mem_caps);
 }
 
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,

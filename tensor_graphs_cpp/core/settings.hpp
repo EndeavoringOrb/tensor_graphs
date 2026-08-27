@@ -672,6 +672,7 @@ struct Settings
             {"extract", "InfiniteCostSkipRule"},
             {"extract", "SiblingEquivalentSkipRule"},
             {"extract", "ExtractorJacksonCarlierRule"},
+            {"extract", "ExtractorDynamicMinCutRule"},
             {"enode", "MemCapENodeDominationRule"},
             {"enode", "FasterEquivalentENodeDominationRule"},
             {"enode", "DeadChildChainDominationRule"},

@@ -1433,7 +1433,8 @@ struct Planner
         auto bufferize_bools = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
 
         auto extractor =
-            makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools, &best_cost);
+            makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools, &best_cost,
+                                             &reduced_caps);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
 
         int max_iters = 10'000'000;
@@ -1471,7 +1472,7 @@ struct Planner
             float cost = TGConstants::INF;
 
             auto dispatch_iterator = makeConfiguredDispatchIteratorFromBools(
-                egraph, selection_map, enodeInfos, delegate, dispatch_bools, &best_cost);
+                egraph, selection_map, enodeInfos, delegate, dispatch_bools, &best_cost, &reduced_caps);
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
