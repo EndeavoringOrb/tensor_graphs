@@ -620,7 +620,7 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); });
 
     m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
-          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
+          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true, py::arg("max_seq_len") = 8);
 
     m.def("build_and_saturate_egraph_from_graph", &build_and_saturate_egraph_from_graph, py::arg("graph"),
           py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false,

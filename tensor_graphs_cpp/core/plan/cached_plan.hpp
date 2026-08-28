@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -112,13 +113,13 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_gr
 inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const std::string &model_name,
                                                                          const std::string &model_path,
                                                                          bool log_cost_calls = false,
-                                                                         bool compile_decode_buckets = true)
+                                                                         bool compile_decode_buckets = true,
+                                                                         uint32_t max_seq_len = 8)
 {
     auto ctx = std::make_shared<SaturatedEGraphContext>();
     ctx->costModel.setLogging(log_cost_calls);
     ctx->mem = std::make_unique<MemoryManager>(ctx->settings.mem_caps);
 
-    uint32_t max_seq_len = 8;
     ModelGraphRoots roots;
     if (model_name == "gemma-3-270m" || model_name == "gemma")
     {
@@ -508,7 +509,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         if (state->egraph.getEClass(rootEClassId).enodes.empty())
         {
             if (delegate)
-                delegate->on_leaf_evaluated(TGConstants::INF);
+                delegate->on_leaf_evaluated(-1.0f);
             if (cache_eval_count >= num_cache)
                 break;
             continue;
@@ -585,7 +586,6 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         auto extractor = makeConfiguredExtractor(state->egraph, rootEClassId, state->enodeInfos, delegate,
                                                  ctx->settings, nullptr, &reduced_caps);
         extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
-        // Note: NO MemValidator here!
 
         uint32_t extract_count = 0;
         while (extractor.getNextSelection())
@@ -593,7 +593,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             extract_count++;
             const auto &selection_map = extractor.selection_map;
 
-            // Dispatch (Level 2) -- unconstrained (empty pruning rule set)
+            // Dispatch (Level 2)
             auto dispatch_iterator = makeConfiguredDispatchIterator(state->egraph, selection_map, state->enodeInfos,
                                                                     delegate, ctx->settings, nullptr, &reduced_caps);
             uint32_t dispatch_count = 0;
@@ -652,8 +652,12 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
                     bool alloc_ok = true;
                     BufferId overflow;
+                    size_t total_alloc_count = 0;
+                    size_t total_unalloc_count = 0;
+
                     for (auto &kv : buf_by_mem_space)
                     {
+                        total_unalloc_count += kv.second.size();
                         MemSpace ms = kv.first;
                         uint64_t cap =
                             reduced_caps.count(ms) ? reduced_caps.at(ms) : std::numeric_limits<uint64_t>::max();
@@ -663,27 +667,67 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                             alloc_ok = false;
                             break;
                         }
+                        total_alloc_count += allocated.size();
                     }
 
-                    float cost = TGConstants::INF;
                     if (alloc_ok)
                     {
-                        cost = get_cost(order, state->egraph, selection_map, state->enodeInfos);
+                        float cost = get_cost(order, state->egraph, selection_map, state->enodeInfos);
                         all_costs.push_back(cost);
+                        if (delegate)
+                            delegate->on_leaf_evaluated(cost);
                     }
-
-                    if (delegate)
-                        delegate->on_leaf_evaluated(cost);
+                    else
+                    {
+                        // Malloc / OOM failure in range [-0.25, 0.0)
+                        float prog = static_cast<float>(total_alloc_count) /
+                                     std::max(1.0f, static_cast<float>(total_unalloc_count));
+                        float shaped_reward = -0.25f + 0.25f * std::clamp(prog, 0.0f, 0.999f);
+                        if (delegate)
+                            delegate->on_leaf_evaluated(shaped_reward);
+                    }
 
                     if (buf_count >= num_bufferize)
                         break;
                 }
+
+                // If bufferize generated 0 valid configurations, emit bufferize failure reward in [-0.50, -0.25)
+                if (buf_count == 0)
+                {
+                    float prog = static_cast<float>(buf_iter.k) /
+                                 std::max(1.0f, static_cast<float>(order.size()));
+                    float shaped_reward = -0.50f + 0.25f * std::clamp(prog, 0.0f, 0.999f);
+                    if (delegate)
+                        delegate->on_leaf_evaluated(shaped_reward);
+                }
+
                 if (dispatch_count >= num_dispatch)
                     break;
             }
+
+            // If dispatch generated 0 valid orders, emit dispatch failure reward in [-0.75, -0.50)
+            if (dispatch_count == 0)
+            {
+                float prog = static_cast<float>(order.size()) /
+                             std::max(1.0f, static_cast<float>(selection_map.size()));
+                float shaped_reward = -0.75f + 0.25f * std::clamp(prog, 0.0f, 0.999f);
+                if (delegate)
+                    delegate->on_leaf_evaluated(shaped_reward);
+            }
+
             extractor.ascend();
             if (extract_count >= num_extract)
                 break;
+        }
+
+        // If extractor generated 0 valid selections, emit extractor failure reward in [-1.00, -0.75)
+        if (extract_count == 0)
+        {
+            float prog = static_cast<float>(extractor.path.size()) /
+                         std::max(1.0f, static_cast<float>(state->egraph.getClasses().size()));
+            float shaped_reward = -1.00f + 0.25f * std::clamp(prog, 0.0f, 0.999f);
+            if (delegate)
+                delegate->on_leaf_evaluated(shaped_reward);
         }
 
         if (cache_eval_count >= num_cache)

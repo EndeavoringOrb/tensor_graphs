@@ -993,6 +993,12 @@ def main():
         default=None,
         help="Path to model file or directory",
     )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=None,
+        help="LLM model sequence length (e.g. gemma-3-270m; defaults to saved config or 8)",
+    )
 
     args = parser.parse_args()
     if args.threads > 0:
@@ -1044,6 +1050,8 @@ def main():
             config.model_path = get_default_model_path(args.model)
     if args.model_path is not None:
         config.model_path = args.model_path
+    if args.seq_len is not None:
+        config.seq_len = args.seq_len
 
     config.save(config_file)
 

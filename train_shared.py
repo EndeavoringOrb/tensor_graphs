@@ -25,7 +25,8 @@ class TrainConfig:
     run_dir: str = "runs"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
-    num_simulations: int = 800
+    seq_len: int = 128  # LLM model sequence length (e.g. gemma-3-270m)
+    num_simulations: int = 4
     level_simulations: list = dataclasses.field(default_factory=lambda: [1, 1, 1, 1])
     replay_buffer_size: int = 100_000
     batch_size: int = 64
@@ -59,6 +60,9 @@ class TrainConfig:
     min_noise: float = 0.01
     decay_episodes: int = 500
     depth_gamma: float = 0.99
+    c_scale: float = 1.0
+    c_visit: float = 50.0
+    gumbel_max_actions: int = 2  # top-m candidate actions for sequential halving. half of num_simulations
 
     # REINFORCE / PPO hyperparameters
     clip_eps: float = 0.2
@@ -99,8 +103,8 @@ class TrainConfig:
 DEFAULT_MODEL_PATHS = {
     "gemma-3-270m": "models/google/gemma-3-270m",
     "qwen-3.6-35b-a3b": "models/Qwen/Qwen3.6-35B-A3B",
-    "krea": "models/krea/Krea-2-Turbo/krea.safetensors",
-    "krea-2-turbo": "models/krea/Krea-2-Turbo/krea.safetensors",
+    "krea": "models/krea/Krea-2-Turbo",
+    "krea-2-turbo": "models/krea/Krea-2-Turbo",
     "krea-2-turbo-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
     "vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
     "qwen-image-vae": "models/krea/Krea-2-Turbo/qwen_image_vae.safetensors",
@@ -390,6 +394,7 @@ class ModelGraphProvider:
                 model_path,
                 config.log_cost_calls,
                 config.compile_decode_buckets,
+                config.seq_len,
             )
         return self._cached_context
 
@@ -760,7 +765,14 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
     def on_leaf_evaluated(self, cost: float):
         cost_val = float(cost)
-        z = 1000.0 / (cost_val + 1.0) if cost_val < float("inf") else -1.0
+        if 0.0 <= cost_val < float("inf") and not math.isnan(cost_val):
+            # Positive cost -> Valid plan
+            z = 1000.0 / (cost_val + 1.0)
+        elif cost_val < 0.0:
+            # Negative cost is our shaped hierarchical failure reward in [-1.0, 0.0)
+            z = cost_val
+        else:
+            z = -1.0
 
         for state_key, act in self.active_stack:
             if state_key in self.mcts_tree:
@@ -1195,44 +1207,82 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
 class GumbelActorDelegate(ActorDelegate):
     """
-    Gumbel AlphaZero Search Delegate.
-    Replaces PUCT exploration and Dirichlet noise with Gumbel noise sampled directly onto policy logits.
-    Uses Sequential Halving / completed Q value transform for search decisions and analytical policy targets.
-    Supports both in-process PolicyValueRNN and AlphaZeroTransformer architectures.
+    Sequential Halving Gumbel AlphaZero Delegate (Danihelka et al., 2022).
+    Enforces exact simulation budget distribution across phases at root decision points.
     """
+    def __init__(
+        self,
+        *args,
+        num_simulations: int = 8,
+        max_actions: int = 4,
+        c_scale: float = 1.0,
+        c_visit: float = 50.0,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.num_simulations = num_simulations
+        self.max_actions = max_actions
+        self.c_scale = c_scale
+        self.c_visit = c_visit
+        
+        # Sequential Halving budget schedule calculation
+        # For N=8, m=4 -> K=2 rounds:
+        # Phase 0: 4 candidates, 1 visit each (4 total)
+        # Phase 1: 2 candidates, 2 visits each (4 total)
+        self.K = max(1, int(math.ceil(math.log2(self.max_actions))))
+        self.root_halving_state = {}  # state_key -> dict tracking SH rounds and candidate sets
+
+    def reset_for_episode(self, mem_caps: dict[int, int] | None = None):
+        super().reset_for_episode(mem_caps=mem_caps)
+        self.root_halving_state.clear()
 
     @torch.inference_mode()
-    def _order_items(self, items, phase_name, extract_fn):
+    def _order_items(self, items, phase_name: str, extract_fn):
         num_actions = len(items)
         if num_actions <= 1:
             return list(range(num_actions))
 
         action_feats = extract_fn(items)
-        if isinstance(action_feats, torch.Tensor):
-            action_feats_np = action_feats.cpu().numpy()
-        else:
-            action_feats_np = np.array(action_feats, dtype=np.float32)
+        action_feats_np = (
+            action_feats.cpu().numpy()
+            if isinstance(action_feats, torch.Tensor)
+            else np.array(action_feats, dtype=np.float32)
+        )
 
         prefix_key = self.current_prefix_keys[phase_name]
         state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
+        is_root = (len(self.active_stack) == 0)
 
+        # ---------------------------------------------------------------------
+        # 1. First time visiting this state: Initialize logits & Gumbel noise
+        # ---------------------------------------------------------------------
         if state_key not in self.mcts_tree:
             scores, v, phase_id, global_feat, hidden = self._evaluate_node(
                 phase_name, action_feats_np, prefix_key
             )
-
-            current_depth = len(self.active_stack)
-            effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
-
             num_a = len(scores)
-            # Sample Gumbel(0, 1) noise: -log(-log(Uniform(0, 1)))
-            u = np.random.uniform(1e-7, 1.0 - 1e-7, size=num_a).astype(np.float32)
-            gumbel_noise = -np.log(-np.log(u))
-            effective_gumbel = (
-                effective_noise * gumbel_noise
-                if effective_noise > 0.001
-                else np.zeros(num_a, dtype=np.float32)
-            )
+
+            if is_root:
+                # Sample standard Gumbel(0, 1) noise at root
+                u = np.random.uniform(1e-7, 1.0 - 1e-7, size=num_a).astype(np.float32)
+                gumbel_noise = -np.log(-np.log(u))
+                
+                # Top-m candidate selection
+                m = min(self.max_actions, num_a)
+                gumbel_prior_scores = scores + gumbel_noise
+                top_m_candidates = np.argsort(-gumbel_prior_scores)[:m].tolist()
+
+                self.root_halving_state[state_key] = {
+                    "m": m,
+                    "K": self.K,
+                    "current_phase": 0,
+                    "active_candidates": top_m_candidates,
+                    "phase_sims_completed": 0,
+                    "target_visits_per_cand": max(1, self.num_simulations // (self.K * m)),
+                    "candidate_cursor": 0,
+                }
+            else:
+                gumbel_noise = np.zeros(num_a, dtype=np.float32)
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
 
@@ -1241,12 +1291,13 @@ class GumbelActorDelegate(ActorDelegate):
                 "W": np.zeros(num_actions, dtype=np.float32),
                 "P": P,
                 "logits": scores.astype(np.float32),
-                "gumbel_noise": effective_gumbel,
+                "gumbel_noise": gumbel_noise,
                 "v": float(v),
                 "prefix_key": prefix_key,
                 "phase_id": phase_id,
                 "action_features": action_feats_np,
                 "is_gumbel": True,
+                "is_root": is_root,
                 "global_feat": global_feat,
                 "hidden": hidden,
             }
@@ -1258,44 +1309,65 @@ class GumbelActorDelegate(ActorDelegate):
         gumbel = node_data["gumbel_noise"]
         v_s = node_data["v"]
 
-        # Completed Q-values: q(s, a) = W / N if N > 0 else v(s)
+        # Completed Q-values
         Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
-
         visited_mask = N_sa > 0
         if np.any(visited_mask):
             min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
             max_q = max(float(v_s), float(np.max(Q_sa[visited_mask])))
-            if max_q > min_q:
-                Q_norm = (Q_sa - min_q) / (max_q - min_q)
-            else:
-                Q_norm = np.full_like(Q_sa, 0.5)
+            Q_norm = (Q_sa - min_q) / (max_q - min_q) if max_q > min_q else np.full_like(Q_sa, 0.5)
         else:
             Q_norm = np.zeros_like(Q_sa)
 
-        # Gumbel value transform sigma(q)
         max_visit = float(np.max(N_sa)) if len(N_sa) > 0 else 0.0
-        c_visit = 50.0
-        c_scale = self.c_puct
-        sigma_q = (c_visit + max_visit) * c_scale * Q_norm
+        sigma_q = (self.c_visit + max_visit) * self.c_scale * Q_norm
 
-        gumbel_scores = logits + gumbel + sigma_q
-        order = np.argsort(-gumbel_scores).tolist()
-        chosen_idx = order[0]
+        # ---------------------------------------------------------------------
+        # 2. Sequential Halving Action Selection (Root) vs Deterministic Greedy (Internal)
+        # ---------------------------------------------------------------------
+        if is_root and state_key in self.root_halving_state:
+            sh = self.root_halving_state[state_key]
+            active_cands = sh["active_candidates"]
 
+            # Check if current phase budget is exhausted
+            if sh["phase_sims_completed"] >= len(active_cands) * sh["target_visits_per_cand"]:
+                if sh["current_phase"] < sh["K"] - 1:
+                    # Score active candidates and eliminate bottom half
+                    cand_scores = [logits[a] + gumbel[a] + sigma_q[a] for a in active_cands]
+                    sorted_indices = np.argsort(-np.array(cand_scores))
+                    next_size = max(1, len(active_cands) // 2)
+                    sh["active_candidates"] = [active_cands[i] for i in sorted_indices[:next_size]]
+                    
+                    sh["current_phase"] += 1
+                    sh["phase_sims_completed"] = 0
+                    sh["target_visits_per_cand"] = max(1, self.num_simulations // (sh["K"] * len(sh["active_candidates"])))
+                    sh["candidate_cursor"] = 0
+                    active_cands = sh["active_candidates"]
+
+            # Pick next candidate in active set round-robin
+            chosen_idx = active_cands[sh["candidate_cursor"] % len(active_cands)]
+            sh["candidate_cursor"] += 1
+            sh["phase_sims_completed"] += 1
+
+            # Order: chosen action at index 0, followed by others sorted by score
+            all_scores = logits + gumbel + sigma_q
+            remaining = [a for a in np.argsort(-all_scores) if a != chosen_idx]
+            order = [chosen_idx] + remaining
+        else:
+            # Internal node: deterministic greedy on logits + sigma(q)
+            internal_scores = logits + sigma_q
+            order = np.argsort(-internal_scores).tolist()
+            chosen_idx = order[0]
+
+        # RNN hidden state update
         if self.model is not None:
             phase_id = self.PHASE_MAP[phase_name]
             g_feat = self._get_global_feature(phase_id)
-            g_t = torch.tensor(
-                g_feat, dtype=torch.float32, device=self.device
-            ).unsqueeze(0)
-            a_t = torch.tensor(
-                action_feats_np, dtype=torch.float32, device=self.device
-            ).unsqueeze(0)
+            g_t = torch.tensor(g_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
+            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
             chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
             with torch.inference_mode():
-                _, self.current_hidden = self.model.step(
-                    self.current_hidden, g_t, chosen_a_t, phase_id
-                )
+                _, self.current_hidden = self.model.step(self.current_hidden, g_t, chosen_a_t, phase_id)
 
         self.active_stack.append((state_key, chosen_idx))
         return order
@@ -1427,8 +1499,10 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
 
     def on_leaf_evaluated(self, cost: float):
         cost_val = float(cost)
-        if cost_val < float("inf") and not math.isnan(cost_val):
+        if 0.0 <= cost_val < float("inf") and not math.isnan(cost_val):
             reward = 1000.0 / (cost_val + 1.0)
+        elif cost_val < 0.0:
+            reward = cost_val
         else:
             reward = -1.0
 
@@ -1436,7 +1510,7 @@ class RNNREINFORCEDelegate(tensor_graphs.SearchDelegate):
             self.completed_episodes.append(
                 RNNEpisode(
                     transitions=list(self.active_path),
-                    cost=cost_val,
+                    cost=cost_val if cost_val >= 0.0 else float("inf"),
                     reward=reward,
                 )
             )
@@ -1650,15 +1724,8 @@ def create_search_delegate(
     is_training: bool = True,
     device: torch.device | None = None,
 ):
-    """
-    Factory function to instantiate the appropriate SearchDelegate based on TrainConfig.algo.
-    """
     algo = getattr(config, "algo", "gumbel_alphazero").lower().replace("-", "_")
     if algo in ["reinforce", "ppo", "rnn"]:
-        if model is None:
-            raise ValueError(
-                "PolicyValueRNN model must be provided for REINFORCE delegate."
-            )
         return RNNREINFORCEDelegate(
             model=model,
             temperature=temperature,
@@ -1685,7 +1752,7 @@ def create_search_delegate(
             shared_v=shared_v,
             device=device,
         )
-    else:  # "gumbel_alphazero" (default)
+    else:
         return GumbelActorDelegate(
             agent=agent,
             model=model,
@@ -1693,6 +1760,10 @@ def create_search_delegate(
             resp_queue=resp_queue,
             worker_id=worker_id,
             mcts_tree=mcts_tree,
+            num_simulations=config.num_simulations,
+            max_actions=min(getattr(config, "gumbel_max_actions", 4), config.num_simulations),
+            c_scale=getattr(config, "c_scale", 1.0),
+            c_visit=getattr(config, "c_visit", 50.0),
             c_puct=config.c_puct,
             episode=episode,
             decay_episodes=config.decay_episodes,

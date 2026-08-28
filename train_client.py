@@ -734,6 +734,12 @@ def main():
     )
     parser.add_argument("--model", type=str, default=None, help="Model name")
     parser.add_argument("--model-path", type=str, default=None, help="Model path")
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=None,
+        help="LLM model sequence length (e.g. gemma-3-270m; defaults to server config or 8)",
+    )
     parser.add_argument("--random-min-nodes", type=int, default=None)
     parser.add_argument("--random-max-nodes", type=int, default=None)
     parser.add_argument("--random-dim", type=int, default=None)
@@ -827,6 +833,8 @@ def main():
         config.model_name = args.model
     if args.model_path is not None:
         config.model_path = args.model_path
+    if args.seq_len is not None:
+        config.seq_len = args.seq_len
     if args.random_min_nodes is not None:
         config.random_min_nodes = args.random_min_nodes
     if args.random_max_nodes is not None:
