@@ -325,7 +325,7 @@ def rnn_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
         total_loss = torch.tensor(0.0, device=device)
         total_p_loss = 0.0
         total_v_loss = 0.0
-        total_transitions = 0
+        total_transitions = sum(len(item[1]) for item in phase_groups.items())
 
         for phase_id, items in phase_groups.items():
             B_p = len(items)
@@ -386,13 +386,14 @@ def rnn_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
             policy_loss = -(padded_pis * safe_log_probs).sum(dim=-1).mean()
             value_loss = F.smooth_l1_loss(values, z_batch)
 
-            phase_loss = policy_loss + getattr(config, "value_coef", 0.5) * value_loss
+            phase_loss = (policy_loss + config.value_coef * value_loss) * (
+                B_p / total_transitions
+            )
             phase_loss.backward()
 
-            total_loss = total_loss + phase_loss.detach() * B_p
-            total_p_loss += policy_loss.item() * B_p
-            total_v_loss += value_loss.item() * B_p
-            total_transitions += B_p
+            total_loss = total_loss + phase_loss.detach()
+            total_p_loss += policy_loss.item() * (B_p / total_transitions)
+            total_v_loss += value_loss.item() * (B_p / total_transitions)
 
         if total_transitions > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

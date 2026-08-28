@@ -62,7 +62,9 @@ class TrainConfig:
     depth_gamma: float = 0.99
     c_scale: float = 1.0
     c_visit: float = 50.0
-    gumbel_max_actions: int = 2  # top-m candidate actions for sequential halving. half of num_simulations
+    gumbel_max_actions: int = (
+        2  # top-m candidate actions for sequential halving. half of num_simulations
+    )
 
     # REINFORCE / PPO hyperparameters
     clip_eps: float = 0.2
@@ -500,10 +502,12 @@ class TrajectoryCodec:
         mcts_tree: dict,
         best_Z: float,
         prefix_registry: dict[int, PrefixData],
-        tau: float = 1.25,
+        tau: float = 1.0,
         blend_k: float = 2.0,
         algo: str = "gumbel_alphazero",
         model_type: str = "rnn",
+        c_visit: float = 2.0,
+        c_scale: float = 1.0,
     ) -> dict:
         referenced_prefixes = {}
         transitions = []
@@ -525,27 +529,29 @@ class TrajectoryCodec:
                 logits = node_data["logits"]
                 W_sa = node_data["W"]
                 v_s = node_data.get("v", 0.0)
+
+                # Completed Q-values
                 Q_sa = np.where(counts > 0, W_sa / np.maximum(counts, 1.0), v_s)
                 visited_mask = counts > 0
                 if np.any(visited_mask):
                     min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
                     max_q = max(float(v_s), float(np.max(Q_sa[visited_mask])))
-                    if max_q > min_q:
-                        Q_norm = (Q_sa - min_q) / (max_q - min_q)
-                    else:
-                        Q_norm = np.full_like(Q_sa, 0.5)
+                    Q_norm = (
+                        (Q_sa - min_q) / (max_q - min_q)
+                        if max_q > min_q
+                        else np.full_like(Q_sa, 0.5)
+                    )
                 else:
-                    Q_norm = np.zeros_like(Q_sa)
+                    Q_norm = np.full_like(Q_sa, 0.5)
 
                 max_visit = float(np.max(counts)) if len(counts) > 0 else 0.0
-                c_visit = 50.0
-                c_scale = 1.0
                 sigma_q = (c_visit + max_visit) * c_scale * Q_norm
+
+                # Improved policy target: Softmax(logits + sigma(q))
                 improved_logits = logits + sigma_q
                 exp_l = np.exp(improved_logits - np.max(improved_logits))
                 pi = exp_l / np.maximum(1e-8, exp_l.sum())
             elif total_counts > 0:
-                # Target temperature softening to avoid extreme one-hot targets on low sim counts
                 smoothed_counts = np.power(counts, 1.0 / max(1e-4, tau))
                 sum_smoothed = smoothed_counts.sum()
                 smoothed_pi = (
@@ -553,8 +559,6 @@ class TrajectoryCodec:
                     if sum_smoothed > 0
                     else prior_p.copy()
                 )
-
-                # Prior blending: smoothly interpolate between prior and MCTS policy
                 blend_weight = total_counts / (total_counts + blend_k)
                 pi = blend_weight * smoothed_pi + (1.0 - blend_weight) * prior_p
             else:
@@ -1207,37 +1211,78 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
 class GumbelActorDelegate(ActorDelegate):
     """
-    Sequential Halving Gumbel AlphaZero Delegate (Danihelka et al., 2022).
-    Enforces exact simulation budget distribution across phases at root decision points.
+    Canonical Gumbel MuZero / Gumbel AlphaZero Search Delegate (Danihelka et al., 2022).
+
+    Principles:
+      1. Root Node: Perturbs prior logits with stationary Gumbel(0, 1) noise and applies
+         Sequential Halving across K = ceil(log2(m)) phases.
+      2. Interior Nodes: Explores deterministically via improved logits (logits + sigma(q))
+         without Gumbel noise.
+      3. No Episode Decay: Exploration is governed structurally by the simulation budget
+         and Sequential Halving, not heuristic noise annealing.
     """
+
+    PHASE_MAP = {
+        "cache": 0,
+        "extract": 1,
+        "dispatch": 2,
+        "bufferize": 3,
+        "malloc": 4,
+        "frontier": 5,
+    }
+
     def __init__(
         self,
         *args,
         num_simulations: int = 8,
         max_actions: int = 4,
+        c_visit: float = 2.0,
         c_scale: float = 1.0,
-        c_visit: float = 50.0,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.num_simulations = num_simulations
-        self.max_actions = max_actions
-        self.c_scale = c_scale
-        self.c_visit = c_visit
-        
-        # Sequential Halving budget schedule calculation
-        # For N=8, m=4 -> K=2 rounds:
-        # Phase 0: 4 candidates, 1 visit each (4 total)
-        # Phase 1: 2 candidates, 2 visits each (4 total)
-        self.K = max(1, int(math.ceil(math.log2(self.max_actions))))
-        self.root_halving_state = {}  # state_key -> dict tracking SH rounds and candidate sets
+        self.num_simulations = max(1, int(num_simulations))
+        self.max_actions = max(1, int(max_actions))
+        self.c_visit = float(c_visit)
+        self.c_scale = float(c_scale)
+
+        # Sequential Halving tracking per root state_key
+        self.root_sh_state: dict[int, dict] = {}
 
     def reset_for_episode(self, mem_caps: dict[int, int] | None = None):
         super().reset_for_episode(mem_caps=mem_caps)
-        self.root_halving_state.clear()
+        self.root_sh_state.clear()
+
+    def compute_sigma_q(self, node_data: dict) -> np.ndarray:
+        """
+        Computes the monotonic value transformation sigma(q) using completed and
+        min-max normalized Q-values relative to the root value estimate v(s).
+        """
+        N_sa = node_data["N"]
+        W_sa = node_data["W"]
+        v_s = node_data["v"]
+
+        # 1. Complete Q-values: unvisited actions take the prior state value v(s)
+        Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
+
+        # 2. Min-Max normalization relative to v(s) and visited actions
+        visited_mask = N_sa > 0
+        if np.any(visited_mask):
+            q_min = min(float(v_s), float(np.min(Q_sa[visited_mask])))
+            q_max = max(float(v_s), float(np.max(Q_sa[visited_mask])))
+            if q_max > q_min:
+                q_norm = (Q_sa - q_min) / (q_max - q_min)
+            else:
+                q_norm = np.full_like(Q_sa, 0.5)
+        else:
+            q_norm = np.full_like(Q_sa, 0.5)
+
+        # 3. Value bonus sigma(q)
+        max_visit = float(np.max(N_sa)) if len(N_sa) > 0 else 0.0
+        return (self.c_visit + max_visit) * self.c_scale * q_norm
 
     @torch.inference_mode()
-    def _order_items(self, items, phase_name: str, extract_fn):
+    def _order_items(self, items, phase_name: str, extract_fn) -> list[int]:
         num_actions = len(items)
         if num_actions <= 1:
             return list(range(num_actions))
@@ -1249,40 +1294,47 @@ class GumbelActorDelegate(ActorDelegate):
             else np.array(action_feats, dtype=np.float32)
         )
 
-        prefix_key = self.current_prefix_keys[phase_name]
+        prefix_key = self.current_prefix_keys.get(phase_name, 0)
         state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
-        is_root = (len(self.active_stack) == 0)
+        is_root = len(self.active_stack) == 0
 
         # ---------------------------------------------------------------------
-        # 1. First time visiting this state: Initialize logits & Gumbel noise
+        # 1. Expand / Evaluate unvisited node
         # ---------------------------------------------------------------------
         if state_key not in self.mcts_tree:
             scores, v, phase_id, global_feat, hidden = self._evaluate_node(
                 phase_name, action_feats_np, prefix_key
             )
-            num_a = len(scores)
+            v_float = float(v)
 
             if is_root:
-                # Sample standard Gumbel(0, 1) noise at root
-                u = np.random.uniform(1e-7, 1.0 - 1e-7, size=num_a).astype(np.float32)
+                # Sample stationary standard Gumbel(0, 1) noise once at root
+                u = np.random.uniform(1e-7, 1.0 - 1e-7, size=num_actions).astype(
+                    np.float32
+                )
                 gumbel_noise = -np.log(-np.log(u))
-                
-                # Top-m candidate selection
-                m = min(self.max_actions, num_a)
-                gumbel_prior_scores = scores + gumbel_noise
-                top_m_candidates = np.argsort(-gumbel_prior_scores)[:m].tolist()
 
-                self.root_halving_state[state_key] = {
+                # Select candidate pool m = min(max_actions, num_actions)
+                m = min(self.max_actions, num_actions)
+                perturbed_scores = scores + gumbel_noise
+                top_m_candidates = np.argsort(-perturbed_scores)[:m].tolist()
+
+                # Sequential Halving budget schedule
+                K = max(1, int(math.ceil(math.log2(m))))
+                visits_per_cand = max(1, self.num_simulations // (K * m))
+
+                self.root_sh_state[state_key] = {
                     "m": m,
-                    "K": self.K,
+                    "K": K,
                     "current_phase": 0,
                     "active_candidates": top_m_candidates,
                     "phase_sims_completed": 0,
-                    "target_visits_per_cand": max(1, self.num_simulations // (self.K * m)),
-                    "candidate_cursor": 0,
+                    "target_visits_per_cand": visits_per_cand,
+                    "cand_cursor": 0,
                 }
             else:
-                gumbel_noise = np.zeros(num_a, dtype=np.float32)
+                # Interior nodes have no Gumbel noise
+                gumbel_noise = np.zeros(num_actions, dtype=np.float32)
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
 
@@ -1292,7 +1344,7 @@ class GumbelActorDelegate(ActorDelegate):
                 "P": P,
                 "logits": scores.astype(np.float32),
                 "gumbel_noise": gumbel_noise,
-                "v": float(v),
+                "v": v_float,
                 "prefix_key": prefix_key,
                 "phase_id": phase_id,
                 "action_features": action_feats_np,
@@ -1303,50 +1355,45 @@ class GumbelActorDelegate(ActorDelegate):
             }
 
         node_data = self.mcts_tree[state_key]
-        N_sa = node_data["N"]
-        W_sa = node_data["W"]
+        sigma_q = self.compute_sigma_q(node_data)
         logits = node_data["logits"]
         gumbel = node_data["gumbel_noise"]
-        v_s = node_data["v"]
-
-        # Completed Q-values
-        Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
-        visited_mask = N_sa > 0
-        if np.any(visited_mask):
-            min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
-            max_q = max(float(v_s), float(np.max(Q_sa[visited_mask])))
-            Q_norm = (Q_sa - min_q) / (max_q - min_q) if max_q > min_q else np.full_like(Q_sa, 0.5)
-        else:
-            Q_norm = np.zeros_like(Q_sa)
-
-        max_visit = float(np.max(N_sa)) if len(N_sa) > 0 else 0.0
-        sigma_q = (self.c_visit + max_visit) * self.c_scale * Q_norm
 
         # ---------------------------------------------------------------------
-        # 2. Sequential Halving Action Selection (Root) vs Deterministic Greedy (Internal)
+        # 2. Sequential Halving Selection (Root) vs Deterministic Greedy (Interior)
         # ---------------------------------------------------------------------
-        if is_root and state_key in self.root_halving_state:
-            sh = self.root_halving_state[state_key]
+        if is_root and state_key in self.root_sh_state:
+            sh = self.root_sh_state[state_key]
             active_cands = sh["active_candidates"]
 
-            # Check if current phase budget is exhausted
-            if sh["phase_sims_completed"] >= len(active_cands) * sh["target_visits_per_cand"]:
+            # Advance Sequential Halving round if current round budget is fulfilled
+            round_capacity = len(active_cands) * sh["target_visits_per_cand"]
+            if sh["phase_sims_completed"] >= round_capacity:
                 if sh["current_phase"] < sh["K"] - 1:
-                    # Score active candidates and eliminate bottom half
-                    cand_scores = [logits[a] + gumbel[a] + sigma_q[a] for a in active_cands]
-                    sorted_indices = np.argsort(-np.array(cand_scores))
-                    next_size = max(1, len(active_cands) // 2)
-                    sh["active_candidates"] = [active_cands[i] for i in sorted_indices[:next_size]]
-                    
+                    # Evaluate surviving candidates on logits + g + sigma(q)
+                    cand_scores = [
+                        logits[a] + gumbel[a] + sigma_q[a] for a in active_cands
+                    ]
+                    ranked_indices = np.argsort(-np.array(cand_scores))
+
+                    # Halve candidate pool
+                    survivor_count = max(1, len(active_cands) // 2)
+                    sh["active_candidates"] = [
+                        active_cands[i] for i in ranked_indices[:survivor_count]
+                    ]
                     sh["current_phase"] += 1
                     sh["phase_sims_completed"] = 0
-                    sh["target_visits_per_cand"] = max(1, self.num_simulations // (sh["K"] * len(sh["active_candidates"])))
-                    sh["candidate_cursor"] = 0
+                    sh["target_visits_per_cand"] = max(
+                        1,
+                        self.num_simulations
+                        // (sh["K"] * len(sh["active_candidates"])),
+                    )
+                    sh["cand_cursor"] = 0
                     active_cands = sh["active_candidates"]
 
-            # Pick next candidate in active set round-robin
-            chosen_idx = active_cands[sh["candidate_cursor"] % len(active_cands)]
-            sh["candidate_cursor"] += 1
+            # Round-robin visit among active candidates in current phase
+            chosen_idx = active_cands[sh["cand_cursor"] % len(active_cands)]
+            sh["cand_cursor"] += 1
             sh["phase_sims_completed"] += 1
 
             # Order: chosen action at index 0, followed by others sorted by score
@@ -1354,20 +1401,28 @@ class GumbelActorDelegate(ActorDelegate):
             remaining = [a for a in np.argsort(-all_scores) if a != chosen_idx]
             order = [chosen_idx] + remaining
         else:
-            # Internal node: deterministic greedy on logits + sigma(q)
-            internal_scores = logits + sigma_q
-            order = np.argsort(-internal_scores).tolist()
+            # Interior nodes: deterministic selection on logits + sigma(q)
+            interior_scores = logits + sigma_q
+            order = np.argsort(-interior_scores).tolist()
             chosen_idx = order[0]
 
-        # RNN hidden state update
+        # ---------------------------------------------------------------------
+        # 3. RNN State Transition (if applicable)
+        # ---------------------------------------------------------------------
         if self.model is not None:
-            phase_id = self.PHASE_MAP[phase_name]
+            phase_id = self.PHASE_MAP.get(phase_name, 0)
             g_feat = self._get_global_feature(phase_id)
-            g_t = torch.tensor(g_feat, dtype=torch.float32, device=self.device).unsqueeze(0)
-            a_t = torch.tensor(action_feats_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            g_t = torch.tensor(
+                g_feat, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            a_t = torch.tensor(
+                action_feats_np, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
             chosen_a_t = a_t[:, chosen_idx : chosen_idx + 1, :].squeeze(1)
             with torch.inference_mode():
-                _, self.current_hidden = self.model.step(self.current_hidden, g_t, chosen_a_t, phase_id)
+                _, self.current_hidden = self.model.step(
+                    self.current_hidden, g_t, chosen_a_t, phase_id
+                )
 
         self.active_stack.append((state_key, chosen_idx))
         return order
@@ -1761,15 +1816,11 @@ def create_search_delegate(
             worker_id=worker_id,
             mcts_tree=mcts_tree,
             num_simulations=config.num_simulations,
-            max_actions=min(getattr(config, "gumbel_max_actions", 4), config.num_simulations),
+            max_actions=min(
+                getattr(config, "gumbel_max_actions", 4), config.num_simulations
+            ),
+            c_visit=getattr(config, "c_visit", 2.0),
             c_scale=getattr(config, "c_scale", 1.0),
-            c_visit=getattr(config, "c_visit", 50.0),
-            c_puct=config.c_puct,
-            episode=episode,
-            decay_episodes=config.decay_episodes,
-            base_noise=config.base_noise,
-            min_noise=config.min_noise,
-            depth_gamma=config.depth_gamma,
             version=version,
             shared_action_feats=shared_action_feats,
             shared_logits=shared_logits,

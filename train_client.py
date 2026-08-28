@@ -42,6 +42,16 @@ def reinforce_worker(
     temperature: float = 1.0,
     cpp_threads: int = 1,
 ):
+    worker_seed = (
+        int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
+    ) & 0x7FFFFFFF
+    import random
+    import numpy as np
+
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
 
@@ -180,6 +190,16 @@ def rnn_mcts_worker(
     traj_queue: mp.Queue,
     cpp_threads: int = 1,
 ):
+    worker_seed = (
+        int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
+    ) & 0x7FFFFFFF
+    import random
+    import numpy as np
+
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
 
@@ -525,6 +545,16 @@ def client_worker(
     shared_logits=None,
     shared_v=None,
 ):
+    worker_seed = (
+        int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
+    ) & 0x7FFFFFFF
+    import random
+    import numpy as np
+
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     tensor_graphs.set_num_threads(config.cpp_threads)

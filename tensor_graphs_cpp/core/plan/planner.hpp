@@ -859,7 +859,7 @@ struct Planner
             {
             }
 
-            if (best_cost < TGConstants::INF && minCompileSeconds == 0.0f && delegate == nullptr)
+            if (best_cost < TGConstants::INF && minCompileSeconds == 0.0f)
             {
                 break;
             }

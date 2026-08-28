@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# File: txt2img.py
+# txt2img.py
 import argparse
 import time
 from pathlib import Path
@@ -10,13 +10,7 @@ import torch
 from PIL import Image
 from safetensors.torch import load_file
 
-from train_models import AlphaZeroTransformer, PolicyValueRNN
-from train_shared import (
-    ActorDelegate,
-    HeuristicDelegate,
-    RNNREINFORCEDelegate,
-    TrainConfig,
-)
+from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
 from utils.decode import load_tokenizer
 
 PROMPT_TEMPLATE_ENCODE_PREFIX = (
@@ -88,7 +82,7 @@ def main():
         "--run-dir",
         type=str,
         default=None,
-        help="Path to runs/N to load the search agent from",
+        help="Path to run directory (e.g. runs/0) to load the cost predictor model from",
     )
     parser.add_argument(
         "--min-compile-time",
@@ -157,40 +151,34 @@ def main():
         if config_file.exists():
             try:
                 cfg = TrainConfig.load(config_file)
+                print(f"[Txt2Img] Loaded config from {config_file}")
             except Exception as e:
-                print(f"Warning: Failed to load config from {config_file}: {e}")
+                print(
+                    f"[Txt2Img] Warning: Failed to load config from {config_file}: {e}"
+                )
 
         model_file = run_dir_path / "model.safetensors"
         if model_file.exists():
             state_dict = load_file(model_file)
-            if (
-                "rnn_cell.weight_ih" in state_dict
-                or "action_encoders.0.0.weight" in state_dict
-            ):
-                model = PolicyValueRNN(hidden_dim=cfg.d_model, global_dim=8)
-                model.load_state_dict(state_dict)
-                model.eval()
-                delegate = RNNREINFORCEDelegate(model=model, is_training=False)
-                print(f"Loaded trained PolicyValueRNN agent from {model_file}")
-            else:
-                agent = AlphaZeroTransformer(
-                    d_model=cfg.d_model,
-                    nhead=cfg.nhead,
-                    num_layers=cfg.num_layers,
-                    max_feat_dim=cfg.max_feat_dim,
-                )
-                agent.load_state_dict(state_dict)
-                agent.eval()
-                delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
-                print(f"Loaded trained AlphaZeroTransformer agent from {model_file}")
+            model = CostPredictorRNN(hidden_dim=cfg.hidden_dim)
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            delegate = CostPredictorDelegate(
+                model=model,
+                epsilon=0.0,
+                is_training=False,
+            )
+            print(f"[Txt2Img] Loaded trained CostPredictorRNN agent from {model_file}")
         else:
             print(
-                f"Warning: Model file not found at {model_file}, using HeuristicDelegate."
+                f"[Txt2Img] Warning: Model file not found at {model_file}, using HeuristicSearchDelegate."
             )
-            delegate = HeuristicDelegate()
+            delegate = tensor_graphs.HeuristicSearchDelegate()
     else:
-        print("No --run-dir specified. Using HeuristicDelegate (caching disabled).")
-        delegate = HeuristicDelegate()
+        print(
+            "[Txt2Img] No --run-dir specified. Using HeuristicSearchDelegate (caching disabled)."
+        )
+        delegate = tensor_graphs.HeuristicSearchDelegate()
         args.disable_caching = True
 
     session = tensor_graphs.Krea2Session(
