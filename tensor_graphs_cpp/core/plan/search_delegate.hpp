@@ -25,7 +25,8 @@ struct ActionFeatureExtractDispatch
     uint64_t size; // n elements * dtype size
     MemSpace mem_space;
     std::vector<uint32_t> engine_idxs;
-    Graph graph; // refFactory or single op graph
+    uint32_t num_nodes = 0;
+    uint32_t num_edges = 0;
 };
 
 struct ActionFeatureMalloc

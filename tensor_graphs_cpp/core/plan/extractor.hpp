@@ -814,7 +814,13 @@ template <typename... Rules> struct DispatchIterator
                             g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
                                            enode.getShape(), enode.getStrides(), "");
                         }
-                        f.graph = std::move(g);
+                        
+                        f.num_nodes = g.nodes.size();
+                        uint32_t edges = 0;
+                        for (const auto& pair : g.nodes) {
+                            edges += pair.second.child_ids.size();
+                        }
+                        f.num_edges = edges;
 
                         features.push_back(f);
                     }
@@ -2090,7 +2096,13 @@ template <typename... Rules> struct Extractor
                             g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
                                            enode.getShape(), enode.getStrides(), "");
                         }
-                        f.graph = std::move(g);
+                        
+                        f.num_nodes = g.nodes.size();
+                        uint32_t edges = 0;
+                        for (const auto& pair : g.nodes) {
+                            edges += pair.second.child_ids.size();
+                        }
+                        f.num_edges = edges;
 
                         features.push_back(f);
                     }

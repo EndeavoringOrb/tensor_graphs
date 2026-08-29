@@ -218,14 +218,14 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def _extract_cache_features(self, items):
         feats = [
             [
-                safe_float(getattr(f, "is_cached", 0.0), default=0.0),
-                safe_log1p(getattr(f, "size", 0.0)),
+                safe_float(f.is_cached, default=0.0),
+                safe_log1p(f.size),
                 safe_float(
-                    getattr(f.mem_space, "type", 0) if hasattr(f, "mem_space") else 0,
+                    f.mem_space.type if hasattr(f, "mem_space") else 0,
                     default=0.0,
                 ),
-                safe_float(getattr(f, "op_type", 0), default=0.0),
-                safe_float(getattr(f, "num_users", 0), default=0.0),
+                safe_float(f.op_type, default=0.0),
+                safe_float(f.num_users, default=0.0),
             ]
             for f in items
         ]
@@ -233,40 +233,33 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         return torch.nan_to_num(t, nan=0.0, posinf=30.0, neginf=0.0)
 
     def _extract_dispatch_features(self, items):
-        feats = []
-        for f in items:
-            num_nodes = len(f.graph.nodes) if hasattr(f, "graph") and f.graph else 0
-            num_edges = (
-                sum(len(n.child_ids) for n in f.graph.nodes.values())
-                if num_nodes
-                else 0
-            )
-            feats.append(
-                [
-                    safe_log1p(getattr(f, "cost", 0.0)),
-                    safe_log1p(getattr(f, "dp_cost", 0.0)),
-                    safe_log1p(getattr(f, "size", 0.0)),
-                    safe_float(
-                        getattr(f.mem_space, "type", 0)
-                        if hasattr(f, "mem_space")
-                        else 0,
-                        default=0.0,
-                    ),
-                    safe_float(len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0, default=0.0),
-                    safe_float(num_nodes, default=0.0),
-                    safe_float(num_edges, default=0.0),
-                ]
-            )
+        feats = [
+            [
+                safe_log1p(f.cost),
+                safe_log1p(f.dp_cost),
+                safe_log1p(f.size),
+                safe_float(
+                    f.mem_space.type
+                    if hasattr(f, "mem_space")
+                    else 0,
+                    default=0.0,
+                ),
+                safe_float(len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0, default=0.0),
+                safe_float(f.num_nodes, default=0.0),
+                safe_float(f.num_edges, default=0.0),
+            ]
+            for f in items
+        ]
         t = torch.tensor(feats, dtype=torch.float32)
         return torch.nan_to_num(t, nan=0.0, posinf=30.0, neginf=0.0)
 
     def _extract_bufferize_features(self, items):
         feats = [
             [
-                safe_float(getattr(f, "is_new_buffer", 0.0), default=0.0),
-                safe_log1p(getattr(f, "size", 0.0)),
-                safe_log1p(getattr(f, "parent_size", 0.0)),
-                safe_float(getattr(f, "parent_birth_time", 0.0), default=0.0),
+                safe_float(f.is_new_buffer, default=0.0),
+                safe_log1p(f.size),
+                safe_log1p(f.parent_size),
+                safe_float(f.parent_birth_time, default=0.0),
             ]
             for f in items
         ]
@@ -276,10 +269,10 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def _extract_malloc_features(self, items):
         feats = [
             [
-                safe_log1p(getattr(f, "size", 0.0)),
-                safe_float(getattr(f, "start", 0.0), default=0.0),
-                safe_float(getattr(f, "end", 0.0), default=0.0),
-                safe_log1p(getattr(f, "mem_cap", 0.0)),
+                safe_log1p(f.size),
+                safe_float(f.start, default=0.0),
+                safe_float(f.end, default=0.0),
+                safe_log1p(f.mem_cap),
             ]
             for f in items
         ]
@@ -289,14 +282,14 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def _extract_frontier_features(self, items):
         feats = [
             [
-                safe_float(getattr(f, "eclass_id", 0), default=0.0),
-                safe_float(getattr(f, "num_enodes", 0), default=0.0),
-                safe_log1p(getattr(f, "min_dp_cp_cost", 0.0)),
-                safe_log1p(getattr(f, "min_dp_cost", 0.0)),
-                safe_log1p(getattr(f, "size", 0.0)),
-                safe_float(getattr(f, "dtype", 0), default=0.0),
+                safe_float(f.eclass_id, default=0.0),
+                safe_float(f.num_enodes, default=0.0),
+                safe_log1p(f.min_dp_cp_cost),
+                safe_log1p(f.min_dp_cost),
+                safe_log1p(f.size),
+                safe_float(f.dtype, default=0.0),
                 safe_float(
-                    getattr(f.mem_space, "type", 0) if hasattr(f, "mem_space") else 0,
+                    f.mem_space.type if hasattr(f, "mem_space") else 0,
                     default=0.0,
                 ),
             ]

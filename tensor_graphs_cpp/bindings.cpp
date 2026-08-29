@@ -569,7 +569,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("size", &ActionFeatureExtractDispatch::size)
         .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
         .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
-        .def_readwrite("graph", &ActionFeatureExtractDispatch::graph);
+        .def_readwrite("num_nodes", &ActionFeatureExtractDispatch::num_nodes)
+        .def_readwrite("num_edges", &ActionFeatureExtractDispatch::num_edges);
 
     py::class_<ActionFeatureBufferize>(m, "ActionFeatureBufferize")
         .def_readwrite("is_new_buffer", &ActionFeatureBufferize::is_new_buffer)
