@@ -2,8 +2,67 @@ import math
 import random
 from abc import ABC, abstractmethod
 import numpy as np
+import torch
 
 ACTION_DIMS = {0: 5, 1: 7, 2: 7, 3: 4, 4: 4, 5: 7}
+
+
+# ==============================================================================
+# DUAL-OBJECTIVE SCORE RANKING
+# ==============================================================================
+def rank_score_indices(
+    scores,
+):
+    """Ranks 1D scores/costs from best to worst according to dual-objective logic:
+      1. Non-negative costs (>= 0) sorted ascending (lowest latency first).
+      2. Negative rewards (< 0) sorted descending (highest progress closer to 0 first).
+      3. Non-finite / NaNs at the end.
+    """
+    if isinstance(scores, torch.Tensor):
+        valid = torch.isfinite(scores)
+        pos_mask = valid & (scores >= 0)
+        neg_mask = valid & (scores < 0)
+        invalid_mask = ~valid
+
+        pos_idx = torch.nonzero(pos_mask, as_tuple=False).squeeze(-1)
+        neg_idx = torch.nonzero(neg_mask, as_tuple=False).squeeze(-1)
+        invalid_idx = torch.nonzero(invalid_mask, as_tuple=False).squeeze(-1)
+
+        pos_sorted = (
+            pos_idx[torch.argsort(scores[pos_idx], descending=False)]
+            if pos_idx.numel() > 0
+            else torch.empty(0, dtype=torch.long, device=scores.device)
+        )
+        neg_sorted = (
+            neg_idx[torch.argsort(scores[neg_idx], descending=True)]
+            if neg_idx.numel() > 0
+            else torch.empty(0, dtype=torch.long, device=scores.device)
+        )
+
+        return torch.cat([pos_sorted, neg_sorted, invalid_idx])
+
+    scores_arr = np.asarray(scores)
+    valid = np.isfinite(scores_arr)
+    pos_mask = valid & (scores_arr >= 0)
+    neg_mask = valid & (scores_arr < 0)
+    invalid_mask = ~valid
+
+    pos_idx = np.flatnonzero(pos_mask)
+    neg_idx = np.flatnonzero(neg_mask)
+    invalid_idx = np.flatnonzero(invalid_mask)
+
+    pos_sorted = (
+        pos_idx[np.argsort(scores_arr[pos_idx])]
+        if len(pos_idx) > 0
+        else np.empty(0, dtype=np.int64)
+    )
+    neg_sorted = (
+        neg_idx[np.argsort(-scores_arr[neg_idx])]
+        if len(neg_idx) > 0
+        else np.empty(0, dtype=np.int64)
+    )
+
+    return np.concatenate([pos_sorted, neg_sorted, invalid_idx])
 
 
 # ==============================================================================
@@ -51,14 +110,12 @@ class EjectLowestLossStrategy(EvictionStrategy):
         total = len(losses)
         if total <= max_size:
             return np.arange(total)
-        # Priority: untrained (NaN or inf) gets highest priority 1e9
         priorities = np.where(np.isnan(losses) | ~np.isfinite(losses), 1e9, losses)
-        # Keep top max_size priorities
         return np.argpartition(-priorities, max_size)[:max_size]
 
 
 class EjectHighestCostStrategy(EvictionStrategy):
-    """Evicts items with highest cost (preserves fastest/best execution plans)."""
+    """Evicts items with worst performance: preserves best plans (lowest latency / highest progress)."""
 
     def select_indices_to_keep(
         self,
@@ -70,9 +127,8 @@ class EjectHighestCostStrategy(EvictionStrategy):
         total = len(costs)
         if total <= max_size:
             return np.arange(total)
-        priorities = np.where(np.isnan(costs) | ~np.isfinite(costs), 1e9, costs)
-        # Keep lowest max_size costs
-        return np.argpartition(priorities, max_size)[:max_size]
+        ranked_indices = rank_score_indices(costs)
+        return ranked_indices[:max_size]
 
 
 def get_eviction_strategy(name: str) -> EvictionStrategy:

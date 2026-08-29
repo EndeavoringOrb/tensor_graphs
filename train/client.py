@@ -101,6 +101,7 @@ def client_worker_process(
     episode = 0
 
     while True:
+        start = time.perf_counter()
         delegate.epsilon = config.epsilon * (random.random() ** 2)
 
         # Check and reload latest weights from disk
@@ -167,11 +168,14 @@ def client_worker_process(
             )
 
             logger.info(
-                f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{current_version}, eps {delegate.epsilon}) | "
-                f"Best Cost: {best_cost:8.4f} ms | Emitted {total_transitions} transitions"
+                f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{current_version}, eps {delegate.epsilon:.4e}) | "
+                f"Best Cost: {best_cost:.4f} ms | {total_transitions} transitions | took {time.perf_counter() - start:.2f}s"
             )
+        else:
+            logger.info(f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{current_version}, eps {delegate.epsilon:.4e}) | took {time.perf_counter() - start:.2f}s")
 
         episode += 1
+        logger.info(f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d}")
 
 
 def main():

@@ -5,6 +5,7 @@ from .buffer import (
     FIFOStrategy,
     PhaseReplayBuffer,
     get_eviction_strategy,
+    rank_score_indices,
 )
 from .config import TrainConfig
 from .delegate import CostPredictorDelegate
@@ -20,4 +21,5 @@ __all__ = [
     "EjectLowestLossStrategy",
     "EjectHighestCostStrategy",
     "get_eviction_strategy",
+    "rank_score_indices",
 ]

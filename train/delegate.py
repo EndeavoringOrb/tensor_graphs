@@ -5,10 +5,11 @@ import numpy as np
 import tensor_graphs
 import torch
 
+from .buffer import rank_score_indices
 from .model import CostPredictorRNN
 
 
-def safe_float(v: float, default: float = 0.0) -> float:
+def safe_float(v: float, default: float = float("nan")) -> float:
     try:
         val = float(v)
         return val if math.isfinite(val) else default
@@ -50,12 +51,14 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         epsilon: float = 0.1,
         is_training: bool = True,
         device: torch.device | None = None,
+        max_trajectories_per_episode: int = 1500,
     ):
         super().__init__()
         self.model = model
         self.device = device if device is not None else next(model.parameters()).device
         self.epsilon = epsilon
         self.is_training = is_training
+        self.max_trajectories_per_episode = max_trajectories_per_episode
 
         self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
         self.hidden_stack: list[torch.Tensor] = []
@@ -102,7 +105,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                     np.array(c_list, dtype=np.float32),
                     nan=0.0,
                     posinf=1e6,
-                    neginf=-1e6,
+                    neginf=-1.0,
                 )
                 packed[phase_id] = {
                     "hiddens": h_arr,
@@ -136,9 +139,11 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                 self.active_path.pop()
 
     def on_leaf_evaluated(self, cost: float):
-        cost_val = safe_float(cost, default=-1.0)
+        cost_val = safe_float(cost)
         if math.isfinite(cost_val):
-            # Group active trajectory by action phase
+            if len(self.completed_trajectories) >= self.max_trajectories_per_episode:
+                return
+
             by_phase = defaultdict(list)
             for h, a, phase in self.active_path:
                 by_phase[phase].append((h, a))
@@ -159,10 +164,9 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         pred_costs = self.model.evaluate_candidates(
             self.current_hidden, action_feats_t, phase_id
         )
-        pred_costs = torch.nan_to_num(pred_costs, nan=1e6, posinf=1e6, neginf=-1e6)
 
-        # Rank candidate actions: lowest predicted cost first
-        order = torch.argsort(pred_costs).cpu().tolist()
+        # Uses shared dual-objective sort order (positives asc, negatives desc)
+        order = rank_score_indices(pred_costs).cpu().tolist()
 
         if self.is_training and random.random() < self.epsilon:
             chosen_idx = random.randrange(num_actions)
@@ -214,13 +218,14 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def _extract_cache_features(self, items):
         feats = [
             [
-                safe_float(getattr(f, "is_cached", 0.0)),
+                safe_float(getattr(f, "is_cached", 0.0), default=0.0),
                 safe_log1p(getattr(f, "size", 0.0)),
                 safe_float(
-                    getattr(f.mem_space, "type", 0) if hasattr(f, "mem_space") else 0
+                    getattr(f.mem_space, "type", 0) if hasattr(f, "mem_space") else 0,
+                    default=0.0,
                 ),
-                safe_float(getattr(f, "op_type", 0)),
-                safe_float(getattr(f, "num_users", 0)),
+                safe_float(getattr(f, "op_type", 0), default=0.0),
+                safe_float(getattr(f, "num_users", 0), default=0.0),
             ]
             for f in items
         ]
@@ -244,11 +249,12 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                     safe_float(
                         getattr(f.mem_space, "type", 0)
                         if hasattr(f, "mem_space")
-                        else 0
+                        else 0,
+                        default=0.0,
                     ),
-                    safe_float(len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0),
-                    safe_float(num_nodes),
-                    safe_float(num_edges),
+                    safe_float(len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0, default=0.0),
+                    safe_float(num_nodes, default=0.0),
+                    safe_float(num_edges, default=0.0),
                 ]
             )
         t = torch.tensor(feats, dtype=torch.float32)
@@ -257,10 +263,10 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def _extract_bufferize_features(self, items):
         feats = [
             [
-                safe_float(getattr(f, "is_new_buffer", 0.0)),
+                safe_float(getattr(f, "is_new_buffer", 0.0), default=0.0),
                 safe_log1p(getattr(f, "size", 0.0)),
                 safe_log1p(getattr(f, "parent_size", 0.0)),
-                safe_float(getattr(f, "parent_birth_time", 0.0)),
+                safe_float(getattr(f, "parent_birth_time", 0.0), default=0.0),
             ]
             for f in items
         ]
@@ -271,8 +277,8 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         feats = [
             [
                 safe_log1p(getattr(f, "size", 0.0)),
-                safe_float(getattr(f, "start", 0.0)),
-                safe_float(getattr(f, "end", 0.0)),
+                safe_float(getattr(f, "start", 0.0), default=0.0),
+                safe_float(getattr(f, "end", 0.0), default=0.0),
                 safe_log1p(getattr(f, "mem_cap", 0.0)),
             ]
             for f in items
@@ -283,14 +289,15 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def _extract_frontier_features(self, items):
         feats = [
             [
-                safe_float(getattr(f, "eclass_id", 0)),
-                safe_float(getattr(f, "num_enodes", 0)),
+                safe_float(getattr(f, "eclass_id", 0), default=0.0),
+                safe_float(getattr(f, "num_enodes", 0), default=0.0),
                 safe_log1p(getattr(f, "min_dp_cp_cost", 0.0)),
                 safe_log1p(getattr(f, "min_dp_cost", 0.0)),
                 safe_log1p(getattr(f, "size", 0.0)),
-                safe_float(getattr(f, "dtype", 0)),
+                safe_float(getattr(f, "dtype", 0), default=0.0),
                 safe_float(
-                    getattr(f.mem_space, "type", 0) if hasattr(f, "mem_space") else 0
+                    getattr(f.mem_space, "type", 0) if hasattr(f, "mem_space") else 0,
+                    default=0.0,
                 ),
             ]
             for f in items
