@@ -145,7 +145,9 @@ def generate_random_graph(
     return g, root, [full_bucket]
 
 
-def compute_graph_memory_metrics(graph: tensor_graphs.Graph, root_id: tensor_graphs.LogicalId) -> dict[str, int]:
+def compute_graph_memory_metrics(
+    graph: tensor_graphs.Graph, root_id: tensor_graphs.LogicalId
+) -> dict[str, int]:
     """Computes exact memory requirements across all reachable nodes in the graph."""
     reachable_nodes = set()
     stack = [root_id]
@@ -171,7 +173,9 @@ def compute_graph_memory_metrics(graph: tensor_graphs.Graph, root_id: tensor_gra
     for node_id in reachable_nodes:
         node = graph.getNode(node_id)
         out_sz = node_bytes(node)
-        in_sz = sum(node_bytes(graph.getNode(c)) for c in node.child_ids if graph.hasNode(c))
+        in_sz = sum(
+            node_bytes(graph.getNode(c)) for c in node.child_ids if graph.hasNode(c)
+        )
 
         max_node_bytes = max(max_node_bytes, out_sz)
         total_node_bytes += out_sz

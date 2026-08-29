@@ -1,4 +1,3 @@
-# train/server.py
 import argparse
 import math
 import queue
@@ -13,7 +12,7 @@ import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from torch import optim
 
-from .buffer import PhaseReplayBuffer, get_eviction_strategy
+from .buffer import TrajectoryReplayBuffer, get_eviction_strategy
 from .config import TrainConfig
 from .graph_provider import get_default_model_path
 from .model import CostPredictorRNN
@@ -94,7 +93,7 @@ def client_handler(
                         },
                     )
 
-            elif msg_type == "transitions_batch":
+            elif msg_type in ("trajectories_batch", "transitions_batch"):
                 data = msg.get("data")
                 if data:
                     replay_queue.put(data)
@@ -162,14 +161,13 @@ def learner_thread_fn(
     weights_ready_event.set()
     save_file(cpu_state, model_filepath)
 
-    # Eviction strategy for replay buffer
+    # Eviction strategy for trajectory replay buffer
     strategy = get_eviction_strategy(config.buffer_strategy)
-    buffer = PhaseReplayBuffer(
+    buffer = TrajectoryReplayBuffer(
         maxlen=config.buffer_size,
-        hidden_dim=config.hidden_dim,
         strategy=strategy,
     )
-    print(f"[Learner] Replay Buffer Strategy: {strategy.__class__.__name__}")
+    print(f"[Learner] Trajectory Replay Buffer Strategy: {strategy.__class__.__name__}")
 
     last_warmup_log = 0.0
 
@@ -189,100 +187,91 @@ def learner_thread_fn(
                         if buf:
                             f_bin.write(buf)
 
-                by_phase = data.get("by_phase", {})
-                buffer.add_batch(by_phase)
+                trajectories = data.get("trajectories", [])
+                if trajectories:
+                    buffer.add_trajectories(trajectories)
             except queue.Empty:
                 break
 
         if len(buffer) < config.batch_size:
             if time.time() - last_warmup_log > 3.0:
                 print(
-                    f"[Learner] Warming up replay buffer: {len(buffer)}/{config.batch_size} transitions..."
+                    f"[Learner] Warming up replay buffer: {len(buffer)}/{config.batch_size} trajectories..."
                 )
                 last_warmup_log = time.time()
             time.sleep(0.05)
             continue
 
+        # Sample a batch of full trajectories
+        sampled = buffer.sample_batch(config.batch_size)
+        if not sampled:
+            time.sleep(0.01)
+            continue
+
+        batch_trajs, batch_indices = sampled
+
         model.train()
         optimizer.zero_grad()
-        total_loss = 0.0
-        active_phases = 0
 
-        for phase_id in range(6):
-            batch = buffer.sample_batch(config.batch_size, phase_id=phase_id)
-            if not batch:
-                continue
+        # Dynamic rollout across current parameters
+        pred_costs, targets, lengths = model.unroll_trajectories(batch_trajs, device)
 
-            h_batch = torch.from_numpy(batch["hiddens"]).to(device)
-            a_batch = torch.from_numpy(batch["actions"]).to(device)
-            raw_costs = torch.from_numpy(batch["costs"]).to(device)
+        per_step_loss = F.smooth_l1_loss(pred_costs, targets, reduction="none")
+        total_loss = per_step_loss.mean()
 
-            # If cost is negative (e.g. OOM penalty), reward = cost; otherwise target = log1p(cost)
-            target_costs = torch.where(
-                raw_costs < 0,
-                raw_costs,
-                torch.log1p(torch.clamp(raw_costs, min=0.0, max=1e20)),
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print("[Learner] Warning: NaN/Inf loss detected, skipping backward step.")
+            continue
+
+        total_loss.backward()
+
+        # Compute trajectory-level mean losses for replay buffer priority updates
+        per_step_loss_np = per_step_loss.detach().cpu().numpy()
+        traj_losses = []
+        offset = 0
+        for L in lengths:
+            traj_l = float(per_step_loss_np[offset : offset + L].mean())
+            traj_losses.append(traj_l)
+            offset += L
+
+        buffer.update_losses(batch_indices, traj_losses)
+
+        has_nan_grad = False
+        for p in model.parameters():
+            if p.grad is not None and (
+                torch.isnan(p.grad).any() or torch.isinf(p.grad).any()
+            ):
+                has_nan_grad = True
+                break
+
+        if has_nan_grad:
+            print(
+                "[Learner] Warning: NaN/Inf gradient detected, skipping optimizer step."
+            )
+            optimizer.zero_grad()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            batches_processed += 1
+            loss_val = total_loss.item()
+
+            print(
+                f"[Learner] Batch {batches_processed:04d} | TrajBuf: {len(buffer):05d} | Loss: {loss_val:.4f}"
             )
 
-            _, pred_costs = model(h_batch, a_batch, phase_id)
+            if math.isfinite(loss_val):
+                with open(losses_bin_path, "ab") as f_bin:
+                    f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
+                    f_bin.flush()
 
-            per_item_loss = F.smooth_l1_loss(pred_costs, target_costs, reduction="none")
-            phase_loss = per_item_loss.mean()
-
-            if torch.isnan(phase_loss) or torch.isinf(phase_loss):
-                print(
-                    "[Learner] Warning: NaN/Inf loss detected, skipping backward step."
-                )
-                continue
-
-            phase_loss.backward()
-
-            buffer.update_losses(
-                phase_id,
-                batch["indices"],
-                per_item_loss.detach().cpu().numpy(),
-            )
-
-            total_loss += phase_loss.item()
-            active_phases += 1
-
-        if active_phases > 0:
-            has_nan_grad = False
-            for p in model.parameters():
-                if p.grad is not None and (
-                    torch.isnan(p.grad).any() or torch.isinf(p.grad).any()
-                ):
-                    has_nan_grad = True
-                    break
-
-            if has_nan_grad:
-                print(
-                    "[Learner] Warning: NaN/Inf gradient detected, skipping optimizer step."
-                )
-                optimizer.zero_grad()
-            else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-
-                batches_processed += 1
-                avg_loss = total_loss / active_phases
-
-                print(
-                    f"[Learner] Batch {batches_processed:04d} | BufSize: {len(buffer):05d} | Loss: {avg_loss:.4f}"
-                )
-
-                if math.isfinite(avg_loss):
-                    with open(losses_bin_path, "ab") as f_bin:
-                        f_bin.write(struct.pack(pack_fmt, batches_processed, avg_loss))
-                        f_bin.flush()
-
-                if batches_processed % config.save_interval == 0:
-                    cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}
-                    with weights_lock:
-                        global_weights.update(cpu_state)
-                        global_version = batches_processed
-                    weights_ready_event.set()
-                    save_file(cpu_state, model_filepath)
+            if batches_processed % config.save_interval == 0:
+                cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}
+                with weights_lock:
+                    global_weights.update(cpu_state)
+                    global_version = batches_processed
+                weights_ready_event.set()
+                save_file(cpu_state, model_filepath)
 
 
 def main():
@@ -312,11 +301,11 @@ def main():
     parser.add_argument(
         "--buffer-size",
         type=int,
-        default=50_000,
-        help="Replay buffer capacity per phase",
+        default=100,
+        help="Replay buffer capacity in full trajectories",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=64, help="Optimization batch size"
+        "--batch-size", type=int, default=4, help="Optimization batch size"
     )
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="Optimizer learning rate"

@@ -32,7 +32,6 @@ def client_worker_process(
     traj_queue: mp.Queue,
 ):
     """In-process search worker performing its own RNN inference."""
-    # Seed per worker
     worker_seed = (
         int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
     ) & 0x7FFFFFFF
@@ -40,7 +39,6 @@ def client_worker_process(
     np.random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 
-    # Clean per-worker file logging with terminal forwarding for [CLIENT] prefix
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
 
@@ -155,14 +153,14 @@ def client_worker_process(
         ]
         best_cost = min(valid_positive_costs) if valid_positive_costs else float("inf")
 
-        # Vectorize, sanitize, and pack completed trajectories on the client worker
-        packed_by_phase, leaf_costs = delegate.export_and_reset()
+        # Export compact trajectories of actions + phases
+        trajectories, leaf_costs = delegate.export_and_reset()
 
-        if packed_by_phase:
-            total_transitions = sum(len(v["hiddens"]) for v in packed_by_phase.values())
+        if trajectories:
+            total_transitions = sum(t["length"] for t in trajectories)
             traj_queue.put(
                 {
-                    "by_phase": packed_by_phase,
+                    "trajectories": trajectories,
                     "leaf_costs": leaf_costs,
                     "best_cost": best_cost,
                 }
@@ -170,7 +168,7 @@ def client_worker_process(
 
             logger.info(
                 f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{current_version}, eps {delegate.epsilon:.4e}) | "
-                f"Best Cost: {best_cost:.4f} ms | {total_transitions} transitions | took {time.perf_counter() - start:.2f}s"
+                f"Best Cost: {best_cost:.4f} ms | {len(trajectories)} trajectories ({total_transitions} transitions) | took {time.perf_counter() - start:.2f}s"
             )
         else:
             logger.info(
@@ -216,12 +214,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # Connect to training server
     print(f"[Client] Connecting to training server at {args.host}:{args.port}...")
     sock = create_client_socket(args.host, args.port)
     sock_lock = threading.Lock()
 
-    # Sync base configuration from server
     with sock_lock:
         send_msg(sock, {"type": "req_config"})
         resp = recv_msg(sock)
@@ -253,7 +249,6 @@ def main():
     weights_path = run_dir / "client_weights.pt"
     weights_event = mp.Event()
 
-    # Thread: Periodically fetch updated weights from server
     def weight_sync_thread():
         current_version = -1
         while True:
@@ -316,13 +311,12 @@ def main():
         p.start()
         processes.append(p)
 
-    # Main process loop: transmits each trajectory to the server as soon as it arrives
     try:
         while True:
             try:
                 batch_data = traj_queue.get(timeout=1.0)
                 with sock_lock:
-                    send_msg(sock, {"type": "transitions_batch", "data": batch_data})
+                    send_msg(sock, {"type": "trajectories_batch", "data": batch_data})
             except queue.Empty:
                 pass
     except KeyboardInterrupt:

@@ -1,6 +1,5 @@
 import math
 import random
-from collections import defaultdict
 
 import numpy as np
 import tensor_graphs
@@ -33,8 +32,8 @@ def safe_log1p(v: float, default: float = 30.0) -> float:
 class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     """In-process search delegate for TensorGraph C++ planner integration.
 
-    Evaluates candidates using the local RNN and gathers trajectories
-    partitioned by action type.
+    Evaluates candidates using the local RNN and collects completed trajectories
+    consisting only of chosen action vectors and phase IDs.
     """
 
     PHASE_MAP = {
@@ -64,58 +63,21 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
         self.hidden_stack: list[torch.Tensor] = []
         self.path_len_stack: list[int] = []
-        self.active_path: list[tuple[np.ndarray, np.ndarray, int]] = []
+        self.active_path: list[tuple[int, np.ndarray]] = []
         self.completed_trajectories: list[dict] = []
 
-    def export_and_reset(self) -> tuple[dict[int, dict[str, np.ndarray]], list[float]]:
-        """Vectorizes and sanitizes all collected transitions across phases on worker CPU."""
+    def export_and_reset(self) -> tuple[list[dict], list[float]]:
+        """Exports all completed trajectories collected during the episode and resets state."""
         if not self.completed_trajectories:
-            return {}, []
+            return [], []
 
-        phase_data: dict[int, tuple[list, list, list]] = {
-            p: ([], [], []) for p in range(6)
-        }
-        leaf_costs: list[float] = []
-
-        for traj in self.completed_trajectories:
-            cost = traj["cost"]
-            leaf_costs.append(cost)
-            for phase_id, items in traj["by_phase"].items():
-                p_id = int(phase_id)
-                for h, a in items:
-                    phase_data[p_id][0].append(h)
-                    phase_data[p_id][1].append(a)
-                    phase_data[p_id][2].append(cost)
-
-        packed = {}
-        for phase_id, (h_list, a_list, c_list) in phase_data.items():
-            if h_list:
-                h_arr = np.nan_to_num(
-                    np.array(h_list, dtype=np.float32),
-                    nan=0.0,
-                    posinf=10.0,
-                    neginf=-10.0,
-                )
-                a_arr = np.nan_to_num(
-                    np.array(a_list, dtype=np.float32),
-                    nan=0.0,
-                    posinf=30.0,
-                    neginf=0.0,
-                )
-                c_arr = np.nan_to_num(
-                    np.array(c_list, dtype=np.float32),
-                    nan=0.0,
-                    posinf=1e6,
-                    neginf=-1.0,
-                )
-                packed[phase_id] = {
-                    "hiddens": h_arr,
-                    "actions": a_arr,
-                    "costs": c_arr,
-                }
-
-        self.completed_trajectories.clear()
-        return packed, leaf_costs
+        trajectories = self.completed_trajectories
+        leaf_costs = [float(t["cost"]) for t in trajectories]
+        self.completed_trajectories = []
+        self.active_path.clear()
+        self.hidden_stack.clear()
+        self.path_len_stack.clear()
+        return trajectories, leaf_costs
 
     def reset(self):
         self.current_hidden = self.model.init_hidden(batch_size=1, device=self.device)
@@ -141,15 +103,21 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
 
     def on_leaf_evaluated(self, cost: float):
         cost_val = safe_float(cost)
-        if math.isfinite(cost_val):
+        if math.isfinite(cost_val) and self.is_training:
             if len(self.completed_trajectories) >= self.max_trajectories_per_episode:
                 return
+            if not self.active_path:
+                return
 
-            by_phase = defaultdict(list)
-            for h, a, phase in self.active_path:
-                by_phase[phase].append((h, a))
+            phases = np.array([p for p, _ in self.active_path], dtype=np.int32)
+            actions = np.array([a for _, a in self.active_path], dtype=np.float32)
             self.completed_trajectories.append(
-                {"by_phase": dict(by_phase), "cost": cost_val}
+                {
+                    "phases": phases,
+                    "actions": actions,
+                    "cost": cost_val,
+                    "length": len(phases),
+                }
             )
 
     @torch.inference_mode()
@@ -160,13 +128,11 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
 
         phase_id = self.PHASE_MAP[phase_name]
         action_feats_t = extract_fn(items).to(self.device)
-        action_feats_np = action_feats_t.cpu().numpy()
 
         pred_costs = self.model.evaluate_candidates(
             self.current_hidden, action_feats_t, phase_id
         )
 
-        # Uses shared dual-objective sort order (positives asc, negatives desc)
         order = rank_score_indices(pred_costs).cpu().tolist()
 
         if self.is_training and random.random() < self.epsilon:
@@ -177,17 +143,15 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         else:
             chosen_idx = order[0]
 
-        # Record step into active path
-        hidden_np = torch.nan_to_num(self.current_hidden[0]).detach().cpu().numpy()
-        self.active_path.append(
-            (
-                hidden_np,
-                action_feats_np[chosen_idx],
-                phase_id,
-            )
-        )
+        # Record action vector into active trajectory path
+        if self.is_training:
+            chosen_feat_np = action_feats_t[chosen_idx].cpu().numpy()
+            padded_act = np.zeros(8, dtype=np.float32)
+            dim = min(len(chosen_feat_np), 8)
+            padded_act[:dim] = chosen_feat_np[:dim]
+            self.active_path.append((phase_id, padded_act))
 
-        # Advance hidden state along the chosen branch
+        # Advance local hidden state along the chosen branch
         chosen_t = action_feats_t[chosen_idx : chosen_idx + 1]
         self.current_hidden, _ = self.model(self.current_hidden, chosen_t, phase_id)
         self.current_hidden = torch.nan_to_num(

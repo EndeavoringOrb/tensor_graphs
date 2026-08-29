@@ -4,6 +4,7 @@ from .buffer import (
     EvictionStrategy,
     FIFOStrategy,
     PhaseReplayBuffer,
+    TrajectoryReplayBuffer,
     get_eviction_strategy,
     rank_score_indices,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "EvictionStrategy",
     "FIFOStrategy",
     "PhaseReplayBuffer",
+    "TrajectoryReplayBuffer",
     "TrainConfig",
     "get_eviction_strategy",
     "rank_score_indices",
