@@ -239,7 +239,7 @@ template <typename... RuleTypes> struct DispatchBench
             auto rule_iter = std::apply(
                 [&](auto &&...rs) {
                     return makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos, nullptr,
-                                                            &rule_cost, rs...);
+                                                            &rule_cost, nullptr, nullptr, rs...);
                 },
                 rules_tuple);
 
@@ -283,7 +283,7 @@ template <typename... RuleTypes> struct DispatchBench
                 return std::apply(
                     [&](auto &&...rs) {
                         return makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos,
-                                                                nullptr, &baseline_cost, rs...);
+                                                                nullptr, &baseline_cost, nullptr, nullptr, rs...);
                     },
                     rules_tuple);
             };
@@ -404,7 +404,7 @@ template <typename... RuleTypes> struct BufferizeBench
             auto rule_iter = std::apply(
                 [&](auto &&...rs) {
                     return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos,
-                                                 mock.settings.mem_caps, rs...);
+                                                 mock.settings.mem_caps, nullptr, nullptr, rs...);
                 },
                 rules_tuple);
 
@@ -456,7 +456,7 @@ template <typename... RuleTypes> struct BufferizeBench
                 return std::apply(
                     [&](auto &&...rs) {
                         return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos,
-                                                     mock.settings.mem_caps, rs...);
+                                                     mock.settings.mem_caps, nullptr, nullptr, rs...);
                     },
                     rules_tuple);
             };
@@ -543,7 +543,9 @@ template <typename... RuleTypes> struct MallocBench
             std::vector<ParallelBuffer> unallocated = buildMallocBuffers(static_cast<int>(s));
 
             auto test_iter = std::apply(
-                [&](auto &&...rs) { return makeMallocIterator(mem_cap, unallocated, CapRespectRule(true), rs...); },
+                [&](auto &&...rs) {
+                    return makeMallocIterator(mem_cap, unallocated, nullptr, nullptr, CapRespectRule(true), rs...);
+                },
                 rules_tuple);
 
             std::vector<ParallelBuffer> allocated;
@@ -585,7 +587,9 @@ template <typename... RuleTypes> struct MallocBench
                 }
             }
 
-            auto make_base = [&]() { return makeMallocIterator(mem_cap, unallocated, CapRespectRule(true)); };
+            auto make_base = [&]() {
+                return makeMallocIterator(mem_cap, unallocated, nullptr, nullptr, CapRespectRule(true));
+            };
             auto yield_base = [&](auto &it) {
                 if (check_timeout())
                     return false;
@@ -603,7 +607,9 @@ template <typename... RuleTypes> struct MallocBench
 
             auto make_rule = [&]() {
                 return std::apply(
-                    [&](auto &&...rs) { return makeMallocIterator(mem_cap, unallocated, CapRespectRule(true), rs...); },
+                    [&](auto &&...rs) {
+                        return makeMallocIterator(mem_cap, unallocated, nullptr, nullptr, CapRespectRule(true), rs...);
+                    },
                     rules_tuple);
             };
             auto yield_rule = [&](auto &it) {
@@ -707,7 +713,8 @@ template <typename... RuleTypes> struct CacheBench
             bucket.outputNeededRegion = {makeFull(g.getNode(root).getShape())};
 
             auto iter_rule = std::apply(
-                [&](auto &&...rs) { return makeCacheIterator(g, candidates, avail_mem_spaces, rs...); }, rules_tuple);
+                [&](auto &&...rs) { return makeCacheIterator(g, candidates, avail_mem_spaces, nullptr, nullptr, rs...); },
+                rules_tuple);
 
             std::unordered_map<LogicalId, MemSpace> cache_rule;
             float min_cost_rule = TGConstants::INF;
@@ -786,7 +793,9 @@ template <typename... RuleTypes> struct CacheBench
 
             auto make_rule_it = [&]() {
                 return std::apply(
-                    [&](auto &&...rs) { return makeCacheIterator(g, candidates, avail_mem_spaces, rs...); },
+                    [&](auto &&...rs) {
+                        return makeCacheIterator(g, candidates, avail_mem_spaces, nullptr, nullptr, rs...);
+                    },
                     rules_tuple);
             };
             auto yield_rule = [&](auto &it) {
@@ -894,7 +903,7 @@ template <typename... RuleTypes> struct ExtractBench
             auto rule_extractor = std::apply(
                 [&](auto &&...rs) {
                     return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr, &rule_cost,
-                                                     nullptr, rs...);
+                                                     nullptr, nullptr, rs...);
                 },
                 rules_tuple);
 
@@ -952,7 +961,7 @@ template <typename... RuleTypes> struct ExtractBench
                 return std::apply(
                     [&](auto &&...rs) {
                         return makeExtractorWithDelegate(mock.egraph, rootEClass, mock.enodeInfos, nullptr,
-                                                         &baseline_cost, nullptr, rs...);
+                                                         &baseline_cost, nullptr, nullptr, rs...);
                     },
                     rules_tuple);
             };

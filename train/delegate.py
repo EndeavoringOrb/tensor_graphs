@@ -102,7 +102,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                     np.array(c_list, dtype=np.float32),
                     nan=0.0,
                     posinf=1e6,
-                    neginf=0.0,
+                    neginf=-1e6,
                 )
                 packed[phase_id] = {
                     "hiddens": h_arr,
@@ -137,7 +137,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
 
     def on_leaf_evaluated(self, cost: float):
         cost_val = safe_float(cost, default=-1.0)
-        if cost_val >= 0.0 and math.isfinite(cost_val):
+        if math.isfinite(cost_val):
             # Group active trajectory by action phase
             by_phase = defaultdict(list)
             for h, a, phase in self.active_path:

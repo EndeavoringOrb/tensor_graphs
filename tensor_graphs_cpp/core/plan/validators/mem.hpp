@@ -29,6 +29,7 @@
 #include "core/rewrite.hpp"
 #include "core/settings.hpp"
 #include "core/shape_propagator.hpp"
+#include "core/timer.hpp"
 #include "core/types.hpp"
 
 inline float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
@@ -729,6 +730,8 @@ template <typename... Rules> struct BufferizeIterator
     const std::unordered_map<EClassId, uint32_t> &selection_map;
     const std::vector<ENodeInfo> &enodeInfos;
     std::shared_ptr<SearchDelegate> delegate;
+    const float *best_cost = nullptr;
+    TimeoutChecker *timeout = nullptr;
 
     std::unordered_map<EClassId, uint32_t> birth_times;
     std::unordered_map<EClassId, uint32_t> death_times;
@@ -747,9 +750,11 @@ template <typename... Rules> struct BufferizeIterator
                       const std::unordered_map<EClassId, uint32_t> &_selection_map,
                       const std::vector<ENodeInfo> &_enodeInfos,
                       const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
-                      std::shared_ptr<SearchDelegate> _delegate, Rs &&..._rules)
+                      std::shared_ptr<SearchDelegate> _delegate, const float *_best_cost = nullptr,
+                      TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), ordered(_ordered), egraph(_egraph), selection_map(_selection_map),
-          enodeInfos(_enodeInfos), mem_caps(_mem_caps), delegate(std::move(_delegate))
+          enodeInfos(_enodeInfos), mem_caps(_mem_caps), delegate(std::move(_delegate)), best_cost(_best_cost),
+          timeout(_timeout)
     {
         init();
         BufferizeContext ctx{ordered,       egraph,      selection_map,
@@ -757,6 +762,11 @@ template <typename... Rules> struct BufferizeIterator
                              inplace_alias, {},          static_cast<uint32_t>(0),
                              mem_caps};
         rules.init(ctx);
+    }
+
+    bool can_abort()
+    {
+        return timeout && timeout->is_expired() && (best_cost != nullptr && *best_cost < TGConstants::INF);
     }
 
     void init()
@@ -965,6 +975,12 @@ template <typename... Rules> struct BufferizeIterator
         uint32_t N = ordered.size();
         while (k >= 0)
         {
+            if (can_abort())
+            {
+                is_done = true;
+                return false;
+            }
+
             if (k == static_cast<int>(N))
             {
                 build_buffers(out_buffers, out_eclass_to_buf);
@@ -1181,20 +1197,23 @@ template <typename... Rules>
 BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIterator(
     const std::vector<EClassId> &ordered, const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-    const std::unordered_map<MemSpace, uint64_t> &mem_caps, Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps, const float *best_cost = nullptr,
+    TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
     return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, mem_caps, nullptr,
-                                                     std::forward<Rules>(rules)...);
+                                                     best_cost, timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
     const std::vector<EClassId> &ordered, const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-    const std::unordered_map<MemSpace, uint64_t> &mem_caps, std::shared_ptr<SearchDelegate> delegate, Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps, std::shared_ptr<SearchDelegate> delegate,
+    const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
     return BufferizeIterator<std::decay_t<Rules>...>(ordered, egraph, selection_map, enodeInfos, mem_caps,
-                                                     std::move(delegate), std::forward<Rules>(rules)...);
+                                                     std::move(delegate), best_cost, timeout,
+                                                     std::forward<Rules>(rules)...);
 }
 
 using AllBufferizeRuleTypes =
@@ -1207,12 +1226,13 @@ inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId>
                                                      const std::vector<ENodeInfo> &enodeInfos,
                                                      const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                                      std::shared_ptr<SearchDelegate> delegate,
-                                                     const BoolTuple &bool_flags)
+                                                     const BoolTuple &bool_flags, const float *best_cost = nullptr,
+                                                     TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
             return makeBufferizeIteratorWithDelegate(ordered, egraph, selection_map, enodeInfos, mem_caps,
-                                                     std::move(delegate), rs...);
+                                                     std::move(delegate), best_cost, timeout, rs...);
         },
         prune::instantiate_from_bools<AllBufferizeRuleTypes>(bool_flags));
 }
@@ -1221,21 +1241,24 @@ inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered
                                             const std::unordered_map<EClassId, uint32_t> &selection_map,
                                             const std::vector<ENodeInfo> &enodeInfos,
                                             const std::unordered_map<MemSpace, uint64_t> &mem_caps,
-                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
+                                            const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     settings.validate_rules("bufferize");
     auto bool_flags = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
     return makeConfiguredBufferizeIteratorFromBools(ordered, egraph, selection_map, enodeInfos, mem_caps,
-                                                    std::move(delegate), bool_flags);
+                                                    std::move(delegate), bool_flags, best_cost, timeout);
 }
 
 inline auto makeConfiguredBufferizeIterator(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                             const std::unordered_map<EClassId, uint32_t> &selection_map,
                                             const std::vector<ENodeInfo> &enodeInfos,
                                             const std::unordered_map<MemSpace, uint64_t> &mem_caps,
-                                            const Settings &settings)
+                                            const Settings &settings, const float *best_cost = nullptr,
+                                            TimeoutChecker *timeout = nullptr)
 {
-    return makeConfiguredBufferizeIterator(ordered, egraph, selection_map, enodeInfos, mem_caps, nullptr, settings);
+    return makeConfiguredBufferizeIterator(ordered, egraph, selection_map, enodeInfos, mem_caps, nullptr, settings,
+                                           best_cost, timeout);
 }
 
 // =============================================================================
@@ -1378,6 +1401,8 @@ template <typename... Rules> struct MallocIterator
     uint64_t mem_cap;
     const std::vector<ParallelBuffer> &unallocated;
     std::shared_ptr<SearchDelegate> delegate;
+    const float *best_cost = nullptr;
+    TimeoutChecker *timeout = nullptr;
 
     int N;
     std::vector<int64_t> unallocated_sizes;
@@ -1405,9 +1430,11 @@ template <typename... Rules> struct MallocIterator
 
     template <typename... Rs>
     MallocIterator(uint64_t _mem_cap, const std::vector<ParallelBuffer> &_unallocated,
-                   std::shared_ptr<SearchDelegate> _delegate, Rs &&..._rules)
+                   std::shared_ptr<SearchDelegate> _delegate, const float *_best_cost = nullptr,
+                   TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), mem_cap(_mem_cap), unallocated(_unallocated),
-          delegate(std::move(_delegate)), N(static_cast<int>(_unallocated.size()))
+          delegate(std::move(_delegate)), best_cost(_best_cost), timeout(_timeout),
+          N(static_cast<int>(_unallocated.size()))
     {
         unallocated_sizes.resize(N);
         for (int i = 0; i < N; ++i)
@@ -1459,6 +1486,11 @@ template <typename... Rules> struct MallocIterator
         trail_starts.assign(N + 1, 0);
     }
 
+    bool can_abort()
+    {
+        return timeout && timeout->is_expired() && (best_cost != nullptr && *best_cost < TGConstants::INF);
+    }
+
     bool getNextAllocation(std::vector<ParallelBuffer> &allocated)
     {
         if (is_done)
@@ -1469,6 +1501,12 @@ template <typename... Rules> struct MallocIterator
 
         while (k >= 0)
         {
+            if (can_abort())
+            {
+                is_done = true;
+                return false;
+            }
+
             if (k % 100 == 0)
             {
                 LOG(DEBUG) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
@@ -1603,18 +1641,22 @@ template <typename... Rules> struct MallocIterator
 template <typename... Rules>
 MallocIterator<std::decay_t<Rules>...> makeMallocIterator(uint64_t mem_cap,
                                                           const std::vector<ParallelBuffer> &unallocated,
-                                                          Rules &&...rules)
+                                                          const float *best_cost = nullptr,
+                                                          TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, nullptr, std::forward<Rules>(rules)...);
+    return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, nullptr, best_cost, timeout,
+                                                  std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 MallocIterator<std::decay_t<Rules>...> makeMallocIteratorWithDelegate(uint64_t mem_cap,
                                                                       const std::vector<ParallelBuffer> &unallocated,
                                                                       std::shared_ptr<SearchDelegate> delegate,
+                                                                      const float *best_cost = nullptr,
+                                                                      TimeoutChecker *timeout = nullptr,
                                                                       Rules &&...rules)
 {
-    return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, std::move(delegate),
+    return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, std::move(delegate), best_cost, timeout,
                                                   std::forward<Rules>(rules)...);
 }
 
@@ -1622,22 +1664,25 @@ using AllMallocRuleTypes = std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, HMi
 
 template <typename BoolTuple>
 inline auto makeConfiguredMallocIteratorFromBools(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
-                                                  std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags)
+                                                  std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
+                                                  const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
-            return makeMallocIteratorWithDelegate(mem_cap, unallocated, std::move(delegate), CapRespectRule(true),
-                                                  rs...);
+            return makeMallocIteratorWithDelegate(mem_cap, unallocated, std::move(delegate), best_cost, timeout,
+                                                  CapRespectRule(true), rs...);
         },
         prune::instantiate_from_bools<AllMallocRuleTypes>(bool_flags));
 }
 
 inline auto makeConfiguredMallocIterator(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
-                                         std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+                                         std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
+                                         const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     settings.validate_rules("malloc");
     auto bool_flags = prune::extract_enabled_states<AllMallocRuleTypes>("malloc", settings);
-    return makeConfiguredMallocIteratorFromBools(mem_cap, unallocated, std::move(delegate), bool_flags);
+    return makeConfiguredMallocIteratorFromBools(mem_cap, unallocated, std::move(delegate), bool_flags, best_cost,
+                                                 timeout);
 }
 
 static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap, BufferId &overflow)
@@ -1743,7 +1788,8 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                                       std::vector<ParallelBuffer> &allocated, BufferId &overflow,
                                       std::shared_ptr<SearchDelegate> delegate = nullptr,
-                                      const Settings *settings_ptr = nullptr)
+                                      const Settings *settings_ptr = nullptr, const float *best_cost = nullptr,
+                                      TimeoutChecker *timeout = nullptr)
 {
     if (unallocated.empty())
         return true;
@@ -1777,7 +1823,7 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
     });
 
     const Settings &active_settings = settings_ptr ? *settings_ptr : Settings::get_default();
-    auto iter = makeConfiguredMallocIterator(mem_cap, sorted_bufs, delegate, active_settings);
+    auto iter = makeConfiguredMallocIterator(mem_cap, sorted_bufs, delegate, active_settings, best_cost, timeout);
     if (!iter.getNextAllocation(comp_allocated))
     {
         return false;
@@ -1796,14 +1842,18 @@ struct MemValidator : public ISelectionValidator
     const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers;
     std::shared_ptr<SearchDelegate> delegate;
     const Settings *settings_ptr = nullptr;
+    const float *best_cost = nullptr;
+    TimeoutChecker *timeout = nullptr;
 
     MemValidator(const EGraph &_egraph, const std::vector<ENodeInfo> &_enodeInfos,
                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
                  const std::unordered_map<EClassId, LogicalId> &_eclassToLogical,
                  const std::unordered_map<LogicalId, ParallelBuffer> &_preallocatedBuffers,
-                 std::shared_ptr<SearchDelegate> _delegate = nullptr, const Settings *_settings = nullptr)
+                 std::shared_ptr<SearchDelegate> _delegate = nullptr, const Settings *_settings = nullptr,
+                 const float *_best_cost = nullptr, TimeoutChecker *_timeout = nullptr)
         : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps), eclassToLogical(_eclassToLogical),
-          preallocatedBuffers(_preallocatedBuffers), delegate(_delegate), settings_ptr(_settings)
+          preallocatedBuffers(_preallocatedBuffers), delegate(_delegate), settings_ptr(_settings),
+          best_cost(_best_cost), timeout(_timeout)
     {
     }
 
@@ -1816,7 +1866,7 @@ struct MemValidator : public ISelectionValidator
 
         const Settings &active_settings = settings_ptr ? *settings_ptr : Settings::get_default();
         auto buf_iter = makeConfiguredBufferizeIterator(order, egraph, selection_map, enodeInfos, mem_caps, delegate,
-                                                        active_settings);
+                                                        active_settings, best_cost, timeout);
 
         std::vector<ParallelBuffer> unallocated_buffers;
         std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -1905,7 +1955,8 @@ struct MemValidator : public ISelectionValidator
                     (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
 
                 std::vector<ParallelBuffer> allocated;
-                if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow, delegate, settings_ptr))
+                if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow, delegate, settings_ptr,
+                                               best_cost, timeout))
                 {
                     alloc_ok = false;
                     failed_ms = ms;

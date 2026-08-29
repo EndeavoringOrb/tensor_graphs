@@ -406,7 +406,7 @@ def rnn_mcts_learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
             print(
                 f"[Learner] Batch {batches_processed:04d} | BufSize: {len(buffer):05d} "
-                f"| Loss: {avg_loss:.4f} (Policy: {avg_p:.3f}, Value: {avg_v:.3f})"
+                f"| Loss: {avg_loss:.4e} (Policy: {avg_p:.3f}, Value: {avg_v:.3f})"
             )
 
             with open(losses_bin_path, "ab") as f_bin:
@@ -647,7 +647,7 @@ def rnn_reinforce_learner_process(config: TrainConfig, replay_queue: queue.Queue
 
             print(
                 f"[Learner] Batch {batches_processed:04d} | Ep: {episode_count:04d} | Steps: {total_transitions:05d} "
-                f"| Loss: {avg_loss:.4f} (P: {avg_p_loss:.3f}, V: {avg_v_loss:.3f}) | Avg Cost: {avg_c:.3f} ms | Best: {min_c:.3f} ms"
+                f"| Loss: {avg_loss:.4e} (P: {avg_p_loss:.3f}, V: {avg_v_loss:.3f}) | Avg Cost: {avg_c:.3f} ms | Best: {min_c:.3f} ms"
             )
 
             with open(losses_bin_path, "ab") as f_bin:

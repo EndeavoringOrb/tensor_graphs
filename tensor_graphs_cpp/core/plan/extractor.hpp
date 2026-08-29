@@ -26,6 +26,7 @@
 #include "core/rewrite.hpp"
 #include "core/settings.hpp"
 #include "core/shape_propagator.hpp"
+#include "core/timer.hpp"
 #include "core/types.hpp"
 
 struct ENodeInfo
@@ -691,14 +692,15 @@ template <typename... Rules> struct DispatchIterator
   public:
     prune::PruningRuleSet<Rules...> rules;
     const float *best_cost = nullptr;
+    TimeoutChecker *timeout = nullptr;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 
     template <typename... Rs>
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &_enode_infos, std::shared_ptr<SearchDelegate> _delegate,
                      const float *_best_cost, const std::unordered_map<MemSpace, uint64_t> *_mem_caps = nullptr,
-                     Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost),
+                     TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), timeout(_timeout),
           mem_caps(_mem_caps ? *_mem_caps : DispatchContext::empty_mem_caps()), egraph(_egraph),
           enodeInfos(_enode_infos), delegate(std::move(_delegate))
     {
@@ -707,6 +709,11 @@ template <typename... Rules> struct DispatchIterator
 
         DispatchContext ctx{egraph, selection_map, enodeInfos, ordered, current_ready, 0, mem_caps, best_cost};
         rules.init(ctx);
+    }
+
+    bool can_abort()
+    {
+        return timeout && timeout->is_expired() && (best_cost != nullptr && *best_cost < TGConstants::INF);
     }
 
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
@@ -735,6 +742,12 @@ template <typename... Rules> struct DispatchIterator
 
         while (true)
         {
+            if (can_abort())
+            {
+                is_done = true;
+                return false;
+            }
+
             uint32_t pos = static_cast<uint32_t>(ordered.size());
 
             if (pos == total_nodes)
@@ -817,6 +830,12 @@ template <typename... Rules> struct DispatchIterator
             bool chosen = false;
             while (selection_at_pos[pos] < current_ready.size())
             {
+                if (can_abort())
+                {
+                    is_done = true;
+                    return false;
+                }
+
                 uint32_t choice_idx = selection_at_pos[pos];
                 selection_at_pos[pos] = choice_idx + 1;
                 uint32_t choice = choice_orders[pos][choice_idx];
@@ -1080,30 +1099,32 @@ template <typename... Rules>
 DispatchIterator<std::decay_t<Rules>...> makeDispatchIterator(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos, const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
-    Rules &&...rules)
+    TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
     return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, nullptr, nullptr, mem_caps,
-                                                    std::forward<Rules>(rules)...);
+                                                    timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate, const float *best_cost,
-    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, TimeoutChecker *timeout = nullptr,
+    Rules &&...rules)
 {
     return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate), best_cost,
-                                                    mem_caps, std::forward<Rules>(rules)...);
+                                                    mem_caps, timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
     const EGraph &egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
-    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, TimeoutChecker *timeout = nullptr,
+    Rules &&...rules)
 {
     return DispatchIterator<std::decay_t<Rules>...>(egraph, selection_map, enodeInfos, std::move(delegate), nullptr,
-                                                    mem_caps, std::forward<Rules>(rules)...);
+                                                    mem_caps, timeout, std::forward<Rules>(rules)...);
 }
 
 using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule,
@@ -1115,12 +1136,13 @@ inline auto makeConfiguredDispatchIteratorFromBools(const EGraph &egraph,
                                                     const std::vector<ENodeInfo> &enodeInfos,
                                                     std::shared_ptr<SearchDelegate> delegate,
                                                     const BoolTuple &bool_flags, const float *best_cost = nullptr,
-                                                    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
+                                                    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                                    TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
             return makeDispatchIteratorWithDelegate(egraph, selection_map, enodeInfos, std::move(delegate), best_cost,
-                                                    mem_caps, rs...);
+                                                    mem_caps, timeout, rs...);
         },
         prune::instantiate_from_bools<AllDispatchRuleTypes>(bool_flags));
 }
@@ -1130,22 +1152,24 @@ inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const std::vector<ENodeInfo> &enodeInfos,
                                            std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
                                            const float *best_cost = nullptr,
-                                           const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
+                                           const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                           TimeoutChecker *timeout = nullptr)
 {
     settings.validate_dispatch_rules();
     if (mem_caps == nullptr)
         mem_caps = &settings.mem_caps;
     auto bool_flags = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
     return makeConfiguredDispatchIteratorFromBools(egraph, selection_map, enodeInfos, std::move(delegate), bool_flags,
-                                                   best_cost, mem_caps);
+                                                   best_cost, mem_caps, timeout);
 }
 
 inline auto makeConfiguredDispatchIterator(const EGraph &egraph,
                                            const std::unordered_map<EClassId, uint32_t> &selection_map,
                                            const std::vector<ENodeInfo> &enodeInfos, const Settings &settings,
-                                           const float *best_cost = nullptr)
+                                           const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
-    return makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, nullptr, settings, best_cost);
+    return makeConfiguredDispatchIterator(egraph, selection_map, enodeInfos, nullptr, settings, best_cost, nullptr,
+                                          timeout);
 }
 
 // =============================================================================
@@ -1888,6 +1912,7 @@ template <typename... Rules> struct Extractor
   public:
     prune::PruningRuleSet<Rules...> rules;
     const float *best_cost = nullptr;
+    TimeoutChecker *timeout = nullptr;
     const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr;
 
     std::unordered_map<EClassId, uint32_t> selection_map;
@@ -1908,8 +1933,10 @@ template <typename... Rules> struct Extractor
     template <typename... Rs>
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
               std::shared_ptr<SearchDelegate> _delegate, const float *_best_cost,
-              const std::unordered_map<MemSpace, uint64_t> *_mem_caps, Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), mem_caps(_mem_caps), egraph(_egraph),
+              const std::unordered_map<MemSpace, uint64_t> *_mem_caps, TimeoutChecker *_timeout = nullptr,
+              Rs &&..._rules)
+        : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), timeout(_timeout), mem_caps(_mem_caps),
+          egraph(_egraph),
           enodeInfos(_enodeInfos), delegate(std::move(_delegate)), numClasses(_egraph.classes.size()),
           to_process({root_eclass_id}), in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
           has_options(_egraph.classes.size(), false)
@@ -1943,6 +1970,11 @@ template <typename... Rules> struct Extractor
         return to_process.empty() && path.empty();
     }
 
+    bool can_abort()
+    {
+        return timeout && timeout->is_expired() && (best_cost != nullptr && *best_cost < TGConstants::INF);
+    }
+
     bool getNextSelection()
     {
         LOG(DEBUG) << "getNextSelection";
@@ -1951,6 +1983,11 @@ template <typename... Rules> struct Extractor
 
         while (!to_process.empty())
         {
+            if (can_abort())
+            {
+                return false;
+            }
+
             if (to_process.size() > 1 && delegate)
             {
                 std::vector<ActionFeatureFrontier> features;
@@ -2069,6 +2106,11 @@ template <typename... Rules> struct Extractor
             bool found_valid = false;
             for (; sel < enodes.size(); ++sel)
             {
+                if (can_abort())
+                {
+                    return false;
+                }
+
                 uint32_t chosen_sel = current_orders[current][sel];
                 ENodeId enode_id = enodes[chosen_sel];
 
@@ -2234,9 +2276,9 @@ template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                                 const std::vector<ENodeInfo> &enodeInfos,
                                                 const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
-                                                Rules &&...rules)
+                                                TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr, nullptr, mem_caps,
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, nullptr, nullptr, mem_caps, timeout,
                                              std::forward<Rules>(rules)...);
 }
 
@@ -2244,20 +2286,21 @@ template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
     const EGraph &egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &enodeInfos,
     std::shared_ptr<SearchDelegate> delegate, const float *best_cost,
-    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, Rules &&...rules)
+    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr, TimeoutChecker *timeout = nullptr,
+    Rules &&...rules)
 {
     return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
-                                             mem_caps, std::forward<Rules>(rules)...);
+                                             mem_caps, timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
     const EGraph &egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &enodeInfos,
     std::shared_ptr<SearchDelegate> delegate, const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
-    Rules &&...rules)
+    TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), nullptr, mem_caps,
-                                             std::forward<Rules>(rules)...);
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), nullptr,
+                                             mem_caps, timeout, std::forward<Rules>(rules)...);
 }
 
 using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule,
@@ -2268,12 +2311,13 @@ inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root
                                              const std::vector<ENodeInfo> &enodeInfos,
                                              std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
                                              const float *best_cost = nullptr,
-                                             const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
+                                             const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                             TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
             return makeExtractorWithDelegate(egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
-                                             mem_caps, rs...);
+                                             mem_caps, timeout, rs...);
         },
         prune::instantiate_from_bools<AllExtractRuleTypes>(bool_flags));
 }
@@ -2281,19 +2325,21 @@ inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                     const std::vector<ENodeInfo> &enodeInfos, std::shared_ptr<SearchDelegate> delegate,
                                     const Settings &settings, const float *best_cost = nullptr,
-                                    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr)
+                                    const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
+                                    TimeoutChecker *timeout = nullptr)
 {
     settings.validate_rules("extract");
     if (mem_caps == nullptr)
         mem_caps = &settings.mem_caps;
     auto bool_flags = prune::extract_enabled_states<AllExtractRuleTypes>("extract", settings);
     return makeConfiguredExtractorFromBools(egraph, root_eclass_id, enodeInfos, std::move(delegate), bool_flags,
-                                            best_cost, mem_caps);
+                                            best_cost, mem_caps, timeout);
 }
 
 inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_id,
                                     const std::vector<ENodeInfo> &enodeInfos, const Settings &settings,
-                                    const float *best_cost = nullptr)
+                                    const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
-    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings, best_cost);
+    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings, best_cost, nullptr,
+                                   timeout);
 }

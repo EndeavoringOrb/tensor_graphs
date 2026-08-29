@@ -336,8 +336,8 @@ inline void testPeakMemoryPruningUnderTightCap()
     }
 
     // 1. Verify PeakMemoryPruningRule prunes all out-of-place choices under 16KB cap
-    auto buf_iter =
-        makeBufferizeIterator(order, egraph, selection_map, enodeInfos, settings.mem_caps, PeakMemoryPruningRule(true));
+    auto buf_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos, settings.mem_caps, nullptr, nullptr,
+                                          PeakMemoryPruningRule(true));
     std::vector<ParallelBuffer> bufs;
     std::unordered_map<EClassId, BufferId> eclass_to_buf;
 
@@ -360,8 +360,8 @@ inline void testPeakMemoryPruningUnderTightCap()
 
     // 2. Verify clean rejection when mem_cap is lower than minimum feasible peak (8 KB < 16 KB)
     std::unordered_map<MemSpace, uint64_t> impossible_caps = {{MemSpace{1, HandleType::CPP}, 8192ULL}};
-    auto impossible_iter =
-        makeBufferizeIterator(order, egraph, selection_map, enodeInfos, impossible_caps, PeakMemoryPruningRule(true));
+    auto impossible_iter = makeBufferizeIterator(order, egraph, selection_map, enodeInfos, impossible_caps, nullptr,
+                                                 nullptr, PeakMemoryPruningRule(true));
     if (impossible_iter.getNextBufferization(bufs, eclass_to_buf))
     {
         Error::throw_err(

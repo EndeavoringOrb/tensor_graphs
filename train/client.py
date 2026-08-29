@@ -148,8 +148,10 @@ def client_worker_process(
             logger.info(f"{LOG_PREFIX} [Worker {rank}] Simulation error: {e}")
             costs = []
 
-        valid_costs = [c for c in costs if c < float("inf") and not math.isnan(c)]
-        best_cost = min(valid_costs) if valid_costs else float("inf")
+        valid_positive_costs = [
+            c for c in costs if c >= 0.0 and c < float("inf") and not math.isnan(c)
+        ]
+        best_cost = min(valid_positive_costs) if valid_positive_costs else float("inf")
 
         # Vectorize, sanitize, and pack completed trajectories on the client worker
         packed_by_phase, leaf_costs = delegate.export_and_reset()

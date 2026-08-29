@@ -29,6 +29,7 @@
 #include "core/plan/validators/mem.hpp"
 #include "core/rewrite.hpp"
 #include "core/shape_propagator.hpp"
+#include "core/timer.hpp"
 #include "core/types.hpp"
 
 struct ExtractionResult
@@ -130,6 +131,8 @@ template <typename... Rules> struct CacheIterator
     std::vector<LogicalId> candidate_nodes;
     std::vector<MemSpace> avail_mem_spaces;
     std::shared_ptr<SearchDelegate> delegate;
+    const float *best_cost = nullptr;
+    TimeoutChecker *timeout = nullptr;
 
     std::vector<uint32_t> num_users;
     std::vector<std::vector<int>> valid_choices;
@@ -144,14 +147,20 @@ template <typename... Rules> struct CacheIterator
     template <typename... Rs>
     CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
                   const std::vector<MemSpace> &_avail_mem_spaces, std::shared_ptr<SearchDelegate> _delegate,
-                  Rs &&..._rules)
+                  const float *_best_cost = nullptr, TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), graph(_graph), candidate_nodes(_candidates),
-          avail_mem_spaces(_avail_mem_spaces), delegate(std::move(_delegate))
+          avail_mem_spaces(_avail_mem_spaces), delegate(std::move(_delegate)), best_cost(_best_cost),
+          timeout(_timeout)
     {
         init();
         CacheContext ctx{graph, candidate_nodes, avail_mem_spaces, num_users, valid_choices, current_cache_selection, 0,
                          0};
         rules.init(ctx);
+    }
+
+    bool can_abort()
+    {
+        return timeout && timeout->is_expired() && (best_cost != nullptr && *best_cost < TGConstants::INF);
     }
 
     void init()
@@ -285,6 +294,12 @@ template <typename... Rules> struct CacheIterator
 
         while (k >= 0)
         {
+            if (can_abort())
+            {
+                is_done = true;
+                return false;
+            }
+
             if (k == static_cast<int>(N))
             {
                 out_cached_nodes = current_cache_selection;
@@ -388,9 +403,11 @@ template <typename... Rules> struct CacheIterator
 
 template <typename... Rules>
 CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                                        const std::vector<MemSpace> &avail_mem_spaces, Rules &&...rules)
+                                                        const std::vector<MemSpace> &avail_mem_spaces,
+                                                        const float *best_cost = nullptr,
+                                                        TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, nullptr,
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, nullptr, best_cost, timeout,
                                                  std::forward<Rules>(rules)...);
 }
 
@@ -399,38 +416,45 @@ CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(const Graph 
                                                                     const std::vector<LogicalId> &candidates,
                                                                     const std::vector<MemSpace> &avail_mem_spaces,
                                                                     std::shared_ptr<SearchDelegate> delegate,
+                                                                    const float *best_cost = nullptr,
+                                                                    TimeoutChecker *timeout = nullptr,
                                                                     Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, std::move(delegate),
-                                                 std::forward<Rules>(rules)...);
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, std::move(delegate), best_cost,
+                                                 timeout, std::forward<Rules>(rules)...);
 }
 using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, StorageAnchoredSkipRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::vector<LogicalId> &candidates,
                                                  const std::vector<MemSpace> &avail_mem_spaces,
-                                                 std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags)
+                                                 std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
+                                                 const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
-            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, std::move(delegate), rs...);
+            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, std::move(delegate), best_cost,
+                                                 timeout, rs...);
         },
         prune::instantiate_from_bools<AllCacheRuleTypes>(bool_flags));
 }
 
 inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
                                         const std::vector<MemSpace> &avail_mem_spaces,
-                                        std::shared_ptr<SearchDelegate> delegate, const Settings &settings)
+                                        std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
+                                        const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     settings.validate_rules("cache");
     auto bool_flags = prune::extract_enabled_states<AllCacheRuleTypes>("cache", settings);
-    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, std::move(delegate), bool_flags);
+    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, std::move(delegate), bool_flags,
+                                                best_cost, timeout);
 }
 
 inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                        const std::vector<MemSpace> &avail_mem_spaces, const Settings &settings)
+                                        const std::vector<MemSpace> &avail_mem_spaces, const Settings &settings,
+                                        const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
-    return makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, nullptr, settings);
+    return makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, nullptr, settings, best_cost, timeout);
 }
 
 struct ENodeDominationContext
@@ -826,10 +850,12 @@ struct Planner
             return a.idx < b.idx;
         });
 
-        auto cache_iter = makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, delegate, settings);
+        float best_cost = TGConstants::INF;
+        TimeoutChecker timeout_checker(minCompileSeconds);
+        auto cache_iter = makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, delegate, settings,
+                                                      &best_cost, &timeout_checker);
         std::unordered_map<LogicalId, MemSpace> current_cache;
         std::unordered_map<LogicalId, MemSpace> best_cache;
-        float best_cost = TGConstants::INF;
 
         uint32_t rep_bucket_idx = buckets.size() > 1 ? 1 : 0;
         const Bucket &rep_bucket = buckets[rep_bucket_idx];
@@ -1430,8 +1456,10 @@ struct Planner
         auto dispatch_bools = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
         auto bufferize_bools = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
 
+        TimeoutChecker timeout_checker(minCompileSeconds);
+
         auto extractor = makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools,
-                                                          &best_cost, &reduced_caps);
+                                                          &best_cost, &reduced_caps, &timeout_checker);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
 
         int max_iters = 10'000'000;
@@ -1444,9 +1472,9 @@ struct Planner
         auto is_time_expired = [&]() -> bool {
             if (minCompileSeconds <= 0.0f)
                 return false;
-            if (best_cost == TGConstants::INF)
-                return false; // Ensure at least one valid extraction exists before aborting
-            return timer.getElapsed() >= minCompileSeconds;
+            if (best_cost >= TGConstants::INF)
+                return false; // Never abort if no feasible baseline exists yet
+            return timeout_checker.is_expired();
         };
 
         while (remaining_iters-- > 0)
@@ -1469,7 +1497,8 @@ struct Planner
             float cost = TGConstants::INF;
 
             auto dispatch_iterator = makeConfiguredDispatchIteratorFromBools(
-                egraph, selection_map, enodeInfos, delegate, dispatch_bools, &best_cost, &reduced_caps);
+                egraph, selection_map, enodeInfos, delegate, dispatch_bools, &best_cost, &reduced_caps,
+                &timeout_checker);
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
@@ -1477,7 +1506,8 @@ struct Planner
                     break;
 
                 auto buf_iter = makeConfiguredBufferizeIteratorFromBools(order, egraph, selection_map, enodeInfos,
-                                                                         reduced_caps, delegate, bufferize_bools);
+                                                                         reduced_caps, delegate, bufferize_bools,
+                                                                         &best_cost, &timeout_checker);
 
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
@@ -1548,7 +1578,8 @@ struct Planner
                         uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
 
                         std::vector<ParallelBuffer> allocated;
-                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &settings))
+                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &settings,
+                                                       &best_cost, &timeout_checker))
                         {
                             alloc_ok = false;
                             break;

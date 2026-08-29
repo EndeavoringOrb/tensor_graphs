@@ -627,7 +627,8 @@ PYBIND11_MODULE(tensor_graphs, m)
           py::arg("mem_cap_override") = 0);
 
     m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
-          py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false);
+          py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false,
+          py::arg("min_compile_seconds") = 0.0f);
 
     m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
           py::arg("log_cost_calls") = false);

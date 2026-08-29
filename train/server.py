@@ -183,7 +183,7 @@ def learner_thread_fn(
                         buf = bytearray()
                         for c in leaf_costs:
                             cost_val = float(c)
-                            if math.isfinite(cost_val) and cost_val >= 0.0:
+                            if math.isfinite(cost_val):
                                 cost_count += 1
                                 buf.extend(struct.pack(pack_fmt, cost_count, cost_val))
                         if buf:
@@ -215,12 +215,13 @@ def learner_thread_fn(
 
             h_batch = torch.from_numpy(batch["hiddens"]).to(device)
             a_batch = torch.from_numpy(batch["actions"]).to(device)
-            target_costs = torch.log1p(
-                torch.clamp(
-                    torch.from_numpy(batch["costs"]).to(device),
-                    min=0.0,
-                    max=1e20,
-                )
+            raw_costs = torch.from_numpy(batch["costs"]).to(device)
+            
+            # If cost is negative (e.g. OOM penalty), reward = cost; otherwise target = log1p(cost)
+            target_costs = torch.where(
+                raw_costs < 0,
+                raw_costs,
+                torch.log1p(torch.clamp(raw_costs, min=0.0, max=1e20)),
             )
 
             _, pred_costs = model(h_batch, a_batch, phase_id)

@@ -14,6 +14,7 @@
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/search_delegate.hpp"
+#include "core/timer.hpp"
 #include "core/types.hpp"
 #include "models/run_models.hpp"
 
@@ -222,25 +223,22 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
         ctx->inputIdsId = roots.inputs[0];
         ctx->max_seq_len = 128;
 
-        LogicalId latentId = roots.inputs[0];
-        LogicalId timestepId = roots.inputs[1];
-        LogicalId textId = roots.inputs[2];
-        LogicalId velocityOut = roots.roots[0];
+        LogicalId inputIds = roots.inputs[0];
+        LogicalId latentId = roots.inputs[1];
+        LogicalId imageOut = roots.roots[0];
 
         if (compile_decode_buckets)
         {
             Bucket stepB;
             stepB.inputDirtyRegions[latentId] = {makeFull(ctx->graph.getNode(latentId).getShape())};
-            stepB.inputDirtyRegions[timestepId] = {makeFull(ctx->graph.getNode(timestepId).getShape())};
-            stepB.outputNeededRegion = {makeFull(ctx->graph.getNode(velocityOut).getShape())};
+            stepB.outputNeededRegion = {makeFull(ctx->graph.getNode(imageOut).getShape())};
             ctx->buckets.push_back(stepB);
         }
 
         Bucket fullB;
+        fullB.inputDirtyRegions[inputIds] = {makeFull(ctx->graph.getNode(inputIds).getShape())};
         fullB.inputDirtyRegions[latentId] = {makeFull(ctx->graph.getNode(latentId).getShape())};
-        fullB.inputDirtyRegions[timestepId] = {makeFull(ctx->graph.getNode(timestepId).getShape())};
-        fullB.inputDirtyRegions[textId] = {makeFull(ctx->graph.getNode(textId).getShape())};
-        fullB.outputNeededRegion = {makeFull(ctx->graph.getNode(velocityOut).getShape())};
+        fullB.outputNeededRegion = {makeFull(ctx->graph.getNode(imageOut).getShape())};
         ctx->buckets.push_back(fullB);
     }
     else if (model_name == "vae" || model_name == "krea-2-turbo-vae" || model_name == "krea-vae" ||
@@ -317,7 +315,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
 inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<SaturatedEGraphContext> ctx, int bucket_idx,
                                                        std::shared_ptr<SearchDelegate> delegate,
                                                        const std::vector<uint32_t> &level_simulations,
-                                                       bool log_cost_calls = false)
+                                                       bool log_cost_calls = false, float minCompileSeconds = 0.0f)
 {
     ctx->costModel.setLogging(log_cost_calls);
 
@@ -401,7 +399,11 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         return a.idx < b.idx;
     });
 
-    auto cache_iter = makeConfiguredCacheIterator(ctx->graph, candidates, avail_mem_spaces, delegate, ctx->settings);
+    float best_cost = TGConstants::INF;
+    TimeoutChecker timeout_checker(minCompileSeconds);
+
+    auto cache_iter = makeConfiguredCacheIterator(ctx->graph, candidates, avail_mem_spaces, delegate, ctx->settings,
+                                                  &best_cost, &timeout_checker);
     std::unordered_map<LogicalId, MemSpace> cachedNodes;
 
     std::vector<float> all_costs;
@@ -584,7 +586,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         }
 
         auto extractor = makeConfiguredExtractor(state->egraph, rootEClassId, state->enodeInfos, delegate,
-                                                 ctx->settings, nullptr, &reduced_caps);
+                                                 ctx->settings, &best_cost, &reduced_caps, &timeout_checker);
         extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
 
         uint32_t extract_count = 0;
@@ -595,7 +597,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
             // Dispatch (Level 2)
             auto dispatch_iterator = makeConfiguredDispatchIterator(state->egraph, selection_map, state->enodeInfos,
-                                                                    delegate, ctx->settings, nullptr, &reduced_caps);
+                                                                    delegate, ctx->settings, &best_cost,
+                                                                    &reduced_caps, &timeout_checker);
             uint32_t dispatch_count = 0;
             std::vector<EClassId> order;
 
@@ -605,7 +608,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
                 // Bufferize (Level 3)
                 auto buf_iter = makeConfiguredBufferizeIterator(order, state->egraph, selection_map, state->enodeInfos,
-                                                                reduced_caps, delegate, ctx->settings);
+                                                                reduced_caps, delegate, ctx->settings, &best_cost,
+                                                                &timeout_checker);
 
                 uint32_t buf_count = 0;
                 std::vector<ParallelBuffer> unallocated_buffers;
@@ -662,7 +666,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                         uint64_t cap =
                             reduced_caps.count(ms) ? reduced_caps.at(ms) : std::numeric_limits<uint64_t>::max();
                         std::vector<ParallelBuffer> allocated;
-                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &ctx->settings))
+                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &ctx->settings,
+                                                       &best_cost, &timeout_checker))
                         {
                             alloc_ok = false;
                             break;
@@ -674,6 +679,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                     {
                         float cost = get_cost(order, state->egraph, selection_map, state->enodeInfos);
                         all_costs.push_back(cost);
+                        if (cost < best_cost)
+                            best_cost = cost;
                         if (delegate)
                             delegate->on_leaf_evaluated(cost);
                     }
