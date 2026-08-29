@@ -363,7 +363,7 @@ struct System
             total_ram = static_cast<uint64_t>(mac_mem);
         }
 #endif
-        uint64_t cpu_buffer_size = std::max<uint64_t>((uint64_t)(total_ram * 0.75), 4ULL * 1024 * 1024 * 1024);
+        uint64_t cpu_buffer_size = std::max<uint64_t>((uint64_t)(total_ram * 0.93), 4ULL * 1024 * 1024 * 1024);
 
         MemSpace cpu_ms{1, HandleType::CPP};
         default_buffer_sizes[cpu_ms] = cpu_buffer_size;
@@ -381,7 +381,7 @@ struct System
                 size_t free_mem = 0, total_mem = 0;
                 cudaMemGetInfo(&free_mem, &total_mem);
                 uint64_t vram_size =
-                    (total_mem > 0) ? static_cast<uint64_t>(total_mem * 0.90) : 8ULL * 1024 * 1024 * 1024;
+                    (total_mem > 0) ? static_cast<uint64_t>(total_mem * 0.93) : 8ULL * 1024 * 1024 * 1024;
 
                 MemSpace cuda_ms{dev, HandleType::CUDA};
                 default_buffer_sizes[cuda_ms] = vram_size;

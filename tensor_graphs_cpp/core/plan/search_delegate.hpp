@@ -12,10 +12,10 @@ struct ActionFeatureCache
 {
     float is_cached = 0.0f; // 1.0f if cached, 0.0f if not cached
     uint64_t size = 0;      // bytes
-    MemSpace mem_space;
-    uint32_t op_type = 0;
     float num_users = 0.0f;
     uint32_t logical_id = 0;
+    MemSpace mem_space;
+    uint64_t mem_cap = 0;
 };
 
 struct ActionFeatureExtractDispatch
@@ -23,10 +23,11 @@ struct ActionFeatureExtractDispatch
     float cost;
     float dp_cost = 0.0f;
     uint64_t size; // n elements * dtype size
-    MemSpace mem_space;
     std::vector<uint32_t> engine_idxs;
     uint32_t num_nodes = 0;
     uint32_t num_edges = 0;
+    MemSpace mem_space;
+    uint64_t mem_cap = 0;
 };
 
 struct ActionFeatureMalloc
@@ -34,6 +35,7 @@ struct ActionFeatureMalloc
     uint64_t size = 0;  // bytes
     uint32_t start = 0; // birth time (idx into dispatch order of first eclass that uses this)
     uint32_t end = 0;   // death time (idx into dispatch order of last eclass that uses this)
+    MemSpace mem_space;
     uint64_t mem_cap = 0;
 };
 
@@ -43,6 +45,8 @@ struct ActionFeatureBufferize
     uint64_t size;
     uint64_t parent_size;
     float parent_birth_time;
+    MemSpace mem_space;
+    uint64_t mem_cap = 0;
 };
 
 struct ActionFeatureFrontier
@@ -54,6 +58,7 @@ struct ActionFeatureFrontier
     uint64_t size = 0; // bytes
     DType dtype = DType::FLOAT32;
     MemSpace mem_space;
+    uint64_t mem_cap = 0;
 };
 
 class SearchDelegate

@@ -12,14 +12,14 @@ from .delegate import CostPredictorDelegate
 from .model import CostPredictorRNN
 
 __all__ = [
-    "TrainConfig",
-    "CostPredictorRNN",
     "CostPredictorDelegate",
-    "PhaseReplayBuffer",
+    "CostPredictorRNN",
+    "EjectHighestCostStrategy",
+    "EjectLowestLossStrategy",
     "EvictionStrategy",
     "FIFOStrategy",
-    "EjectLowestLossStrategy",
-    "EjectHighestCostStrategy",
+    "PhaseReplayBuffer",
+    "TrainConfig",
     "get_eviction_strategy",
     "rank_score_indices",
 ]

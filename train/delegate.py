@@ -1,6 +1,7 @@
 import math
 import random
 from collections import defaultdict
+
 import numpy as np
 import tensor_graphs
 import torch
@@ -220,12 +221,13 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
             [
                 safe_float(f.is_cached, default=0.0),
                 safe_log1p(f.size),
+                safe_float(f.num_users, default=0.0),
+                safe_float(f.logical_id, default=0.0),
                 safe_float(
                     f.mem_space.type if hasattr(f, "mem_space") else 0,
                     default=0.0,
                 ),
-                safe_float(f.op_type, default=0.0),
-                safe_float(f.num_users, default=0.0),
+                safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
             ]
             for f in items
         ]
@@ -239,14 +241,15 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                 safe_log1p(f.dp_cost),
                 safe_log1p(f.size),
                 safe_float(
-                    f.mem_space.type
-                    if hasattr(f, "mem_space")
-                    else 0,
+                    f.mem_space.type if hasattr(f, "mem_space") else 0,
                     default=0.0,
                 ),
-                safe_float(len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0, default=0.0),
+                safe_float(
+                    len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0, default=0.0
+                ),
                 safe_float(f.num_nodes, default=0.0),
                 safe_float(f.num_edges, default=0.0),
+                safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
             ]
             for f in items
         ]
@@ -260,6 +263,11 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                 safe_log1p(f.size),
                 safe_log1p(f.parent_size),
                 safe_float(f.parent_birth_time, default=0.0),
+                safe_float(
+                    f.mem_space.type if hasattr(f, "mem_space") else 0,
+                    default=0.0,
+                ),
+                safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
             ]
             for f in items
         ]
@@ -272,7 +280,11 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                 safe_log1p(f.size),
                 safe_float(f.start, default=0.0),
                 safe_float(f.end, default=0.0),
-                safe_log1p(f.mem_cap),
+                safe_float(
+                    f.mem_space.type if hasattr(f, "mem_space") else 0,
+                    default=0.0,
+                ),
+                safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
             ]
             for f in items
         ]
@@ -292,6 +304,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                     f.mem_space.type if hasattr(f, "mem_space") else 0,
                     default=0.0,
                 ),
+                safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
             ]
             for f in items
         ]

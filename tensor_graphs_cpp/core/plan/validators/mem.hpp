@@ -1010,6 +1010,10 @@ template <typename... Rules> struct BufferizeIterator
                     for (int choice : valid_choices[k])
                     {
                         ActionFeatureBufferize f;
+                        f.mem_space = node.getMemSpace();
+                        auto cap_it = mem_caps.find(node.getMemSpace());
+                        f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
+
                         if (choice == -1)
                         {
                             f.is_new_buffer = 1.0f;
@@ -1537,6 +1541,7 @@ template <typename... Rules> struct MallocIterator
                         f.size = unallocated[avail[idx]].size;
                         f.start = unallocated[avail[idx]].start;
                         f.end = unallocated[avail[idx]].end;
+                        f.mem_space = unallocated[avail[idx]].mem_space;
                         f.mem_cap = mem_cap;
                         features.push_back(f);
                     }
@@ -1649,12 +1654,9 @@ MallocIterator<std::decay_t<Rules>...> makeMallocIterator(uint64_t mem_cap,
 }
 
 template <typename... Rules>
-MallocIterator<std::decay_t<Rules>...> makeMallocIteratorWithDelegate(uint64_t mem_cap,
-                                                                      const std::vector<ParallelBuffer> &unallocated,
-                                                                      std::shared_ptr<SearchDelegate> delegate,
-                                                                      const float *best_cost = nullptr,
-                                                                      TimeoutChecker *timeout = nullptr,
-                                                                      Rules &&...rules)
+MallocIterator<std::decay_t<Rules>...> makeMallocIteratorWithDelegate(
+    uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated, std::shared_ptr<SearchDelegate> delegate,
+    const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
     return MallocIterator<std::decay_t<Rules>...>(mem_cap, unallocated, std::move(delegate), best_cost, timeout,
                                                   std::forward<Rules>(rules)...);

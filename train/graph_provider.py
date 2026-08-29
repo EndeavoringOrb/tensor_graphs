@@ -1,5 +1,6 @@
 import random
 from typing import Protocol
+
 import numpy as np
 import tensor_graphs
 
@@ -144,6 +145,75 @@ def generate_random_graph(
     return g, root, [full_bucket]
 
 
+def compute_graph_memory_metrics(graph: tensor_graphs.Graph, root_id: tensor_graphs.LogicalId) -> dict[str, int]:
+    """Computes exact memory requirements across all reachable nodes in the graph."""
+    reachable_nodes = set()
+    stack = [root_id]
+    while stack:
+        curr = stack.pop()
+        if curr in reachable_nodes:
+            continue
+        reachable_nodes.add(curr)
+        node = graph.getNode(curr)
+        for child in node.child_ids:
+            stack.append(child)
+
+    def node_bytes(n):
+        num_elems = 1
+        for d in n.shape:
+            num_elems *= d
+        return num_elems * 4
+
+    max_node_bytes = 0
+    total_node_bytes = 0
+    max_op_peak = 0
+
+    for node_id in reachable_nodes:
+        node = graph.getNode(node_id)
+        out_sz = node_bytes(node)
+        in_sz = sum(node_bytes(graph.getNode(c)) for c in node.child_ids if graph.hasNode(c))
+
+        max_node_bytes = max(max_node_bytes, out_sz)
+        total_node_bytes += out_sz
+        max_op_peak = max(max_op_peak, out_sz + in_sz)
+
+    return {
+        "max_node_bytes": max_node_bytes,
+        "max_op_peak": max(max_op_peak, max_node_bytes),
+        "total_node_bytes": max(total_node_bytes, max_node_bytes),
+    }
+
+
+def sample_calibrated_mem_cap(metrics: dict[str, int], rng: random.Random) -> int:
+    """Samples memory capacity across impossible, tight, moderate, and generous regimes."""
+    max_node = metrics["max_node_bytes"]
+    max_op_peak = metrics["max_op_peak"]
+    total_bytes = metrics["total_node_bytes"]
+
+    mode = rng.random()
+
+    if mode < 0.15:
+        # Impossible / Infeasible (15%): Cap is smaller than required for a single op or tensor
+        factor = rng.uniform(0.1, 0.8)
+        cap = int(max_node * factor)
+        return max(512, cap)
+
+    elif mode < 0.50:
+        # Hard / Very Tight (35%): Calibrated right at the minimum theoretical peak for 1 op
+        factor = rng.uniform(0.9, 1.3)
+        return max(max_node, int(max_op_peak * factor))
+
+    elif mode < 0.80:
+        # Moderate / Constrained (30%): Requires smart buffer reuse across multiple steps
+        factor = rng.uniform(1.4, 2.5)
+        return max(max_op_peak, int(max_op_peak * factor))
+
+    else:
+        # Generous / Relaxed (20%): Large budget focusing primarily on execution latency
+        factor = rng.uniform(1.2, 3.0)
+        return min(256 * 1024 * 1024, max(int(total_bytes * factor), max_op_peak * 4))
+
+
 class BaseGraphProvider(Protocol):
     def get_context(
         self, config: TrainConfig, episode: int = 0
@@ -164,7 +234,7 @@ class ModelGraphProvider:
             self._cached_context = tensor_graphs.build_and_saturate_egraph(
                 self.model_name,
                 model_path,
-                False,
+                config.log_cost_calls,
                 True,
                 config.seq_len,
             )
@@ -191,18 +261,21 @@ class RandomGraphProvider:
             seed = (
                 (config.random_seed or 42) + self.worker_rank * 10007 + episode
             ) & 0x7FFFFFFF
-            num_nodes = random.Random(seed).randint(
-                config.random_min_nodes, config.random_max_nodes
-            )
+            rng = random.Random(seed)
+
+            num_nodes = rng.randint(config.random_min_nodes, config.random_max_nodes)
             graph, root, buckets = generate_random_graph(
                 num_nodes=num_nodes,
                 hidden_dim=config.random_dim,
                 seq_len=config.random_seq_len,
                 seed=seed,
             )
-            mem_cap = random.Random(seed).randint(1024, 256 * 1024 * 1024)
+
+            metrics = compute_graph_memory_metrics(graph, root)
+            mem_cap = sample_calibrated_mem_cap(metrics, rng)
+
             self._cached_context = tensor_graphs.build_and_saturate_egraph_from_graph(
-                graph, root, buckets, False, mem_cap
+                graph, root, buckets, config.log_cost_calls, mem_cap
             )
             self._last_sampled_episode = episode
 

@@ -8,9 +8,10 @@ import sys
 import threading
 import time
 from pathlib import Path
+
 import numpy as np
-import tensor_graphs
 import psutil
+import tensor_graphs
 import torch
 import torch.multiprocessing as mp
 
@@ -143,7 +144,7 @@ def client_worker_process(
                 bucket_idx,
                 delegate,
                 [1, 1, 1, 1],  # Standard single extraction pass
-                False,
+                config.log_cost_calls,
             )
         except Exception as e:
             logger.info(f"{LOG_PREFIX} [Worker {rank}] Simulation error: {e}")
@@ -172,10 +173,11 @@ def client_worker_process(
                 f"Best Cost: {best_cost:.4f} ms | {total_transitions} transitions | took {time.perf_counter() - start:.2f}s"
             )
         else:
-            logger.info(f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{current_version}, eps {delegate.epsilon:.4e}) | took {time.perf_counter() - start:.2f}s")
+            logger.info(
+                f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{current_version}, eps {delegate.epsilon:.4e}) | took {time.perf_counter() - start:.2f}s"
+            )
 
         episode += 1
-        logger.info(f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d}")
 
 
 def main():
@@ -207,6 +209,11 @@ def main():
     parser.add_argument(
         "--model-path", type=str, default=None, help="Target model path"
     )
+    parser.add_argument(
+        "--log-cost-calls",
+        action="store_true",
+        help="Log cost model calls to benchmarks/calls.bin",
+    )
     args = parser.parse_args()
 
     # Connect to training server
@@ -237,6 +244,9 @@ def main():
         config.model_name = args.model
     if args.model_path is not None:
         config.model_path = args.model_path
+    if args.log_cost_calls:
+        config.log_cost_calls = True
+        config.workers = 1
 
     run_dir = Path(config.run_dir) if config.run_dir else Path("runs/0")
     run_dir.mkdir(parents=True, exist_ok=True)

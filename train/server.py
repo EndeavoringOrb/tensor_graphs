@@ -7,7 +7,7 @@ import struct
 import threading
 import time
 from pathlib import Path
-import numpy as np
+
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
@@ -216,7 +216,7 @@ def learner_thread_fn(
             h_batch = torch.from_numpy(batch["hiddens"]).to(device)
             a_batch = torch.from_numpy(batch["actions"]).to(device)
             raw_costs = torch.from_numpy(batch["costs"]).to(device)
-            
+
             # If cost is negative (e.g. OOM penalty), reward = cost; otherwise target = log1p(cost)
             target_costs = torch.where(
                 raw_costs < 0,

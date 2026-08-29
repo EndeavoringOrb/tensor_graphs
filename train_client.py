@@ -46,6 +46,7 @@ def reinforce_worker(
         int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
     ) & 0x7FFFFFFF
     import random
+
     import numpy as np
 
     random.seed(worker_seed)
@@ -194,6 +195,7 @@ def rnn_mcts_worker(
         int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
     ) & 0x7FFFFFFF
     import random
+
     import numpy as np
 
     random.seed(worker_seed)
@@ -549,6 +551,7 @@ def client_worker(
         int(time.time() * 1000) ^ (os.getpid() << 16) ^ (rank * 10007)
     ) & 0x7FFFFFFF
     import random
+
     import numpy as np
 
     random.seed(worker_seed)

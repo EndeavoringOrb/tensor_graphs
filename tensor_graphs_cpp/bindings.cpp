@@ -558,10 +558,10 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<ActionFeatureCache>(m, "ActionFeatureCache")
         .def_readwrite("is_cached", &ActionFeatureCache::is_cached)
         .def_readwrite("size", &ActionFeatureCache::size)
-        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
-        .def_readwrite("op_type", &ActionFeatureCache::op_type)
         .def_readwrite("num_users", &ActionFeatureCache::num_users)
-        .def_readwrite("logical_id", &ActionFeatureCache::logical_id);
+        .def_readwrite("logical_id", &ActionFeatureCache::logical_id)
+        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureCache::mem_cap);
 
     py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
         .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
@@ -570,18 +570,22 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
         .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
         .def_readwrite("num_nodes", &ActionFeatureExtractDispatch::num_nodes)
-        .def_readwrite("num_edges", &ActionFeatureExtractDispatch::num_edges);
+        .def_readwrite("num_edges", &ActionFeatureExtractDispatch::num_edges)
+        .def_readwrite("mem_cap", &ActionFeatureExtractDispatch::mem_cap);
 
     py::class_<ActionFeatureBufferize>(m, "ActionFeatureBufferize")
         .def_readwrite("is_new_buffer", &ActionFeatureBufferize::is_new_buffer)
         .def_readwrite("size", &ActionFeatureBufferize::size)
         .def_readwrite("parent_size", &ActionFeatureBufferize::parent_size)
-        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time);
+        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time)
+        .def_readwrite("mem_space", &ActionFeatureBufferize::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureBufferize::mem_cap);
 
     py::class_<ActionFeatureMalloc>(m, "ActionFeatureMalloc")
         .def_readwrite("size", &ActionFeatureMalloc::size)
         .def_readwrite("start", &ActionFeatureMalloc::start)
         .def_readwrite("end", &ActionFeatureMalloc::end)
+        .def_readwrite("mem_space", &ActionFeatureMalloc::mem_space)
         .def_readwrite("mem_cap", &ActionFeatureMalloc::mem_cap);
 
     py::class_<ActionFeatureFrontier>(m, "ActionFeatureFrontier")
@@ -591,7 +595,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("min_dp_cost", &ActionFeatureFrontier::min_dp_cost)
         .def_readwrite("size", &ActionFeatureFrontier::size)
         .def_readwrite("dtype", &ActionFeatureFrontier::dtype)
-        .def_readwrite("mem_space", &ActionFeatureFrontier::mem_space);
+        .def_readwrite("mem_space", &ActionFeatureFrontier::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureFrontier::mem_cap);
 
     // Search Delegate
     py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")

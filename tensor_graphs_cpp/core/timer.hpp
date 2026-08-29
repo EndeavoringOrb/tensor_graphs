@@ -166,25 +166,29 @@ struct ProgressTimer
 
 #endif
 
-
-struct TimeoutChecker {
+struct TimeoutChecker
+{
     std::chrono::steady_clock::time_point deadline;
     bool has_deadline = false;
     uint32_t counter = 0;
 
-    TimeoutChecker(float timeout_seconds = 0.0f) {
-        if (timeout_seconds > 0.0f) {
-            deadline = std::chrono::steady_clock::now() + 
-                       std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::duration<float>(timeout_seconds));
+    TimeoutChecker(float timeout_seconds = 0.0f)
+    {
+        if (timeout_seconds > 0.0f)
+        {
+            deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                              std::chrono::duration<float>(timeout_seconds));
             has_deadline = true;
         }
     }
 
-    inline bool is_expired() {
-        if (!has_deadline) return false;
+    inline bool is_expired()
+    {
+        if (!has_deadline)
+            return false;
         // Check system clock only once every 1024 iterations
-        if ((++counter & 1023) == 0) {
+        if ((++counter & 1023) == 0)
+        {
             return std::chrono::steady_clock::now() >= deadline;
         }
         return false;

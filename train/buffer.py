@@ -1,10 +1,10 @@
-import math
 import random
 from abc import ABC, abstractmethod
+
 import numpy as np
 import torch
 
-ACTION_DIMS = {0: 5, 1: 7, 2: 7, 3: 4, 4: 4, 5: 7}
+ACTION_DIMS = {0: 6, 1: 8, 2: 8, 3: 6, 4: 5, 5: 8}
 
 
 # ==============================================================================
@@ -14,9 +14,9 @@ def rank_score_indices(
     scores,
 ):
     """Ranks 1D scores/costs from best to worst according to dual-objective logic:
-      1. Non-negative costs (>= 0) sorted ascending (lowest latency first).
-      2. Negative rewards (< 0) sorted descending (highest progress closer to 0 first).
-      3. Non-finite / NaNs at the end.
+    1. Non-negative costs (>= 0) sorted ascending (lowest latency first).
+    2. Negative rewards (< 0) sorted descending (highest progress closer to 0 first).
+    3. Non-finite / NaNs at the end.
     """
     if isinstance(scores, torch.Tensor):
         valid = torch.isfinite(scores)
@@ -78,7 +78,6 @@ class EvictionStrategy(ABC):
         max_size: int,
     ) -> np.ndarray:
         """Returns array of indices of items to keep (len <= max_size)."""
-        pass
 
 
 class FIFOStrategy(EvictionStrategy):

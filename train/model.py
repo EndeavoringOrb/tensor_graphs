@@ -9,12 +9,12 @@ class CostPredictorRNN(nn.Module):
     """
 
     ACTION_DIMS = {
-        0: 5,  # Cache: [is_cached, log_size, mem_type, op_type, num_users]
-        1: 7,  # Extract (ENode): [log_cost, log_dp_cost, log_size, mem_type, eng_len, num_nodes, num_edges]
-        2: 7,  # Dispatch: [log_cost, log_dp_cost, log_size, mem_type, eng_len, num_nodes, num_edges]
-        3: 4,  # Bufferize: [is_new_buffer, log_size, log_parent_size, parent_birth_time]
-        4: 4,  # Malloc: [log_size, start, end, log_mem_cap]
-        5: 7,  # Frontier: [eclass_id, num_enodes, log_dp_cp, log_dp, log_size, dtype, mem_type]
+        0: 6,  # Cache: [is_cached, log_size, num_users, logical_id, mem_type, log_mem_cap]
+        1: 8,  # Extract (ENode): [log_cost, log_dp_cost, log_size, mem_type, eng_len, num_nodes, num_edges, log_mem_cap]
+        2: 8,  # Dispatch: [log_cost, log_dp_cost, log_size, mem_type, eng_len, num_nodes, num_edges, log_mem_cap]
+        3: 6,  # Bufferize: [is_new_buffer, log_size, log_parent_size, parent_birth_time, mem_type, log_mem_cap]
+        4: 5,  # Malloc: [log_size, start, end, mem_type, log_mem_cap]
+        5: 8,  # Frontier: [eclass_id, num_enodes, log_dp_cp, log_dp, log_size, dtype, mem_type, log_mem_cap]
     }
 
     def __init__(self, hidden_dim: int = 64):

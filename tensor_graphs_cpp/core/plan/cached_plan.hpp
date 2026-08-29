@@ -504,7 +504,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             state->eclassToLogical = std::move(eclassToLogical);
             state->enodeInfos = std::move(enodeInfos);
 
-            ctx->saturationCache[state_key] = state;
+            // ctx->saturationCache[state_key] = state;
         }
 
         EClassId rootEClassId = state->egraph.findConst(ctx->baseNodeToEClass.at(ctx->rootId));
@@ -596,9 +596,9 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             const auto &selection_map = extractor.selection_map;
 
             // Dispatch (Level 2)
-            auto dispatch_iterator = makeConfiguredDispatchIterator(state->egraph, selection_map, state->enodeInfos,
-                                                                    delegate, ctx->settings, &best_cost,
-                                                                    &reduced_caps, &timeout_checker);
+            auto dispatch_iterator =
+                makeConfiguredDispatchIterator(state->egraph, selection_map, state->enodeInfos, delegate, ctx->settings,
+                                               &best_cost, &reduced_caps, &timeout_checker);
             uint32_t dispatch_count = 0;
             std::vector<EClassId> order;
 
@@ -701,8 +701,7 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
                 // If bufferize generated 0 valid configurations, emit bufferize failure reward in [-0.50, -0.25)
                 if (buf_count == 0)
                 {
-                    float prog = static_cast<float>(buf_iter.k) /
-                                 std::max(1.0f, static_cast<float>(order.size()));
+                    float prog = static_cast<float>(buf_iter.k) / std::max(1.0f, static_cast<float>(order.size()));
                     float shaped_reward = -0.50f + 0.25f * std::clamp(prog, 0.0f, 0.999f);
                     if (delegate)
                         delegate->on_leaf_evaluated(shaped_reward);
@@ -715,8 +714,8 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             // If dispatch generated 0 valid orders, emit dispatch failure reward in [-0.75, -0.50)
             if (dispatch_count == 0)
             {
-                float prog = static_cast<float>(order.size()) /
-                             std::max(1.0f, static_cast<float>(selection_map.size()));
+                float prog =
+                    static_cast<float>(order.size()) / std::max(1.0f, static_cast<float>(selection_map.size()));
                 float shaped_reward = -0.75f + 0.25f * std::clamp(prog, 0.0f, 0.999f);
                 if (delegate)
                     delegate->on_leaf_evaluated(shaped_reward);

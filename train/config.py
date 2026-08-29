@@ -30,6 +30,7 @@ class TrainConfig:
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     seq_len: int = 128
+    log_cost_calls: bool = False  # <--- Added
 
     # Random Graph Generator Settings
     random_min_nodes: int = 10

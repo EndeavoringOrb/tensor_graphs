@@ -130,6 +130,7 @@ template <typename... Rules> struct CacheIterator
     const Graph &graph;
     std::vector<LogicalId> candidate_nodes;
     std::vector<MemSpace> avail_mem_spaces;
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
     std::shared_ptr<SearchDelegate> delegate;
     const float *best_cost = nullptr;
     TimeoutChecker *timeout = nullptr;
@@ -146,11 +147,13 @@ template <typename... Rules> struct CacheIterator
 
     template <typename... Rs>
     CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
-                  const std::vector<MemSpace> &_avail_mem_spaces, std::shared_ptr<SearchDelegate> _delegate,
+                  const std::vector<MemSpace> &_avail_mem_spaces,
+                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
+                  std::shared_ptr<SearchDelegate> _delegate,
                   const float *_best_cost = nullptr, TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), graph(_graph), candidate_nodes(_candidates),
-          avail_mem_spaces(_avail_mem_spaces), delegate(std::move(_delegate)), best_cost(_best_cost),
-          timeout(_timeout)
+          avail_mem_spaces(_avail_mem_spaces), mem_caps(_mem_caps), delegate(std::move(_delegate)),
+          best_cost(_best_cost), timeout(_timeout)
     {
         init();
         CacheContext ctx{graph, candidate_nodes, avail_mem_spaces, num_users, valid_choices, current_cache_selection, 0,
@@ -330,7 +333,6 @@ template <typename... Rules> struct CacheIterator
                     {
                         ActionFeatureCache f;
                         f.size = node_size;
-                        f.op_type = static_cast<uint32_t>(node.opType);
                         f.num_users = static_cast<float>(num_users[k]);
                         f.logical_id = id.value;
 
@@ -338,11 +340,14 @@ template <typename... Rules> struct CacheIterator
                         {
                             f.is_cached = 0.0f;
                             f.mem_space = MemSpace{0, HandleType::STORAGE};
+                            f.mem_cap = 0;
                         }
                         else
                         {
                             f.is_cached = 1.0f;
                             f.mem_space = avail_mem_spaces[choice - 1];
+                            auto cap_it = mem_caps.find(f.mem_space);
+                            f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
                         }
                         features.push_back(f);
                     }
@@ -404,10 +409,22 @@ template <typename... Rules> struct CacheIterator
 template <typename... Rules>
 CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
                                                         const std::vector<MemSpace> &avail_mem_spaces,
+                                                        const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                                         const float *best_cost = nullptr,
                                                         TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, nullptr, best_cost, timeout,
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, nullptr, best_cost, timeout,
+                                                 std::forward<Rules>(rules)...);
+}
+
+template <typename... Rules>
+CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
+                                                        const std::vector<MemSpace> &avail_mem_spaces,
+                                                        const float *best_cost = nullptr,
+                                                        TimeoutChecker *timeout = nullptr, Rules &&...rules)
+{
+    static const std::unordered_map<MemSpace, uint64_t> empty_caps;
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, empty_caps, nullptr, best_cost, timeout,
                                                  std::forward<Rules>(rules)...);
 }
 
@@ -415,12 +432,12 @@ template <typename... Rules>
 CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(const Graph &graph,
                                                                     const std::vector<LogicalId> &candidates,
                                                                     const std::vector<MemSpace> &avail_mem_spaces,
+                                                                    const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                                                     std::shared_ptr<SearchDelegate> delegate,
                                                                     const float *best_cost = nullptr,
-                                                                    TimeoutChecker *timeout = nullptr,
-                                                                    Rules &&...rules)
+                                                                    TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, std::move(delegate), best_cost,
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate), best_cost,
                                                  timeout, std::forward<Rules>(rules)...);
 }
 using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, StorageAnchoredSkipRule>;
@@ -428,12 +445,13 @@ using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, Stor
 template <typename BoolTuple>
 inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::vector<LogicalId> &candidates,
                                                  const std::vector<MemSpace> &avail_mem_spaces,
+                                                 const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                                  std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
                                                  const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
-            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, std::move(delegate), best_cost,
+            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate), best_cost,
                                                  timeout, rs...);
         },
         prune::instantiate_from_bools<AllCacheRuleTypes>(bool_flags));
@@ -446,7 +464,7 @@ inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<Lo
 {
     settings.validate_rules("cache");
     auto bool_flags = prune::extract_enabled_states<AllCacheRuleTypes>("cache", settings);
-    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, std::move(delegate), bool_flags,
+    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, settings.mem_caps, std::move(delegate), bool_flags,
                                                 best_cost, timeout);
 }
 
@@ -1496,18 +1514,18 @@ struct Planner
             std::vector<EClassId> order;
             float cost = TGConstants::INF;
 
-            auto dispatch_iterator = makeConfiguredDispatchIteratorFromBools(
-                egraph, selection_map, enodeInfos, delegate, dispatch_bools, &best_cost, &reduced_caps,
-                &timeout_checker);
+            auto dispatch_iterator =
+                makeConfiguredDispatchIteratorFromBools(egraph, selection_map, enodeInfos, delegate, dispatch_bools,
+                                                        &best_cost, &reduced_caps, &timeout_checker);
 
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 if (is_time_expired())
                     break;
 
-                auto buf_iter = makeConfiguredBufferizeIteratorFromBools(order, egraph, selection_map, enodeInfos,
-                                                                         reduced_caps, delegate, bufferize_bools,
-                                                                         &best_cost, &timeout_checker);
+                auto buf_iter =
+                    makeConfiguredBufferizeIteratorFromBools(order, egraph, selection_map, enodeInfos, reduced_caps,
+                                                             delegate, bufferize_bools, &best_cost, &timeout_checker);
 
                 std::vector<ParallelBuffer> unallocated_buffers;
                 std::unordered_map<EClassId, BufferId> eclass_to_buf_local;

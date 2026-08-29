@@ -787,6 +787,8 @@ template <typename... Rules> struct DispatchIterator
                         f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
                         f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
+                        auto cap_it = mem_caps.find(enode.getMemSpace());
+                        f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
                         for (const auto &eng : enode.getEngines())
                         {
                             f.engine_idxs.push_back(eng.idx);
@@ -814,10 +816,11 @@ template <typename... Rules> struct DispatchIterator
                             g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
                                            enode.getShape(), enode.getStrides(), "");
                         }
-                        
+
                         f.num_nodes = g.nodes.size();
                         uint32_t edges = 0;
-                        for (const auto& pair : g.nodes) {
+                        for (const auto &pair : g.nodes)
+                        {
                             edges += pair.second.child_ids.size();
                         }
                         f.num_edges = edges;
@@ -1942,8 +1945,7 @@ template <typename... Rules> struct Extractor
               const std::unordered_map<MemSpace, uint64_t> *_mem_caps, TimeoutChecker *_timeout = nullptr,
               Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), timeout(_timeout), mem_caps(_mem_caps),
-          egraph(_egraph),
-          enodeInfos(_enodeInfos), delegate(std::move(_delegate)), numClasses(_egraph.classes.size()),
+          egraph(_egraph), enodeInfos(_enodeInfos), delegate(std::move(_delegate)), numClasses(_egraph.classes.size()),
           to_process({root_eclass_id}), in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
           has_options(_egraph.classes.size(), false)
     {
@@ -2008,6 +2010,11 @@ template <typename... Rules> struct Extractor
                     f.size = getSizeBytes(cls.shape, cls.dtype);
                     f.dtype = cls.dtype;
                     f.mem_space = cls.mem_space;
+                    if (mem_caps)
+                    {
+                        auto cap_it = mem_caps->find(cls.mem_space);
+                        f.mem_cap = (cap_it != mem_caps->end()) ? cap_it->second : 0;
+                    }
 
                     float min_cp = TGConstants::INF;
                     float min_dp = TGConstants::INF;
@@ -2069,6 +2076,11 @@ template <typename... Rules> struct Extractor
                         f.dp_cost = enodeInfos[enodeId.value].dp_cost;
                         f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
+                        if (mem_caps)
+                        {
+                            auto cap_it = mem_caps->find(enode.getMemSpace());
+                            f.mem_cap = (cap_it != mem_caps->end()) ? cap_it->second : 0;
+                        }
                         for (const auto &eng : enode.getEngines())
                         {
                             f.engine_idxs.push_back(eng.idx);
@@ -2096,10 +2108,11 @@ template <typename... Rules> struct Extractor
                             g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
                                            enode.getShape(), enode.getStrides(), "");
                         }
-                        
+
                         f.num_nodes = g.nodes.size();
                         uint32_t edges = 0;
-                        for (const auto& pair : g.nodes) {
+                        for (const auto &pair : g.nodes)
+                        {
                             edges += pair.second.child_ids.size();
                         }
                         f.num_edges = edges;
@@ -2311,8 +2324,8 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
     std::shared_ptr<SearchDelegate> delegate, const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
     TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), nullptr,
-                                             mem_caps, timeout, std::forward<Rules>(rules)...);
+    return Extractor<std::decay_t<Rules>...>(egraph, root_eclass_id, enodeInfos, std::move(delegate), nullptr, mem_caps,
+                                             timeout, std::forward<Rules>(rules)...);
 }
 
 using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule,
@@ -2352,6 +2365,5 @@ inline auto makeConfiguredExtractor(const EGraph &egraph, EClassId root_eclass_i
                                     const std::vector<ENodeInfo> &enodeInfos, const Settings &settings,
                                     const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
-    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings, best_cost, nullptr,
-                                   timeout);
+    return makeConfiguredExtractor(egraph, root_eclass_id, enodeInfos, nullptr, settings, best_cost, nullptr, timeout);
 }

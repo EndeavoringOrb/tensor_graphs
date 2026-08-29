@@ -713,7 +713,9 @@ template <typename... RuleTypes> struct CacheBench
             bucket.outputNeededRegion = {makeFull(g.getNode(root).getShape())};
 
             auto iter_rule = std::apply(
-                [&](auto &&...rs) { return makeCacheIterator(g, candidates, avail_mem_spaces, nullptr, nullptr, rs...); },
+                [&](auto &&...rs) {
+                    return makeCacheIterator(g, candidates, avail_mem_spaces, nullptr, nullptr, rs...);
+                },
                 rules_tuple);
 
             std::unordered_map<LogicalId, MemSpace> cache_rule;

@@ -3,7 +3,6 @@ import argparse
 from pathlib import Path
 
 import tensor_graphs
-import torch
 from safetensors.torch import load_file
 
 from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
