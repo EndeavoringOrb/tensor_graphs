@@ -53,6 +53,14 @@
 #include <typeinfo>
 #include <utility>
 
+#ifdef TG_PROFILE
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <unordered_map>
+#endif
+
 #define TG_PRUNING_RULE(Name)                                                                                          \
     static constexpr const char *kName = #Name;                                                                        \
     const char *name() const                                                                                           \
@@ -279,26 +287,67 @@ template <typename... Rules> struct PruningRuleSet
     template <class R, class Ctx> static void init_one(R &rule, const Ctx &ctx)
     {
         if constexpr (has_init_v<R, Ctx>)
+        {
+#ifdef TG_PROFILE
+            auto t0 = std::chrono::steady_clock::now();
             rule.init(ctx);
+            auto t1 = std::chrono::steady_clock::now();
+            PruningProfiler::get().record_init(name_of(rule),
+                                               std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+#else
+            rule.init(ctx);
+#endif
+        }
     }
 
     template <class R, class Node, class Ctx> static void push_one(R &rule, Node node, const Ctx &ctx)
     {
         if constexpr (has_push_v<R, Node, Ctx>)
+        {
+#ifdef TG_PROFILE
+            auto t0 = std::chrono::steady_clock::now();
             rule.on_push(node, ctx);
+            auto t1 = std::chrono::steady_clock::now();
+            PruningProfiler::get().record_push(name_of(rule),
+                                               std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+#else
+            rule.on_push(node, ctx);
+#endif
+        }
     }
 
     template <class R, class Node, class Ctx> static void pop_one(R &rule, Node node, const Ctx &ctx)
     {
         if constexpr (has_pop_v<R, Node, Ctx>)
+        {
+#ifdef TG_PROFILE
+            auto t0 = std::chrono::steady_clock::now();
             rule.on_pop(node, ctx);
+            auto t1 = std::chrono::steady_clock::now();
+            PruningProfiler::get().record_pop(name_of(rule),
+                                              std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+#else
+            rule.on_pop(node, ctx);
+#endif
+        }
     }
 
     template <class R, class Cand, class Ctx>
     static bool check_one(R &rule, Cand candidate, size_t candidate_idx, const Ctx &ctx)
     {
         if constexpr (has_check_v<R, Cand, Ctx>)
+        {
+#ifdef TG_PROFILE
+            auto t0 = std::chrono::steady_clock::now();
+            bool pruned = rule.check(candidate, candidate_idx, ctx);
+            auto t1 = std::chrono::steady_clock::now();
+            PruningProfiler::get().record_check(
+                name_of(rule), std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(), pruned);
+            return pruned;
+#else
             return rule.check(candidate, candidate_idx, ctx);
+#endif
+        }
         else
             return false;
     }
@@ -306,7 +355,18 @@ template <typename... Rules> struct PruningRuleSet
     template <class R, class Ctx> static bool leaf_one(R &rule, const Ctx &ctx)
     {
         if constexpr (has_leaf_v<R, Ctx>)
+        {
+#ifdef TG_PROFILE
+            auto t0 = std::chrono::steady_clock::now();
+            bool ok = rule.validate_leaf(ctx);
+            auto t1 = std::chrono::steady_clock::now();
+            PruningProfiler::get().record_leaf(name_of(rule),
+                                               std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+            return ok;
+#else
             return rule.validate_leaf(ctx);
+#endif
+        }
         else
             return true;
     }
@@ -319,5 +379,119 @@ template <typename... Rules> struct PruningRuleSet
             return typeid(R).name();
     }
 };
+
+#ifdef TG_PROFILE
+struct RuleTimingStats
+{
+    uint64_t init_ns = 0;
+    uint64_t init_calls = 0;
+
+    uint64_t check_ns = 0;
+    uint64_t check_calls = 0;
+    uint64_t check_pruned = 0;
+
+    uint64_t push_ns = 0;
+    uint64_t push_calls = 0;
+
+    uint64_t pop_ns = 0;
+    uint64_t pop_calls = 0;
+
+    uint64_t leaf_ns = 0;
+    uint64_t leaf_calls = 0;
+};
+
+class PruningProfiler
+{
+  private:
+    mutable std::mutex mtx;
+    std::unordered_map<std::string, RuleTimingStats> stats_by_rule;
+
+  public:
+    static PruningProfiler &get()
+    {
+        static PruningProfiler instance;
+        return instance;
+    }
+
+    void record_init(const std::string &name, uint64_t ns)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto &s = stats_by_rule[name];
+        s.init_ns += ns;
+        s.init_calls++;
+    }
+
+    void record_check(const std::string &name, uint64_t ns, bool pruned)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto &s = stats_by_rule[name];
+        s.check_ns += ns;
+        s.check_calls++;
+        if (pruned)
+            s.check_pruned++;
+    }
+
+    void record_push(const std::string &name, uint64_t ns)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto &s = stats_by_rule[name];
+        s.push_ns += ns;
+        s.push_calls++;
+    }
+
+    void record_pop(const std::string &name, uint64_t ns)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto &s = stats_by_rule[name];
+        s.pop_ns += ns;
+        s.pop_calls++;
+    }
+
+    void record_leaf(const std::string &name, uint64_t ns)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto &s = stats_by_rule[name];
+        s.leaf_ns += ns;
+        s.leaf_calls++;
+    }
+
+    void printSummary() const
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (stats_by_rule.empty())
+            return;
+
+        std::cout << "\n=========================================================================================\n";
+        std::cout << " [Pruning Rule Profiling Report]\n";
+        std::cout << "=========================================================================================\n";
+        std::cout << std::left << std::setw(36) << "Rule Name" << std::right << std::setw(12) << "Check (ms)"
+                  << std::setw(12) << "Check Calls" << std::setw(10) << "Pruned" << std::setw(12) << "Push/Pop(ms)"
+                  << std::setw(12) << "Total (ms)\n";
+        std::cout << std::string(94, '-') << "\n";
+
+        for (const auto &[name, s] : stats_by_rule)
+        {
+            double check_ms = s.check_ns / 1e6;
+            double push_pop_ms = (s.push_ns + s.pop_ns) / 1e6;
+            double total_ms = (s.init_ns + s.check_ns + s.push_ns + s.pop_ns + s.leaf_ns) / 1e6;
+            std::cout << std::left << std::setw(36) << name.substr(0, 35) << std::right << std::setw(12) << std::fixed
+                      << std::setprecision(2) << check_ms << std::setw(12) << s.check_calls << std::setw(10)
+                      << s.check_pruned << std::setw(12) << std::fixed << std::setprecision(2) << push_pop_ms
+                      << std::setw(12) << std::fixed << std::setprecision(2) << total_ms << "\n";
+        }
+        std::cout << "=========================================================================================\n\n"
+                  << std::flush;
+    }
+};
+
+inline void printPruningProfileSummary()
+{
+    PruningProfiler::get().printSummary();
+}
+#else
+inline void printPruningProfileSummary()
+{
+}
+#endif
 
 } // namespace prune

@@ -123,7 +123,7 @@ def main():
             delegate = tensor_graphs.HeuristicSearchDelegate()
     else:
         print(
-            "[Main] No --run-dir specified. Using HeuristicSearchDelegate (caching disabled)."
+            "[Main] No --run-dir specified. Using HeuristicSearchDelegate (node caching disabled)."
         )
         delegate = tensor_graphs.HeuristicSearchDelegate()
         args.disable_caching = True

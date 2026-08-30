@@ -17,8 +17,7 @@
     "malloc": {
       "OffsetMonotoneRule": true,
       "IdMaxSymmetryRule": true,
-      "HMinBoundRule": true,
-      "LargerBufferPriorityRule": true
+      "HMinBoundRule": true
     },
     "cache": {
       "SingleUseSkipRule": true,
@@ -27,7 +26,6 @@
     },
     "extract": {
       "InfiniteCostSkipRule": true,
-      "SiblingEquivalentSkipRule": true,
       "ExtractorJacksonCarlierRule": true,
       "ExtractorDynamicMinCutRule": false
     },

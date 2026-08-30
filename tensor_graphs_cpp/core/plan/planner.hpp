@@ -148,8 +148,7 @@ template <typename... Rules> struct CacheIterator
     template <typename... Rs>
     CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
                   const std::vector<MemSpace> &_avail_mem_spaces,
-                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
-                  std::shared_ptr<SearchDelegate> _delegate,
+                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps, std::shared_ptr<SearchDelegate> _delegate,
                   const float *_best_cost = nullptr, TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
         : rules(std::forward<Rs>(_rules)...), graph(_graph), candidate_nodes(_candidates),
           avail_mem_spaces(_avail_mem_spaces), mem_caps(_mem_caps), delegate(std::move(_delegate)),
@@ -413,8 +412,8 @@ CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, cons
                                                         const float *best_cost = nullptr,
                                                         TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, nullptr, best_cost, timeout,
-                                                 std::forward<Rules>(rules)...);
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, nullptr, best_cost,
+                                                 timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
@@ -424,21 +423,18 @@ CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, cons
                                                         TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
     static const std::unordered_map<MemSpace, uint64_t> empty_caps;
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, empty_caps, nullptr, best_cost, timeout,
-                                                 std::forward<Rules>(rules)...);
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, empty_caps, nullptr, best_cost,
+                                                 timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
-CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(const Graph &graph,
-                                                                    const std::vector<LogicalId> &candidates,
-                                                                    const std::vector<MemSpace> &avail_mem_spaces,
-                                                                    const std::unordered_map<MemSpace, uint64_t> &mem_caps,
-                                                                    std::shared_ptr<SearchDelegate> delegate,
-                                                                    const float *best_cost = nullptr,
-                                                                    TimeoutChecker *timeout = nullptr, Rules &&...rules)
+CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(
+    const Graph &graph, const std::vector<LogicalId> &candidates, const std::vector<MemSpace> &avail_mem_spaces,
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps, std::shared_ptr<SearchDelegate> delegate,
+    const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate), best_cost,
-                                                 timeout, std::forward<Rules>(rules)...);
+    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate),
+                                                 best_cost, timeout, std::forward<Rules>(rules)...);
 }
 using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, StorageAnchoredSkipRule>;
 
@@ -451,8 +447,8 @@ inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::
 {
     return std::apply(
         [&](auto &&...rs) {
-            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate), best_cost,
-                                                 timeout, rs...);
+            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate),
+                                                 best_cost, timeout, rs...);
         },
         prune::instantiate_from_bools<AllCacheRuleTypes>(bool_flags));
 }
@@ -464,8 +460,8 @@ inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<Lo
 {
     settings.validate_rules("cache");
     auto bool_flags = prune::extract_enabled_states<AllCacheRuleTypes>("cache", settings);
-    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, settings.mem_caps, std::move(delegate), bool_flags,
-                                                best_cost, timeout);
+    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, settings.mem_caps,
+                                                std::move(delegate), bool_flags, best_cost, timeout);
 }
 
 inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,

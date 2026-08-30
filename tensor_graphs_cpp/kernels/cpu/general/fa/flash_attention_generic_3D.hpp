@@ -3,11 +3,11 @@
 #include <cmath>
 #include <vector>
 
+#include "core/common/constants.hpp"
 #include "core/common/thread_pool.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/constants.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -159,6 +159,6 @@ inline LogicalId refFactoryFlashAttentionGeneric3D(const std::vector<LogicalId> 
 
 REGISTER_KERNEL("Flash_Attention_Generic_3D", 3, 3, matchFlashAttentionGeneric3D, runFlashAttentionGeneric3D,
                 refFactoryFlashAttentionGeneric3D, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
-                {{1, 4096, 384}, {1, 4096, 384}, {1, 4096, 384}}, {true, true, true},
+                {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32}, {{1, 4096, 384}, {1, 4096, 384}, {1, 4096, 384}},
+                {true, true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

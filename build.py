@@ -899,6 +899,9 @@ class Toolchain:
             self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
         )
 
+        if self.config.profile:
+            flags.append("-DTG_PROFILE")
+
         if self.platform.is_windows:
             if target_arm64 and not self.config.use_cuda:
                 flags.extend(
@@ -998,6 +1001,9 @@ class Toolchain:
             flags.extend(["-Xcompiler", "-fPIC"])
         else:
             flags.append("-DNOMINMAX")
+
+        if self.config.profile:
+            flags.append("-DTG_PROFILE")
 
         if self.config.debug:
             flags.extend(["-g", "-G", "-O0", "-DTG_DEBUG"])

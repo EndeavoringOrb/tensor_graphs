@@ -749,6 +749,20 @@ template <typename... Rules> struct DispatchIterator
             }
 
             uint32_t pos = static_cast<uint32_t>(ordered.size());
+            if (pos > max_pos_reached)
+            {
+                max_pos_reached = pos;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - last_report_time).count() >= 3.0)
+            {
+                last_report_time = now;
+                std::cout << "\n";
+                render_progress(pos, total_nodes);
+                std::cout << "\n";
+                prune::printPruningProfileSummary();
+            }
 
             if (pos == total_nodes)
             {
@@ -938,6 +952,28 @@ template <typename... Rules> struct DispatchIterator
     bool is_done = false;
     bool first_yield = true;
     uint32_t iter = 0;
+    std::chrono::steady_clock::time_point last_report_time = std::chrono::steady_clock::now();
+    uint32_t max_pos_reached = 0;
+
+    void render_progress(uint32_t pos, uint32_t total)
+    {
+        int bar_width = 30;
+        float progress = total > 0 ? static_cast<float>(pos) / total : 0.0f;
+        int filled = static_cast<int>(progress * bar_width);
+        std::string bar = "[";
+        for (int i = 0; i < bar_width; ++i)
+        {
+            if (i < filled)
+                bar += "=";
+            else if (i == filled)
+                bar += ">";
+            else
+                bar += " ";
+        }
+        bar += "]";
+        std::cout << "\r[Dispatch] " << bar << " " << pos << "/" << total << " (" << std::fixed << std::setprecision(1)
+                  << (progress * 100.0f) << "%) max: " << max_pos_reached << "/" << total << std::flush;
+    }
 
     void initOrderState(const std::unordered_map<EClassId, uint32_t> &selection_map)
     {
@@ -1855,61 +1891,6 @@ class InfiniteCostSkipRule
     }
 };
 
-// Rule: Symmetry breaking -- if a sibling EClass in the path already selected
-// an ENode with the same kernelId (and equivalent children), the candidate is
-// dominated. Prunes redundant permutation of equivalent fused rewrites.
-class SiblingEquivalentSkipRule
-{
-  public:
-    TG_PRUNING_RULE(SiblingEquivalentSkipRule)
-    SiblingEquivalentSkipRule(bool en = true) : enabled(en)
-    {
-    }
-    bool check(ENodeId /*cand*/, size_t /*cand_idx*/, const ExtractContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        const auto &enodes = ctx.egraph.getEClass(ctx.current).enodes;
-        if (ctx.sel >= enodes.size())
-            return false;
-        ENodeId cand_id = enodes[ctx.sel];
-        const ENode &cand_en = ctx.egraph.getENode(cand_id);
-        KernelId cand_kid = cand_en.getKernelId();
-        if (cand_kid.value == 0)
-            return false; // no kernel, skip
-
-        // Walk the path backwards (siblings are path entries before `current`).
-        for (auto it = ctx.path.rbegin(); it != ctx.path.rend(); ++it)
-        {
-            EClassId sibling = *it;
-            if (sibling == ctx.current)
-                break;
-            auto sel_it = ctx.selection_map.find(sibling);
-            if (sel_it == ctx.selection_map.end())
-                continue;
-            ENodeId s_enode_id = ctx.egraph.getEClass(sibling).enodes[sel_it->second];
-            const ENode &s_en = ctx.egraph.getENode(s_enode_id);
-            if (s_en.getKernelId() != cand_kid)
-                continue;
-            if (s_en.getChildren().size() != cand_en.getChildren().size())
-                continue;
-            // children must be canonically equal
-            bool same_children = true;
-            for (size_t c = 0; c < cand_en.getChildren().size(); ++c)
-            {
-                if (ctx.egraph.findConst(cand_en.getChildren()[c]) != ctx.egraph.findConst(s_en.getChildren()[c]))
-                {
-                    same_children = false;
-                    break;
-                }
-            }
-            if (same_children)
-                return true;
-        }
-        return false;
-    }
-};
-
 // =============================================================================
 // Extractor<Rules...> -- zero-overhead, rules inlined via std::tuple
 // =============================================================================
@@ -2328,8 +2309,7 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
                                              timeout, std::forward<Rules>(rules)...);
 }
 
-using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, SiblingEquivalentSkipRule, ExtractorJacksonCarlierRule,
-                                       ExtractorDynamicMinCutRule>;
+using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,

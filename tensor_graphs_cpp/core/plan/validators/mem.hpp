@@ -1359,41 +1359,6 @@ class HMinBoundRule
     }
 };
 
-class LargerBufferPriorityRule
-{
-  public:
-    TG_PRUNING_RULE(LargerBufferPriorityRule)
-    LargerBufferPriorityRule(bool en = true) : enabled(en)
-    {
-    }
-    bool check(int /*cand*/, size_t /*cand_idx*/, const MallocContext &c) const
-    {
-        if (!enabled)
-            return false;
-        if (c.offset != c.global_offset_max[c.k])
-            return false;
-        int cand = c.avail[c.idx];
-        int64_t cand_size = c.unallocated_sizes[cand];
-        for (int j = c.k; j < static_cast<int>(c.avail.size()); ++j)
-        {
-            if (j == c.idx)
-                continue;
-            int other = c.avail[j];
-            if (c.current_offsets[other] != c.offset)
-                continue;
-            if (c.unallocated_sizes[other] > cand_size)
-            {
-                return true;
-            }
-            if (c.unallocated_sizes[other] == cand_size && c.unallocated[other].id < c.unallocated[cand].id)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
 // =============================================================================
 // MallocIterator<Rules...>
 // =============================================================================
@@ -1662,7 +1627,7 @@ MallocIterator<std::decay_t<Rules>...> makeMallocIteratorWithDelegate(
                                                   std::forward<Rules>(rules)...);
 }
 
-using AllMallocRuleTypes = std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, HMinBoundRule, LargerBufferPriorityRule>;
+using AllMallocRuleTypes = std::tuple<OffsetMonotoneRule, IdMaxSymmetryRule, HMinBoundRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredMallocIteratorFromBools(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,

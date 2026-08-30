@@ -70,13 +70,13 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         """Exports all completed trajectories collected during the episode and resets state."""
         trajectories = self.completed_trajectories
         leaf_costs = [float(t["cost"]) for t in trajectories]
-        
+
         # Always clear internal state to avoid memory leaks regardless of whether trajectories were found
         self.completed_trajectories = []
         self.active_path.clear()
         self.hidden_stack.clear()
         self.path_len_stack.clear()
-        
+
         return trajectories, leaf_costs
 
     def reset(self):

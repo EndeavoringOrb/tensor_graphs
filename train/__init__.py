@@ -20,8 +20,8 @@ __all__ = [
     "EvictionStrategy",
     "FIFOStrategy",
     "PhaseReplayBuffer",
-    "TrajectoryReplayBuffer",
     "TrainConfig",
+    "TrajectoryReplayBuffer",
     "get_eviction_strategy",
     "rank_score_indices",
 ]

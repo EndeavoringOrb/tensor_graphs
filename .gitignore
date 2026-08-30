@@ -13,6 +13,7 @@ resources/*.json
 .vscode
 flux-klein-4b
 malloc_heuristic/build
+patching
 out.log
 images
 wsl_venv

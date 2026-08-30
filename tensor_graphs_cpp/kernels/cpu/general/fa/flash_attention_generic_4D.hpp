@@ -3,11 +3,11 @@
 #include <cmath>
 #include <vector>
 
+#include "core/common/constants.hpp"
 #include "core/common/thread_pool.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/constants.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>

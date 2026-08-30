@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 
@@ -73,11 +72,11 @@ class CostPredictorRNN(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Step transition: next_hidden, pred_cost = model(hidden, action_feat, phase_id)"""
         act_emb = self.encode_action(action_feat, phase_id)
-        
+
         # nn.GRU expects sequence length and num_layers dims: (Seq, Batch, Hidden)
         _, next_hidden = self.rnn(act_emb.unsqueeze(0), hidden.unsqueeze(0))
         next_hidden = next_hidden.squeeze(0)
-        
+
         pred_cost = self.cost_head(next_hidden).squeeze(-1)
         return next_hidden, pred_cost
 
@@ -90,11 +89,11 @@ class CostPredictorRNN(nn.Module):
         num_actions = action_candidates.shape[0]
         hidden_exp = hidden.expand(num_actions, -1)
         act_emb = self.encode_action(action_candidates, phase_id)
-        
+
         # Format for nn.GRU single-step rollout
         _, next_hidden = self.rnn(act_emb.unsqueeze(0), hidden_exp.unsqueeze(0))
         next_hidden = next_hidden.squeeze(0)
-        
+
         pred_costs = self.cost_head(next_hidden).squeeze(-1)
         return pred_costs
 
@@ -162,11 +161,13 @@ class CostPredictorRNN(nn.Module):
         all_hiddens_t, _ = self.rnn(seq_emb, hidden)  # (max_len, B, hidden_dim)
 
         # 4. Predict cost for all active steps in a single batched pass
-        # FIXED BUG: Transpose to (B, max_len, H) before reshaping so that predictions 
+        # FIXED BUG: Transpose to (B, max_len, H) before reshaping so that predictions
         # are grouped by batch. This perfectly matches the batch-grouped order of `targets_flat`.
-        all_hiddens_b = all_hiddens_t.transpose(0, 1).reshape(B * max_len, self.hidden_dim)
+        all_hiddens_b = all_hiddens_t.transpose(0, 1).reshape(
+            B * max_len, self.hidden_dim
+        )
         mask_b = mask_t.transpose(0, 1).reshape(B * max_len)
-        
+
         active_hiddens = all_hiddens_b[mask_b]
         pred_costs_flat = self.cost_head(active_hiddens).squeeze(-1)
 
