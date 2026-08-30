@@ -257,7 +257,7 @@ def learner_thread_fn(
             loss_val = total_loss.item()
 
             print(
-                f"[Learner] Batch {batches_processed:04d} | TrajBuf: {len(buffer):05d} | Loss: {loss_val:.4f}"
+                f"[Learner] Batch {batches_processed:04d} | TrajBuf: {len(buffer):05d} | Loss: {loss_val:.4e}"
             )
 
             if math.isfinite(loss_val):
@@ -301,7 +301,7 @@ def main():
     parser.add_argument(
         "--buffer-size",
         type=int,
-        default=100,
+        default=1000,
         help="Replay buffer capacity in full trajectories",
     )
     parser.add_argument(

@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from tqdm import trange
 
 
 class CostPredictorRNN(nn.Module):
@@ -36,8 +35,8 @@ class CostPredictorRNN(nn.Module):
             }
         )
 
-        # Recurrent state transition cell
-        self.rnn = nn.GRUCell(hidden_dim, hidden_dim)
+        # FAST C++ RNN: Replaced GRUCell with GRU to avoid the extremely slow Python unrolling
+        self.rnn = nn.GRU(hidden_dim, hidden_dim)
 
         # Direct score/cost prediction head
         self.cost_head = nn.Sequential(
@@ -74,44 +73,35 @@ class CostPredictorRNN(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Step transition: next_hidden, pred_cost = model(hidden, action_feat, phase_id)"""
         act_emb = self.encode_action(action_feat, phase_id)
-        next_hidden = self.rnn(act_emb, hidden)
+        
+        # nn.GRU expects sequence length and num_layers dims: (Seq, Batch, Hidden)
+        _, next_hidden = self.rnn(act_emb.unsqueeze(0), hidden.unsqueeze(0))
+        next_hidden = next_hidden.squeeze(0)
+        
         pred_cost = self.cost_head(next_hidden).squeeze(-1)
         return next_hidden, pred_cost
 
     def evaluate_candidates(
         self, hidden: torch.Tensor, action_candidates: torch.Tensor, phase_id: int
     ) -> torch.Tensor:
-        """Evaluates all candidate actions for a state in a single vectorized pass.
-
-        hidden: [1, H] or [H]
-        action_candidates: [A, D]
-        returns: pred_costs [A]
-        """
+        """Evaluates all candidate actions for a state in a single vectorized pass."""
         if hidden.dim() == 1:
             hidden = hidden.unsqueeze(0)
         num_actions = action_candidates.shape[0]
         hidden_exp = hidden.expand(num_actions, -1)
         act_emb = self.encode_action(action_candidates, phase_id)
-        next_hidden = self.rnn(act_emb, hidden_exp)
+        
+        # Format for nn.GRU single-step rollout
+        _, next_hidden = self.rnn(act_emb.unsqueeze(0), hidden_exp.unsqueeze(0))
+        next_hidden = next_hidden.squeeze(0)
+        
         pred_costs = self.cost_head(next_hidden).squeeze(-1)
         return pred_costs
 
     def unroll_trajectories(
         self, batch_trajectories: list[dict], device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-        """Vectorized server-side unroll of a batch of trajectories from h_0 = 0
-        using active parameters. Pre-encodes actions in 6 batched MLP operations,
-        steps the GRU over T_max time-steps, and evaluates the cost head in one pass.
-
-        Args:
-            batch_trajectories: List of dicts with 'phases', 'actions', 'cost', 'length'.
-            device: Target torch.device.
-
-        Returns:
-            pred_costs_flat: (N,) tensor of cost predictions for all valid steps.
-            targets_flat: (N,) tensor of target costs for all valid steps.
-            lengths: List of trajectory lengths in the batch.
-        """
+        """Vectorized server-side unroll of a batch of trajectories from h_0 = 0."""
         B = len(batch_trajectories)
         lengths = [int(t["length"]) for t in batch_trajectories]
         max_len = max(lengths)
@@ -167,18 +157,17 @@ class CostPredictorRNN(nn.Module):
         seq_emb = flat_emb.reshape(max_len, B, self.hidden_dim)
 
         # 3. Recurrent GRU Rollout through time
-        hidden = torch.zeros(B, self.hidden_dim, dtype=torch.float32, device=device)
-        all_hiddens: list[torch.Tensor] = []
-
-        for t in trange(max_len):
-            emb_t = seq_emb[t]
-            hidden = self.rnn(emb_t, hidden)
-            all_hiddens.append(hidden)
-
-        all_hiddens_t = torch.stack(all_hiddens, dim=0)  # (max_len, B, hidden_dim)
+        # REPLACED the slow Python `for t in range(max_len):` loop with optimized C++ engine
+        hidden = torch.zeros(1, B, self.hidden_dim, dtype=torch.float32, device=device)
+        all_hiddens_t, _ = self.rnn(seq_emb, hidden)  # (max_len, B, hidden_dim)
 
         # 4. Predict cost for all active steps in a single batched pass
-        active_hiddens = all_hiddens_t.reshape(max_len * B, self.hidden_dim)[flat_mask]
+        # FIXED BUG: Transpose to (B, max_len, H) before reshaping so that predictions 
+        # are grouped by batch. This perfectly matches the batch-grouped order of `targets_flat`.
+        all_hiddens_b = all_hiddens_t.transpose(0, 1).reshape(B * max_len, self.hidden_dim)
+        mask_b = mask_t.transpose(0, 1).reshape(B * max_len)
+        
+        active_hiddens = all_hiddens_b[mask_b]
         pred_costs_flat = self.cost_head(active_hiddens).squeeze(-1)
 
         return pred_costs_flat, targets_flat, lengths

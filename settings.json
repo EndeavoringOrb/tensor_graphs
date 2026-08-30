@@ -29,7 +29,7 @@
       "InfiniteCostSkipRule": true,
       "SiblingEquivalentSkipRule": true,
       "ExtractorJacksonCarlierRule": true,
-      "ExtractorDynamicMinCutRule": true
+      "ExtractorDynamicMinCutRule": false
     },
     "enode": {
       "MemCapENodeDominationRule": true,
