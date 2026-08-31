@@ -122,10 +122,14 @@ inline void runF8E4M3TransposedGEMMv3(const KernelContext &ctx)
                     const float *w3_ptr = W_panel.data() + static_cast<uint64_t>(n_off + 3) * K;
 
 #if defined(TG_HAS_NEON)
-                    float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f), c02 = vdupq_n_f32(0.0f), c03 = vdupq_n_f32(0.0f);
-                    float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f), c12 = vdupq_n_f32(0.0f), c13 = vdupq_n_f32(0.0f);
-                    float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f), c22 = vdupq_n_f32(0.0f), c23 = vdupq_n_f32(0.0f);
-                    float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f), c32 = vdupq_n_f32(0.0f), c33 = vdupq_n_f32(0.0f);
+                    float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f), c02 = vdupq_n_f32(0.0f),
+                                c03 = vdupq_n_f32(0.0f);
+                    float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f), c12 = vdupq_n_f32(0.0f),
+                                c13 = vdupq_n_f32(0.0f);
+                    float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f), c22 = vdupq_n_f32(0.0f),
+                                c23 = vdupq_n_f32(0.0f);
+                    float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f), c32 = vdupq_n_f32(0.0f),
+                                c33 = vdupq_n_f32(0.0f);
 
                     for (uint32_t k = 0; k < K4; k += 4)
                     {
@@ -169,10 +173,22 @@ inline void runF8E4M3TransposedGEMMv3(const KernelContext &ctx)
                     {
                         float x0_v = x0_ptr[k], x1_v = x1_ptr[k], x2_v = x2_ptr[k], x3_v = x3_ptr[k];
                         float w0_v = w0_ptr[k], w1_v = w1_ptr[k], w2_v = w2_ptr[k], w3_v = w3_ptr[k];
-                        s00 += x0_v * w0_v; s01 += x0_v * w1_v; s02 += x0_v * w2_v; s03 += x0_v * w3_v;
-                        s10 += x1_v * w0_v; s11 += x1_v * w1_v; s12 += x1_v * w2_v; s13 += x1_v * w3_v;
-                        s20 += x2_v * w0_v; s21 += x2_v * w1_v; s22 += x2_v * w2_v; s23 += x2_v * w3_v;
-                        s30 += x3_v * w0_v; s31 += x3_v * w1_v; s32 += x3_v * w2_v; s33 += x3_v * w3_v;
+                        s00 += x0_v * w0_v;
+                        s01 += x0_v * w1_v;
+                        s02 += x0_v * w2_v;
+                        s03 += x0_v * w3_v;
+                        s10 += x1_v * w0_v;
+                        s11 += x1_v * w1_v;
+                        s12 += x1_v * w2_v;
+                        s13 += x1_v * w3_v;
+                        s20 += x2_v * w0_v;
+                        s21 += x2_v * w1_v;
+                        s22 += x2_v * w2_v;
+                        s23 += x2_v * w3_v;
+                        s30 += x3_v * w0_v;
+                        s31 += x3_v * w1_v;
+                        s32 += x3_v * w2_v;
+                        s33 += x3_v * w3_v;
                     }
 
                     float32x4_t r0 = {s00, s01, s02, s03};

@@ -106,7 +106,6 @@ inline LogicalId refFactoryConv2d3x3Dot(const std::vector<LogicalId> &inputs, Gr
 }
 
 REGISTER_KERNEL("Conv2d_3x3_Im2Col_Dot", 2, 2, matchConv2d3x3Dot, runConv2d3x3Dot, refFactoryConv2d3x3Dot, {},
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::FLOAT32},
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 384, 128, 128}, {1, 384, 3456}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -36,6 +36,7 @@ struct ENodeInfo
     float dp_cost = 0.0f;
     float dp_cp_cost = 0.0f;
     float rev_cp_cost = 0.0f;
+    float dp_mem = 0.0f;
 };
 
 // =============================================================================
@@ -580,7 +581,7 @@ class MemoryPressureDispatchRule
             if (inplace_idx < enode.getChildren().size())
             {
                 EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
-                
+
                 // An in-place reuse requires this to be the parent's last use (R(P) == 1)
                 if (child.value < remaining_users.size() && remaining_users[child.value] == 1)
                 {
@@ -851,6 +852,7 @@ template <typename... Rules> struct DispatchIterator
                             (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
                         f.rev_cp_cost =
                             (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
+                        f.dp_mem = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_mem : 0.0f;
                         f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         auto cap_it = mem_caps.find(enode.getMemSpace());
@@ -2053,16 +2055,19 @@ template <typename... Rules> struct Extractor
 
                     float min_cp = TGConstants::INF;
                     float min_dp = TGConstants::INF;
+                    float min_mem = TGConstants::INF;
                     for (ENodeId eid : cls.enodes)
                     {
                         if (eid.value < enodeInfos.size())
                         {
                             min_cp = std::min(min_cp, enodeInfos[eid.value].dp_cp_cost);
                             min_dp = std::min(min_dp, enodeInfos[eid.value].dp_cost);
+                            min_mem = std::min(min_mem, enodeInfos[eid.value].dp_mem);
                         }
                     }
                     f.min_dp_cp_cost = (min_cp == TGConstants::INF) ? 0.0f : min_cp;
                     f.min_dp_cost = (min_dp == TGConstants::INF) ? 0.0f : min_dp;
+                    f.min_dp_mem = (min_mem == TGConstants::INF) ? 0.0f : min_mem;
                     features.push_back(f);
                 }
 
@@ -2111,6 +2116,7 @@ template <typename... Rules> struct Extractor
                         f.dp_cost = enodeInfos[enodeId.value].dp_cost;
                         f.min_dp_cp_cost = enodeInfos[enodeId.value].dp_cp_cost;
                         f.rev_cp_cost = enodeInfos[enodeId.value].rev_cp_cost;
+                        f.dp_mem = enodeInfos[enodeId.value].dp_mem;
                         f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         if (mem_caps)

@@ -1110,8 +1110,8 @@ BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
                                                      std::forward<Rules>(rules)...);
 }
 
-using AllBufferizeRuleTypes =
-    std::tuple<MemSpaceMismatchInplaceRule, CommutativeInplaceSymmetryRule, PeakMemoryPruningRule, BufferizeCostPruningRule>;
+using AllBufferizeRuleTypes = std::tuple<MemSpaceMismatchInplaceRule, CommutativeInplaceSymmetryRule,
+                                         PeakMemoryPruningRule, BufferizeCostPruningRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId> &ordered, const EGraph &egraph,

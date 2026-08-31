@@ -45,8 +45,7 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
-    {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -1478,8 +1477,7 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId)
-                {
+                                       EClassId stId, EClassId enId, EClassId stepId) {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1524,7 +1522,7 @@ struct SlicePushDownDot : public Rule
 // tensor parallism across engines.
 struct DotSplitRule : public Rule
 {
-    uint32_t splitThreshold = 16384; // Only split dimensions >= splitThreshold
+    uint32_t splitThreshold = 32768; // Only split dimensions >= splitThreshold
     std::unordered_set<uint32_t> visited;
 
     std::string name() const override
@@ -1822,8 +1820,7 @@ struct RemoveContiguous : public Rule
         std::vector<std::vector<EClassId>> childCombinations;
         std::vector<EClassId> currentCombination(children.size());
 
-        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped)
-        {
+        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
             if (pos == children.size())
             {
                 if (hasUnwrapped)
@@ -1868,7 +1865,8 @@ struct RemoveContiguous : public Rule
             if (kernel.matches(inNodes, outNode, outCls.mem_space, inMemSpaces, enode.getEngines()))
             {
                 ENode newENode(kernel.uid, enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
-                               enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(), "", 0, enode.getDebugOrigin());
+                               enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(), "", 0,
+                               enode.getDebugOrigin());
                 egraph.addENode(e_class_id, newENode);
             }
         }
@@ -2040,7 +2038,8 @@ struct ConsumerWeightReuseRule : public Rule
             return false;
 
         const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE || enode.getOpType() == OpType::COPY_TO)
+        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE ||
+            enode.getOpType() == OpType::COPY_TO)
             return false;
 
         // Check if any child is a loaded storage weight that has an earlier duplicate in the EGraph
@@ -2117,9 +2116,9 @@ struct ConsumerWeightReuseRule : public Rule
 
         if (changed)
         {
-            ENode altENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren,
-                           enode.getShape(), enode.getStrides(), enode.getDType(),
-                           enode.getMemSpace(), enode.getEngines(), enode.getContentHash());
+            ENode altENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
+                           enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
+                           enode.getContentHash());
             egraph.addENode(eclass_id, altENode);
         }
     }
@@ -2188,7 +2187,7 @@ struct RemoveRedundantReshape : public Rule
 
                 for (ENodeId cEnodeId : childCls.enodes)
                 {
-                    const ENode &cEnode一部分 = egraph.getENode(cEnodeId);
+                    const ENode &cEnode = egraph.getENode(cEnodeId);
                     if (cEnode.getOpType() == OpType::RESHAPE && !cEnode.getChildren().empty())
                     {
                         EClassId unwrappedChildId = egraph.findConst(cEnode.getChildren()[0]);
@@ -2215,7 +2214,7 @@ struct RemoveRedundantReshape : public Rule
         if (enode.getOpType() == OpType::RESHAPE && !enode.getChildren().empty())
         {
             EClassId srcClassId = egraph.findConst(enode.getChildren()[0]);
-            const EClass &srcCls = egraph.getEClass(srcClassId);
+            const EClass srcCls = egraph.getEClass(srcClassId);
 
             if (srcCls.shape == enode.getShape() && srcCls.dtype == enode.getDType() &&
                 srcCls.mem_space == enode.getMemSpace())
@@ -2227,16 +2226,16 @@ struct RemoveRedundantReshape : public Rule
             // 2. Chained Reshape: RESHAPE(RESHAPE(x, S1), S2) -> add RESHAPE(x, S2)
             for (ENodeId cEnodeId : srcCls.enodes)
             {
-                const ENode &cEnode = egraph.getENode(cEnodeId);
+                const ENode cEnode = egraph.getENode(cEnodeId);
                 if (cEnode.getOpType() == OpType::RESHAPE && !cEnode.getChildren().empty())
                 {
                     EClassId grandChildId = egraph.findConst(cEnode.getChildren()[0]);
                     std::vector<EClassId> newChildren = enode.getChildren();
                     newChildren[0] = grandChildId;
 
-                    ENode collapsed(enode.getKernelId(), OpType::RESHAPE, "", newChildren,
-                                    enode.getShape(), enode.getStrides(), enode.getDType(),
-                                    enode.getMemSpace(), enode.getEngines(), enode.getContentHash());
+                    ENode collapsed(enode.getKernelId(), OpType::RESHAPE, "", newChildren, enode.getShape(),
+                                    enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
+                                    enode.getContentHash());
                     egraph.addENode(e_class_id, collapsed);
                 }
             }
@@ -2272,7 +2271,7 @@ struct RemoveRedundantReshape : public Rule
             std::vector<std::vector<EClassId>> childCombinations;
             std::vector<EClassId> currentCombination(enode.getChildren().size());
 
-            std::function<void(uint64_t, bool)> generateCombos剩下 = [&](uint64_t pos, bool hasUnwrapped) {
+            std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
                 if (pos == enode.getChildren().size())
                 {
                     if (hasUnwrapped)
@@ -2290,9 +2289,9 @@ struct RemoveRedundantReshape : public Rule
 
             for (const auto &newChildren : childCombinations)
             {
-                ENode newENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren,
-                               enode.getShape(), enode.getStrides(), enode.getDType(),
-                               enode.getMemSpace(), enode.getEngines(), enode.getContentHash());
+                ENode newENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
+                               enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
+                               enode.getContentHash());
                 egraph.addENode(e_class_id, newENode);
             }
         }

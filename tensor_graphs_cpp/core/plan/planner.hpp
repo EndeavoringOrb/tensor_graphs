@@ -1215,9 +1215,11 @@ struct Planner
 
         applyDominationRules(egraph, enodeInfos, eclassToLogical, cachedNodes);
 
-        // DP pass for subtree cost approximation (workload sum & critical path)
+        // DP pass for subtree cost approximation (workload sum, critical path, & Sethi-Ullman memory)
         std::vector<float> eclass_dp_cost(egraph.getClasses().size(), TGConstants::INF);
         std::vector<float> eclass_dp_cp_cost(egraph.getClasses().size(), TGConstants::INF);
+        std::vector<float> eclass_dp_mem(egraph.getClasses().size(), TGConstants::INF);
+
         for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
         {
             EClassId cid = egraph.findConst(EClassId{i});
@@ -1230,8 +1232,12 @@ struct Planner
                     {
                         eclass_dp_cost[i] = 0.0f;
                         eclass_dp_cp_cost[i] = 0.0f;
+                        const ENode &enode = egraph.getENode(enodeId);
+                        float node_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                        eclass_dp_mem[i] = node_size;
                         enodeInfos[enodeId.value].dp_cost = 0.0f;
                         enodeInfos[enodeId.value].dp_cp_cost = 0.0f;
+                        enodeInfos[enodeId.value].dp_mem = node_size;
                     }
                 }
             }
@@ -1239,7 +1245,7 @@ struct Planner
 
         bool changed = true;
         int iters = 0;
-        ProgressTimer timer2(0, "calculating enode dp cost");
+        ProgressTimer timer2(0, "calculating enode dp cost and memory");
         while (changed)
         {
             changed = false;
@@ -1257,7 +1263,8 @@ struct Planner
                 for (EClassId child : enode.getChildren())
                 {
                     EClassId canon = egraph.findConst(child);
-                    if (eclass_dp_cost[canon.value] == TGConstants::INF)
+                    if (eclass_dp_cost[canon.value] == TGConstants::INF ||
+                        eclass_dp_mem[canon.value] == TGConstants::INF)
                     {
                         all_children_ready = false;
                         break;
@@ -1271,12 +1278,73 @@ struct Planner
                     float total_cost = cost + sum_child_cost;
                     float total_cp_cost = cost + max_child_cp_cost;
 
-                    if (total_cost < enodeInfos[i].dp_cost || total_cp_cost < enodeInfos[i].dp_cp_cost)
+                    // Sethi-Ullman Memory Calculation:
+                    struct ChildMem
+                    {
+                        float m; // Peak subtree memory
+                        float s; // Output tensor size
+                    };
+                    std::vector<ChildMem> child_mems;
+                    float sum_child_sizes = 0.0f;
+                    for (EClassId child : enode.getChildren())
+                    {
+                        EClassId canon = egraph.findConst(child);
+                        const EClass &cCls = egraph.getEClass(canon);
+                        float c_size = static_cast<float>(getSizeBytes(cCls.shape, cCls.dtype));
+                        float c_mem = eclass_dp_mem[canon.value];
+                        child_mems.push_back({c_mem, c_size});
+                        sum_child_sizes += c_size;
+                    }
+
+                    // Sort children descending by (M_j - S_j) per weighted Sethi-Ullman ordering
+                    std::sort(child_mems.begin(), child_mems.end(),
+                              [](const ChildMem &a, const ChildMem &b) { return (a.m - a.s) > (b.m - b.s); });
+
+                    float peak_child_eval = 0.0f;
+                    float accumulated_s = 0.0f;
+                    for (const auto &cm : child_mems)
+                    {
+                        peak_child_eval = std::max(peak_child_eval, accumulated_s + cm.m);
+                        accumulated_s += cm.s;
+                    }
+
+                    float out_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                    bool can_be_inplace = enodeInfos[i].is_view;
+                    if (!can_be_inplace && enode.getKernelId().value != 0 &&
+                        KernelRegistry::get().hasKernel(enode.getKernelId()))
+                    {
+                        const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
+                        for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
+                        {
+                            if (inplace_idx < enode.getChildren().size())
+                            {
+                                EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
+                                const EClass &cCls = egraph.getEClass(child);
+                                if (cCls.mem_space == enode.getMemSpace())
+                                {
+                                    float in_sz = static_cast<float>(getSizeBytes(cCls.shape, cCls.dtype));
+                                    if (out_size <= in_sz)
+                                    {
+                                        can_be_inplace = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    float op_exec_mem = sum_child_sizes + (can_be_inplace ? 0.0f : out_size);
+                    float total_mem = std::max(peak_child_eval, op_exec_mem);
+
+                    if (total_cost < enodeInfos[i].dp_cost || total_cp_cost < enodeInfos[i].dp_cp_cost ||
+                        total_mem < enodeInfos[i].dp_mem)
                     {
                         if (total_cost < enodeInfos[i].dp_cost)
                             enodeInfos[i].dp_cost = total_cost;
                         if (total_cp_cost < enodeInfos[i].dp_cp_cost)
                             enodeInfos[i].dp_cp_cost = total_cp_cost;
+                        if (total_mem < enodeInfos[i].dp_mem)
+                            enodeInfos[i].dp_mem = total_mem;
                         changed = true;
 
                         EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
@@ -1288,6 +1356,10 @@ struct Planner
                         if (total_cp_cost < eclass_dp_cp_cost[canon.value])
                         {
                             eclass_dp_cp_cost[canon.value] = total_cp_cost;
+                        }
+                        if (total_mem < eclass_dp_mem[canon.value])
+                        {
+                            eclass_dp_mem[canon.value] = total_mem;
                         }
                     }
                 }

@@ -26,7 +26,8 @@ inline void runGeluTanhFill_NEON(const KernelContext &ctx)
     uint64_t n = countElements(ctx.inViews[0].getShape());
 
     uint32_t num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 1;
+    if (num_threads == 0)
+        num_threads = 1;
 
     ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
         uint64_t chunk = (n + num_threads - 1) / num_threads;
@@ -70,6 +71,6 @@ inline LogicalId refFactoryGeluTanhFill(const std::vector<LogicalId> &inputs, Gr
     return g.mul(half_x, one_plus_tanh);
 }
 
-REGISTER_KERNEL("Gelu_Tanh_Fill_NEON", 1, 1, matchGeluTanhFill_NEON, runGeluTanhFill_NEON,
-                refFactoryGeluTanhFill, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32}, {{1, 128, 6144}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Gelu_Tanh_Fill_NEON", 1, 1, matchGeluTanhFill_NEON, runGeluTanhFill_NEON, refFactoryGeluTanhFill, {0},
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 128, 6144}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});

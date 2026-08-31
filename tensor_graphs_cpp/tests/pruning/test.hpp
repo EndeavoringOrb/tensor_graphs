@@ -408,7 +408,7 @@ template <typename... RuleTypes> struct BufferizeBench
                                                  mock.settings.mem_caps, &rule_cost, nullptr, rs...);
                 },
                 rules_tuple);
-            
+
             while (rule_iter.getNextBufferization(bufs, eclass_to_buf))
             {
                 if (check_timeout())

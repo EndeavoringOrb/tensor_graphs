@@ -116,10 +116,14 @@ inline void runF8E4M3TransposedGEMM_v2(const KernelContext &ctx)
                 const uint8_t *w3_ptr = W + static_cast<uint64_t>(n + 3) * K;
 
                 // 16 accumulators in registers (4x4 tile)
-                float32x4_t acc00 = vdupq_n_f32(0.0f), acc01 = vdupq_n_f32(0.0f), acc02 = vdupq_n_f32(0.0f), acc03 = vdupq_n_f32(0.0f);
-                float32x4_t acc10 = vdupq_n_f32(0.0f), acc11 = vdupq_n_f32(0.0f), acc12 = vdupq_n_f32(0.0f), acc13 = vdupq_n_f32(0.0f);
-                float32x4_t acc20 = vdupq_n_f32(0.0f), acc21 = vdupq_n_f32(0.0f), acc22 = vdupq_n_f32(0.0f), acc23 = vdupq_n_f32(0.0f);
-                float32x4_t acc30 = vdupq_n_f32(0.0f), acc31 = vdupq_n_f32(0.0f), acc32 = vdupq_n_f32(0.0f), acc33 = vdupq_n_f32(0.0f);
+                float32x4_t acc00 = vdupq_n_f32(0.0f), acc01 = vdupq_n_f32(0.0f), acc02 = vdupq_n_f32(0.0f),
+                            acc03 = vdupq_n_f32(0.0f);
+                float32x4_t acc10 = vdupq_n_f32(0.0f), acc11 = vdupq_n_f32(0.0f), acc12 = vdupq_n_f32(0.0f),
+                            acc13 = vdupq_n_f32(0.0f);
+                float32x4_t acc20 = vdupq_n_f32(0.0f), acc21 = vdupq_n_f32(0.0f), acc22 = vdupq_n_f32(0.0f),
+                            acc23 = vdupq_n_f32(0.0f);
+                float32x4_t acc30 = vdupq_n_f32(0.0f), acc31 = vdupq_n_f32(0.0f), acc32 = vdupq_n_f32(0.0f),
+                            acc33 = vdupq_n_f32(0.0f);
 
                 uint32_t k = 0;
                 // Main loop: unrolled by 16 for ILP on 4-wide execution pipelines
@@ -291,21 +295,38 @@ inline void runF8E4M3TransposedGEMM_v2(const KernelContext &ctx)
                 }
 
                 // Horizontal reduction
-                float s00 = vaddvq_f32(acc00), s01 = vaddvq_f32(acc01), s02 = vaddvq_f32(acc02), s03 = vaddvq_f32(acc03);
-                float s10 = vaddvq_f32(acc10), s11 = vaddvq_f32(acc11), s12 = vaddvq_f32(acc12), s13 = vaddvq_f32(acc13);
-                float s20 = vaddvq_f32(acc20), s21 = vaddvq_f32(acc21), s22 = vaddvq_f32(acc22), s23 = vaddvq_f32(acc23);
-                float s30 = vaddvq_f32(acc30), s31 = vaddvq_f32(acc31), s32 = vaddvq_f32(acc32), s33 = vaddvq_f32(acc33);
+                float s00 = vaddvq_f32(acc00), s01 = vaddvq_f32(acc01), s02 = vaddvq_f32(acc02),
+                      s03 = vaddvq_f32(acc03);
+                float s10 = vaddvq_f32(acc10), s11 = vaddvq_f32(acc11), s12 = vaddvq_f32(acc12),
+                      s13 = vaddvq_f32(acc13);
+                float s20 = vaddvq_f32(acc20), s21 = vaddvq_f32(acc21), s22 = vaddvq_f32(acc22),
+                      s23 = vaddvq_f32(acc23);
+                float s30 = vaddvq_f32(acc30), s31 = vaddvq_f32(acc31), s32 = vaddvq_f32(acc32),
+                      s33 = vaddvq_f32(acc33);
 
                 // Tail reduction along K
                 for (uint32_t kt = k_rem4; kt < K; ++kt)
                 {
                     float x0_val = x0_ptr[kt], x1_val = x1_ptr[kt], x2_val = x2_ptr[kt], x3_val = x3_ptr[kt];
-                    float w0_val = lut[w0_ptr[kt]], w1_val = lut[w1_ptr[kt]], w2_val = lut[w2_ptr[kt]], w3_val = lut[w3_ptr[kt]];
+                    float w0_val = lut[w0_ptr[kt]], w1_val = lut[w1_ptr[kt]], w2_val = lut[w2_ptr[kt]],
+                          w3_val = lut[w3_ptr[kt]];
 
-                    s00 += x0_val * w0_val; s01 += x0_val * w1_val; s02 += x0_val * w2_val; s03 += x0_val * w3_val;
-                    s10 += x1_val * w0_val; s11 += x1_val * w1_val; s12 += x1_val * w2_val; s13 += x1_val * w3_val;
-                    s20 += x2_val * w0_val; s21 += x2_val * w1_val; s22 += x2_val * w2_val; s23 += x2_val * w3_val;
-                    s30 += x3_val * w0_val; s31 += x3_val * w1_val; s32 += x3_val * w2_val; s33 += x3_val * w3_val;
+                    s00 += x0_val * w0_val;
+                    s01 += x0_val * w1_val;
+                    s02 += x0_val * w2_val;
+                    s03 += x0_val * w3_val;
+                    s10 += x1_val * w0_val;
+                    s11 += x1_val * w1_val;
+                    s12 += x1_val * w2_val;
+                    s13 += x1_val * w3_val;
+                    s20 += x2_val * w0_val;
+                    s21 += x2_val * w1_val;
+                    s22 += x2_val * w2_val;
+                    s23 += x2_val * w3_val;
+                    s30 += x3_val * w0_val;
+                    s31 += x3_val * w1_val;
+                    s32 += x3_val * w2_val;
+                    s33 += x3_val * w3_val;
                 }
 
                 // Vectorized row stores (assigned to lvalues to avoid macro argument comma parsing)
@@ -357,7 +378,8 @@ inline void runF8E4M3TransposedGEMM_v2(const KernelContext &ctx)
                 const uint8_t *w2_ptr = W + static_cast<uint64_t>(n + 2) * K;
                 const uint8_t *w3_ptr = W + static_cast<uint64_t>(n + 3) * K;
 
-                float32x4_t acc0 = vdupq_n_f32(0.0f), acc1 = vdupq_n_f32(0.0f), acc2 = vdupq_n_f32(0.0f), acc3 = vdupq_n_f32(0.0f);
+                float32x4_t acc0 = vdupq_n_f32(0.0f), acc1 = vdupq_n_f32(0.0f), acc2 = vdupq_n_f32(0.0f),
+                            acc3 = vdupq_n_f32(0.0f);
 
                 uint32_t k = 0;
                 for (; k < k_rem4; k += 4)
