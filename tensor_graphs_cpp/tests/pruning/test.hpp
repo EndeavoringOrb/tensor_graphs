@@ -401,14 +401,14 @@ template <typename... RuleTypes> struct BufferizeBench
                         std::min(baseline_cost, get_cost(order, mock.egraph, mock.selection_map, mock.enodeInfos));
             }
 
+            float rule_cost = TGConstants::INF;
             auto rule_iter = std::apply(
                 [&](auto &&...rs) {
                     return makeBufferizeIterator(order, mock.egraph, mock.selection_map, mock.enodeInfos,
-                                                 mock.settings.mem_caps, nullptr, nullptr, rs...);
+                                                 mock.settings.mem_caps, &rule_cost, nullptr, rs...);
                 },
                 rules_tuple);
-
-            float rule_cost = TGConstants::INF;
+            
             while (rule_iter.getNextBufferization(bufs, eclass_to_buf))
             {
                 if (check_timeout())

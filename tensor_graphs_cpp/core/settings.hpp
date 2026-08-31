@@ -659,6 +659,7 @@ struct Settings
             {"bufferize", "MemSpaceMismatchInplaceRule"},
             {"bufferize", "CommutativeInplaceSymmetryRule"},
             {"bufferize", "PeakMemoryPruningRule"},
+            {"bufferize", "BufferizeCostPruningRule"},
             {"malloc", "OffsetMonotoneRule"},
             {"malloc", "IdMaxSymmetryRule"},
             {"malloc", "HMinBoundRule"},

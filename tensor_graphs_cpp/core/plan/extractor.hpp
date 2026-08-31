@@ -559,6 +559,46 @@ class MemoryPressureDispatchRule
     };
     std::vector<UndoState> undo_stack;
 
+    // Checks if the ENode is guaranteed to require a fresh buffer allocation
+    bool can_execute_inplace(const ENode &enode, const ENodeInfo &info, const DispatchContext &ctx) const
+    {
+        if (info.is_view)
+            return true;
+
+        if (enode.getKernelId().value == 0 || !KernelRegistry::get().hasKernel(enode.getKernelId()))
+            return false;
+
+        const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
+        if (kernel.safe_inplace_idxs.empty())
+            return false;
+
+        MemSpace ms = enode.getMemSpace();
+        uint64_t out_size = getSizeBytes(enode.getShape(), enode.getDType());
+
+        for (uint32_t inplace_idx : kernel.safe_inplace_idxs)
+        {
+            if (inplace_idx < enode.getChildren().size())
+            {
+                EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
+                
+                // An in-place reuse requires this to be the parent's last use (R(P) == 1)
+                if (child.value < remaining_users.size() && remaining_users[child.value] == 1)
+                {
+                    const EClass &cCls = ctx.egraph.getEClass(child);
+                    if (cCls.mem_space == ms)
+                    {
+                        uint64_t in_size = getSizeBytes(cCls.shape, cCls.dtype);
+                        if (in_size >= out_size)
+                        {
+                            return true; // Parent buffer can be directly reused in-place
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
   public:
     void init(const DispatchContext &ctx)
     {
@@ -593,9 +633,14 @@ class MemoryPressureDispatchRule
         uint32_t sel = ctx.selection_map.at(cand);
         ENodeId enode_id = ctx.egraph.getEClass(cand).enodes[sel];
         const ENode &enode = ctx.egraph.getENode(enode_id);
+        const ENodeInfo &info = ctx.enodeInfos[enode_id.value];
         MemSpace ms = enode.getMemSpace();
 
         if (ms.type == HandleType::STORAGE || enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+            return false;
+
+        // If it's a view or can run in-place, the lower bound on added memory is 0
+        if (can_execute_inplace(enode, info, ctx))
             return false;
 
         auto cap_it = ctx.mem_caps.find(ms);
@@ -608,12 +653,10 @@ class MemoryPressureDispatchRule
         auto live_it = current_live_mem.find(ms);
         uint64_t cur_mem = (live_it != current_live_mem.end()) ? live_it->second : 0;
 
-        // If even the lower-bound memory during this node's execution exceeds cap, prune immediately!
+        // Unconditionally prune only if it MUST allocate out-of-place and violates cap
         if (cur_mem + out_size > cap)
         {
-            // LOG(DEBUG) << "OOM in MemoryPressureDispatchRule ("
-            //            << (enode.getDebugOrigin().empty() ? "unknown" : enode.getDebugOrigin()) << ")";
-            return true; // PRUNE: Guaranteed to OOM in bufferizer
+            return true;
         }
 
         return false;
@@ -627,6 +670,7 @@ class MemoryPressureDispatchRule
         uint32_t sel = ctx.selection_map.at(node);
         ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
         const ENode &enode = ctx.egraph.getENode(enode_id);
+        const ENodeInfo &info = ctx.enodeInfos[enode_id.value];
         MemSpace ms = enode.getMemSpace();
 
         UndoState state;
@@ -634,7 +678,8 @@ class MemoryPressureDispatchRule
         state.ms = ms;
         state.allocated_bytes = 0;
 
-        if (ms.type != HandleType::STORAGE && enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
+        if (ms.type != HandleType::STORAGE && enode.getOpType() != OpType::INPUT &&
+            enode.getOpType() != OpType::CACHE && !can_execute_inplace(enode, info, ctx))
         {
             state.allocated_bytes = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
             current_live_mem[ms] += state.allocated_bytes;

@@ -167,6 +167,7 @@ struct BufferizeContext
     const std::vector<int> &current_choices;
     uint32_t k;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
+    const float *best_cost = nullptr;
 
     EClassId get_inplace_alias(EClassId id) const
     {
@@ -183,6 +184,31 @@ struct BufferizeContext
 // =============================================================================
 // Bufferize pruning rules
 // =============================================================================
+
+class BufferizeCostPruningRule
+{
+  public:
+    TG_PRUNING_RULE(BufferizeCostPruningRule)
+    BufferizeCostPruningRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
+    float order_cost = 0.0f;
+
+  public:
+    void init(const BufferizeContext &ctx)
+    {
+        order_cost = get_cost(ctx.ordered, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
+    }
+
+    bool check(int /*candidate_choice*/, size_t /*cand_idx*/, const BufferizeContext &ctx) const
+    {
+        if (!enabled || !ctx.best_cost)
+            return false;
+        return order_cost >= *ctx.best_cost;
+    }
+};
 
 class PeakMemoryPruningRule
 {
@@ -624,7 +650,7 @@ template <typename... Rules> struct BufferizeIterator
         BufferizeContext ctx{ordered,       egraph,      selection_map,
                              enodeInfos,    birth_times, death_times,
                              inplace_alias, {},          static_cast<uint32_t>(0),
-                             mem_caps};
+                             mem_caps,      best_cost};
         rules.init(ctx);
     }
 
@@ -805,7 +831,7 @@ template <typename... Rules> struct BufferizeIterator
             BufferizeContext pop_ctx{ordered,       egraph,           selection_map,
                                      enodeInfos,    birth_times,      death_times,
                                      inplace_alias, valid_choices[k], static_cast<uint32_t>(k),
-                                     mem_caps};
+                                     mem_caps,      best_cost};
             rules.on_pop(choice, pop_ctx);
 
             inplace_alias.erase(eclass);
@@ -927,7 +953,7 @@ template <typename... Rules> struct BufferizeIterator
                 BufferizeContext ctx{ordered,       egraph,           selection_map,
                                      enodeInfos,    birth_times,      death_times,
                                      inplace_alias, valid_choices[k], static_cast<uint32_t>(k),
-                                     mem_caps};
+                                     mem_caps,      best_cost};
                 if (rules.is_pruned(choice, choice_idx, ctx))
                 {
                     continue;
@@ -1085,7 +1111,7 @@ BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
 }
 
 using AllBufferizeRuleTypes =
-    std::tuple<MemSpaceMismatchInplaceRule, CommutativeInplaceSymmetryRule, PeakMemoryPruningRule>;
+    std::tuple<MemSpaceMismatchInplaceRule, CommutativeInplaceSymmetryRule, PeakMemoryPruningRule, BufferizeCostPruningRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId> &ordered, const EGraph &egraph,

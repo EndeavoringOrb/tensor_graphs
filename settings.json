@@ -9,7 +9,8 @@
     "bufferize": {
       "MemSpaceMismatchInplaceRule": true,
       "CommutativeInplaceSymmetryRule": true,
-      "PeakMemoryPruningRule": true
+      "PeakMemoryPruningRule": true,
+      "BufferizeCostPruningRule": true
     },
     "malloc": {
       "OffsetMonotoneRule": true,
