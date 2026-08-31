@@ -1,3 +1,6 @@
+// File: tensor_graphs_cpp/core/cost_model.hpp
+// TODO: Enhanced NaN protection in prediction algorithms
+
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -290,6 +293,7 @@ struct CostModel
                 }
                 log_y = std::clamp(log_y, -13.8, 20.0);
                 double y = std::exp(log_y);
+                if (std::isnan(y) || std::isinf(y)) return 1e-6f;
                 return static_cast<float>(std::max(1e-6, y));
             }
 
@@ -380,6 +384,7 @@ struct CostModel
                 }
 
                 double y = refTime * ratio;
+                if (std::isnan(y) || std::isinf(y)) return 1e-6f;
                 return static_cast<float>(std::max(1e-6, y));
             }
 
@@ -611,11 +616,15 @@ struct CostModel
         {
             Matrix W = multiply(XtX, XtY);
             model.weights.resize(D);
+            model.valid = true;
             for (int i = 0; i < D; ++i)
             {
+                if (std::isnan(W(i, 0)) || std::isinf(W(i, 0))) {
+                    model.valid = false;
+                    break;
+                }
                 model.weights[i] = W(i, 0);
             }
-            model.valid = true;
         }
 
         models[mk] = model;
@@ -683,7 +692,7 @@ struct CostModel
                 r.outputStrides == outStrides && r.inputDTypes == inDTypes && r.outputDType == outDType &&
                 r.inputConstants == inConstants)
             {
-                return std::max(1e-6f, r.runTime);
+                return std::max(1e-6f, std::isnan(r.runTime) ? 1e-6f : r.runTime);
             }
         }
 
@@ -713,8 +722,8 @@ struct CostModel
         if (modelIt != models.end())
         {
             auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-            return modelIt->second.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides,
-                                           outDType);
+            float p = modelIt->second.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+            return std::isnan(p) ? 1e-6f : p;
         }
 
         LinearModel fallbackModel;
@@ -723,6 +732,7 @@ struct CostModel
         fallbackModel.opType = opType;
         fallbackModel.opName = opName;
         auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-        return fallbackModel.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+        float p = fallbackModel.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+        return std::isnan(p) ? 1e-6f : p;
     }
 };

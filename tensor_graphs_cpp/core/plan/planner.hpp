@@ -1,3 +1,6 @@
+// File: tensor_graphs_cpp/core/plan/planner.hpp
+// TODO: Enhanced NaN protection during DP passes to avoid sorting UB
+
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -567,7 +570,7 @@ class FasterEquivalentENodeDominationRule
         if (!enabled)
             return false;
         float costA = ctx.enodeInfos[enodeId.value].cost;
-        if (costA == TGConstants::INF)
+        if (costA == TGConstants::INF || std::isnan(costA))
             return false;
 
         const ENode &a = ctx.egraph.getENode(enodeId);
@@ -587,7 +590,7 @@ class FasterEquivalentENodeDominationRule
                 continue;
 
             float costB = ctx.enodeInfos[otherId.value].cost;
-            if (costB == TGConstants::INF)
+            if (costB == TGConstants::INF || std::isnan(costB))
                 continue;
 
             const ENode &b = ctx.egraph.getENode(otherId);
@@ -1610,6 +1613,7 @@ struct Planner
             {
                 if (is_time_expired())
                     break;
+                LOG(DEBUG) << "got dispatch order";
 
                 auto buf_iter =
                     makeConfiguredBufferizeIteratorFromBools(order, egraph, selection_map, enodeInfos, reduced_caps,

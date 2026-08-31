@@ -184,12 +184,12 @@ def main():
             print(
                 f"[Txt2Img] Warning: Model file not found at {model_file}, using HeuristicSearchDelegate."
             )
-            delegate = tensor_graphs.HeuristicSearchDelegate()
+            delegate = None
     else:
         print(
             "[Txt2Img] No --run-dir specified. Using HeuristicSearchDelegate (node caching disabled)."
         )
-        delegate = tensor_graphs.HeuristicSearchDelegate()
+        delegate = None
         args.disable_caching = True
 
     session = tensor_graphs.Krea2Session(

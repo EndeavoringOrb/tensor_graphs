@@ -1,4 +1,5 @@
 // File: tensor_graphs_cpp/core/plan/validators/mem.hpp
+
 #pragma once
 
 #include <algorithm>
@@ -124,32 +125,54 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
                                    const std::unordered_map<EClassId, uint32_t> &selection_map,
                                    const std::vector<ENodeInfo> &enodeInfos)
 {
-    EClassId curr = egraph.findConst(id);
-    while (true)
-    {
-        auto sel_it = selection_map.find(curr);
+    auto step = [&](EClassId curr) -> EClassId {
+        EClassId canon = egraph.findConst(curr);
+        auto sel_it = selection_map.find(canon);
         if (sel_it == selection_map.end())
-            break;
+            return EClassId{UINT32_MAX};
+
         uint32_t sel = sel_it->second;
-        ENodeId enode_id = egraph.getEClass(curr).enodes[sel];
-        if (enodeInfos[enode_id.value].is_view)
+        const auto &enodes = egraph.getEClass(canon).enodes;
+        if (sel >= enodes.size())
+            return EClassId{UINT32_MAX};
+
+        ENodeId enode_id = enodes[sel];
+        if (enode_id.value < enodeInfos.size() && enodeInfos[enode_id.value].is_view)
         {
             const ENode &node = egraph.getENode(enode_id);
             if (!node.getChildren().empty())
             {
-                curr = egraph.findConst(node.getChildren()[0]);
-            }
-            else
-            {
-                break;
+                return egraph.findConst(node.getChildren()[0]);
             }
         }
-        else
+        return EClassId{UINT32_MAX};
+    };
+
+    EClassId slow = egraph.findConst(id);
+    EClassId fast = slow;
+
+    while (true)
+    {
+        EClassId next_slow = step(slow);
+        if (next_slow.value == UINT32_MAX)
+            return slow;
+
+        EClassId next_fast1 = step(fast);
+        if (next_fast1.value == UINT32_MAX)
+            return fast;
+
+        EClassId next_fast2 = step(next_fast1);
+        if (next_fast2.value == UINT32_MAX)
+            return next_fast1;
+
+        slow = next_slow;
+        fast = next_fast2;
+
+        if (slow == fast)
         {
-            break;
+            return slow;
         }
     }
-    return curr;
 }
 
 // =============================================================================
@@ -171,13 +194,38 @@ struct BufferizeContext
 
     EClassId get_inplace_alias(EClassId id) const
     {
-        auto it = inplace_alias.find(id);
-        while (it != inplace_alias.end())
+        auto step = [&](EClassId curr) -> EClassId {
+            auto it = inplace_alias.find(curr);
+            if (it != inplace_alias.end())
+                return it->second;
+            return EClassId{UINT32_MAX};
+        };
+
+        EClassId slow = id;
+        EClassId fast = id;
+
+        while (true)
         {
-            id = it->second;
-            it = inplace_alias.find(id);
+            EClassId next_slow = step(slow);
+            if (next_slow.value == UINT32_MAX)
+                return slow;
+
+            EClassId next_fast1 = step(fast);
+            if (next_fast1.value == UINT32_MAX)
+                return fast;
+
+            EClassId next_fast2 = step(next_fast1);
+            if (next_fast2.value == UINT32_MAX)
+                return next_fast1;
+
+            slow = next_slow;
+            fast = next_fast2;
+
+            if (slow == fast)
+            {
+                return slow;
+            }
         }
-        return id;
     }
 };
 
@@ -258,11 +306,9 @@ class PeakMemoryPruningRule
         const ENode &node = ctx.egraph.getENode(enode_id);
         MemSpace ms = node.getMemSpace();
 
-        // 1. STORAGE is file-backed and does not consume RAM/VRAM capacity
         if (ms.type == HandleType::STORAGE)
             return false;
 
-        // 2. INPUT and CACHE nodes are preallocated in reserved memory
         if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
             return false;
 
@@ -290,62 +336,6 @@ class PeakMemoryPruningRule
             {
                 if (usage[t] + size > cap)
                 {
-                    // TODO: Temporary diagnostic print to inspect alive tensors during OOM
-                    static bool printed_once = false;
-                    if (!printed_once)
-                    {
-                        printed_once = true; // Avoid spamming stdout on every search branch
-                        std::cout << "\n==================== [OOM DIAGNOSTIC AT k=" << ctx.k << ", timestep t=" << t
-                                  << "] ====================\n";
-                        std::cout << "Attempted node: "
-                                  << (node.getDebugOrigin().empty() ? "unknown" : node.getDebugOrigin())
-                                  << "\n  Op: " << toString(node.getOpType())
-                                  << " | Shape: " << toString(node.getShape())
-                                  << " | Requesting: " << (size / (1024.0 * 1024.0)) << " MB\n";
-                        std::cout << "  Usage at t=" << t << ": " << (usage[t] / (1024.0 * 1024.0))
-                                  << " MB / Cap: " << (cap / (1024.0 * 1024.0)) << " MB\n\n";
-                        std::cout << "--- Active (Alive) Tensors in Memory at Timestep " << t << " ---\n";
-
-                        uint64_t accounted_bytes = 0;
-                        for (uint32_t prev_k = 0; prev_k < ctx.k; ++prev_k)
-                        {
-                            EClassId prev_eclass = ctx.ordered[prev_k];
-                            uint32_t prev_sel = ctx.selection_map.at(prev_eclass);
-                            ENodeId prev_enode_id = ctx.egraph.getEClass(prev_eclass).enodes[prev_sel];
-                            const ENode &prev_node = ctx.egraph.getENode(prev_enode_id);
-
-                            if (prev_node.getMemSpace() != ms)
-                                continue;
-                            if (prev_node.getOpType() == OpType::INPUT || prev_node.getOpType() == OpType::CACHE)
-                                continue;
-
-                            uint32_t b_prev =
-                                ctx.birth_times.count(prev_eclass) ? ctx.birth_times.at(prev_eclass) : prev_k;
-                            uint32_t d_prev =
-                                ctx.death_times.count(prev_eclass) ? ctx.death_times.at(prev_eclass) : prev_k + 1;
-
-                            // A node is alive at timestep t if t falls within its active interval
-                            if (b_prev <= t && t <= d_prev)
-                            {
-                                uint64_t prev_sz =
-                                    (getSizeBytes(prev_node.getShape(), prev_node.getDType()) + 4095) & ~4095ULL;
-                                accounted_bytes += prev_sz;
-                                std::cout
-                                    << "  - [k=" << prev_k << ", life=[" << b_prev << ".." << d_prev << "]] "
-                                    << std::setw(8) << std::fixed << std::setprecision(2)
-                                    << (prev_sz / (1024.0 * 1024.0)) << " MB"
-                                    << " | " << toString(prev_node.getShape()) << " | "
-                                    << toString(prev_node.getOpType()) << " | "
-                                    << (prev_node.getDebugOrigin().empty() ? "unknown" : prev_node.getDebugOrigin())
-                                    << "\n";
-                            }
-                        }
-                        std::cout
-                            << "-----------------------------------------------------------------------------------\n";
-                        std::cout << "Total Active Live Memory: " << (accounted_bytes / (1024.0 * 1024.0)) << " MB\n";
-                        std::cout << "================================================================================="
-                                     "==\n\n";
-                    }
                     LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size() << " ("
                                << (node.getDebugOrigin().empty() ? "unknown" : node.getDebugOrigin()) << ")";
                     return true;
@@ -799,13 +789,38 @@ template <typename... Rules> struct BufferizeIterator
 
     EClassId get_inplace_alias(EClassId id) const
     {
-        auto it = inplace_alias.find(id);
-        while (it != inplace_alias.end())
+        auto step = [&](EClassId curr) -> EClassId {
+            auto it = inplace_alias.find(curr);
+            if (it != inplace_alias.end())
+                return it->second;
+            return EClassId{UINT32_MAX};
+        };
+
+        EClassId slow = id;
+        EClassId fast = id;
+
+        while (true)
         {
-            id = it->second;
-            it = inplace_alias.find(id);
+            EClassId next_slow = step(slow);
+            if (next_slow.value == UINT32_MAX)
+                return slow;
+
+            EClassId next_fast1 = step(fast);
+            if (next_fast1.value == UINT32_MAX)
+                return fast;
+
+            EClassId next_fast2 = step(next_fast1);
+            if (next_fast2.value == UINT32_MAX)
+                return next_fast1;
+
+            slow = next_slow;
+            fast = next_fast2;
+
+            if (slow == fast)
+            {
+                return slow;
+            }
         }
-        return id;
     }
 
     bool ascend()
@@ -825,7 +840,6 @@ template <typename... Rules> struct BufferizeIterator
 
             EClassId eclass = ordered[k];
 
-            // Pop the rule state!
             uint32_t choice_idx = choice_orders[k][state[k] - 1];
             int choice = valid_choices[k][choice_idx];
             BufferizeContext pop_ctx{ordered,       egraph,           selection_map,
@@ -959,7 +973,6 @@ template <typename... Rules> struct BufferizeIterator
                     continue;
                 }
 
-                // Push the rule state
                 rules.on_push(choice, ctx);
 
                 if (choice != -1)

@@ -31,12 +31,12 @@
 
 struct ENodeInfo
 {
-    float cost;
-    bool is_view;
-    float dp_cost = 0.0f;
-    float dp_cp_cost = 0.0f;
+    float cost = TGConstants::INF;
+    bool is_view = false;
+    float dp_cost = TGConstants::INF;
+    float dp_cp_cost = TGConstants::INF;
     float rev_cp_cost = 0.0f;
-    float dp_mem = 0.0f;
+    float dp_mem = TGConstants::INF;
 };
 
 // =============================================================================
@@ -815,6 +815,7 @@ template <typename... Rules> struct DispatchIterator
 
             if (pos == total_nodes)
             {
+                LOG(DEBUG) << "pos == total_nodes";
                 DispatchContext leaf_ctx{egraph,        selection_map, enodeInfos, ordered,
                                          current_ready, pos,           mem_caps,   best_cost};
                 if (rules.validate_leaf(leaf_ctx))
@@ -838,6 +839,7 @@ template <typename... Rules> struct DispatchIterator
                     delegate->push_state();
 
                     std::vector<ActionFeatureExtractDispatch> features;
+                    LOG(DEBUG) << "creating features for " << current_ready.size() << " options";
                     features.reserve(current_ready.size());
                     for (auto id : current_ready)
                     {
@@ -862,36 +864,37 @@ template <typename... Rules> struct DispatchIterator
                             f.engine_idxs.push_back(eng.idx);
                         }
 
-                        Graph g;
-                        std::vector<LogicalId> inIds;
-                        for (EClassId child : enode.getChildren())
-                        {
-                            const EClass &cCls = egraph.getEClass(egraph.findConst(child));
-                            inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
-                        }
+                        // TODO: set up something so we only compute this if the delegate uses it
+                        // Graph g;
+                        // std::vector<LogicalId> inIds;
+                        // for (EClassId child : enode.getChildren())
+                        // {
+                        //     const EClass &cCls = egraph.getEClass(egraph.findConst(child));
+                        //     inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
+                        // }
 
-                        if (enode.getOpType() == OpType::FUSED)
-                        {
-                            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
-                            {
-                                auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
-                                if (refFact)
-                                    refFact(inIds, g);
-                            }
-                        }
-                        else
-                        {
-                            g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
-                                           enode.getShape(), enode.getStrides(), "");
-                        }
+                        // if (enode.getOpType() == OpType::FUSED)
+                        // {
+                        //     if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+                        //     {
+                        //         auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
+                        //         if (refFact)
+                        //             refFact(inIds, g);
+                        //     }
+                        // }
+                        // else
+                        // {
+                        //     g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
+                        //                    enode.getShape(), enode.getStrides(), "");
+                        // }
 
-                        f.num_nodes = g.nodes.size();
-                        uint32_t edges = 0;
-                        for (const auto &pair : g.nodes)
-                        {
-                            edges += pair.second.child_ids.size();
-                        }
-                        f.num_edges = edges;
+                        // f.num_nodes = g.nodes.size();
+                        // uint32_t edges = 0;
+                        // for (const auto &pair : g.nodes)
+                        // {
+                        //     edges += pair.second.child_ids.size();
+                        // }
+                        // f.num_edges = edges;
 
                         features.push_back(f);
                     }
@@ -912,8 +915,9 @@ template <typename... Rules> struct DispatchIterator
                     is_done = true;
                     return false;
                 }
-
+                
                 uint32_t choice_idx = selection_at_pos[pos];
+                LOG(DEBUG) << "choice_idx " << choice_idx;
                 selection_at_pos[pos] = choice_idx + 1;
                 uint32_t choice = choice_orders[pos][choice_idx];
 
