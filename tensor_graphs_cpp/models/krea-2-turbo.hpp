@@ -93,17 +93,19 @@ class Krea2TurboModel
                      uint32_t B, uint32_t S, SourceLocation loc = SourceLocation::current())
     {
         LogicalId w = weight(w_name, loc);
-        LogicalId w_t = g.contiguous(g.permute(w, {1, 0}));
-        LogicalId x_flat = g.reshape(x, {1, static_cast<int32_t>(B * S), static_cast<int32_t>(in_d)});
-        LogicalId out_flat = g.dot(x_flat, g.reshape(w_t, {1, static_cast<int32_t>(in_d), static_cast<int32_t>(out_d)}));
-        LogicalId out = g.reshape(out_flat, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(out_d)});
+        int32_t perm[] = {1, 0};
+        LogicalId w_t = g.contiguous(g.permute(w, g.constant({2}, perm, DType::INT32, loc), loc), loc);
+        int32_t s3[] = {static_cast<int32_t>(B), static_cast<int32_t>(in_d), static_cast<int32_t>(out_d)};
+        LogicalId w_3d = g.reshape(w_t, g.constant({3}, s3, DType::INT32, loc), loc);
+        LogicalId out = g.dot(x, w_3d, loc);
 
         if (!b_name.empty() && FileRegistry::get().hasTensor(w_path, b_name))
         {
             LogicalId b = weight(b_name, loc);
-            LogicalId b_3d = g.reshape(b, {1, 1, static_cast<int32_t>(out_d)});
-            LogicalId b_exp = g.repeat(g.repeat(b_3d, B, 0), S, 1);
-            out = g.add(out, b_exp);
+            LogicalId b_3d = g.reshape(b, g.constant({3}, std::vector<int32_t>{1, 1, static_cast<int32_t>(out_d)}.data(), DType::INT32, loc), loc);
+            LogicalId b_exp = g.repeat(b_3d, S, 1, loc);
+            if (B > 1) b_exp = g.repeat(b_exp, B, 0, loc);
+            out = g.add(out, b_exp, loc);
         }
         return out;
     }

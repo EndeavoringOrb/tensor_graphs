@@ -363,7 +363,7 @@ class PeakMemoryPruningRule
 
             if (old_death != 0xFFFFFFFF && d_time > old_death)
             {
-                for (uint32_t t = old_death; t <= d_time && t < usage.size(); ++t)
+                for (uint32_t t = old_death + 1; t <= d_time && t < usage.size(); ++t)
                 {
                     if (usage[t] + size > cap)
                     {
@@ -437,7 +437,7 @@ class PeakMemoryPruningRule
 
                     if (mem_usage.count(ms))
                     {
-                        for (uint32_t t = old_death; t <= d_time && t < mem_usage[ms].size(); ++t)
+                        for (uint32_t t = old_death + 1; t <= d_time && t < mem_usage[ms].size(); ++t)
                         {
                             mem_usage[ms][t] += size;
                         }
@@ -478,7 +478,7 @@ class PeakMemoryPruningRule
 
             if (mem_usage.count(ms))
             {
-                for (uint32_t t = state.old_death; t <= state.new_death && t < mem_usage[ms].size(); ++t)
+                for (uint32_t t = state.old_death + 1; t <= state.new_death && t < mem_usage[ms].size(); ++t)
                 {
                     mem_usage[ms][t] -= size;
                 }

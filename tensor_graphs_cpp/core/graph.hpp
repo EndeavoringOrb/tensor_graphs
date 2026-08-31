@@ -133,11 +133,13 @@ struct Graph
             Error::throw_err("Tensor '" + name + "' not found in: " + path);
         }
 
-        SHA256 sha;
-        sha.update(path + "::" + name);
-
         const auto &meta = FileRegistry::get().getMetadata(path, name);
-        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, sha.digest(), loc);
+        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, "", loc);
+
+        SHA256 sha;
+        sha.update(path + "::" + name + "::" + toString(node.id));
+        node.contentHash = sha.digest();
+
         FileRegistry::get().registerNode(node.id, path, name);
         input_data_types[node.id] = InputDataType::STORAGE;
         TensorNode &copyNode = allocateNode(OpType::COPY_TO, "", meta.dtype, {node.id}, {}, {}, "", loc);

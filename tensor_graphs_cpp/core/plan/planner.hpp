@@ -899,6 +899,8 @@ struct Planner
         rules.emplace_back(std::make_unique<DotSplitRule>());
         rules.emplace_back(std::make_unique<RemoveContiguous>());
         rules.emplace_back(std::make_unique<RemoveCopyChains>());
+        rules.emplace_back(std::make_unique<ConsumerWeightReuseRule>());
+        rules.emplace_back(std::make_unique<RemoveRedundantReshape>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
