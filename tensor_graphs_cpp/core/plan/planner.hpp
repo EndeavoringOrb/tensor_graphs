@@ -1306,7 +1306,8 @@ struct Planner
             }
         }
 
-        for (auto& info : enodeInfos) {
+        for (auto &info : enodeInfos)
+        {
             info.rev_cp_cost = 0.0f;
         }
 
