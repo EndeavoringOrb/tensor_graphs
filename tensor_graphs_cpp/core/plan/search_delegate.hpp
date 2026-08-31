@@ -23,6 +23,7 @@ struct ActionFeatureExtractDispatch
     float cost;
     float min_dp_cp_cost = 0.0f;
     float dp_cost = 0.0f;
+    float rev_cp_cost = 0.0f;
     uint64_t size; // n elements * dtype size
     std::vector<uint32_t> engine_idxs;
     uint32_t num_nodes = 0;
@@ -184,12 +185,18 @@ class HeuristicSearchDelegate : public SearchDelegate
         std::iota(res.begin(), res.end(), 0);
         std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
             // 1. Critical-path first (depth-first: consume and free tensors ASAP)
+            // This prioritizes executing deeper compute nodes over loading disconnected weights.
             if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
                 return ready_nodes[a].min_dp_cp_cost > ready_nodes[b].min_dp_cp_cost;
 
-            // 2. Subtree work cost tie-breaker
-            if (ready_nodes[a].dp_cost != ready_nodes[b].dp_cost)
-                return ready_nodes[a].dp_cost < ready_nodes[b].dp_cost;
+            // 2. Reverse Critical Path tie-breaker (Distance to Output)
+            // When deciding WHICH depth=0 weight/input to load, pick the one that feeds the earliest layers.
+            if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
+                return ready_nodes[a].rev_cp_cost > ready_nodes[b].rev_cp_cost;
+
+            // 3. Memory footprint tie-breaker (smaller footprint first to delay memory spikes)
+            if (ready_nodes[a].size != ready_nodes[b].size)
+                return ready_nodes[a].size < ready_nodes[b].size;
 
             return ready_nodes[a].cost < ready_nodes[b].cost;
         });

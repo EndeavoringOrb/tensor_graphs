@@ -35,6 +35,7 @@ struct ENodeInfo
     bool is_view;
     float dp_cost = 0.0f;
     float dp_cp_cost = 0.0f;
+    float rev_cp_cost = 0.0f;
 };
 
 // =============================================================================
@@ -803,6 +804,7 @@ template <typename... Rules> struct DispatchIterator
                         f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
                         f.min_dp_cp_cost =
                             (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
+                        f.rev_cp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
                         f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         auto cap_it = mem_caps.find(enode.getMemSpace());
@@ -2062,6 +2064,7 @@ template <typename... Rules> struct Extractor
                         f.cost = enodeInfos[enodeId.value].cost;
                         f.dp_cost = enodeInfos[enodeId.value].dp_cost;
                         f.min_dp_cp_cost = enodeInfos[enodeId.value].dp_cp_cost;
+                        f.rev_cp_cost = enodeInfos[enodeId.value].rev_cp_cost;
                         f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         if (mem_caps)

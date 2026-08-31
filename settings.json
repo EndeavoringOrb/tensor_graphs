@@ -1,8 +1,8 @@
 {
   "rules": {
     "dispatch": {
-      "InputDispatchDominationRule": true,
-      "UnifiedMemoryExchangeableDispatchRule": true,
+      "InputDispatchDominationRule": false,
+      "UnifiedMemoryExchangeableDispatchRule": false,
       "MemoryPressureDispatchRule": true,
       "DispatchCostPruningRule": true
     },
@@ -24,7 +24,7 @@
     "extract": {
       "InfiniteCostSkipRule": true,
       "ExtractorJacksonCarlierRule": true,
-      "ExtractorDynamicMinCutRule": true
+      "ExtractorDynamicMinCutRule": false
     },
     "enode": {
       "MemCapENodeDominationRule": true,

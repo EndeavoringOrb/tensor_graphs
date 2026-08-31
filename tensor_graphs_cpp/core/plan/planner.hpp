@@ -1237,9 +1237,8 @@ struct Planner
 
         bool changed = true;
         int iters = 0;
-        int max_iters = 1000;
-        ProgressTimer timer2(max_iters, "calculating enode dp cost");
-        while (changed && iters < max_iters)
+        ProgressTimer timer2(0, "calculating enode dp cost");
+        while (changed)
         {
             changed = false;
             iters++;
@@ -1292,6 +1291,62 @@ struct Planner
                 }
             }
             timer2.tick();
+        }
+
+        // Backward DP pass for rev_cp_cost (Distance to Output)
+        std::vector<float> eclass_rev_cp_cost(egraph.getClasses().size(), 0.0f);
+        std::vector<std::vector<ENodeId>> consumers(egraph.getClasses().size());
+        for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+        {
+            const ENode &enode = egraph.getENodes()[i];
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon = egraph.findConst(child);
+                consumers[canon.value].push_back(ENodeId{i});
+            }
+        }
+
+        for (auto& info : enodeInfos) {
+            info.rev_cp_cost = 0.0f;
+        }
+
+        bool rev_changed = true;
+        ProgressTimer timer3(0, "calculating enode reverse dp cost");
+        while (rev_changed)
+        {
+            rev_changed = false;
+
+            for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+            {
+                float cost = enodeInfos[i].cost;
+                if (cost == TGConstants::INF)
+                    continue;
+
+                EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
+                EClassId canon = egraph.findConst(e_class_id);
+
+                float current_rev_cost = cost + eclass_rev_cp_cost[canon.value];
+                if (current_rev_cost > enodeInfos[i].rev_cp_cost)
+                {
+                    enodeInfos[i].rev_cp_cost = current_rev_cost;
+                    rev_changed = true;
+                }
+            }
+
+            for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
+            {
+                float max_consumer_rev = 0.0f;
+                for (ENodeId consumer_id : consumers[i])
+                {
+                    max_consumer_rev = std::max(max_consumer_rev, enodeInfos[consumer_id.value].rev_cp_cost);
+                }
+                if (max_consumer_rev > eclass_rev_cp_cost[i])
+                {
+                    eclass_rev_cp_cost[i] = max_consumer_rev;
+                    rev_changed = true;
+                }
+            }
+            timer3.tick();
         }
 
         return enodeInfos;
