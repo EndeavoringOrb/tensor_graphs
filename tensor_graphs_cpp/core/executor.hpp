@@ -20,7 +20,7 @@ class Executor
     void run(const CompiledGraph &compiled, const Debug::Callback &debugCallback = nullptr)
     {
         uint32_t nInst = compiled.instructions.size();
-        bool disableTimer = true;
+        bool disableTimer = false;
 #ifdef TG_DEBUG
         disableTimer = false;
 #endif
