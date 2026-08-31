@@ -208,7 +208,7 @@ inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &input
 }
 
 REGISTER_KERNEL("JinaSwiGLU_F32_3D", 2, 2, matchJinaSwiGLU_F32_3D, runJinaSwiGLU_F32_3D, refFactoryJinaSwiGLU_F32_3D,
-                {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {0, 1}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1024, 3072}, {1, 1024, 3072}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

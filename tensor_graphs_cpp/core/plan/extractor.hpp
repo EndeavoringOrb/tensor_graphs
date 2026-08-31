@@ -799,6 +799,8 @@ template <typename... Rules> struct DispatchIterator
 
                         f.cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].cost : 0.0f;
                         f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
+                        f.min_dp_cp_cost =
+                            (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
                         f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         auto cap_it = mem_caps.find(enode.getMemSpace());
@@ -2055,6 +2057,7 @@ template <typename... Rules> struct Extractor
                         ActionFeatureExtractDispatch f;
                         f.cost = enodeInfos[enodeId.value].cost;
                         f.dp_cost = enodeInfos[enodeId.value].dp_cost;
+                        f.min_dp_cp_cost = enodeInfos[enodeId.value].dp_cp_cost;
                         f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                         f.mem_space = enode.getMemSpace();
                         if (mem_caps)

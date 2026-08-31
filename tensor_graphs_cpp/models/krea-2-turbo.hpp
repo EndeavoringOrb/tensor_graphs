@@ -81,18 +81,11 @@ class Krea2TurboModel
     Graph &g;
     MemoryManager &mem;
     const std::string w_path;
-    std::unordered_map<std::string, LogicalId> weight_cache;
 
     LogicalId weight(const std::string &name)
     {
-        auto it = weight_cache.find(name);
-        if (it != weight_cache.end())
-        {
-            return it->second;
-        }
         LogicalId raw_weight = g.weight(w_path, name);
         LogicalId cast_w = g.cast(raw_weight, DType::FLOAT32);
-        weight_cache[name] = cast_w;
         return cast_w;
     }
 

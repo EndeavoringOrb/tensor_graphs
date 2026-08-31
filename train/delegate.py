@@ -203,6 +203,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
             [
                 safe_log1p(f.cost),
                 safe_log1p(f.dp_cost),
+                safe_log1p(getattr(f, "min_dp_cp_cost", 0.0)),
                 safe_log1p(f.size),
                 safe_float(
                     f.mem_space.type if hasattr(f, "mem_space") else 0,

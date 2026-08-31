@@ -442,147 +442,6 @@ class MemSpaceMismatchInplaceRule
     }
 };
 
-class LinearChainInplaceDominationRule
-{
-  public:
-    TG_PRUNING_RULE(LinearChainInplaceDominationRule)
-    LinearChainInplaceDominationRule(bool en = true) : enabled(en)
-    {
-    }
-
-    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (candidate_choice != -1)
-            return false;
-
-        EClassId eclass = ctx.ordered[ctx.k];
-        uint32_t sel = ctx.selection_map.at(eclass);
-        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
-        const ENode &node = ctx.egraph.getENode(enode_id);
-        uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
-
-        for (int choice : ctx.current_choices)
-        {
-            if (choice < 0)
-                continue;
-
-            if (static_cast<size_t>(choice) >= node.getChildren().size())
-                continue;
-
-            EClassId child = ctx.egraph.findConst(node.getChildren()[choice]);
-            EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
-
-            auto death_it = ctx.death_times.find(child_base);
-            if (death_it == ctx.death_times.end() || death_it->second != ctx.k)
-                continue;
-
-            EClassId target_base = ctx.get_inplace_alias(child_base);
-            auto base_sel_it = ctx.selection_map.find(target_base);
-            if (base_sel_it == ctx.selection_map.end())
-                continue;
-
-            uint32_t base_sel = base_sel_it->second;
-            const ENode &base_node = ctx.egraph.getENode(ctx.egraph.getEClass(target_base).enodes[base_sel]);
-
-            if (base_node.getOpType() == OpType::INPUT || base_node.getOpType() == OpType::CACHE)
-                continue;
-
-            if (base_node.getMemSpace() != node.getMemSpace())
-                continue;
-
-            uint64_t in_size = getSizeBytes(base_node.getShape(), base_node.getDType());
-            if (out_size == in_size)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-};
-
-class IntervalSubsetDominationRule
-{
-  public:
-    TG_PRUNING_RULE(IntervalSubsetDominationRule)
-    IntervalSubsetDominationRule(bool en = true) : enabled(en)
-    {
-    }
-
-    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (candidate_choice < 0)
-            return false;
-
-        EClassId eclass = ctx.ordered[ctx.k];
-        uint32_t sel = ctx.selection_map.at(eclass);
-        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
-        const ENode &node = ctx.egraph.getENode(enode_id);
-
-        if (static_cast<size_t>(candidate_choice) >= node.getChildren().size())
-            return false;
-
-        EClassId cand_child = ctx.egraph.findConst(node.getChildren()[candidate_choice]);
-        EClassId cand_child_base = resolve_view_alias(cand_child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
-        EClassId cand_target_base = ctx.get_inplace_alias(cand_child_base);
-
-        auto cand_sel_it = ctx.selection_map.find(cand_target_base);
-        if (cand_sel_it == ctx.selection_map.end())
-            return false;
-
-        const ENode &cand_base_node =
-            ctx.egraph.getENode(ctx.egraph.getEClass(cand_target_base).enodes[cand_sel_it->second]);
-        uint64_t cand_size = getSizeBytes(cand_base_node.getShape(), cand_base_node.getDType());
-        MemSpace cand_ms = cand_base_node.getMemSpace();
-
-        auto cand_birth_it = ctx.birth_times.find(cand_target_base);
-        if (cand_birth_it == ctx.birth_times.end())
-            return false;
-        uint32_t cand_birth = cand_birth_it->second;
-
-        for (int other_choice : ctx.current_choices)
-        {
-            if (other_choice < 0 || other_choice == candidate_choice)
-                continue;
-
-            if (static_cast<size_t>(other_choice) >= node.getChildren().size())
-                continue;
-
-            EClassId other_child = ctx.egraph.findConst(node.getChildren()[other_choice]);
-            EClassId other_child_base = resolve_view_alias(other_child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
-            EClassId other_target_base = ctx.get_inplace_alias(other_child_base);
-
-            auto other_sel_it = ctx.selection_map.find(other_target_base);
-            if (other_sel_it == ctx.selection_map.end())
-                continue;
-
-            const ENode &other_base_node =
-                ctx.egraph.getENode(ctx.egraph.getEClass(other_target_base).enodes[other_sel_it->second]);
-            uint64_t other_size = getSizeBytes(other_base_node.getShape(), other_base_node.getDType());
-            MemSpace other_ms = other_base_node.getMemSpace();
-
-            if (other_ms != cand_ms || other_size != cand_size)
-                continue;
-
-            auto other_birth_it = ctx.birth_times.find(other_target_base);
-            if (other_birth_it == ctx.birth_times.end())
-                continue;
-            uint32_t other_birth = other_birth_it->second;
-
-            if (other_birth > cand_birth)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-};
-
 class CommutativeInplaceSymmetryRule
 {
   public:
@@ -660,59 +519,6 @@ class CommutativeInplaceSymmetryRule
             }
         }
 
-        return false;
-    }
-};
-
-class DeadBufferReuseDominationRule
-{
-  public:
-    TG_PRUNING_RULE(DeadBufferReuseDominationRule)
-    DeadBufferReuseDominationRule(bool en = true) : enabled(en)
-    {
-    }
-
-    bool check(int candidate_choice, size_t /*candidate_choice_idx*/, const BufferizeContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (candidate_choice != -1)
-            return false;
-
-        EClassId eclass = ctx.ordered[ctx.k];
-        uint32_t sel = ctx.selection_map.at(eclass);
-        ENodeId enode_id = ctx.egraph.getEClass(eclass).enodes[sel];
-        const ENode &node = ctx.egraph.getENode(enode_id);
-        uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
-
-        for (int choice : ctx.current_choices)
-        {
-            if (choice < 0)
-                continue;
-            if (static_cast<size_t>(choice) >= node.getChildren().size())
-                continue;
-
-            EClassId child = ctx.egraph.findConst(node.getChildren()[choice]);
-            EClassId child_base = resolve_view_alias(child, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
-
-            auto death_it = ctx.death_times.find(child_base);
-            if (death_it == ctx.death_times.end() || death_it->second != ctx.k)
-                continue;
-
-            EClassId target_base = ctx.get_inplace_alias(child_base);
-            auto base_sel_it = ctx.selection_map.find(target_base);
-            if (base_sel_it == ctx.selection_map.end())
-                continue;
-
-            uint32_t base_sel = base_sel_it->second;
-            const ENode &base_node = ctx.egraph.getENode(ctx.egraph.getEClass(target_base).enodes[base_sel]);
-            if (base_node.getMemSpace() != node.getMemSpace())
-                continue;
-
-            uint64_t in_size = getSizeBytes(base_node.getShape(), base_node.getDType());
-            if (out_size <= in_size)
-                return true;
-        }
         return false;
     }
 };
@@ -1221,8 +1027,8 @@ BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
 }
 
 using AllBufferizeRuleTypes =
-    std::tuple<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule, IntervalSubsetDominationRule,
-               CommutativeInplaceSymmetryRule, DeadBufferReuseDominationRule, PeakMemoryPruningRule>;
+    std::tuple<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule, CommutativeInplaceSymmetryRule,
+               DeadBufferReuseDominationRule, PeakMemoryPruningRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId> &ordered, const EGraph &egraph,

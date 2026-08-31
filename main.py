@@ -82,6 +82,18 @@ def main():
         help="Disable dirty region session caching",
     )
     parser.add_argument(
+        "--log-cost-calls",
+        action="store_true",
+        default=True,
+        help="Log cost model calls to benchmarks/calls.bin (default: True)",
+    )
+    parser.add_argument(
+        "--no-log-cost-calls",
+        dest="log_cost_calls",
+        action="store_false",
+        help="Disable logging cost model calls to benchmarks/calls.bin",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
         default=0,
@@ -137,6 +149,7 @@ def main():
         compile_decode_buckets=args.compile_decode_buckets,
         disable_caching=args.disable_caching,
         threads=args.threads,
+        log_cost_calls=args.log_cost_calls,
     )
 
     print(f"Loading tokenizer for {args.model}...")

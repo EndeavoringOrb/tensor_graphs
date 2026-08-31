@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # txt2img.py
 import argparse
 import time
@@ -94,6 +93,18 @@ def main():
         "--disable-caching",
         action="store_true",
         help="Disable dirty region session caching",
+    )
+    parser.add_argument(
+        "--log-cost-calls",
+        action="store_true",
+        default=True,
+        help="Log cost model calls to benchmarks/calls.bin (default: True)",
+    )
+    parser.add_argument(
+        "--no-log-cost-calls",
+        dest="log_cost_calls",
+        action="store_false",
+        help="Disable logging cost model calls to benchmarks/calls.bin",
     )
     parser.add_argument(
         "--height", type=int, default=512, help="Output image height (divisible by 16)"
@@ -194,6 +205,7 @@ def main():
         min_compile_time=args.min_compile_time,
         disable_caching=args.disable_caching,
         threads=args.threads,
+        log_cost_calls=args.log_cost_calls,
     )
 
     tok_path = args.text_encoder_path if args.text_encoder_path else args.model_path

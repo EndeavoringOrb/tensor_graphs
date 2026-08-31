@@ -38,7 +38,6 @@ class Qwen3VLModel
     Graph &g;
     MemoryManager &mem;
     const std::string w_path;
-    std::unordered_map<std::string, LogicalId> weight_cache;
 
     std::string resolve_weight_name(const std::string &name)
     {
@@ -57,11 +56,6 @@ class Qwen3VLModel
 
     LogicalId weight(const std::string &name)
     {
-        auto it = weight_cache.find(name);
-        if (it != weight_cache.end())
-        {
-            return it->second;
-        }
         std::string resolved = resolve_weight_name(name);
         TensorMetadata meta = FileRegistry::get().getMetadata(w_path, resolved);
         LogicalId raw_weight = g.weight(w_path, resolved);
@@ -76,7 +70,6 @@ class Qwen3VLModel
             weight_f32 = g.mul(weight_f32, scale_expanded);
         }
 
-        weight_cache[name] = weight_f32;
         return weight_f32;
     }
 

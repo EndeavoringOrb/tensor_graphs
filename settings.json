@@ -2,16 +2,13 @@
   "rules": {
     "dispatch": {
       "InputDispatchDominationRule": true,
-      "UnifiedMemoryExchangeableDispatchRule": true,
-      "MemoryPressureDispatchRule": true,
+      "UnifiedMemoryExchangeableDispatchRule": false,
+      "MemoryPressureDispatchRule": false,
       "DispatchCostPruningRule": true
     },
     "bufferize": {
       "MemSpaceMismatchInplaceRule": true,
-      "LinearChainInplaceDominationRule": true,
-      "IntervalSubsetDominationRule": true,
       "CommutativeInplaceSymmetryRule": true,
-      "DeadBufferReuseDominationRule": true,
       "PeakMemoryPruningRule": true
     },
     "malloc": {
@@ -31,8 +28,7 @@
     },
     "enode": {
       "MemCapENodeDominationRule": true,
-      "FasterEquivalentENodeDominationRule": true,
-      "DeadChildChainDominationRule": true
+      "FasterEquivalentENodeDominationRule": true
     }
   }
 }

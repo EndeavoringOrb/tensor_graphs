@@ -21,6 +21,7 @@ struct ActionFeatureCache
 struct ActionFeatureExtractDispatch
 {
     float cost;
+    float min_dp_cp_cost = 0.0f;
     float dp_cost = 0.0f;
     uint64_t size; // n elements * dtype size
     std::vector<uint32_t> engine_idxs;
@@ -182,8 +183,14 @@ class HeuristicSearchDelegate : public SearchDelegate
         std::vector<uint32_t> res(ready_nodes.size());
         std::iota(res.begin(), res.end(), 0);
         std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+            // 1. Critical-path first (depth-first: consume and free tensors ASAP)
+            if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
+                return ready_nodes[a].min_dp_cp_cost < ready_nodes[b].min_dp_cp_cost;
+
+            // 2. Subtree work cost tie-breaker
             if (ready_nodes[a].dp_cost != ready_nodes[b].dp_cost)
                 return ready_nodes[a].dp_cost < ready_nodes[b].dp_cost;
+
             return ready_nodes[a].cost < ready_nodes[b].cost;
         });
         return res;

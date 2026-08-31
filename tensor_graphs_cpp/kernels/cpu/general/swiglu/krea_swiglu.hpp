@@ -60,7 +60,7 @@ inline LogicalId refFactoryKreaSwiglu(const std::vector<LogicalId> &inputs, Grap
     return g.mul(gate_silu, up);
 }
 
-REGISTER_KERNEL("Krea_SwiGLU", 2, 2, matchKreaSwiglu, runKreaSwiglu, refFactoryKreaSwiglu, {0},
+REGISTER_KERNEL("Krea_SwiGLU", 2, 2, matchKreaSwiglu, runKreaSwiglu, refFactoryKreaSwiglu, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 4224, 6144}, {1, 4224, 6144}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

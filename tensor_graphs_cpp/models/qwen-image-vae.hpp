@@ -51,8 +51,6 @@ class Krea2TurboVAEModel
     Graph &g;
     MemoryManager &mem;
     const std::string w_path;
-    std::unordered_map<std::string, LogicalId> weight_cache;
-    std::unordered_map<std::string, LogicalId> conv_weight_cache;
 
     std::string resolve_weight_name(const std::string &name)
     {
@@ -70,21 +68,14 @@ class Krea2TurboVAEModel
 
     LogicalId weight(const std::string &name)
     {
-        auto it = weight_cache.find(name);
-        if (it != weight_cache.end())
-            return it->second;
         std::string resolved = resolve_weight_name(name);
         LogicalId raw_weight = g.weight(w_path, resolved);
         LogicalId cast_w = g.cast(raw_weight, DType::FLOAT32);
-        weight_cache[name] = cast_w;
         return cast_w;
     }
 
     LogicalId load_conv_weight(const std::string &name, uint32_t out_c, uint32_t in_c, uint32_t k)
     {
-        auto it = conv_weight_cache.find(name);
-        if (it != conv_weight_cache.end())
-            return it->second;
         std::string resolved = resolve_weight_name(name);
         TensorMetadata meta = FileRegistry::get().getMetadata(w_path, resolved);
         LogicalId raw = g.weight(w_path, resolved);
@@ -105,7 +96,6 @@ class Krea2TurboVAEModel
         {
             res = g.reshape(raw_f32, {(int32_t)out_c, (int32_t)(in_c * k * k)});
         }
-        conv_weight_cache[name] = res;
         return res;
     }
 

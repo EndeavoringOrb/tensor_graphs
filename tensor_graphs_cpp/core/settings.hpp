@@ -657,10 +657,7 @@ struct Settings
             {"dispatch", "MemoryPressureDispatchRule"},
             {"dispatch", "DispatchCostPruningRule"},
             {"bufferize", "MemSpaceMismatchInplaceRule"},
-            {"bufferize", "LinearChainInplaceDominationRule"},
-            {"bufferize", "IntervalSubsetDominationRule"},
             {"bufferize", "CommutativeInplaceSymmetryRule"},
-            {"bufferize", "DeadBufferReuseDominationRule"},
             {"bufferize", "PeakMemoryPruningRule"},
             {"malloc", "OffsetMonotoneRule"},
             {"malloc", "IdMaxSymmetryRule"},
@@ -672,9 +669,7 @@ struct Settings
             {"extract", "ExtractorJacksonCarlierRule"},
             {"extract", "ExtractorDynamicMinCutRule"},
             {"enode", "MemCapENodeDominationRule"},
-            {"enode", "FasterEquivalentENodeDominationRule"},
-            {"enode", "DeadChildChainDominationRule"},
-        };
+            {"enode", "FasterEquivalentENodeDominationRule"}};
         for (const auto &p : defaults)
         {
             set_rule_enabled(p.first, p.second, enabled);

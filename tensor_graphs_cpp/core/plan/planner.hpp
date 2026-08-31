@@ -663,50 +663,12 @@ class FasterEquivalentENodeDominationRule
     }
 };
 
-class DeadChildChainDominationRule
-{
-  public:
-    TG_PRUNING_RULE(DeadChildChainDominationRule)
-    DeadChildChainDominationRule(bool en = true) : enabled(en)
-    {
-    }
-    bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        const ENode &enode = ctx.egraph.getENode(enodeId);
-        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
-            return false;
-        if (enode.getChildren().empty())
-            return false;
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            const EClass &cCls = ctx.egraph.getEClass(canon_child);
-            bool any_finite = false;
-            for (ENodeId c_enode_id : cCls.enodes)
-            {
-                if (ctx.enodeInfos[c_enode_id.value].cost != TGConstants::INF)
-                {
-                    any_finite = true;
-                    break;
-                }
-            }
-            if (!any_finite)
-                return true;
-        }
-        return false;
-    }
-};
-
-using AllENodeDominationRuleTypes =
-    std::tuple<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule, DeadChildChainDominationRule>;
+using AllENodeDominationRuleTypes = std::tuple<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule>;
 
 struct Planner
 {
     CostModel &costModel;
-    prune::PruningRuleSet<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule, DeadChildChainDominationRule>
-        domination_rules;
+    prune::PruningRuleSet<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule> domination_rules;
     const Settings &settings;
 
     void applyDominationRules(const EGraph &egraph, std::vector<ENodeInfo> &enodeInfos,

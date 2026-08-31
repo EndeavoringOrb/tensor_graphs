@@ -106,7 +106,7 @@ inline LogicalId refFactoryConv2dDot(const std::vector<LogicalId> &inputs, Graph
     return g.add(out, b_exp);
 }
 
-REGISTER_KERNEL("Conv2d_Im2Col_Dot_Add", 3, 3, matchConv2dDot, runConv2dDot, refFactoryConv2dDot, {0},
+REGISTER_KERNEL("Conv2d_Im2Col_Dot_Add", 3, 3, matchConv2dDot, runConv2dDot, refFactoryConv2dDot, {2},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
                 {{1, 384, 128, 128}, {1, 384, 3456}, {1, 384, 128, 128}}, {true, true, true},

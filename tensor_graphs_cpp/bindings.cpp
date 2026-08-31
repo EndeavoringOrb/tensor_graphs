@@ -111,7 +111,7 @@ class LLMSession
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
-               uint32_t threads = 0)
+               uint32_t threads = 0, bool log_cost_calls = true)
     {
         if (threads > 0)
         {
@@ -163,7 +163,7 @@ class LLMSession
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, act_delegate);
+                                            min_compile_time, act_delegate, log_cost_calls);
 
         if (compile_decode_buckets)
         {
@@ -287,7 +287,8 @@ class Krea2Session
                  const std::string &vae_path = "", uint32_t height = 1024, uint32_t width = 1024,
                  uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
                  std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
-                 const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0)
+                 const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
+                 bool log_cost_calls = true)
         : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
     {
         if (threads > 0)
@@ -359,7 +360,7 @@ class Krea2Session
         }
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, act_delegate);
+                                            min_compile_time, act_delegate, log_cost_calls);
         session->compile(true);
     }
 
@@ -566,6 +567,7 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
         .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
         .def_readwrite("dp_cost", &ActionFeatureExtractDispatch::dp_cost)
+        .def_readwrite("min_dp_cp_cost", &ActionFeatureExtractDispatch::min_dp_cp_cost)
         .def_readwrite("size", &ActionFeatureExtractDispatch::size)
         .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
         .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
@@ -641,19 +643,21 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t>(),
+                      const std::string &, bool, uint32_t, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false, py::arg("threads") = 0)
+             py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
-                      uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t>(),
+                      uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t,
+                      bool>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
              py::arg("mu") = 1.15f, py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
-             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0)
+             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
+             py::arg("log_cost_calls") = true)
         .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"));
 }
