@@ -608,14 +608,14 @@ struct Graph
         if (repeats <= 1)
             return id;
         int32_t r = repeats, a = axis;
-        return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32), loc);
+        return repeat(id, constant({1}, &r, DType::INT32, loc), constant({1}, &a, DType::INT32, loc), loc);
     }
 
     LogicalId fill(const LogicalId scalar_id, const std::vector<uint32_t> &shape,
                    SourceLocation loc = SourceLocation::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
-        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32, loc);
         return fill(scalar_id, shape_node, loc);
     }
 
@@ -623,64 +623,55 @@ struct Graph
                    SourceLocation loc = SourceLocation::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
-        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
-        return fill(constant({1}, &value, DType::FLOAT32), shape_node, loc);
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32, loc);
+        return fill(constant({1}, &value, DType::FLOAT32, loc), shape_node, loc);
     }
 
     LogicalId fill(const int32_t value, const std::vector<uint32_t> &shape,
                    SourceLocation loc = SourceLocation::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
-        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
-        return fill(constant({1}, &value, DType::INT32), shape_node, loc);
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32, loc);
+        return fill(constant({1}, &value, DType::INT32, loc), shape_node, loc);
     }
 
     LogicalId reshape(LogicalId id, const std::vector<int32_t> &shape, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32);
+        LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32, loc);
         return reshape(id, shape_node, loc);
     }
 
     LogicalId concat(std::vector<LogicalId> ids, uint32_t axis, SourceLocation loc = SourceLocation::current())
     {
-        return concat(ids, constant({1}, &axis, DType::INT32), loc);
+        return concat(ids, constant({1}, &axis, DType::INT32, loc), loc);
     }
 
     LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape, SourceLocation loc = SourceLocation::current())
     {
-        // 1. Create a zero tensor with matching shape
-        LogicalId zeros = fill(0.0f, shape);
-
-        // 2. Element-wise comparison: (0 < scores) -> BOOL tensor
-        LogicalId is_positive = lt(zeros, scores);
-
-        // 3. Cast BOOL -> FLOAT32 (1.0f for true, 0.0f for false)
-        LogicalId mask_f32 = cast(is_positive, DType::FLOAT32);
-
-        // 4. Element-wise multiply: x * (x > 0)
-        LogicalId relu_scores = mul(scores, mask_f32);
-
-        return relu_scores;
+        LogicalId zeros = fill(0.0f, shape, loc);
+        LogicalId is_positive = lt(zeros, scores, loc);
+        LogicalId mask_f32 = cast(is_positive, DType::FLOAT32, loc);
+        return mul(scores, mask_f32, loc);
     }
 
-    LogicalId constant(const std::vector<int32_t> &vals)
+    LogicalId constant(const std::vector<int32_t> &vals, SourceLocation loc = SourceLocation::current())
     {
-        return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32);
+        return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32, loc);
     }
 
     LogicalId sum(LogicalId id0, int32_t axis, SourceLocation loc = SourceLocation::current())
     {
-        return sum(id0, constant({1}, &axis, DType::INT32), loc);
+        return sum(id0, constant({1}, &axis, DType::INT32, loc), loc);
     }
 
     LogicalId max(LogicalId id0, int32_t axis, SourceLocation loc = SourceLocation::current())
     {
-        return max(id0, constant({1}, &axis, DType::INT32), loc);
+        return max(id0, constant({1}, &axis, DType::INT32, loc), loc);
     }
 
     LogicalId permute(LogicalId id0, const std::vector<int32_t> &dims, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId dims_node = constant({(uint32_t)dims.size()}, dims.data(), DType::INT32);
+        LogicalId dims_node = constant({(uint32_t)dims.size()}, dims.data(), DType::INT32, loc);
         return permute(id0, dims_node, loc);
     }
 
@@ -689,35 +680,33 @@ struct Graph
     {
         std::vector<int32_t> actual_steps = steps;
         if (actual_steps.empty())
-        {
             actual_steps.assign(starts.size(), 1);
-        }
-        LogicalId st_node = constant({(uint32_t)starts.size()}, starts.data(), DType::INT32);
-        LogicalId en_node = constant({(uint32_t)ends.size()}, ends.data(), DType::INT32);
-        LogicalId step_node = constant({(uint32_t)actual_steps.size()}, actual_steps.data(), DType::INT32);
+        LogicalId st_node = constant({(uint32_t)starts.size()}, starts.data(), DType::INT32, loc);
+        LogicalId en_node = constant({(uint32_t)ends.size()}, ends.data(), DType::INT32, loc);
+        LogicalId step_node = constant({(uint32_t)actual_steps.size()}, actual_steps.data(), DType::INT32, loc);
         return slice(id0, st_node, en_node, step_node, loc);
     }
 
     LogicalId arange(int32_t start, int32_t stop, int32_t step = 1, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId st_node = constant({1}, &start, DType::INT32);
-        LogicalId sp_node = constant({1}, &stop, DType::INT32);
-        LogicalId step_node = constant({1}, &step, DType::INT32);
+        LogicalId st_node = constant({1}, &start, DType::INT32, loc);
+        LogicalId sp_node = constant({1}, &stop, DType::INT32, loc);
+        LogicalId step_node = constant({1}, &step, DType::INT32, loc);
         return arange(st_node, sp_node, step_node, loc);
     }
 
     LogicalId triu(LogicalId id0, int32_t k = 0, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId k_node = constant({1}, &k, DType::INT32);
+        LogicalId k_node = constant({1}, &k, DType::INT32, loc);
         return triu(id0, k_node, loc);
     }
 
     LogicalId im2col(LogicalId input_id, int32_t kernel_size, int32_t stride, int32_t padding,
                      SourceLocation loc = SourceLocation::current())
     {
-        LogicalId k_id = constant({1}, &kernel_size, DType::INT32);
-        LogicalId s_id = constant({1}, &stride, DType::INT32);
-        LogicalId p_id = constant({1}, &padding, DType::INT32);
+        LogicalId k_id = constant({1}, &kernel_size, DType::INT32, loc);
+        LogicalId s_id = constant({1}, &stride, DType::INT32, loc);
+        LogicalId p_id = constant({1}, &padding, DType::INT32, loc);
         return im2col(input_id, k_id, s_id, p_id, loc);
     }
 };

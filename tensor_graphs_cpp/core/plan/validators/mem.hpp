@@ -264,7 +264,64 @@ class PeakMemoryPruningRule
             {
                 if (usage[t] + size > cap)
                 {
-                    LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size();
+                    // TODO: Temporary diagnostic print to inspect alive tensors during OOM
+                    static bool printed_once = false;
+                    if (!printed_once)
+                    {
+                        printed_once = true; // Avoid spamming stdout on every search branch
+                        std::cout << "\n==================== [OOM DIAGNOSTIC AT k=" << ctx.k << ", timestep t=" << t
+                                  << "] ====================\n";
+                        std::cout << "Attempted node: "
+                                  << (node.getDebugOrigin().empty() ? "unknown" : node.getDebugOrigin())
+                                  << "\n  Op: " << toString(node.getOpType())
+                                  << " | Shape: " << toString(node.getShape())
+                                  << " | Requesting: " << (size / (1024.0 * 1024.0)) << " MB\n";
+                        std::cout << "  Usage at t=" << t << ": " << (usage[t] / (1024.0 * 1024.0))
+                                  << " MB / Cap: " << (cap / (1024.0 * 1024.0)) << " MB\n\n";
+                        std::cout << "--- Active (Alive) Tensors in Memory at Timestep " << t << " ---\n";
+
+                        uint64_t accounted_bytes = 0;
+                        for (uint32_t prev_k = 0; prev_k < ctx.k; ++prev_k)
+                        {
+                            EClassId prev_eclass = ctx.ordered[prev_k];
+                            uint32_t prev_sel = ctx.selection_map.at(prev_eclass);
+                            ENodeId prev_enode_id = ctx.egraph.getEClass(prev_eclass).enodes[prev_sel];
+                            const ENode &prev_node = ctx.egraph.getENode(prev_enode_id);
+
+                            if (prev_node.getMemSpace() != ms)
+                                continue;
+                            if (prev_node.getOpType() == OpType::INPUT || prev_node.getOpType() == OpType::CACHE)
+                                continue;
+
+                            uint32_t b_prev =
+                                ctx.birth_times.count(prev_eclass) ? ctx.birth_times.at(prev_eclass) : prev_k;
+                            uint32_t d_prev =
+                                ctx.death_times.count(prev_eclass) ? ctx.death_times.at(prev_eclass) : prev_k + 1;
+
+                            // A node is alive at timestep t if t falls within its active interval
+                            if (b_prev <= t && t <= d_prev)
+                            {
+                                uint64_t prev_sz =
+                                    (getSizeBytes(prev_node.getShape(), prev_node.getDType()) + 4095) & ~4095ULL;
+                                accounted_bytes += prev_sz;
+                                std::cout
+                                    << "  - [k=" << prev_k << ", life=[" << b_prev << ".." << d_prev << "]] "
+                                    << std::setw(8) << std::fixed << std::setprecision(2)
+                                    << (prev_sz / (1024.0 * 1024.0)) << " MB"
+                                    << " | " << toString(prev_node.getShape()) << " | "
+                                    << toString(prev_node.getOpType()) << " | "
+                                    << (prev_node.getDebugOrigin().empty() ? "unknown" : prev_node.getDebugOrigin())
+                                    << "\n";
+                            }
+                        }
+                        std::cout
+                            << "-----------------------------------------------------------------------------------\n";
+                        std::cout << "Total Active Live Memory: " << (accounted_bytes / (1024.0 * 1024.0)) << " MB\n";
+                        std::cout << "================================================================================="
+                                     "==\n\n";
+                    }
+                    LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size() << " ("
+                               << (node.getDebugOrigin().empty() ? "unknown" : node.getDebugOrigin()) << ")";
                     return true;
                 }
             }
@@ -284,7 +341,8 @@ class PeakMemoryPruningRule
                 {
                     if (usage[t] + size > cap)
                     {
-                        LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size();
+                        LOG(DEBUG) << "OOM k=" << ctx.k << "/" << ctx.ordered.size() << " ("
+                                   << (node.getDebugOrigin().empty() ? "unknown" : node.getDebugOrigin()) << ")";
                         return true;
                     }
                 }
@@ -1027,8 +1085,7 @@ BufferizeIterator<std::decay_t<Rules>...> makeBufferizeIteratorWithDelegate(
 }
 
 using AllBufferizeRuleTypes =
-    std::tuple<MemSpaceMismatchInplaceRule, LinearChainInplaceDominationRule, CommutativeInplaceSymmetryRule,
-               DeadBufferReuseDominationRule, PeakMemoryPruningRule>;
+    std::tuple<MemSpaceMismatchInplaceRule, CommutativeInplaceSymmetryRule, PeakMemoryPruningRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredBufferizeIteratorFromBools(const std::vector<EClassId> &ordered, const EGraph &egraph,

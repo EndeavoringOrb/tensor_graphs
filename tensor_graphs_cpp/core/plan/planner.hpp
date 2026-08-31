@@ -1900,7 +1900,8 @@ struct Planner
 
                 ENode enode =
                     ENode(KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype,
-                          graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, contentHash);
+                          graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, contentHash,
+                          0, node.debugOrigin);
                 baseState.egraph.addENode(e_class_id, enode);
                 continue;
             }
@@ -2015,8 +2016,8 @@ struct Planner
                 {
                     strides = calcContiguousStrides(node.getShape());
                 }
-                ENode enode =
-                    ENode(uid, node.opType, node.opName, children, node.getShape(), strides, node.dtype, ram, {cpu});
+                ENode enode = ENode(uid, node.opType, node.opName, children, node.getShape(), strides, node.dtype, ram,
+                                    {cpu}, "", 0, node.debugOrigin);
                 baseState.egraph.addENode(e_class_id, enode);
             }
 

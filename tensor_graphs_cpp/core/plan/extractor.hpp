@@ -610,6 +610,8 @@ class MemoryPressureDispatchRule
         // If even the lower-bound memory during this node's execution exceeds cap, prune immediately!
         if (cur_mem + out_size > cap)
         {
+            // LOG(DEBUG) << "OOM in MemoryPressureDispatchRule ("
+            //            << (enode.getDebugOrigin().empty() ? "unknown" : enode.getDebugOrigin()) << ")";
             return true; // PRUNE: Guaranteed to OOM in bufferizer
         }
 
@@ -1355,8 +1357,9 @@ class ExtractorDynamicMinCutRule
         uint64_t local_peak = (can_be_inplace ? 0 : out_size) + input_sum_in_ms;
         if (local_peak > cap)
         {
-            LOG(INFO) << "OOM at path size " << ctx.path.size();
-            return true; // Prune: single node OOM
+            LOG(INFO) << "OOM at path size " << ctx.path.size() << " ("
+                      << (enode.getDebugOrigin().empty() ? "unknown" : enode.getDebugOrigin()) << ")";
+            return true;
         }
 
         // 2. Cut Memory Lower Bound (Active Bypass Frontier + Current Node Demand)
@@ -1381,8 +1384,9 @@ class ExtractorDynamicMinCutRule
         uint64_t total_cut_memory = live_bypass_bytes + local_peak;
         if (total_cut_memory > cap)
         {
-            LOG(INFO) << "OOM at path size " << ctx.path.size();
-            return true; // Prune: Cut lower bound exceeds memory cap
+            LOG(INFO) << "OOM at path size " << ctx.path.size() << " ("
+                      << (enode.getDebugOrigin().empty() ? "unknown" : enode.getDebugOrigin()) << ")";
+            return true;
         }
 
         return false;

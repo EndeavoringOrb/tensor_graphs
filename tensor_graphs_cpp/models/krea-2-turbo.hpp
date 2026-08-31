@@ -82,22 +82,22 @@ class Krea2TurboModel
     MemoryManager &mem;
     const std::string w_path;
 
-    LogicalId weight(const std::string &name)
+    LogicalId weight(const std::string &name, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId raw_weight = g.weight(w_path, name);
-        LogicalId cast_w = g.cast(raw_weight, DType::FLOAT32);
+        LogicalId raw_weight = g.weight(w_path, name, loc);
+        LogicalId cast_w = g.cast(raw_weight, DType::FLOAT32, loc);
         return cast_w;
     }
 
     LogicalId linear(LogicalId x, const std::string &w_name, const std::string &b_name, uint32_t in_d, uint32_t out_d,
-                     uint32_t S)
+                     uint32_t S, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId w = weight(w_name);
+        LogicalId w = weight(w_name, loc);
         LogicalId w_t = g.contiguous(g.permute(w, {1, 0}));
         LogicalId out = g.dot(x, g.reshape(w_t, {1, (int32_t)in_d, (int32_t)out_d}));
         if (!b_name.empty() && FileRegistry::get().hasTensor(w_path, b_name))
         {
-            LogicalId b = weight(b_name);
+            LogicalId b = weight(b_name, loc);
             LogicalId b_exp = g.repeat(g.reshape(b, {1, 1, (int32_t)out_d}), S, 1);
             out = g.add(out, b_exp);
         }

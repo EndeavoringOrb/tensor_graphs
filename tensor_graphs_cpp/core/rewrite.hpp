@@ -107,13 +107,14 @@ struct Rule
 inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClassId> &children,
                               const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
                               MemSpace mem_space, EClassId targetEClass = EClassId(),
-                              SourceLocation loc = SourceLocation::current())
+                              SourceLocation loc = SourceLocation::current(), const std::string &debugOrigin = "")
 {
     EClassId cls = targetEClass;
     if (cls == EClassId())
     {
         cls = egraph.addEClass(shape, strides, dtype, mem_space);
     }
+    std::string origin = debugOrigin.empty() ? toString(loc) : debugOrigin;
 
     TensorNode outNode;
     outNode.opType = op;
@@ -177,7 +178,7 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
                            &actual_engines);
 
             ENode n(uid, op, kernel.opName, children, shape, kernel.is_view ? strides : calcContiguousStrides(shape),
-                    dtype, mem_space, actual_engines);
+                    dtype, mem_space, actual_engines, "", 0, origin);
 
             cls = egraph.addENode(cls, n);
         }
@@ -185,18 +186,21 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
     return cls;
 }
 
-inline EClassId copyTo(EGraph &egraph, EClassId class_id, MemSpace target_mem_space)
+inline EClassId copyTo(EGraph &egraph, EClassId class_id, MemSpace target_mem_space,
+                       const std::string &debugOrigin = "")
 {
     EClassId canon = egraph.find(class_id);
     const EClass cls = egraph.getEClass(canon);
     if (cls.mem_space == target_mem_space)
         return canon;
 
-    return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.dtype, target_mem_space);
+    return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.dtype, target_mem_space,
+                         EClassId(), SourceLocation::current(), debugOrigin);
 }
 
 inline EClassId createCacheInputNode(EGraph &egraph, EClassId sourceClassId,
-                                     std::unordered_map<EClassId, LogicalId> &eclassToLogical)
+                                     std::unordered_map<EClassId, LogicalId> &eclassToLogical,
+                                     const std::string &debugOrigin = "")
 {
     EClassId canonSrcClass = egraph.findConst(sourceClassId);
     const EClass srcClass = egraph.getEClass(canonSrcClass);
@@ -222,7 +226,7 @@ inline EClassId createCacheInputNode(EGraph &egraph, EClassId sourceClassId,
     }
 
     ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, srcClass.shape, srcClass.strides, srcClass.dtype,
-                    srcClass.mem_space, {}, toString(srcLogicalId));
+                    srcClass.mem_space, {}, toString(srcLogicalId), 0, debugOrigin);
     op_cache = egraph.addENode(op_cache, cacheNode);
 
     eclassToLogical[op_cache] = srcLogicalId;

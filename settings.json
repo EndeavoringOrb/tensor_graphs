@@ -2,8 +2,8 @@
   "rules": {
     "dispatch": {
       "InputDispatchDominationRule": true,
-      "UnifiedMemoryExchangeableDispatchRule": false,
-      "MemoryPressureDispatchRule": false,
+      "UnifiedMemoryExchangeableDispatchRule": true,
+      "MemoryPressureDispatchRule": true,
       "DispatchCostPruningRule": true
     },
     "bufferize": {
@@ -24,7 +24,7 @@
     "extract": {
       "InfiniteCostSkipRule": true,
       "ExtractorJacksonCarlierRule": true,
-      "ExtractorDynamicMinCutRule": false
+      "ExtractorDynamicMinCutRule": true
     },
     "enode": {
       "MemCapENodeDominationRule": true,

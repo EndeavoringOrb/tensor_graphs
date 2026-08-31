@@ -11,15 +11,16 @@
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 
-class ENode
+struct ENode
 {
   public:
     ENode(KernelId kernelId, OpType opType, std::string opName, std::vector<EClassId> children,
           std::vector<uint32_t> shape, std::vector<uint64_t> strides, DType dtype, MemSpace mem_space,
-          std::vector<Engine> engines, std::string contentHash = "", uint64_t sig = 0)
+          std::vector<Engine> engines, std::string contentHash = "", uint64_t sig = 0, std::string debugOrigin = "")
         : kernelId(kernelId), opType(opType), opName(std::move(opName)), children(std::move(children)),
           shape(std::move(shape)), strides(std::move(strides)), dtype(dtype), mem_space(mem_space),
-          engines(std::move(engines)), contentHash(std::move(contentHash)), sig(sig)
+          engines(std::move(engines)), contentHash(std::move(contentHash)), sig(sig),
+          debugOrigin(std::move(debugOrigin))
     {
     }
 
@@ -80,6 +81,10 @@ class ENode
     {
         return sig;
     }
+    const std::string &getDebugOrigin() const
+    {
+        return debugOrigin;
+    }
 
     // Setters
     void setChildren(std::vector<EClassId> newChildren)
@@ -90,20 +95,24 @@ class ENode
     {
         sig = newSig;
     }
+    void setDebugOrigin(std::string origin)
+    {
+        debugOrigin = std::move(origin);
+    }
 
   private:
     KernelId kernelId;
     OpType opType;
     std::string opName;
-    std::vector<EClassId> children; // list of child eclass ids
+    std::vector<EClassId> children;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
     DType dtype;
     MemSpace mem_space;
     std::vector<Engine> engines;
     std::string contentHash;
-
-    uint64_t sig; // Precomputed structural signature used by hashcons buckets.
+    uint64_t sig;
+    std::string debugOrigin;
 };
 
 struct EClass

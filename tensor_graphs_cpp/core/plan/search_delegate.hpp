@@ -185,7 +185,7 @@ class HeuristicSearchDelegate : public SearchDelegate
         std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
             // 1. Critical-path first (depth-first: consume and free tensors ASAP)
             if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
-                return ready_nodes[a].min_dp_cp_cost < ready_nodes[b].min_dp_cp_cost;
+                return ready_nodes[a].min_dp_cp_cost > ready_nodes[b].min_dp_cp_cost;
 
             // 2. Subtree work cost tie-breaker
             if (ready_nodes[a].dp_cost != ready_nodes[b].dp_cost)
