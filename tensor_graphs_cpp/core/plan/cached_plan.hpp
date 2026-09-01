@@ -587,7 +587,6 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
 
         auto extractor = makeConfiguredExtractor(state->egraph, rootEClassId, state->enodeInfos, delegate,
                                                  ctx->settings, &best_cost, &reduced_caps, &timeout_checker);
-        extractor.registerValidator(std::make_unique<CycleValidator>(state->egraph));
 
         uint32_t extract_count = 0;
         while (extractor.getNextSelection())

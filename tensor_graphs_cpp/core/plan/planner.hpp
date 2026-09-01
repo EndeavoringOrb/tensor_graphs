@@ -28,8 +28,7 @@
 #include "core/plan/extractor.hpp"
 #include "core/plan/pruning.hpp"
 #include "core/plan/search_delegate.hpp"
-#include "core/plan/validators/cycle.hpp"
-#include "core/plan/validators/mem.hpp"
+#include "core/plan/mem.hpp"
 #include "core/rewrite.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/timer.hpp"
@@ -1569,7 +1568,6 @@ struct Planner
 
         auto extractor = makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools,
                                                           &best_cost, &reduced_caps, &timeout_checker);
-        extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
 
         int max_iters = 10'000'000;
         int remaining_iters = max_iters;
@@ -1799,6 +1797,7 @@ struct Planner
             if (logical_id != LogicalId{UINT32_MAX} && logical_id.value != UINT32_MAX)
             {
                 compiled.eclass_to_logical[eclass_id] = logical_id;
+                compiled.logical_to_eclass[logical_id] = eclass_id;
             }
 
             OpInstruction inst;
@@ -1816,6 +1815,7 @@ struct Planner
                     if (eclassToLogical.count(canon_child))
                     {
                         compiled.eclass_to_logical[canon_child] = eclassToLogical.at(canon_child);
+                        compiled.logical_to_eclass[eclassToLogical.at(canon_child)] = canon_child;
                     }
                     else
                     {
@@ -1824,6 +1824,7 @@ struct Planner
                         if (eclassToLogical.count(base_child))
                         {
                             compiled.eclass_to_logical[canon_child] = eclassToLogical.at(base_child);
+                            compiled.logical_to_eclass[eclassToLogical.at(base_child)] = canon_child;
                         }
                     }
                 }
@@ -1959,11 +1960,46 @@ struct Planner
 
         compiled.nodeCosts = extraction.eclass_to_cost;
 
+        // Register all graph inputs/logical nodes and map into nodeViews
+        for (const auto &pair : nodeToEClass)
+        {
+            LogicalId lid = pair.first;
+            EClassId cid = egraph.findConst(pair.second);
+            compiled.logical_to_eclass[lid] = cid;
+            if (!compiled.eclass_to_logical.count(cid))
+            {
+                compiled.eclass_to_logical[cid] = lid;
+            }
+
+            if (!compiled.nodeViews.count(cid))
+            {
+                auto out_buf_it = extraction.eclass_to_buf.find(cid);
+                if (out_buf_it != extraction.eclass_to_buf.end())
+                {
+                    BufferId buf_id = out_buf_it->second;
+                    for (const auto &buf : extraction.buffers)
+                    {
+                        if (buf.id == buf_id)
+                        {
+                            const EClass &cls = egraph.getEClass(cid);
+                            compiled.nodeViews[cid] =
+                                TensorView(cls.shape, buf.offset >= 0 ? buf.offset : 0, cls.strides, cls.dtype);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         for (const auto &kv : eclassToLogical)
         {
             if (!compiled.eclass_to_logical.count(kv.first))
             {
                 compiled.eclass_to_logical[kv.first] = kv.second;
+            }
+            if (!compiled.logical_to_eclass.count(kv.second))
+            {
+                compiled.logical_to_eclass[kv.second] = kv.first;
             }
         }
 

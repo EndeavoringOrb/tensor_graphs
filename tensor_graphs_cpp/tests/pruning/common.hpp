@@ -17,7 +17,7 @@
 #include "core/misc.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/rule_registry.hpp"
-#include "core/plan/validators/mem.hpp"
+#include "core/plan/mem.hpp"
 #include "core/types.hpp"
 #include "tests/common.hpp"
 

@@ -4,7 +4,8 @@
       "InputDispatchDominationRule": false,
       "UnifiedMemoryExchangeableDispatchRule": false,
       "MemoryPressureDispatchRule": true,
-      "DispatchCostPruningRule": true
+      "DispatchCostPruningRule": true,
+      "DispatchCycleRule": true
     },
     "bufferize": {
       "MemSpaceMismatchInplaceRule": true,
@@ -24,6 +25,7 @@
     },
     "extract": {
       "InfiniteCostSkipRule": true,
+      "ExtractorCycleStepRule": true,
       "ExtractorJacksonCarlierRule": true,
       "ExtractorDynamicMinCutRule": false
     },

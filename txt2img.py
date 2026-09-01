@@ -146,9 +146,7 @@ def main():
     prompt = args.prompt_file.read_text(encoding="utf-8").strip()
 
     print("=========================================================")
-    print(" Krea 2 Turbo (Unified Pipeline: Qwen3-VL + 12B DiT + VAE)")
-    print(f" Prompt File: {args.prompt_file}")
-    print(f" Prompt: {prompt!r}")
+    print(" Krea 2 Turbo (Qwen3-VL + 12B DiT + VAE)")
     print(
         f" Resolution: {args.width}x{args.height} | Steps: {args.steps} | Shift mu: {args.mu}"
     )

@@ -22,7 +22,6 @@
 #include "core/misc.hpp"
 #include "core/plan/pruning.hpp"
 #include "core/plan/search_delegate.hpp"
-#include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
 #include "core/settings.hpp"
 #include "core/shape_propagator.hpp"
@@ -734,6 +733,115 @@ class MemoryPressureDispatchRule
 };
 
 // =============================================================================
+// Dispatch Pruning Rule: Cycle Detection
+// =============================================================================
+class DispatchCycleRule
+{
+  public:
+    TG_PRUNING_RULE(DispatchCycleRule)
+    DispatchCycleRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
+    bool has_cycle = false;
+
+    bool detectCycles(const DispatchContext &ctx) const
+    {
+        uint32_t max_class_id = static_cast<uint32_t>(ctx.egraph.getClasses().size());
+        std::vector<int32_t> in_degree(max_class_id, 0);
+        std::vector<std::vector<EClassId>> dependents(max_class_id);
+        std::vector<EClassId> ready;
+        ready.reserve(ctx.selection_map.size());
+
+        std::vector<uint8_t> in_selection(max_class_id, 0);
+        for (const auto &kv : ctx.selection_map)
+        {
+            EClassId canon_key = ctx.egraph.findConst(kv.first);
+            if (canon_key.value < max_class_id)
+            {
+                in_selection[canon_key.value] = 1;
+            }
+        }
+
+        std::vector<EClassId> unique_children;
+        for (const auto &kv : ctx.selection_map)
+        {
+            EClassId node = ctx.egraph.findConst(kv.first);
+            if (node.value >= max_class_id)
+                continue;
+
+            uint32_t sel = kv.second;
+            ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
+            const ENode &enode = ctx.egraph.getENode(enode_id);
+
+            unique_children.clear();
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = ctx.egraph.findConst(child);
+                if (canon_child.value < max_class_id && in_selection[canon_child.value] && canon_child != node)
+                {
+                    if (std::find(unique_children.begin(), unique_children.end(), canon_child) == unique_children.end())
+                    {
+                        unique_children.push_back(canon_child);
+                    }
+                }
+            }
+
+            in_degree[node.value] = static_cast<int32_t>(unique_children.size());
+            if (in_degree[node.value] == 0)
+            {
+                ready.push_back(node);
+            }
+
+            for (EClassId canon_child : unique_children)
+            {
+                dependents[canon_child.value].push_back(node);
+            }
+        }
+
+        size_t processed = 0;
+        while (!ready.empty())
+        {
+            EClassId curr = ready.back();
+            ready.pop_back();
+            processed++;
+
+            for (EClassId dep : dependents[curr.value])
+            {
+                in_degree[dep.value]--;
+                if (in_degree[dep.value] == 0)
+                {
+                    ready.push_back(dep);
+                }
+            }
+        }
+
+        return processed < ctx.selection_map.size();
+    }
+
+  public:
+    void init(const DispatchContext &ctx)
+    {
+        if (enabled)
+        {
+            has_cycle = detectCycles(ctx);
+        }
+        else
+        {
+            has_cycle = false;
+        }
+    }
+
+    bool check(EClassId /*cand*/, size_t /*cand_idx*/, const DispatchContext & /*ctx*/) const
+    {
+        if (!enabled)
+            return false;
+        return has_cycle;
+    }
+};
+
+// =============================================================================
 // DispatchIterator
 // =============================================================================
 template <typename... Rules> struct DispatchIterator
@@ -815,7 +923,6 @@ template <typename... Rules> struct DispatchIterator
 
             if (pos == total_nodes)
             {
-                LOG(DEBUG) << "pos == total_nodes";
                 DispatchContext leaf_ctx{egraph,        selection_map, enodeInfos, ordered,
                                          current_ready, pos,           mem_caps,   best_cost};
                 if (rules.validate_leaf(leaf_ctx))
@@ -839,7 +946,6 @@ template <typename... Rules> struct DispatchIterator
                     delegate->push_state();
 
                     std::vector<ActionFeatureExtractDispatch> features;
-                    LOG(DEBUG) << "creating features for " << current_ready.size() << " options";
                     features.reserve(current_ready.size());
                     for (auto id : current_ready)
                     {
@@ -917,7 +1023,6 @@ template <typename... Rules> struct DispatchIterator
                 }
                 
                 uint32_t choice_idx = selection_at_pos[pos];
-                LOG(DEBUG) << "choice_idx " << choice_idx;
                 selection_at_pos[pos] = choice_idx + 1;
                 uint32_t choice = choice_orders[pos][choice_idx];
 
@@ -1231,7 +1336,7 @@ DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
 }
 
 using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule,
-                                        MemoryPressureDispatchRule, DispatchCostPruningRule>;
+                                        MemoryPressureDispatchRule, DispatchCostPruningRule, DispatchCycleRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredDispatchIteratorFromBools(const EGraph &egraph,
@@ -1952,13 +2057,116 @@ class InfiniteCostSkipRule
 };
 
 // =============================================================================
+// Extractor Pruning Rule: Step Cycle Reachability
+// =============================================================================
+class ExtractorCycleStepRule
+{
+  public:
+    TG_PRUNING_RULE(ExtractorCycleStepRule)
+    ExtractorCycleStepRule(bool en = true) : enabled(en)
+    {
+    }
+
+  private:
+    mutable std::vector<uint32_t> visited;
+    mutable uint32_t visited_gen = 0;
+
+    bool reaches(EClassId start, EClassId target, const EGraph &egraph,
+                 const std::unordered_map<EClassId, uint32_t> &selection_map) const
+    {
+        if (start == target)
+            return true;
+
+        if (visited.size() < egraph.getClasses().size())
+            visited.assign(egraph.getClasses().size(), 0);
+
+        if (++visited_gen == 0)
+        {
+            std::fill(visited.begin(), visited.end(), 0);
+            visited_gen = 1;
+        }
+        visited[start.value] = visited_gen;
+
+        std::vector<EClassId> q;
+        q.push_back(start);
+
+        size_t head = 0;
+        while (head < q.size())
+        {
+            EClassId curr = q[head++];
+
+            auto it = selection_map.find(curr);
+            if (it == selection_map.end())
+                continue;
+
+            uint32_t sel = it->second;
+            const auto &cls = egraph.getEClass(curr);
+            if (sel >= cls.enodes.size())
+                continue;
+
+            ENodeId enode_id = cls.enodes[sel];
+            const ENode &enode = egraph.getENode(enode_id);
+
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = egraph.findConst(child);
+                if (canon_child == target)
+                {
+                    return true;
+                }
+
+                if (canon_child.value < visited.size() && visited[canon_child.value] != visited_gen)
+                {
+                    visited[canon_child.value] = visited_gen;
+                    q.push_back(canon_child);
+                }
+            }
+        }
+        return false;
+    }
+
+  public:
+    void init(const ExtractContext &ctx)
+    {
+        visited.assign(ctx.egraph.getClasses().size(), 0);
+        visited_gen = 0;
+    }
+
+    bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
+    {
+        if (!enabled)
+            return false;
+
+        EClassId current = ctx.current;
+        if (current.value == UINT32_MAX)
+            return false;
+
+        EClassId canon_current = ctx.egraph.findConst(current);
+        const ENode &enode = ctx.egraph.getENode(cand);
+
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId canon_child = ctx.egraph.findConst(child);
+            if (canon_child == canon_current)
+                return true;
+
+            if (ctx.selection_map.find(canon_child) != ctx.selection_map.end())
+            {
+                if (reaches(canon_child, canon_current, ctx.egraph, ctx.selection_map))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+};
+
+// =============================================================================
 // Extractor<Rules...> -- zero-overhead, rules inlined via std::tuple
 // =============================================================================
 template <typename... Rules> struct Extractor
 {
-  private:
-    std::vector<std::unique_ptr<ISelectionValidator>> validators;
-
   public:
     prune::PruningRuleSet<Rules...> rules;
     const float *best_cost = nullptr;
@@ -1993,25 +2201,6 @@ template <typename... Rules> struct Extractor
         ExtractContext ctx{egraph, enodeInfos,  selection_map, path,    EClassId{UINT32_MAX},
                            0,      &to_process, best_cost,     mem_caps};
         rules.init(ctx);
-    }
-
-    void registerValidator(std::unique_ptr<ISelectionValidator> validator)
-    {
-        validators.push_back(std::move(validator));
-    }
-
-    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
-                  std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  float &cost, std::vector<EClassId> &conflict_nodes)
-    {
-        for (const auto &validator : validators)
-        {
-            if (!validator->validate(selection_map, order, path, buffers, eclass_to_buf, cost, conflict_nodes))
-            {
-                return false;
-            }
-        }
-        return true;
     }
 
     bool is_done() const
@@ -2194,28 +2383,9 @@ template <typename... Rules> struct Extractor
                 }
 
                 selection_map[current] = chosen_sel;
-
-                bool step_valid = true;
-                std::vector<EClassId> dummy_conflict;
-                for (const auto &validator : validators)
-                {
-                    if (!validator->validateStep(current, enode_id, selection_map, dummy_conflict))
-                    {
-                        step_valid = false;
-                        break;
-                    }
-                }
-
-                if (step_valid)
-                {
-                    rules.on_push(enode_id, pctx);
-                    found_valid = true;
-                    break;
-                }
-                else
-                {
-                    selection_map.erase(current);
-                }
+                rules.on_push(enode_id, pctx);
+                found_valid = true;
+                break;
             }
 
             if (!found_valid)
@@ -2375,7 +2545,8 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
                                              timeout, std::forward<Rules>(rules)...);
 }
 
-using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
+using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, ExtractorCycleStepRule,
+                                       ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,

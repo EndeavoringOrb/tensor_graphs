@@ -188,7 +188,6 @@ class HeuristicSearchDelegate : public SearchDelegate
 
     std::vector<uint32_t> order_dispatch(const std::vector<ActionFeatureExtractDispatch> &ready_nodes) override
     {
-        LOG(DEBUG) << "order_dispatch start";
         std::vector<uint32_t> res(ready_nodes.size());
         std::iota(res.begin(), res.end(), 0);
         std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
@@ -210,7 +209,6 @@ class HeuristicSearchDelegate : public SearchDelegate
 
             return ready_nodes[a].cost < ready_nodes[b].cost;
         });
-        LOG(DEBUG) << "order_dispatch end";
         return res;
     }
 

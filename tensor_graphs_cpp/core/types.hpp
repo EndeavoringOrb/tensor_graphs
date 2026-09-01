@@ -1648,6 +1648,7 @@ struct CompiledGraph
     // Canonical direction:
     // compiled physical node id -> original logical node id.
     std::unordered_map<EClassId, LogicalId> eclass_to_logical;
+    std::unordered_map<LogicalId, EClassId> logical_to_eclass;
     std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     float cost() const
@@ -1750,6 +1751,7 @@ inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
     bw.write(val.instructions);
     bw.write(val.nodeCosts);
     bw.write(val.eclass_to_logical);
+    bw.write(val.logical_to_eclass);
     uint32_t const_size = 0;
     for (const auto &pair : val.constantStaging)
     {
@@ -1774,6 +1776,7 @@ inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
     br.read(val.instructions);
     br.read(val.nodeCosts);
     br.read(val.eclass_to_logical);
+    br.read(val.logical_to_eclass);
     uint32_t const_size;
     br.read(const_size);
     val.constantStaging.clear();

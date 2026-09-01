@@ -343,6 +343,20 @@ struct Session
     {
         for (const CompiledGraph &g : cachedGraphs)
         {
+            // 1. Direct O(1) lookup via logical_to_eclass
+            auto it = g.logical_to_eclass.find(logicalId);
+            if (it != g.logical_to_eclass.end())
+            {
+                EClassId eclass_id = it->second;
+                if (g.nodeViews.count(eclass_id))
+                {
+                    const TensorView &view = g.nodeViews.at(eclass_id);
+                    memManager.write(MemSpace{1, HandleType::CPP}, view.offset, data, size);
+                    return;
+                }
+            }
+
+            // 2. Scan eclass_to_logical fallback
             for (const auto &pair : g.eclass_to_logical)
             {
                 if (pair.second == logicalId)
@@ -356,12 +370,15 @@ struct Session
                     }
                 }
             }
+
+            // 3. Search instruction input buffers
             for (const auto &inst : g.instructions)
             {
                 for (uint32_t i = 0; i < inst.children.size(); i++)
                 {
                     EClassId child = inst.children[i];
-                    if (g.has_logical_id(child) && g.get_logical_id(child) == logicalId)
+                    auto it_l = g.eclass_to_logical.find(child);
+                    if (it_l != g.eclass_to_logical.end() && it_l->second == logicalId)
                     {
                         memManager.write(inst.inBuffers[i].mem_space, inst.inBuffers[i].offset, data, size);
                         return;

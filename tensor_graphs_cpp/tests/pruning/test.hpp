@@ -21,7 +21,7 @@
 #include "core/plan/extractor.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/rule_registry.hpp"
-#include "core/plan/validators/mem.hpp"
+#include "core/plan/mem.hpp"
 #include "core/settings.hpp"
 #include "core/types.hpp"
 #include "tests/common.hpp"
