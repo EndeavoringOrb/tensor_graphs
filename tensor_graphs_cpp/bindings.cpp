@@ -1,6 +1,227 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <windows.h>
+#include <dbghelp.h>
+#include <iostream>
+#include <iomanip>
+#include <cstring>
+#include <cstdio>
+
+#pragma comment(lib, "dbghelp.lib")
+
+inline const char* get_exception_code_name(DWORD code) {
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:      return "EXCEPTION_ACCESS_VIOLATION (0xc0000005)";
+        case EXCEPTION_IN_PAGE_ERROR:         return "EXCEPTION_IN_PAGE_ERROR (0xc0000006)";
+        case EXCEPTION_ILLEGAL_INSTRUCTION:   return "EXCEPTION_ILLEGAL_INSTRUCTION (0xc000001d)";
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED (0xc000008c)";
+        case EXCEPTION_DATATYPE_MISALIGNMENT: return "EXCEPTION_DATATYPE_MISALIGNMENT (0xc0000002)";
+        case EXCEPTION_STACK_OVERFLOW:        return "EXCEPTION_STACK_OVERFLOW (0xc00000fd)";
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:    return "EXCEPTION_INT_DIVIDE_BY_ZERO (0xc0000094)";
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:    return "EXCEPTION_FLT_DIVIDE_BY_ZERO (0xc000008e)";
+        default:                              return "UNKNOWN_FATAL_EXCEPTION";
+    }
+}
+
+inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx) {
+    // 1. Resolve module name and relative base offset
+    char mod_name[MAX_PATH] = "<unknown>";
+    DWORD64 mod_base = SymGetModuleBase64(process, addr);
+    if (!mod_base) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) {
+            mod_base = reinterpret_cast<DWORD64>(mbi.AllocationBase);
+        }
+    }
+    if (mod_base) {
+        char full_path[MAX_PATH] = {0};
+        if (GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), full_path, sizeof(full_path))) {
+            const char* slash = strrchr(full_path, '\\');
+            const char* fslash = strrchr(full_path, '/');
+            const char* base_name = slash ? slash + 1 : (fslash ? fslash + 1 : full_path);
+            strncpy_s(mod_name, sizeof(mod_name), base_name, _TRUNCATE);
+        }
+    }
+
+    DWORD64 offset_in_mod = mod_base ? (addr - mod_base) : 0;
+
+    // 2. Resolve symbol using stack-allocated memory (no heap allocations)
+    alignas(SYMBOL_INFO) char symbol_buffer[sizeof(SYMBOL_INFO) + 256] = {0};
+    SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(symbol_buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 255;
+    DWORD64 sym_disp = 0;
+    bool has_sym = SymFromAddr(process, addr, &sym_disp, symbol) && (symbol->NameLen > 0);
+
+    // 3. Resolve source file & line number if PDB is present
+    IMAGEHLP_LINE64 line = {0};
+    line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+    DWORD line_disp = 0;
+    bool has_line = SymGetLineFromAddr64(process, addr, &line_disp, &line);
+
+    if (frame_idx >= 0) {
+        std::cerr << "  [" << std::setw(2) << frame_idx << "] ";
+    } else {
+        std::cerr << "  ";
+    }
+
+    std::cerr << "0x" << std::hex << std::setw(16) << std::setfill('0') << addr << std::dec << std::setfill(' ')
+              << " " << mod_name;
+
+    if (mod_base) {
+        std::cerr << " + 0x" << std::hex << offset_in_mod << std::dec;
+    }
+    if (has_sym) {
+        std::cerr << " : " << symbol->Name;
+    }
+    if (has_line) {
+        std::cerr << " (" << line.FileName << ":" << line.LineNumber << ")";
+    }
+    std::cerr << "\n";
+}
+
+inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // Filter strictly for fatal hardware/memory errors
+    if (code != EXCEPTION_ACCESS_VIOLATION &&
+        code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT &&
+        code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_FLT_DIVIDE_BY_ZERO)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
+    static volatile LONG g_in_handler = 0;
+    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE process = GetCurrentProcess();
+    HANDLE thread = GetCurrentThread();
+
+    // Ensure DbgHelp symbol engine is initialized
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+    SymInitialize(process, NULL, TRUE);
+
+    DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
+
+    std::cerr << "\n========================================================\n"
+              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
+              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
+
+    // Diagnostic information for Access Violations
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
+        const char* op = (access_type == 0) ? "read from" :
+                         (access_type == 1) ? "write to" :
+                         (access_type == 8) ? "execute at" : "access";
+        std::cerr << "  Details: Attempted to " << op << " invalid address 0x"
+                  << std::hex << fault_target << std::dec;
+        if (fault_target < 0x1000) {
+            std::cerr << " (Null / near-null pointer dereference)";
+        }
+        std::cerr << "\n";
+    }
+
+    std::cerr << "========================================================\n"
+              << "Call Stack (Crash Site):\n";
+
+    // Copy the context record because StackWalk64 mutates it during unwinding
+    CONTEXT ctx = *ep->ContextRecord;
+    ctx.ContextFlags = CONTEXT_FULL;
+
+    STACKFRAME64 frame;
+    memset(&frame, 0, sizeof(frame));
+    DWORD machineType = IMAGE_FILE_MACHINE_UNKNOWN;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+    machineType = IMAGE_FILE_MACHINE_ARM64;
+    frame.AddrPC.Offset    = ctx.Pc;
+    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Fp;
+    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Sp;
+    frame.AddrStack.Mode   = AddrModeFlat;
+#elif defined(_M_X64) || defined(__x86_64__)
+    machineType = IMAGE_FILE_MACHINE_AMD64;
+    frame.AddrPC.Offset    = ctx.Rip;
+    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode   = AddrModeFlat;
+#elif defined(_M_IX86) || defined(__i386__)
+    machineType = IMAGE_FILE_MACHINE_I386;
+    frame.AddrPC.Offset    = ctx.Eip;
+    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Ebp;
+    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Esp;
+    frame.AddrStack.Mode   = AddrModeFlat;
+#endif
+
+    int frame_idx = 0;
+    DWORD64 prev_pc = 0;
+
+    while (frame_idx < 64) {
+        if (!StackWalk64(machineType, process, thread, &frame, &ctx,
+                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+        {
+            break;
+        }
+
+        DWORD64 pc = frame.AddrPC.Offset;
+        if (pc == 0 || pc == prev_pc) {
+            break;
+        }
+        prev_pc = pc;
+
+        print_frame_info(process, pc, frame_idx);
+        frame_idx++;
+    }
+
+    // If StackWalk64 was unable to unwind even frame 0, print the fault PC directly
+    if (frame_idx == 0) {
+        print_frame_info(process, fault_pc, 0);
+    }
+
+    std::cerr << "========================================================\n" << std::flush;
+    fflush(stderr);
+    fflush(stdout);
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+struct InstallCrashHandler {
+    InstallCrashHandler() {
+        HANDLE process = GetCurrentProcess();
+        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+        SymInitialize(process, NULL, TRUE);
+        AddVectoredExceptionHandler(1, TG_CrashHandler);
+    }
+} static _install_crash_handler;
+#endif
+
 #include "core/common/thread_pool.hpp"
 #include "core/hardware.hpp"
 #include "core/plan/cached_plan.hpp"

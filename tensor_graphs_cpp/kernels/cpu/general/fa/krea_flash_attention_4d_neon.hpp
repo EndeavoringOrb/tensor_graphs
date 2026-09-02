@@ -244,10 +244,11 @@ inline LogicalId refFactoryKreaFlashAttention4D(const std::vector<LogicalId> &in
     LogicalId K_t = g.contiguous(g.permute(K, g.constant({4}, perm, DType::INT32)));
     LogicalId scores = g.dot(Q, K_t);
 
-    LogicalId max_s = g.repeat(g.max(scores, -1), S, 3);
+    // Explicitly add contiguous here to match baseEGraph insertion
+    LogicalId max_s = g.contiguous(g.repeat(g.max(scores, -1), S, 3));
     LogicalId shifted = g.add(scores, g.neg(max_s));
     LogicalId exps = g.pow(g.fill(TGConstants::E, {B, num_heads, S, S}), shifted);
-    LogicalId sums = g.repeat(g.sum(exps, -1), S, 3);
+    LogicalId sums = g.contiguous(g.repeat(g.sum(exps, -1), S, 3));
     LogicalId probs = g.div(exps, sums);
 
     return g.dot(probs, V);

@@ -143,8 +143,7 @@ template <typename... Rules> struct CacheIterator
     int k = 0;
     bool is_done = false;
     bool first_yield = true;
-    std::vector<int> state;
-    std::vector<std::vector<uint32_t>> choice_orders;
+    std::vector<std::vector<int>> tried_choices;
     std::unordered_map<LogicalId, MemSpace> current_cache_selection;
 
     template <typename... Rs>
@@ -156,6 +155,10 @@ template <typename... Rules> struct CacheIterator
           avail_mem_spaces(_avail_mem_spaces), mem_caps(_mem_caps), delegate(std::move(_delegate)),
           best_cost(_best_cost), timeout(_timeout)
     {
+        if (delegate && best_cost)
+        {
+            delegate->set_best_cost_ptr(best_cost);
+        }
         init();
         CacheContext ctx{graph, candidate_nodes, avail_mem_spaces, num_users, valid_choices, current_cache_selection, 0,
                          0};
@@ -170,8 +173,7 @@ template <typename... Rules> struct CacheIterator
     void init()
     {
         uint32_t N = static_cast<uint32_t>(candidate_nodes.size());
-        state.assign(N, 0);
-        choice_orders.resize(N);
+        tried_choices.resize(N);
         valid_choices.resize(N);
         num_users.assign(N, 0);
 
@@ -250,19 +252,20 @@ template <typename... Rules> struct CacheIterator
                 k--;
                 continue;
             }
-            if (delegate && valid_choices[k].size() > 1)
-            {
-                delegate->pop_state();
-            }
 
             LogicalId id = candidate_nodes[k];
             current_cache_selection.erase(id);
 
-            if (state[k] < valid_choices[k].size())
+            if (tried_choices[k].size() < valid_choices[k].size())
             {
                 return true;
             }
-            state[k] = 0;
+
+            tried_choices[k].clear();
+            if (delegate && valid_choices[k].size() > 1)
+            {
+                delegate->pop_state();
+            }
             k--;
         }
         return false;
@@ -319,58 +322,81 @@ template <typename... Rules> struct CacheIterator
             LogicalId id = candidate_nodes[k];
             const TensorNode &node = graph.getNode(id);
 
-            if (state[k] == 0)
+            std::vector<int> unexplored;
+            unexplored.reserve(valid_choices[k].size());
+            for (int choice : valid_choices[k])
             {
-                if (delegate && valid_choices[k].size() > 1)
+                if (std::find(tried_choices[k].begin(), tried_choices[k].end(), choice) == tried_choices[k].end())
                 {
-                    delegate->push_state();
-
-                    std::vector<ActionFeatureCache> features;
-                    features.reserve(valid_choices[k].size());
-
-                    uint64_t node_size = node.getSizeBytes();
-
-                    for (int choice : valid_choices[k])
-                    {
-                        ActionFeatureCache f;
-                        f.size = node_size;
-                        f.num_users = static_cast<float>(num_users[k]);
-                        f.logical_id = id.value;
-
-                        if (choice == 0)
-                        {
-                            f.is_cached = 0.0f;
-                            f.mem_space = MemSpace{0, HandleType::STORAGE};
-                            f.mem_cap = 0;
-                        }
-                        else
-                        {
-                            f.is_cached = 1.0f;
-                            f.mem_space = avail_mem_spaces[choice - 1];
-                            auto cap_it = mem_caps.find(f.mem_space);
-                            f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
-                        }
-                        features.push_back(f);
-                    }
-
-                    choice_orders[k] = delegate->order_cache(features);
-                }
-                else
-                {
-                    choice_orders[k].resize(valid_choices[k].size());
-                    std::iota(choice_orders[k].begin(), choice_orders[k].end(), 0u);
+                    unexplored.push_back(choice);
                 }
             }
 
-            if (state[k] < valid_choices[k].size())
+            if (unexplored.empty())
             {
-                uint32_t choice_idx = choice_orders[k][state[k]];
-                int choice = valid_choices[k][choice_idx];
-                state[k]++;
+                tried_choices[k].clear();
+                if (delegate && valid_choices[k].size() > 1)
+                {
+                    delegate->pop_state();
+                }
+                if (!ascend())
+                {
+                    is_done = true;
+                    return false;
+                }
+                continue;
+            }
+
+            std::vector<uint32_t> relative_order;
+            if (delegate && valid_choices[k].size() > 1)
+            {
+                delegate->push_state();
+
+                std::vector<ActionFeatureCache> features;
+                features.reserve(unexplored.size());
+
+                uint64_t node_size = node.getSizeBytes();
+
+                for (int choice : unexplored)
+                {
+                    ActionFeatureCache f;
+                    f.size = node_size;
+                    f.num_users = static_cast<float>(num_users[k]);
+                    f.logical_id = id.value;
+
+                    if (choice == 0)
+                    {
+                        f.is_cached = 0.0f;
+                        f.mem_space = MemSpace{0, HandleType::STORAGE};
+                        f.mem_cap = 0;
+                    }
+                    else
+                    {
+                        f.is_cached = 1.0f;
+                        f.mem_space = avail_mem_spaces[choice - 1];
+                        auto cap_it = mem_caps.find(f.mem_space);
+                        f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
+                    }
+                    features.push_back(f);
+                }
+
+                relative_order = delegate->order_cache(features);
+            }
+            else
+            {
+                relative_order.resize(unexplored.size());
+                std::iota(relative_order.begin(), relative_order.end(), 0u);
+            }
+
+            bool chosen = false;
+            for (uint32_t rel_idx : relative_order)
+            {
+                int choice = unexplored[rel_idx];
+                tried_choices[k].push_back(choice);
 
                 CacheContext ctx{graph,         candidate_nodes,         avail_mem_spaces,         num_users,
                                  valid_choices, current_cache_selection, static_cast<uint32_t>(k), choice};
-                if (rules.is_pruned(choice, choice_idx, ctx))
+                if (rules.is_pruned(choice, static_cast<size_t>(rel_idx), ctx))
                 {
                     continue;
                 }
@@ -384,11 +410,18 @@ template <typename... Rules> struct CacheIterator
                     current_cache_selection.erase(id);
                 }
 
+                chosen = true;
                 k++;
+                break;
             }
-            else
+
+            if (!chosen)
             {
-                state[k] = 0;
+                tried_choices[k].clear();
+                if (delegate && valid_choices[k].size() > 1)
+                {
+                    delegate->pop_state();
+                }
                 if (delegate && delegate->fast_fail())
                 {
                     is_done = true;
@@ -2048,6 +2081,8 @@ struct Planner
             if (graph.constantStaging.count(nodeId))
             {
                 baseState.egraph.constantStaging[e_class_id] = graph.constantStaging.at(nodeId);
+                uint64_t dataHash = tg_hash::computeConstantHash(node.getShape(), node.strides, node.dtype, *graph.constantStaging.at(nodeId));
+                baseState.egraph.constantHashIndex[dataHash].push_back(e_class_id);
             }
         }
 

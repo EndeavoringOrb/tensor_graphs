@@ -20,6 +20,10 @@ inline void runConcatF32_ND(const KernelContext &ctx)
 
     // The axis is stored in the first input tensor
     int32_t axis = *static_cast<const int32_t *>(ctx.inputs[0]);
+    LOG(DEBUG) << "CONCAT INFO";
+    LOG(DEBUG) << "outShape " << toString(outShape);
+    LOG(DEBUG) << "axis " << axis;
+    LOG(DEBUG) << "# inputs " << ctx.inputs.size();
     if (axis < 0)
         axis += static_cast<int32_t>(rank);
 

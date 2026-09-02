@@ -70,6 +70,10 @@ class SearchDelegate
   public:
     virtual ~SearchDelegate() = default;
 
+    virtual void set_best_cost_ptr(const float *ptr)
+    {
+    }
+
     virtual bool fast_fail() const
     {
         return false;
@@ -162,6 +166,29 @@ class SearchDelegate
 class HeuristicSearchDelegate : public SearchDelegate
 {
   public:
+    const float *best_cost_ptr = nullptr;
+    float best_cost_val = TGConstants::INF;
+
+    void set_best_cost_ptr(const float *ptr) override
+    {
+        best_cost_ptr = ptr;
+    }
+
+    void on_leaf_evaluated(float cost) override
+    {
+        if (cost >= 0.0f && cost < best_cost_val)
+        {
+            best_cost_val = cost;
+        }
+    }
+
+    bool has_valid_plan() const
+    {
+        if (best_cost_ptr && *best_cost_ptr < TGConstants::INF)
+            return true;
+        return (best_cost_val < TGConstants::INF);
+    }
+
     std::vector<uint32_t> order_cache(const std::vector<ActionFeatureCache> &choices) override
     {
         std::vector<uint32_t> res(choices.size());
@@ -173,16 +200,28 @@ class HeuristicSearchDelegate : public SearchDelegate
     {
         std::vector<uint32_t> res(enodes.size());
         std::iota(res.begin(), res.end(), 0);
-        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
-            // 1. Prioritize options with lower Sethi-Ullman peak memory usage to fit in capacity sooner
-            if (enodes[a].dp_mem != enodes[b].dp_mem)
+        if (has_valid_plan())
+        {
+            // Once a valid plan exists, prioritize minimizing workload/execution cost
+            std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (enodes[a].dp_cost != enodes[b].dp_cost)
+                    return enodes[a].dp_cost < enodes[b].dp_cost;
+                if (enodes[a].cost != enodes[b].cost)
+                    return enodes[a].cost < enodes[b].cost;
                 return enodes[a].dp_mem < enodes[b].dp_mem;
-            // 2. Subtree workload cost
-            if (enodes[a].dp_cost != enodes[b].dp_cost)
-                return enodes[a].dp_cost < enodes[b].dp_cost;
-            // 3. Direct execution cost
-            return enodes[a].cost < enodes[b].cost;
-        });
+            });
+        }
+        else
+        {
+            // Prioritize fitting within memory capacity first
+            std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (enodes[a].dp_mem != enodes[b].dp_mem)
+                    return enodes[a].dp_mem < enodes[b].dp_mem;
+                if (enodes[a].dp_cost != enodes[b].dp_cost)
+                    return enodes[a].dp_cost < enodes[b].dp_cost;
+                return enodes[a].cost < enodes[b].cost;
+            });
+        }
         return res;
     }
 
@@ -190,25 +229,34 @@ class HeuristicSearchDelegate : public SearchDelegate
     {
         std::vector<uint32_t> res(ready_nodes.size());
         std::iota(res.begin(), res.end(), 0);
-        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
-            // 1. Critical-path first (depth-first: consume and free tensors ASAP)
-            if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
-                return ready_nodes[a].min_dp_cp_cost > ready_nodes[b].min_dp_cp_cost;
-
-            // 2. Reverse Critical Path tie-breaker (Distance to Output)
-            if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
-                return ready_nodes[a].rev_cp_cost > ready_nodes[b].rev_cp_cost;
-
-            // 3. Sethi-Ullman peak memory demand
-            if (ready_nodes[a].dp_mem != ready_nodes[b].dp_mem)
+        if (has_valid_plan())
+        {
+            // Prioritize minimizing makespan and critical path execution latency
+            std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
+                    return ready_nodes[a].min_dp_cp_cost > ready_nodes[b].min_dp_cp_cost;
+                if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
+                    return ready_nodes[a].rev_cp_cost > ready_nodes[b].rev_cp_cost;
+                if (ready_nodes[a].cost != ready_nodes[b].cost)
+                    return ready_nodes[a].cost < ready_nodes[b].cost;
                 return ready_nodes[a].dp_mem < ready_nodes[b].dp_mem;
-
-            // 4. Memory footprint tie-breaker (smaller footprint first)
-            if (ready_nodes[a].size != ready_nodes[b].size)
-                return ready_nodes[a].size < ready_nodes[b].size;
-
-            return ready_nodes[a].cost < ready_nodes[b].cost;
-        });
+            });
+        }
+        else
+        {
+            // Prioritize freeing memory and fitting within memory footprint
+            std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
+                    return ready_nodes[a].min_dp_cp_cost > ready_nodes[b].min_dp_cp_cost;
+                if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
+                    return ready_nodes[a].rev_cp_cost > ready_nodes[b].rev_cp_cost;
+                if (ready_nodes[a].dp_mem != ready_nodes[b].dp_mem)
+                    return ready_nodes[a].dp_mem < ready_nodes[b].dp_mem;
+                if (ready_nodes[a].size != ready_nodes[b].size)
+                    return ready_nodes[a].size < ready_nodes[b].size;
+                return ready_nodes[a].cost < ready_nodes[b].cost;
+            });
+        }
         return res;
     }
 
@@ -234,22 +282,30 @@ class HeuristicSearchDelegate : public SearchDelegate
     {
         std::vector<uint32_t> res(frontier.size());
         std::iota(res.begin(), res.end(), 0);
-        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
-            // 1. Minimum Remaining Values (MRV): fewest candidate ENodes first
-            if (frontier[a].num_enodes != frontier[b].num_enodes)
-                return frontier[a].num_enodes < frontier[b].num_enodes;
-
-            // 2. Critical Path First: highest critical path cost first (Fail-First)
-            if (frontier[a].min_dp_cp_cost != frontier[b].min_dp_cp_cost)
-                return frontier[a].min_dp_cp_cost > frontier[b].min_dp_cp_cost;
-
-            // 3. Sethi-Ullman memory requirement (Fail-First: decide heavier memory subtrees first)
-            if (frontier[a].min_dp_mem != frontier[b].min_dp_mem)
-                return frontier[a].min_dp_mem > frontier[b].min_dp_mem;
-
-            // 4. Tie-breaker: largest buffer size first
-            return frontier[a].size > frontier[b].size;
-        });
+        if (has_valid_plan())
+        {
+            std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (frontier[a].min_dp_cp_cost != frontier[b].min_dp_cp_cost)
+                    return frontier[a].min_dp_cp_cost > frontier[b].min_dp_cp_cost;
+                if (frontier[a].num_enodes != frontier[b].num_enodes)
+                    return frontier[a].num_enodes < frontier[b].num_enodes;
+                if (frontier[a].min_dp_cost != frontier[b].min_dp_cost)
+                    return frontier[a].min_dp_cost < frontier[b].min_dp_cost;
+                return frontier[a].size > frontier[b].size;
+            });
+        }
+        else
+        {
+            std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (frontier[a].num_enodes != frontier[b].num_enodes)
+                    return frontier[a].num_enodes < frontier[b].num_enodes;
+                if (frontier[a].min_dp_cp_cost != frontier[b].min_dp_cp_cost)
+                    return frontier[a].min_dp_cp_cost > frontier[b].min_dp_cp_cost;
+                if (frontier[a].min_dp_mem != frontier[b].min_dp_mem)
+                    return frontier[a].min_dp_mem > frontier[b].min_dp_mem;
+                return frontier[a].size > frontier[b].size;
+            });
+        }
         return res;
     }
 };

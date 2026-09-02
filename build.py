@@ -32,6 +32,7 @@ ALL_TARGETS = [
     "embed.cpp",
     "main.cpp",
     "test.cpp",
+    "test_inst.cpp",
     "write_ref_tensors.cpp",
     "bindings.cpp",
 ]
@@ -983,6 +984,9 @@ class Toolchain:
 
             if self.platform.is_windows and self.config.profile:
                 flags.append("-Wl,-debug")
+
+        if self.platform.is_windows:
+            flags.append("-ldbghelp")
 
         if not is_python_ext and not self.config.use_cuda:
             flags.extend(["-static"])

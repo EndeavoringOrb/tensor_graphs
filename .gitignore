@@ -15,6 +15,7 @@ flux-klein-4b
 malloc_heuristic/build
 patching
 out.log
+run*.txt
 images
 wsl_venv
 diff.txt

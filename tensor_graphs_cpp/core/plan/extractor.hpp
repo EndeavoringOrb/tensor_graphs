@@ -841,9 +841,6 @@ class DispatchCycleRule
     }
 };
 
-// =============================================================================
-// DispatchIterator
-// =============================================================================
 template <typename... Rules> struct DispatchIterator
 {
   public:
@@ -861,6 +858,10 @@ template <typename... Rules> struct DispatchIterator
           mem_caps(_mem_caps ? *_mem_caps : DispatchContext::empty_mem_caps()), egraph(_egraph),
           enodeInfos(_enode_infos), delegate(std::move(_delegate))
     {
+        if (delegate && best_cost)
+        {
+            delegate->set_best_cost_ptr(best_cost);
+        }
         selection_map_ref = &selection_map;
         initOrderState(selection_map);
 
@@ -939,94 +940,84 @@ template <typename... Rules> struct DispatchIterator
                 continue;
             }
 
-            if (selection_at_pos[pos] == 0)
+            // Collect only unexplored nodes among current_ready
+            std::vector<uint32_t> unexplored_indices;
+            unexplored_indices.reserve(current_ready.size());
+            for (uint32_t i = 0; i < current_ready.size(); ++i)
             {
-                if (delegate)
+                EClassId node = current_ready[i];
+                if (std::find(tried_nodes_at_pos[pos].begin(), tried_nodes_at_pos[pos].end(), node) ==
+                    tried_nodes_at_pos[pos].end())
                 {
-                    delegate->push_state();
-
-                    std::vector<ActionFeatureExtractDispatch> features;
-                    features.reserve(current_ready.size());
-                    for (auto id : current_ready)
-                    {
-                        ActionFeatureExtractDispatch f;
-                        uint32_t sel = selection_map.at(id);
-                        ENodeId enodeId = egraph.getEClass(id).enodes[sel];
-                        const ENode &enode = egraph.getENode(enodeId);
-
-                        f.cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].cost : 0.0f;
-                        f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
-                        f.min_dp_cp_cost =
-                            (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
-                        f.rev_cp_cost =
-                            (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
-                        f.dp_mem = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_mem : 0.0f;
-                        f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
-                        f.mem_space = enode.getMemSpace();
-                        auto cap_it = mem_caps.find(enode.getMemSpace());
-                        f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
-                        for (const auto &eng : enode.getEngines())
-                        {
-                            f.engine_idxs.push_back(eng.idx);
-                        }
-
-                        // TODO: set up something so we only compute this if the delegate uses it
-                        // Graph g;
-                        // std::vector<LogicalId> inIds;
-                        // for (EClassId child : enode.getChildren())
-                        // {
-                        //     const EClass &cCls = egraph.getEClass(egraph.findConst(child));
-                        //     inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
-                        // }
-
-                        // if (enode.getOpType() == OpType::FUSED)
-                        // {
-                        //     if (KernelRegistry::get().hasKernel(enode.getKernelId()))
-                        //     {
-                        //         auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
-                        //         if (refFact)
-                        //             refFact(inIds, g);
-                        //     }
-                        // }
-                        // else
-                        // {
-                        //     g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
-                        //                    enode.getShape(), enode.getStrides(), "");
-                        // }
-
-                        // f.num_nodes = g.nodes.size();
-                        // uint32_t edges = 0;
-                        // for (const auto &pair : g.nodes)
-                        // {
-                        //     edges += pair.second.child_ids.size();
-                        // }
-                        // f.num_edges = edges;
-
-                        features.push_back(f);
-                    }
-                    choice_orders[pos] = delegate->order_dispatch(features);
-                }
-                else
-                {
-                    choice_orders[pos].resize(current_ready.size());
-                    std::iota(choice_orders[pos].begin(), choice_orders[pos].end(), 0u);
+                    unexplored_indices.push_back(i);
                 }
             }
 
+            if (unexplored_indices.empty())
+            {
+                tried_nodes_at_pos[pos].clear();
+                if (delegate)
+                    delegate->pop_state();
+                if (!ascend())
+                {
+                    is_done = true;
+                    return false;
+                }
+                continue;
+            }
+
+            std::vector<uint32_t> relative_order;
+            if (delegate)
+            {
+                delegate->push_state();
+
+                std::vector<ActionFeatureExtractDispatch> features;
+                features.reserve(unexplored_indices.size());
+                for (uint32_t idx : unexplored_indices)
+                {
+                    EClassId id = current_ready[idx];
+                    ActionFeatureExtractDispatch f;
+                    uint32_t sel = selection_map.at(id);
+                    ENodeId enodeId = egraph.getEClass(id).enodes[sel];
+                    const ENode &enode = egraph.getENode(enodeId);
+
+                    f.cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].cost : 0.0f;
+                    f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
+                    f.min_dp_cp_cost =
+                        (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
+                    f.rev_cp_cost =
+                        (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
+                    f.dp_mem = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_mem : 0.0f;
+                    f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
+                    f.mem_space = enode.getMemSpace();
+                    auto cap_it = mem_caps.find(enode.getMemSpace());
+                    f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
+                    for (const auto &eng : enode.getEngines())
+                    {
+                        f.engine_idxs.push_back(eng.idx);
+                    }
+                    features.push_back(f);
+                }
+                relative_order = delegate->order_dispatch(features);
+            }
+            else
+            {
+                relative_order.resize(unexplored_indices.size());
+                std::iota(relative_order.begin(), relative_order.end(), 0u);
+            }
+
             bool chosen = false;
-            while (selection_at_pos[pos] < current_ready.size())
+            for (uint32_t rel_idx : relative_order)
             {
                 if (can_abort())
                 {
                     is_done = true;
                     return false;
                 }
-                
-                uint32_t choice_idx = selection_at_pos[pos];
-                selection_at_pos[pos] = choice_idx + 1;
-                uint32_t choice = choice_orders[pos][choice_idx];
 
+                uint32_t choice = unexplored_indices[rel_idx];
                 EClassId node = current_ready[choice];
+                tried_nodes_at_pos[pos].push_back(node);
 
                 {
                     DispatchContext ctx{egraph,        selection_map, enodeInfos, ordered,
@@ -1065,7 +1056,9 @@ template <typename... Rules> struct DispatchIterator
 
             if (!chosen)
             {
-                selection_at_pos[pos] = 0;
+                tried_nodes_at_pos[pos].clear();
+                if (delegate)
+                    delegate->pop_state();
                 if (delegate && delegate->fast_fail())
                 {
                     is_done = true;
@@ -1109,8 +1102,7 @@ template <typename... Rules> struct DispatchIterator
     std::vector<std::vector<EClassId>> added_nodes_at_pos;
     std::vector<EClassId> chosen_at_pos;
     std::vector<uint32_t> choice_at_pos;
-    std::vector<uint32_t> selection_at_pos;
-    std::vector<std::vector<uint32_t>> choice_orders;
+    std::vector<std::vector<EClassId>> tried_nodes_at_pos;
 
     bool is_done = false;
     bool first_yield = true;
@@ -1161,9 +1153,8 @@ template <typename... Rules> struct DispatchIterator
 
         chosen_at_pos.assign(num_nodes_in_selection + 1, EClassId{UINT32_MAX});
         choice_at_pos.assign(num_nodes_in_selection + 1, 0);
-        selection_at_pos.assign(num_nodes_in_selection + 1, 0);
-        choice_orders.clear();
-        choice_orders.resize(num_nodes_in_selection + 1);
+        tried_nodes_at_pos.clear();
+        tried_nodes_at_pos.resize(num_nodes_in_selection + 1);
 
         std::vector<uint8_t> in_selection(max_class_id, 0);
         for (const auto &kv : selection_map)
@@ -1263,12 +1254,7 @@ template <typename... Rules> struct DispatchIterator
 
     bool ascend()
     {
-        if (delegate)
-        {
-            delegate->pop_state();
-        }
         uint32_t pos = static_cast<uint32_t>(ordered.size());
-        selection_at_pos[pos] = 0;
         if (ordered.empty())
             return false;
 
@@ -2057,7 +2043,7 @@ class InfiniteCostSkipRule
 };
 
 // =============================================================================
-// Extractor Pruning Rule: Step Cycle Reachability
+// Extractor Pruning Rule: Dynamic Incremental Cycle Detection (Pearce-Kelly)
 // =============================================================================
 class ExtractorCycleStepRule
 {
@@ -2068,68 +2054,215 @@ class ExtractorCycleStepRule
     }
 
   private:
-    mutable std::vector<uint32_t> visited;
+    std::vector<uint32_t> ord;                 // Node -> topological position index
+    std::vector<EClassId> node_at_pos;         // Topological position index -> Node
+    std::vector<std::vector<EClassId>> adj;     // v -> consumers u (v is input to u)
+    std::vector<std::vector<EClassId>> rev_adj; // u -> inputs v
+
+    mutable std::vector<uint32_t> visited_marker;
     mutable uint32_t visited_gen = 0;
 
-    bool reaches(EClassId start, EClassId target, const EGraph &egraph,
-                 const std::unordered_map<EClassId, uint32_t> &selection_map) const
+    struct UndoEntry
+    {
+        EClassId node;
+        uint32_t old_ord;
+    };
+
+    struct UndoPosEntry
+    {
+        uint32_t pos;
+        EClassId old_node;
+    };
+
+    struct PushUndoFrame
+    {
+        EClassId u;
+        std::vector<EClassId> added_inputs;
+        std::vector<UndoEntry> ord_undos;
+        std::vector<UndoPosEntry> pos_undos;
+    };
+
+    std::vector<PushUndoFrame> undo_stack;
+
+    // Checks reachability from start to target bounded by max_ord
+    bool is_reachable_bounded(EClassId start, EClassId target, uint32_t max_ord) const
     {
         if (start == target)
             return true;
 
-        if (visited.size() < egraph.getClasses().size())
-            visited.assign(egraph.getClasses().size(), 0);
-
         if (++visited_gen == 0)
         {
-            std::fill(visited.begin(), visited.end(), 0);
+            std::fill(visited_marker.begin(), visited_marker.end(), 0);
             visited_gen = 1;
         }
-        visited[start.value] = visited_gen;
 
-        std::vector<EClassId> q;
-        q.push_back(start);
+        std::vector<EClassId> stack;
+        stack.push_back(start);
+        visited_marker[start.value] = visited_gen;
 
-        size_t head = 0;
-        while (head < q.size())
+        while (!stack.empty())
         {
-            EClassId curr = q[head++];
+            EClassId curr = stack.back();
+            stack.pop_back();
 
-            auto it = selection_map.find(curr);
-            if (it == selection_map.end())
-                continue;
-
-            uint32_t sel = it->second;
-            const auto &cls = egraph.getEClass(curr);
-            if (sel >= cls.enodes.size())
-                continue;
-
-            ENodeId enode_id = cls.enodes[sel];
-            const ENode &enode = egraph.getENode(enode_id);
-
-            for (EClassId child : enode.getChildren())
+            for (EClassId next : adj[curr.value])
             {
-                EClassId canon_child = egraph.findConst(child);
-                if (canon_child == target)
-                {
+                if (next == target)
                     return true;
-                }
 
-                if (canon_child.value < visited.size() && visited[canon_child.value] != visited_gen)
+                if (next.value < ord.size() && ord[next.value] <= max_ord)
                 {
-                    visited[canon_child.value] = visited_gen;
-                    q.push_back(canon_child);
+                    if (visited_marker[next.value] != visited_gen)
+                    {
+                        visited_marker[next.value] = visited_gen;
+                        stack.push_back(next);
+                    }
                 }
             }
         }
         return false;
     }
 
+    void collect_forward(EClassId start, uint32_t max_ord, std::vector<EClassId> &F)
+    {
+        if (++visited_gen == 0)
+        {
+            std::fill(visited_marker.begin(), visited_marker.end(), 0);
+            visited_gen = 1;
+        }
+
+        std::vector<EClassId> stack;
+        stack.push_back(start);
+        visited_marker[start.value] = visited_gen;
+        F.push_back(start);
+
+        while (!stack.empty())
+        {
+            EClassId curr = stack.back();
+            stack.pop_back();
+
+            for (EClassId next : adj[curr.value])
+            {
+                if (next.value < ord.size() && ord[next.value] <= max_ord)
+                {
+                    if (visited_marker[next.value] != visited_gen)
+                    {
+                        visited_marker[next.value] = visited_gen;
+                        F.push_back(next);
+                        stack.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+
+    void collect_backward(EClassId start, uint32_t min_ord, std::vector<EClassId> &B)
+    {
+        if (++visited_gen == 0)
+        {
+            std::fill(visited_marker.begin(), visited_marker.end(), 0);
+            visited_gen = 1;
+        }
+
+        std::vector<EClassId> stack;
+        stack.push_back(start);
+        visited_marker[start.value] = visited_gen;
+        B.push_back(start);
+
+        while (!stack.empty())
+        {
+            EClassId curr = stack.back();
+            stack.pop_back();
+
+            for (EClassId prev : rev_adj[curr.value])
+            {
+                if (prev.value < ord.size() && ord[prev.value] >= min_ord)
+                {
+                    if (visited_marker[prev.value] != visited_gen)
+                    {
+                        visited_marker[prev.value] = visited_gen;
+                        B.push_back(prev);
+                        stack.push_back(prev);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pearce-Kelly topological reordering within window [ord[u], ord[v]]
+    void pk_reorder(EClassId v, EClassId u, PushUndoFrame &frame)
+    {
+        uint32_t l = ord[u.value];
+        uint32_t r = ord[v.value];
+        if (l > r)
+            return;
+
+        std::vector<EClassId> F;
+        collect_forward(u, r, F);
+
+        std::vector<EClassId> B;
+        collect_backward(v, l, B);
+
+        std::sort(F.begin(), F.end(), [&](EClassId a, EClassId b) { return ord[a.value] < ord[b.value]; });
+        std::sort(B.begin(), B.end(), [&](EClassId a, EClassId b) { return ord[a.value] < ord[b.value]; });
+
+        std::vector<uint32_t> P;
+        P.reserve(B.size() + F.size());
+        for (EClassId b_node : B)
+            P.push_back(ord[b_node.value]);
+        for (EClassId f_node : F)
+            P.push_back(ord[f_node.value]);
+
+        std::sort(P.begin(), P.end());
+
+        size_t p_idx = 0;
+        for (EClassId b_node : B)
+        {
+            uint32_t new_pos = P[p_idx++];
+            if (ord[b_node.value] != new_pos)
+            {
+                frame.ord_undos.push_back({b_node, ord[b_node.value]});
+                ord[b_node.value] = new_pos;
+            }
+            if (node_at_pos[new_pos] != b_node)
+            {
+                frame.pos_undos.push_back({new_pos, node_at_pos[new_pos]});
+                node_at_pos[new_pos] = b_node;
+            }
+        }
+
+        for (EClassId f_node : F)
+        {
+            uint32_t new_pos = P[p_idx++];
+            if (ord[f_node.value] != new_pos)
+            {
+                frame.ord_undos.push_back({f_node, ord[f_node.value]});
+                ord[f_node.value] = new_pos;
+            }
+            if (node_at_pos[new_pos] != f_node)
+            {
+                frame.pos_undos.push_back({new_pos, node_at_pos[new_pos]});
+                node_at_pos[new_pos] = f_node;
+            }
+        }
+    }
+
   public:
     void init(const ExtractContext &ctx)
     {
-        visited.assign(ctx.egraph.getClasses().size(), 0);
+        uint32_t n = static_cast<uint32_t>(ctx.egraph.getClasses().size());
+        ord.resize(n);
+        node_at_pos.resize(n);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            ord[i] = i;
+            node_at_pos[i] = EClassId{i};
+        }
+        adj.assign(n, {});
+        rev_adj.assign(n, {});
+        visited_marker.assign(n, 0);
         visited_gen = 0;
+        undo_stack.clear();
     }
 
     bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
@@ -2141,24 +2274,109 @@ class ExtractorCycleStepRule
         if (current.value == UINT32_MAX)
             return false;
 
-        EClassId canon_current = ctx.egraph.findConst(current);
+        EClassId u = ctx.egraph.findConst(current);
+        if (u.value >= ord.size())
+            return false;
+
         const ENode &enode = ctx.egraph.getENode(cand);
 
         for (EClassId child : enode.getChildren())
         {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (canon_child == canon_current)
-                return true;
+            EClassId v = ctx.egraph.findConst(child);
+            if (v == u)
+                return true; // Direct self-loop
 
-            if (ctx.selection_map.find(canon_child) != ctx.selection_map.end())
+            if (v.value >= ord.size())
+                continue;
+
+            // If ord[v] < ord[u], adding edge v -> u is forward in topological order; cycle is impossible.
+            if (ord[v.value] < ord[u.value])
+                continue;
+
+            // If ord[v] >= ord[u], check reachability strictly bounded to [ord[u], ord[v]].
+            if (is_reachable_bounded(u, v, ord[v.value]))
             {
-                if (reaches(canon_child, canon_current, ctx.egraph, ctx.selection_map))
-                {
-                    return true;
-                }
+                return true;
             }
         }
         return false;
+    }
+
+    void on_push(ENodeId enode_id, const ExtractContext &ctx)
+    {
+        if (!enabled)
+            return;
+
+        EClassId current = ctx.current;
+        if (current.value == UINT32_MAX)
+            return;
+
+        EClassId u = ctx.egraph.findConst(current);
+        if (u.value >= ord.size())
+            return;
+
+        const ENode &enode = ctx.egraph.getENode(enode_id);
+
+        PushUndoFrame frame;
+        frame.u = u;
+
+        std::vector<EClassId> unique_children;
+        for (EClassId child : enode.getChildren())
+        {
+            EClassId v = ctx.egraph.findConst(child);
+            if (v == u || v.value >= ord.size())
+                continue;
+            if (std::find(unique_children.begin(), unique_children.end(), v) == unique_children.end())
+            {
+                unique_children.push_back(v);
+            }
+        }
+
+        for (EClassId v : unique_children)
+        {
+            adj[v.value].push_back(u);
+            rev_adj[u.value].push_back(v);
+            frame.added_inputs.push_back(v);
+
+            if (ord[v.value] >= ord[u.value])
+            {
+                pk_reorder(v, u, frame);
+            }
+        }
+
+        undo_stack.push_back(std::move(frame));
+    }
+
+    void on_pop(ENodeId /*enode_id*/, const ExtractContext & /*ctx*/)
+    {
+        if (!enabled || undo_stack.empty())
+            return;
+
+        PushUndoFrame frame = std::move(undo_stack.back());
+        undo_stack.pop_back();
+
+        for (auto it = frame.ord_undos.rbegin(); it != frame.ord_undos.rend(); ++it)
+        {
+            ord[it->node.value] = it->old_ord;
+        }
+        for (auto it = frame.pos_undos.rbegin(); it != frame.pos_undos.rend(); ++it)
+        {
+            node_at_pos[it->pos] = it->old_node;
+        }
+
+        EClassId u = frame.u;
+        for (EClassId v : frame.added_inputs)
+        {
+            auto &v_adj = adj[v.value];
+            auto it1 = std::find(v_adj.begin(), v_adj.end(), u);
+            if (it1 != v_adj.end())
+                v_adj.erase(it1);
+
+            auto &u_rev = rev_adj[u.value];
+            auto it2 = std::find(u_rev.begin(), u_rev.end(), v);
+            if (it2 != u_rev.end())
+                u_rev.erase(it2);
+        }
     }
 };
 
@@ -2183,10 +2401,32 @@ template <typename... Rules> struct Extractor
     std::vector<EClassId> to_process;
     std::vector<bool> has_options;
     uint32_t active_options = 0;
-    std::unordered_map<EClassId, uint32_t> next_sel;
-    std::unordered_map<EClassId, std::vector<uint32_t>> current_orders;
-    EClassId target_backtrack_eclass = EClassId{UINT32_MAX};
+    std::vector<std::vector<uint8_t>> tried_enodes;
     uint64_t numClasses;
+
+    std::chrono::steady_clock::time_point last_report_time = std::chrono::steady_clock::now();
+    uint32_t max_path_reached = 0;
+
+    void render_progress(uint32_t path_len, uint32_t total_classes)
+    {
+        int bar_width = 30;
+        float progress = total_classes > 0 ? static_cast<float>(path_len) / total_classes : 0.0f;
+        int filled = static_cast<int>(progress * bar_width);
+        std::string bar = "[";
+        for (int i = 0; i < bar_width; ++i)
+        {
+            if (i < filled)
+                bar += "=";
+            else if (i == filled)
+                bar += ">";
+            else
+                bar += " ";
+        }
+        bar += "]";
+        std::cout << "\r[Extract] " << bar << " " << path_len << "/" << total_classes << " (" << std::fixed
+                  << std::setprecision(1) << (progress * 100.0f) << "%) max: " << max_path_reached << "/"
+                  << total_classes << std::flush;
+    }
 
     template <typename... Rs>
     Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
@@ -2196,8 +2436,12 @@ template <typename... Rules> struct Extractor
         : rules(std::forward<Rs>(_rules)...), best_cost(_best_cost), timeout(_timeout), mem_caps(_mem_caps),
           egraph(_egraph), enodeInfos(_enodeInfos), delegate(std::move(_delegate)), numClasses(_egraph.classes.size()),
           to_process({root_eclass_id}), in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
-          has_options(_egraph.classes.size(), false)
+          has_options(_egraph.classes.size(), false), tried_enodes(_egraph.classes.size())
     {
+        if (delegate && best_cost)
+        {
+            delegate->set_best_cost_ptr(best_cost);
+        }
         ExtractContext ctx{egraph, enodeInfos,  selection_map, path,    EClassId{UINT32_MAX},
                            0,      &to_process, best_cost,     mem_caps};
         rules.init(ctx);
@@ -2224,6 +2468,22 @@ template <typename... Rules> struct Extractor
             if (can_abort())
             {
                 return false;
+            }
+
+            uint32_t cur_path_len = static_cast<uint32_t>(path.size());
+            if (cur_path_len > max_path_reached)
+            {
+                max_path_reached = cur_path_len;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - last_report_time).count() >= 3.0)
+            {
+                last_report_time = now;
+                std::cout << "\n";
+                render_progress(cur_path_len, static_cast<uint32_t>(numClasses));
+                std::cout << "\n";
+                prune::printPruningProfileSummary();
             }
 
             if (to_process.size() > 1 && delegate)
@@ -2279,100 +2539,87 @@ template <typename... Rules> struct Extractor
                 continue;
             }
 
+            const auto &enodes = egraph.getEClass(current).enodes;
+            if (tried_enodes[current.value].size() != enodes.size())
+            {
+                tried_enodes[current.value].assign(enodes.size(), 0);
+            }
+
+            std::vector<uint32_t> unexplored;
+            unexplored.reserve(enodes.size());
+            for (uint32_t i = 0; i < enodes.size(); ++i)
+            {
+                if (!tried_enodes[current.value][i])
+                {
+                    unexplored.push_back(i);
+                }
+            }
+
+            if (unexplored.empty())
+            {
+                tried_enodes[current.value].clear();
+                if (delegate)
+                    delegate->pop_state();
+                if (delegate && delegate->fast_fail())
+                {
+                    to_process.clear();
+                    return false;
+                }
+                return false;
+            }
+
             path.push_back(current);
             in_path[current.value] = true;
             path_pos[current.value] = path.size() - 1;
 
-            uint32_t sel = 0;
-            auto nextIt = next_sel.find(current);
-            if (nextIt != next_sel.end())
+            std::vector<uint32_t> relative_order;
+            if (delegate)
             {
-                sel = nextIt->second;
-                next_sel.erase(nextIt);
-            }
+                delegate->push_state();
 
-            const auto &enodes = egraph.getEClass(current).enodes;
-
-            if (sel == 0)
-            {
-                if (delegate)
+                std::vector<ActionFeatureExtractDispatch> features;
+                features.reserve(unexplored.size());
+                for (uint32_t unexp_idx : unexplored)
                 {
-                    delegate->push_state();
-
-                    std::vector<ActionFeatureExtractDispatch> features;
-                    features.reserve(enodes.size());
-                    for (ENodeId enodeId : enodes)
+                    ENodeId enodeId = enodes[unexp_idx];
+                    const ENode &enode = egraph.getENode(enodeId);
+                    ActionFeatureExtractDispatch f;
+                    f.cost = enodeInfos[enodeId.value].cost;
+                    f.dp_cost = enodeInfos[enodeId.value].dp_cost;
+                    f.min_dp_cp_cost = enodeInfos[enodeId.value].dp_cp_cost;
+                    f.rev_cp_cost = enodeInfos[enodeId.value].rev_cp_cost;
+                    f.dp_mem = enodeInfos[enodeId.value].dp_mem;
+                    f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
+                    f.mem_space = enode.getMemSpace();
+                    if (mem_caps)
                     {
-                        const ENode &enode = egraph.getENode(enodeId);
-                        ActionFeatureExtractDispatch f;
-                        f.cost = enodeInfos[enodeId.value].cost;
-                        f.dp_cost = enodeInfos[enodeId.value].dp_cost;
-                        f.min_dp_cp_cost = enodeInfos[enodeId.value].dp_cp_cost;
-                        f.rev_cp_cost = enodeInfos[enodeId.value].rev_cp_cost;
-                        f.dp_mem = enodeInfos[enodeId.value].dp_mem;
-                        f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
-                        f.mem_space = enode.getMemSpace();
-                        if (mem_caps)
-                        {
-                            auto cap_it = mem_caps->find(enode.getMemSpace());
-                            f.mem_cap = (cap_it != mem_caps->end()) ? cap_it->second : 0;
-                        }
-                        for (const auto &eng : enode.getEngines())
-                        {
-                            f.engine_idxs.push_back(eng.idx);
-                        }
-
-                        Graph g;
-                        std::vector<LogicalId> inIds;
-                        for (EClassId child : enode.getChildren())
-                        {
-                            const EClass &cCls = egraph.getEClass(egraph.findConst(child));
-                            inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
-                        }
-
-                        if (enode.getOpType() == OpType::FUSED)
-                        {
-                            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
-                            {
-                                auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
-                                if (refFact)
-                                    refFact(inIds, g);
-                            }
-                        }
-                        else
-                        {
-                            g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
-                                           enode.getShape(), enode.getStrides(), "");
-                        }
-
-                        f.num_nodes = g.nodes.size();
-                        uint32_t edges = 0;
-                        for (const auto &pair : g.nodes)
-                        {
-                            edges += pair.second.child_ids.size();
-                        }
-                        f.num_edges = edges;
-
-                        features.push_back(f);
+                        auto cap_it = mem_caps->find(enode.getMemSpace());
+                        f.mem_cap = (cap_it != mem_caps->end()) ? cap_it->second : 0;
                     }
-                    current_orders[current] = delegate->order_enodes(features);
+                    for (const auto &eng : enode.getEngines())
+                    {
+                        f.engine_idxs.push_back(eng.idx);
+                    }
+                    features.push_back(f);
                 }
-                else
-                {
-                    current_orders[current].resize(enodes.size());
-                    std::iota(current_orders[current].begin(), current_orders[current].end(), 0u);
-                }
+                relative_order = delegate->order_enodes(features);
+            }
+            else
+            {
+                relative_order.resize(unexplored.size());
+                std::iota(relative_order.begin(), relative_order.end(), 0u);
             }
 
             bool found_valid = false;
-            for (; sel < enodes.size(); ++sel)
+            for (uint32_t rel_idx : relative_order)
             {
                 if (can_abort())
                 {
                     return false;
                 }
 
-                uint32_t chosen_sel = current_orders[current][sel];
+                uint32_t chosen_sel = unexplored[rel_idx];
+                tried_enodes[current.value][chosen_sel] = 1;
                 ENodeId enode_id = enodes[chosen_sel];
 
                 ExtractContext pctx{egraph,     enodeInfos,  selection_map, path,    current,
@@ -2390,6 +2637,10 @@ template <typename... Rules> struct Extractor
 
             if (!found_valid)
             {
+                path.pop_back();
+                in_path[current.value] = false;
+                path_pos[current.value] = -1;
+
                 if (delegate)
                     delegate->pop_state();
 
@@ -2402,12 +2653,26 @@ template <typename... Rules> struct Extractor
                 return false;
             }
 
-            if (enodes.size() > sel + 1)
+            uint32_t remaining_unexplored = 0;
+            for (uint32_t i = 0; i < enodes.size(); ++i)
+            {
+                if (!tried_enodes[current.value][i])
+                    remaining_unexplored++;
+            }
+            if (remaining_unexplored > 0)
             {
                 if (!has_options[current.value])
                 {
                     has_options[current.value] = true;
                     active_options++;
+                }
+            }
+            else
+            {
+                if (has_options[current.value])
+                {
+                    has_options[current.value] = false;
+                    active_options--;
                 }
             }
 
@@ -2436,6 +2701,7 @@ template <typename... Rules> struct Extractor
             EClassId current = path.back();
             path.pop_back();
             in_path[current.value] = false;
+            path_pos[current.value] = -1;
 
             if (selection_map.find(current) == selection_map.end())
                 continue;
@@ -2447,36 +2713,20 @@ template <typename... Rules> struct Extractor
             ExtractContext pop_ctx{egraph,     enodeInfos,  selection_map, path,    current,
                                    chosen_sel, &to_process, best_cost,     mem_caps};
             rules.on_pop(popped_enode, pop_ctx);
+            selection_map.erase(current);
 
-            uint32_t iteration_index = chosen_sel;
-            auto it = std::find(current_orders[current].begin(), current_orders[current].end(), chosen_sel);
-            if (it != current_orders[current].end())
+            bool has_unexplored = false;
+            for (uint32_t i = 0; i < enodes.size(); ++i)
             {
-                iteration_index = static_cast<uint32_t>(std::distance(current_orders[current].begin(), it));
+                if (!tried_enodes[current.value][i])
+                {
+                    has_unexplored = true;
+                    break;
+                }
             }
 
-            if (iteration_index + 1 < enodes.size())
+            if (has_unexplored)
             {
-                next_sel[current] = iteration_index + 1;
-                selection_map.erase(current);
-
-                if (enodes.size() <= iteration_index + 2)
-                {
-                    if (has_options[current.value])
-                    {
-                        has_options[current.value] = false;
-                        active_options--;
-                    }
-                }
-                else
-                {
-                    if (!has_options[current.value])
-                    {
-                        has_options[current.value] = true;
-                        active_options++;
-                    }
-                }
-
                 to_process.clear();
                 for (EClassId eclass : path)
                 {
@@ -2497,8 +2747,7 @@ template <typename... Rules> struct Extractor
             }
             else
             {
-                selection_map.erase(current);
-                current_orders.erase(current);
+                tried_enodes[current.value].clear();
                 if (delegate)
                     delegate->pop_state();
                 if (has_options[current.value])

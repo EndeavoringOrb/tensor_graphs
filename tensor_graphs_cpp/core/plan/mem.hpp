@@ -617,8 +617,8 @@ template <typename... Rules> struct BufferizeIterator
     int k = 0;
     bool is_done = false;
     bool first_yield = true;
-    std::vector<int> state;
-    std::vector<std::vector<uint32_t>> choice_orders;
+    std::vector<std::vector<int>> tried_choices;
+    std::vector<int> current_choice;
     std::unordered_map<EClassId, EClassId> inplace_alias;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 
@@ -633,6 +633,10 @@ template <typename... Rules> struct BufferizeIterator
           enodeInfos(_enodeInfos), mem_caps(_mem_caps), delegate(std::move(_delegate)), best_cost(_best_cost),
           timeout(_timeout)
     {
+        if (delegate && best_cost)
+        {
+            delegate->set_best_cost_ptr(best_cost);
+        }
         init();
         BufferizeContext ctx{ordered,       egraph,      selection_map,
                              enodeInfos,    birth_times, death_times,
@@ -649,14 +653,32 @@ template <typename... Rules> struct BufferizeIterator
     void init()
     {
         uint32_t N = ordered.size();
-        state.assign(N, 0);
-        choice_orders.resize(N);
+        tried_choices.resize(N);
+        current_choice.assign(N, -1);
         valid_choices.resize(N);
 
         for (uint32_t i = 0; i < N; ++i)
         {
             EClassId eclass = ordered[i];
-            birth_times[eclass] = i;
+            auto sel_it = selection_map.find(eclass);
+            if (sel_it != selection_map.end())
+            {
+                uint32_t sel = sel_it->second;
+                ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
+                const ENode &node = egraph.getENode(enode_id);
+                if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+                {
+                    birth_times[eclass] = 0;
+                }
+                else
+                {
+                    birth_times[eclass] = i;
+                }
+            }
+            else
+            {
+                birth_times[eclass] = i;
+            }
             death_times[eclass] = i + 1;
         }
         for (uint32_t i = 0; i < N; ++i)
@@ -830,28 +852,27 @@ template <typename... Rules> struct BufferizeIterator
                 k--;
                 continue;
             }
-            if (delegate && valid_choices[k].size() > 1)
-            {
-                delegate->pop_state();
-            }
 
             EClassId eclass = ordered[k];
+            int choice = current_choice[k];
 
-            uint32_t choice_idx = choice_orders[k][state[k] - 1];
-            int choice = valid_choices[k][choice_idx];
             BufferizeContext pop_ctx{ordered,       egraph,           selection_map,
                                      enodeInfos,    birth_times,      death_times,
                                      inplace_alias, valid_choices[k], static_cast<uint32_t>(k),
                                      mem_caps,      best_cost};
             rules.on_pop(choice, pop_ctx);
-
             inplace_alias.erase(eclass);
 
-            if (state[k] < valid_choices[k].size())
+            if (tried_choices[k].size() < valid_choices[k].size())
             {
                 return true;
             }
-            state[k] = 0;
+
+            tried_choices[k].clear();
+            if (delegate && valid_choices[k].size() > 1)
+            {
+                delegate->pop_state();
+            }
             k--;
         }
         return false;
@@ -899,77 +920,101 @@ template <typename... Rules> struct BufferizeIterator
             ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
             const ENode &node = egraph.getENode(enode_id);
 
-            if (state[k] == 0)
+            // Collect unexplored choices
+            std::vector<int> unexplored;
+            unexplored.reserve(valid_choices[k].size());
+            for (int choice : valid_choices[k])
             {
-                if (delegate && valid_choices[k].size() > 1)
+                if (std::find(tried_choices[k].begin(), tried_choices[k].end(), choice) == tried_choices[k].end())
                 {
-                    delegate->push_state();
-
-                    std::vector<ActionFeatureBufferize> features;
-                    uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
-
-                    for (int choice : valid_choices[k])
-                    {
-                        ActionFeatureBufferize f;
-                        f.mem_space = node.getMemSpace();
-                        auto cap_it = mem_caps.find(node.getMemSpace());
-                        f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
-
-                        if (choice == -1)
-                        {
-                            f.is_new_buffer = 1.0f;
-                            f.size = out_size;
-                            f.parent_size = 0;
-                            f.parent_birth_time = 0.0f;
-                        }
-                        else
-                        {
-                            f.is_new_buffer = 0.0f;
-                            f.size = out_size;
-                            EClassId child = egraph.findConst(node.getChildren()[choice]);
-                            EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
-                            EClassId parent_actual_base = get_inplace_alias(child_base);
-
-                            auto c_sel_it = selection_map.find(child_base);
-                            if (c_sel_it != selection_map.end())
-                            {
-                                uint32_t c_sel = c_sel_it->second;
-                                const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
-                                f.parent_size = getSizeBytes(c_node.getShape(), c_node.getDType());
-                            }
-                            else
-                            {
-                                f.parent_size = 0;
-                            }
-                            f.parent_birth_time = (float)birth_times[parent_actual_base];
-                        }
-                        features.push_back(f);
-                    }
-                    choice_orders[k] = delegate->order_bufferize(features);
-                }
-                else
-                {
-                    choice_orders[k].resize(valid_choices[k].size());
-                    std::iota(choice_orders[k].begin(), choice_orders[k].end(), 0u);
+                    unexplored.push_back(choice);
                 }
             }
 
-            bool chosen = false;
-            while (state[k] < valid_choices[k].size())
+            if (unexplored.empty())
             {
-                uint32_t choice_idx = choice_orders[k][state[k]];
-                int choice = valid_choices[k][choice_idx];
-                state[k]++;
+                tried_choices[k].clear();
+                if (delegate && valid_choices[k].size() > 1)
+                {
+                    delegate->pop_state();
+                }
+                if (!ascend())
+                {
+                    is_done = true;
+                    return false;
+                }
+                continue;
+            }
+
+            std::vector<uint32_t> relative_order;
+            if (delegate && valid_choices[k].size() > 1)
+            {
+                delegate->push_state();
+
+                std::vector<ActionFeatureBufferize> features;
+                uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
+
+                for (int choice : unexplored)
+                {
+                    ActionFeatureBufferize f;
+                    f.mem_space = node.getMemSpace();
+                    auto cap_it = mem_caps.find(node.getMemSpace());
+                    f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
+
+                    if (choice == -1)
+                    {
+                        f.is_new_buffer = 1.0f;
+                        f.size = out_size;
+                        f.parent_size = 0;
+                        f.parent_birth_time = 0.0f;
+                    }
+                    else
+                    {
+                        f.is_new_buffer = 0.0f;
+                        f.size = out_size;
+                        EClassId child = egraph.findConst(node.getChildren()[choice]);
+                        EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
+                        EClassId parent_actual_base = get_inplace_alias(child_base);
+
+                        auto c_sel_it = selection_map.find(child_base);
+                        if (c_sel_it != selection_map.end())
+                        {
+                            uint32_t c_sel = c_sel_it->second;
+                            const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
+                            f.parent_size = getSizeBytes(c_node.getShape(), c_node.getDType());
+                        }
+                        else
+                        {
+                            f.parent_size = 0;
+                        }
+                        f.parent_birth_time = (float)birth_times[parent_actual_base];
+                    }
+                    features.push_back(f);
+                }
+                relative_order = delegate->order_bufferize(features);
+            }
+            else
+            {
+                relative_order.resize(unexplored.size());
+                std::iota(relative_order.begin(), relative_order.end(), 0u);
+            }
+
+            bool chosen = false;
+            for (uint32_t rel_idx : relative_order)
+            {
+                int choice = unexplored[rel_idx];
+                tried_choices[k].push_back(choice);
 
                 BufferizeContext ctx{ordered,       egraph,           selection_map,
                                      enodeInfos,    birth_times,      death_times,
                                      inplace_alias, valid_choices[k], static_cast<uint32_t>(k),
                                      mem_caps,      best_cost};
-                if (rules.is_pruned(choice, choice_idx, ctx))
+                if (rules.is_pruned(choice, static_cast<size_t>(rel_idx), ctx))
                 {
                     continue;
                 }
 
+                current_choice[k] = choice;
                 rules.on_push(choice, ctx);
 
                 if (choice != -1)
@@ -990,7 +1035,11 @@ template <typename... Rules> struct BufferizeIterator
 
             if (!chosen)
             {
-                state[k] = 0;
+                tried_choices[k].clear();
+                if (delegate && valid_choices[k].size() > 1)
+                {
+                    delegate->pop_state();
+                }
                 if (delegate && delegate->fast_fail())
                 {
                     is_done = true;
@@ -1261,6 +1310,8 @@ class HMinBoundRule
 // =============================================================================
 // MallocIterator<Rules...>
 // =============================================================================
+// In MallocIterator (inside tensor_graphs_cpp/core/plan/mem.hpp):
+
 template <typename... Rules> struct MallocIterator
 {
   public:
@@ -1277,12 +1328,12 @@ template <typename... Rules> struct MallocIterator
     std::vector<std::vector<int>> adj;
 
     std::vector<int> avail;
-    std::vector<int> state;
     std::vector<int> order;
     std::vector<int64_t> chosen_offset;
     std::vector<int64_t> global_offset_max;
     std::vector<int64_t> current_offsets;
-    std::vector<std::vector<uint32_t>> choice_orders;
+    std::vector<std::vector<int>> tried_at_k;
+    std::vector<int> swapped_idx_at_k;
 
     struct Backup
     {
@@ -1293,7 +1344,6 @@ template <typename... Rules> struct MallocIterator
     std::vector<size_t> trail_starts;
 
     int k = 0;
-
     bool is_done = false;
 
     template <typename... Rs>
@@ -1304,6 +1354,10 @@ template <typename... Rules> struct MallocIterator
           delegate(std::move(_delegate)), best_cost(_best_cost), timeout(_timeout),
           N(static_cast<int>(_unallocated.size()))
     {
+        if (delegate && best_cost)
+        {
+            delegate->set_best_cost_ptr(best_cost);
+        }
         unallocated_sizes.resize(N);
         for (int i = 0; i < N; ++i)
             unallocated_sizes[i] = unallocated[i].size;
@@ -1343,13 +1397,12 @@ template <typename... Rules> struct MallocIterator
 
         avail.resize(N);
         std::iota(avail.begin(), avail.end(), 0);
-        state.assign(N, 0);
-        state[0] = 0;
         order.assign(N, 0);
         chosen_offset.assign(N, 0);
         global_offset_max.assign(N + 1, 0);
         current_offsets.assign(N, 0);
-        choice_orders.resize(N);
+        tried_at_k.resize(N);
+        swapped_idx_at_k.assign(N, 0);
         trail.reserve(N * 50);
         trail_starts.assign(N + 1, 0);
     }
@@ -1392,33 +1445,63 @@ template <typename... Rules> struct MallocIterator
                 return true;
             }
 
-            if (state[k] == (k == 0 ? 0 : k))
+            // Collect untried candidate indices in avail[k .. N-1]
+            std::vector<int> unexplored_indices;
+            unexplored_indices.reserve(N - k);
+            for (int idx = k; idx < N; ++idx)
             {
-                if (delegate)
+                int buf_idx = avail[idx];
+                if (std::find(tried_at_k[k].begin(), tried_at_k[k].end(), buf_idx) == tried_at_k[k].end())
                 {
-                    delegate->push_state();
-
-                    std::vector<ActionFeatureMalloc> features;
-                    for (int idx = k; idx < N; ++idx)
-                    {
-                        ActionFeatureMalloc f;
-                        f.size = unallocated[avail[idx]].size;
-                        f.start = unallocated[avail[idx]].start;
-                        f.end = unallocated[avail[idx]].end;
-                        f.mem_space = unallocated[avail[idx]].mem_space;
-                        f.mem_cap = mem_cap;
-                        features.push_back(f);
-                    }
-                    choice_orders[k] = delegate->order_malloc(features);
-                }
-                else
-                {
-                    choice_orders[k].resize(N - k);
-                    std::iota(choice_orders[k].begin(), choice_orders[k].end(), 0u);
+                    unexplored_indices.push_back(idx);
                 }
             }
 
-            bool advanced = false;
+            if (unexplored_indices.empty())
+            {
+                tried_at_k[k].clear();
+                if (delegate)
+                    delegate->pop_state();
+                k--;
+                if (k >= 0)
+                {
+                    int swap_idx = swapped_idx_at_k[k];
+                    std::swap(avail[k], avail[swap_idx]);
+
+                    size_t ts = trail_starts[k];
+                    while (trail.size() > ts)
+                    {
+                        current_offsets[trail.back().j] = trail.back().old_val;
+                        trail.pop_back();
+                    }
+                }
+                continue;
+            }
+
+            std::vector<uint32_t> relative_order;
+            if (delegate)
+            {
+                delegate->push_state();
+
+                std::vector<ActionFeatureMalloc> features;
+                features.reserve(unexplored_indices.size());
+                for (int idx : unexplored_indices)
+                {
+                    ActionFeatureMalloc f;
+                    f.size = unallocated[avail[idx]].size;
+                    f.start = unallocated[avail[idx]].start;
+                    f.end = unallocated[avail[idx]].end;
+                    f.mem_space = unallocated[avail[idx]].mem_space;
+                    f.mem_cap = mem_cap;
+                    features.push_back(f);
+                }
+                relative_order = delegate->order_malloc(features);
+            }
+            else
+            {
+                relative_order.resize(unexplored_indices.size());
+                std::iota(relative_order.begin(), relative_order.end(), 0u);
+            }
 
             int64_t h_min = std::numeric_limits<int64_t>::max();
             for (int idx = k; idx < N; ++idx)
@@ -1429,14 +1512,12 @@ template <typename... Rules> struct MallocIterator
                     h_min = h;
             }
 
-            while (state[k] < N)
+            bool advanced = false;
+            for (uint32_t rel_idx : relative_order)
             {
-                uint32_t sel_idx = state[k] - k;
-                int mapped_idx = k + choice_orders[k][sel_idx];
-
-                int idx = mapped_idx;
-                state[k]++;
+                int idx = unexplored_indices[rel_idx];
                 int i = avail[idx];
+                tried_at_k[k].push_back(i);
                 int64_t offset_i = current_offsets[i];
 
                 MallocContext ctx{mem_cap,
@@ -1457,6 +1538,7 @@ template <typename... Rules> struct MallocIterator
                     continue;
                 }
 
+                swapped_idx_at_k[k] = idx;
                 std::swap(avail[k], avail[idx]);
                 order[k] = i;
                 chosen_offset[k] = offset_i;
@@ -1481,18 +1563,17 @@ template <typename... Rules> struct MallocIterator
             if (advanced)
             {
                 k++;
-                if (k < N)
-                    state[k] = k;
             }
             else
             {
+                tried_at_k[k].clear();
                 if (delegate)
                     delegate->pop_state();
                 k--;
                 if (k >= 0)
                 {
-                    int idx = state[k] - 1;
-                    std::swap(avail[k], avail[idx]);
+                    int swap_idx = swapped_idx_at_k[k];
+                    std::swap(avail[k], avail[swap_idx]);
 
                     size_t ts = trail_starts[k];
                     while (trail.size() > ts)

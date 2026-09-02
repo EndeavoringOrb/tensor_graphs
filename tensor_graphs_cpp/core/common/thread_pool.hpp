@@ -9,9 +9,11 @@
 #include <thread>
 #include <vector>
 
+#include "core/logging.hpp"
+
 class ThreadPool
 {
-  public:
+public:
     static ThreadPool &get()
     {
         static ThreadPool instance;
@@ -50,7 +52,8 @@ class ThreadPool
         {
             for (uint32_t i = 0; i < num_threads_ - 1; ++i)
             {
-                threads.emplace_back([this] {
+                threads.emplace_back([this]
+                                     {
                     while (true)
                     {
                         std::function<void()> task;
@@ -63,8 +66,7 @@ class ThreadPool
                             this->tasks.pop();
                         }
                         task();
-                    }
-                });
+                    } });
             }
         }
     }
@@ -96,13 +98,25 @@ class ThreadPool
         auto state = std::make_shared<State>();
         state->task = task;
 
-        auto worker_task = [state, num_tasks]() {
+        auto worker_task = [state, num_tasks]()
+        {
             while (true)
             {
                 uint32_t idx = state->counter.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= num_tasks)
                     break;
-                state->task(idx);
+                try
+                {
+                    state->task(idx);
+                }
+                catch (const std::exception &e)
+                {
+                    LOG(ERROR) << "\n[ThreadPool Error in Task " << idx << "]: " << e.what() << std::endl;
+                }
+                catch (...)
+                {
+                    LOG(ERROR) << "\n[ThreadPool Unknown Fatal Exception in Task " << idx << "]" << std::endl;
+                }
                 state->completed.fetch_add(1, std::memory_order_release);
             }
         };
@@ -127,7 +141,7 @@ class ThreadPool
         }
     }
 
-  private:
+private:
     ThreadPool() : stop(false)
     {
         set_num_threads(0);

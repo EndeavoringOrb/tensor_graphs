@@ -206,8 +206,7 @@ def main():
         log_cost_calls=args.log_cost_calls,
     )
 
-    tok_path = args.text_encoder_path if args.text_encoder_path else args.model_path
-    tokenizer = load_tokenizer([tok_path, "Qwen/Qwen3-VL-4B-Instruct"])
+    tokenizer = load_tokenizer(["Qwen/Qwen3-VL-4B-Instruct"])
     token_ids = encode_prompt(tokenizer, prompt, max_seq_len=128)
 
     latent_h = args.height // 8

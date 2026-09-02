@@ -1,5 +1,7 @@
 add .nBytes() to TensorNode and TensorView in place of countElements * getDTypeSize
 
+fix/update reference tests against pytorch (utils/make_test_files.py)
+
 CI/CD pipeline
 
 switch ShapePropagator to registry so we can assert that every op has handling

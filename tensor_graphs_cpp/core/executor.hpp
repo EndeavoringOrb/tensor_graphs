@@ -43,6 +43,7 @@ class Executor
             const OpInstruction &inst = compiled.instructions[idx];
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+            LOG(DEBUG) << kernel_name;
 
             const std::vector<Engine> &inst_engines = inst.engines;
             const Engine &primary_engine = inst_engines[0];
