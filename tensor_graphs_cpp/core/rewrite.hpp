@@ -1183,7 +1183,7 @@ struct SlicePushDownElementwise : public Rule
 
             for (ENodeId srcNodeIdx : srcEnodes)
             {
-                const ENode &opNode = egraph.getENode(srcNodeIdx);
+                const ENode opNode = egraph.getENode(srcNodeIdx);
                 OpType op = opNode.getOpType();
                 if (!isElementwise(op) || op == OpType::COPY_TO || op == OpType::CONTIGUOUS)
                 {
