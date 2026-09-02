@@ -1183,12 +1183,25 @@ struct SlicePushDownElementwise : public Rule
 
             for (ENodeId srcNodeIdx : srcEnodes)
             {
-                const ENode opNode = egraph.getENode(srcNodeIdx);
+                const ENode &opNode = egraph.getENode(srcNodeIdx);
                 OpType op = opNode.getOpType();
-                if (!isElementwise(op))
+                if (!isElementwise(op) || op == OpType::COPY_TO || op == OpType::CONTIGUOUS)
                 {
                     continue;
                 }
+
+                bool hasBroadcastChild = false;
+                for (EClassId cid : opNode.getChildren())
+                {
+                    const auto &cls = egraph.getEClass(egraph.findConst(cid));
+                    if (cls.shape != opNode.getShape())
+                    {
+                        hasBroadcastChild = true;
+                        break;
+                    }
+                }
+                if (hasBroadcastChild)
+                    continue;
 
                 MatchKey key{eNodeIdx, sliceNodeIdx.value, srcNodeIdx.value};
                 if (!visited.insert(key).second)
