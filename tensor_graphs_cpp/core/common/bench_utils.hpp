@@ -83,10 +83,17 @@ struct BenchBuffer
         if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
+            cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
+            if (set_device_err != cudaSuccess)
+            {
+                Error::throw_err("cudaSetDevice failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(set_device_err)));
+            }
             cudaError_t err = cudaMalloc(&devicePtr, bytes);
             if (err != cudaSuccess)
             {
-                Error::throw_err("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+                Error::throw_err("cudaMalloc failed on device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(err)));
             }
 #else
             Error::throw_err("CUDA backend requested but TG_USE_CUDA is not defined.");
@@ -124,10 +131,17 @@ struct BenchBuffer
         if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
+            cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
+            if (set_device_err != cudaSuccess)
+            {
+                Error::throw_err("cudaSetDevice failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(set_device_err)));
+            }
             cudaError_t err = cudaMemcpy(devicePtr, hostData.data(), bytes, cudaMemcpyHostToDevice);
             if (err != cudaSuccess)
             {
-                Error::throw_err("cudaMemcpy HostToDevice failed: " + std::string(cudaGetErrorString(err)));
+                Error::throw_err("cudaMemcpy HostToDevice failed on device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(err)));
             }
 #endif
         }
@@ -155,10 +169,17 @@ struct BenchBuffer
         if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
+            cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
+            if (set_device_err != cudaSuccess)
+            {
+                Error::throw_err("cudaSetDevice failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(set_device_err)));
+            }
             cudaError_t err = cudaMemcpy(hostData.data(), devicePtr, bytes, cudaMemcpyDeviceToHost);
             if (err != cudaSuccess)
             {
-                Error::throw_err("cudaMemcpy DeviceToHost failed: " + std::string(cudaGetErrorString(err)));
+                Error::throw_err("cudaMemcpy DeviceToHost failed on device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(err)));
             }
 #endif
         }
@@ -188,6 +209,7 @@ struct BenchBuffer
             if (mem_space.type == HandleType::CUDA)
             {
 #ifdef TG_USE_CUDA
+                cudaSetDevice(mem_space.idx);
                 cudaFree(devicePtr);
 #endif
             }
@@ -396,6 +418,16 @@ struct PreparedKernel
     void prepare(const KernelEntry &kernel, const Record &r,
                  const std::vector<std::vector<uint8_t>> *explicitInputData = nullptr)
     {
+        HardwareBinding binding;
+        if (!TopologyMapper::resolve(kernel.output_mem_space, kernel.input_mem_spaces, kernel.engines,
+                                     kernel.is_view, r.inputShapes.size(), r.output_mem_space,
+                                     r.input_mem_spaces, r.engines, false, false, false, binding) &&
+            !TopologyMapper::resolve(kernel.output_mem_space, kernel.input_mem_spaces, kernel.engines,
+                                     kernel.is_view, r.inputShapes.size(), {}, {}, {}, true, true, true, binding))
+        {
+            Error::throw_err("Unable to resolve physical hardware for " + kernel.getName());
+        }
+
         inputBuffers.resize(r.inputShapes.size());
         inPtrs.assign(r.inputShapes.size(), nullptr);
         inViews.resize(r.inputShapes.size());
@@ -420,11 +452,7 @@ struct PreparedKernel
                 elements = 1;
             uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
 
-            MemSpace b = {1, HandleType::CPP};
-            if (!r.input_mem_spaces.empty() && idx < r.input_mem_spaces.size())
-                b = r.input_mem_spaces[idx];
-
-            inputBuffers[idx].allocate(b, bytes);
+            inputBuffers[idx].allocate(binding.input_mem_spaces[idx], bytes);
 
             if (explicitInputData && idx < explicitInputData->size() && !(*explicitInputData)[idx].empty())
             {
@@ -543,8 +571,7 @@ struct PreparedKernel
                 elements = 1;
             uint64_t bytes = elements * getDTypeSize(r.outputDType);
 
-            MemSpace outBackend = r.output_mem_space;
-            outputBuffers[0].allocate(outBackend, bytes);
+            outputBuffers[0].allocate(binding.output_mem_space, bytes);
 
             outPtrs[0] = outputBuffers[0].getWritePtr();
 
@@ -570,41 +597,46 @@ struct PreparedKernel
         }
 
 #ifdef TG_USE_CUDA
-        // Benchmarking/testing environments bypass the Executor, so provide a valid CUDA
-        // stream here to ensure ctx.cuda_stream() does not throw an out-of-bounds error
-        // when CUDA kernels are run directly through PreparedKernel.
+        int primary_cuda_device = -1;
+        for (const auto &engine : binding.engines)
         {
-            uint32_t cudaDevIdx = 0;
-            bool hasCuda = (r.output_mem_space.type == HandleType::CUDA);
-            if (hasCuda)
-                cudaDevIdx = r.output_mem_space.idx;
-            if (!hasCuda)
+            if (engine.type == EngineType::CUDA_GPU || engine.type == EngineType::CUDA_DMA)
             {
-                for (const auto &ms : r.input_mem_spaces)
+                primary_cuda_device = static_cast<int>(engine.idx);
+                break;
+            }
+        }
+        if (primary_cuda_device == -1 && binding.output_mem_space.type == HandleType::CUDA)
+            primary_cuda_device = static_cast<int>(binding.output_mem_space.idx);
+        if (primary_cuda_device == -1)
+        {
+            for (const auto &mem_space : binding.input_mem_spaces)
+            {
+                if (mem_space.type == HandleType::CUDA)
                 {
-                    if (ms.type == HandleType::CUDA)
-                    {
-                        hasCuda = true;
-                        cudaDevIdx = ms.idx;
-                        break;
-                    }
+                    primary_cuda_device = static_cast<int>(mem_space.idx);
+                    break;
                 }
             }
-
-            if (hasCuda)
+        }
+        if (primary_cuda_device != -1)
+        {
+            cudaError_t err = cudaSetDevice(primary_cuda_device);
+            if (err != cudaSuccess)
             {
-                cudaSetDevice(cudaDevIdx);
-                if (!benchStream)
-                {
-                    cudaError_t err = cudaStreamCreateWithFlags(&benchStream, cudaStreamNonBlocking);
-                    if (err != cudaSuccess)
-                    {
-                        Error::throw_err("cudaStreamCreateWithFlags failed in PreparedKernel::prepare: " +
-                                         std::string(cudaGetErrorString(err)));
-                    }
-                }
-                ctx.cuda_streams.push_back(reinterpret_cast<void *>(benchStream));
+                Error::throw_err("cudaSetDevice failed in PreparedKernel::prepare: " +
+                                 std::string(cudaGetErrorString(err)));
             }
+            if (!benchStream)
+            {
+                err = cudaStreamCreateWithFlags(&benchStream, cudaStreamNonBlocking);
+                if (err != cudaSuccess)
+                {
+                    Error::throw_err("cudaStreamCreateWithFlags failed in PreparedKernel::prepare: " +
+                                     std::string(cudaGetErrorString(err)));
+                }
+            }
+            ctx.cuda_streams.push_back(reinterpret_cast<void *>(benchStream));
         }
 #endif
     }
