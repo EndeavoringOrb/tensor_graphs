@@ -185,10 +185,9 @@ def main():
             delegate = None
     else:
         print(
-            "[Txt2Img] No --run-dir specified. Using HeuristicSearchDelegate (node caching disabled)."
+            "[Txt2Img] No --run-dir specified. Using HeuristicSearchDelegate."
         )
         delegate = None
-        args.disable_caching = True
 
     session = tensor_graphs.Krea2Session(
         model_path=args.model_path,

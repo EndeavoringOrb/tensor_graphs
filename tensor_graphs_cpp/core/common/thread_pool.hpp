@@ -104,18 +104,9 @@ class ThreadPool
                 uint32_t idx = state->counter.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= num_tasks)
                     break;
-                try
-                {
-                    state->task(idx);
-                }
-                catch (const std::exception &e)
-                {
-                    LOG(ERROR) << "\n[ThreadPool Error in Task " << idx << "]: " << e.what() << std::endl;
-                }
-                catch (...)
-                {
-                    LOG(ERROR) << "\n[ThreadPool Unknown Fatal Exception in Task " << idx << "]" << std::endl;
-                }
+                    
+                state->task(idx);
+                
                 state->completed.fetch_add(1, std::memory_order_release);
             }
         };

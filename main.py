@@ -135,10 +135,9 @@ def main():
             delegate = tensor_graphs.HeuristicSearchDelegate()
     else:
         print(
-            "[Main] No --run-dir specified. Using HeuristicSearchDelegate (node caching disabled)."
+            "[Main] No --run-dir specified. Using HeuristicSearchDelegate."
         )
         delegate = tensor_graphs.HeuristicSearchDelegate()
-        args.disable_caching = True
 
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(

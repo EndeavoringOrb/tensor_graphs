@@ -221,7 +221,7 @@ int main(int argc, char *argv[])
                           "Name of the target model (gemma-3-270m, "
                           "qwen-3.6-35b-a3b).",
                           "gemma-3-270m");
-    parser.add_positional("model_path", "Model file or directory containing model files.");
+    parser.add_positional("model_path", "Model file or directory containing model files.", "models/google/gemma-3-270m");
 
     if (!parser.parse(argc, argv))
     {
