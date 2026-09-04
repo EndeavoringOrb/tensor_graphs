@@ -1,0 +1,2 @@
+-use `rg` instead of `grep`
+-use .venv/Scripts/python.exe when running python

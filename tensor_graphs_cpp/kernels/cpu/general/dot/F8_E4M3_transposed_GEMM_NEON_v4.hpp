@@ -133,10 +133,14 @@ inline void runF8E4M3TransposedGEMMv4(const KernelContext &ctx)
                         float *out3 = Out + static_cast<uint64_t>(m + 3) * N + n_outer + ni;
 
 #if defined(TG_HAS_NEON)
-                        float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f), c02 = vdupq_n_f32(0.0f), c03 = vdupq_n_f32(0.0f);
-                        float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f), c12 = vdupq_n_f32(0.0f), c13 = vdupq_n_f32(0.0f);
-                        float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f), c22 = vdupq_n_f32(0.0f), c23 = vdupq_n_f32(0.0f);
-                        float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f), c32 = vdupq_n_f32(0.0f), c33 = vdupq_n_f32(0.0f);
+                        float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f), c02 = vdupq_n_f32(0.0f),
+                                    c03 = vdupq_n_f32(0.0f);
+                        float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f), c12 = vdupq_n_f32(0.0f),
+                                    c13 = vdupq_n_f32(0.0f);
+                        float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f), c22 = vdupq_n_f32(0.0f),
+                                    c23 = vdupq_n_f32(0.0f);
+                        float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f), c32 = vdupq_n_f32(0.0f),
+                                    c33 = vdupq_n_f32(0.0f);
 
                         for (uint32_t k = 0; k < cur_K4; k += 4)
                         {
@@ -171,17 +175,33 @@ inline void runF8E4M3TransposedGEMMv4(const KernelContext &ctx)
                             c33 = vfmaq_f32(c33, xv3, wv3);
                         }
 
-                        float s00 = vaddvq_f32(c00), s01 = vaddvq_f32(c01), s02 = vaddvq_f32(c02), s03 = vaddvq_f32(c03);
-                        float s10 = vaddvq_f32(c10), s11 = vaddvq_f32(c11), s12 = vaddvq_f32(c12), s13 = vaddvq_f32(c13);
-                        float s20 = vaddvq_f32(c20), s21 = vaddvq_f32(c21), s22 = vaddvq_f32(c22), s23 = vaddvq_f32(c23);
-                        float s30 = vaddvq_f32(c30), s31 = vaddvq_f32(c31), s32 = vaddvq_f32(c32), s33 = vaddvq_f32(c33);
+                        float s00 = vaddvq_f32(c00), s01 = vaddvq_f32(c01), s02 = vaddvq_f32(c02),
+                              s03 = vaddvq_f32(c03);
+                        float s10 = vaddvq_f32(c10), s11 = vaddvq_f32(c11), s12 = vaddvq_f32(c12),
+                              s13 = vaddvq_f32(c13);
+                        float s20 = vaddvq_f32(c20), s21 = vaddvq_f32(c21), s22 = vaddvq_f32(c22),
+                              s23 = vaddvq_f32(c23);
+                        float s30 = vaddvq_f32(c30), s31 = vaddvq_f32(c31), s32 = vaddvq_f32(c32),
+                              s33 = vaddvq_f32(c33);
 
                         for (uint32_t k = cur_K4; k < cur_K; ++k)
                         {
-                            s00 += x0[k] * w0[k]; s01 += x0[k] * w1[k]; s02 += x0[k] * w2[k]; s03 += x0[k] * w3[k];
-                            s10 += x1[k] * w0[k]; s11 += x1[k] * w1[k]; s12 += x1[k] * w2[k]; s13 += x1[k] * w3[k];
-                            s20 += x2[k] * w0[k]; s21 += x2[k] * w1[k]; s22 += x2[k] * w2[k]; s23 += x2[k] * w3[k];
-                            s30 += x3[k] * w0[k]; s31 += x3[k] * w1[k]; s32 += x3[k] * w2[k]; s33 += x3[k] * w3[k];
+                            s00 += x0[k] * w0[k];
+                            s01 += x0[k] * w1[k];
+                            s02 += x0[k] * w2[k];
+                            s03 += x0[k] * w3[k];
+                            s10 += x1[k] * w0[k];
+                            s11 += x1[k] * w1[k];
+                            s12 += x1[k] * w2[k];
+                            s13 += x1[k] * w3[k];
+                            s20 += x2[k] * w0[k];
+                            s21 += x2[k] * w1[k];
+                            s22 += x2[k] * w2[k];
+                            s23 += x2[k] * w3[k];
+                            s30 += x3[k] * w0[k];
+                            s31 += x3[k] * w1[k];
+                            s32 += x3[k] * w2[k];
+                            s33 += x3[k] * w3[k];
                         }
 
                         if (is_first_k)

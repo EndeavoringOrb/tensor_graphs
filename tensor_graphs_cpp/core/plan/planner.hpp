@@ -26,9 +26,9 @@
 #include "core/misc.hpp"
 #include "core/ops/ops.hpp"
 #include "core/plan/extractor.hpp"
+#include "core/plan/mem.hpp"
 #include "core/plan/pruning.hpp"
 #include "core/plan/search_delegate.hpp"
-#include "core/plan/mem.hpp"
 #include "core/rewrite.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/timer.hpp"
@@ -2081,7 +2081,8 @@ struct Planner
             if (graph.constantStaging.count(nodeId))
             {
                 baseState.egraph.constantStaging[e_class_id] = graph.constantStaging.at(nodeId);
-                uint64_t dataHash = tg_hash::computeConstantHash(node.getShape(), node.strides, node.dtype, *graph.constantStaging.at(nodeId));
+                uint64_t dataHash = tg_hash::computeConstantHash(node.getShape(), node.strides, node.dtype,
+                                                                 *graph.constantStaging.at(nodeId));
                 baseState.egraph.constantHashIndex[dataHash].push_back(e_class_id);
             }
         }

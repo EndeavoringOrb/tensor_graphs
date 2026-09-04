@@ -64,7 +64,10 @@ inline LONG WINAPI TestInstCrashHandler(EXCEPTION_POINTERS *ep)
         {
             ULONG_PTR op = ep->ExceptionRecord->ExceptionInformation[0];
             ULONG_PTR addr = ep->ExceptionRecord->ExceptionInformation[1];
-            std::cerr << "  Details: Attempted to " << (op == 0 ? "read from" : op == 1 ? "write to" : "access")
+            std::cerr << "  Details: Attempted to "
+                      << (op == 0   ? "read from"
+                          : op == 1 ? "write to"
+                                    : "access")
                       << " invalid address 0x" << std::hex << addr << std::dec << "\n";
         }
         std::cerr << "========================================================\n" << std::flush;
@@ -132,7 +135,8 @@ int main(int argc, char *argv[])
 #endif
     System::get();
 
-    ArgParser parser("test_inst", "Test / benchmark a specific instruction or set of instructions from a cache file in isolation.");
+    ArgParser parser("test_inst",
+                     "Test / benchmark a specific instruction or set of instructions from a cache file in isolation.");
     parser.add_option({"--cache", "-c"}, "Path to compiled graph cache .bin file.", "");
     parser.add_option({"--inst", "-i"}, "Instruction index or range (e.g. 30402 or 30390:30405).", "");
     parser.add_option({"--op"}, "Filter by op name or op type (case-insensitive substring).", "");
@@ -269,7 +273,8 @@ int main(int argc, char *argv[])
             for (uint64_t i = 0; i < n_instructions; ++i)
                 all_idx[i] = i;
             return all_idx;
-        }() : target_indices;
+        }()
+                                                : target_indices;
 
         for (uint64_t idx : to_search)
         {
@@ -344,8 +349,8 @@ int main(int argc, char *argv[])
     std::cout << "[test_inst] Initializing memory manager (" << (isolated ? "ISOLATED" : "FULL ARENA") << ")...\n";
     for (const auto &pair : peakSizes)
     {
-        std::cout << "  - " << pair.first << ": " << pair.second << " bytes ("
-                  << (pair.second / (1024.0 * 1024.0)) << " MB)\n";
+        std::cout << "  - " << pair.first << ": " << pair.second << " bytes (" << (pair.second / (1024.0 * 1024.0))
+                  << " MB)\n";
     }
 
     MemoryManager memManager(peakSizes);
@@ -396,7 +401,8 @@ int main(int argc, char *argv[])
         const OpInstruction &inst = compiled.instructions[inst_idx];
         if (inst.kernel_id.value == 0 || !KernelRegistry::get().hasKernel(inst.kernel_id))
         {
-            std::cout << "Skipping inst #" << inst_idx << " (Kernel ID 0x" << std::hex << inst.kernel_id.value << std::dec << " not registered).\n";
+            std::cout << "Skipping inst #" << inst_idx << " (Kernel ID 0x" << std::hex << inst.kernel_id.value
+                      << std::dec << " not registered).\n";
             continue;
         }
 
@@ -419,13 +425,12 @@ int main(int argc, char *argv[])
         uint64_t out_extent = getRequiredBufferSize(outView) * getDTypeSize(outView.dtype);
         std::cout << "Output:\n";
         std::cout << "  EClass: " << inst.eclass_id.value << " | LogicalId: " << inst.logical_id.value << "\n";
-        std::cout << "  Buffer: ID " << inst.outBuffer.id.value << " | " << inst.outBuffer.mem_space
-                  << " | Offset: 0x" << std::hex << inst.outBuffer.offset << std::dec
-                  << " (" << inst.outBuffer.offset << ") | Size: " << inst.outBuffer.size << " B\n";
+        std::cout << "  Buffer: ID " << inst.outBuffer.id.value << " | " << inst.outBuffer.mem_space << " | Offset: 0x"
+                  << std::hex << inst.outBuffer.offset << std::dec << " (" << inst.outBuffer.offset
+                  << ") | Size: " << inst.outBuffer.size << " B\n";
         std::cout << "  View:   " << toString(outView.dtype) << " " << toString(outView.getShape())
-                  << " | Strides: " << toString(outView.strides)
-                  << " | ViewOffset: 0x" << std::hex << outView.offset << std::dec
-                  << " | Extent: " << out_extent << " B\n";
+                  << " | Strides: " << toString(outView.strides) << " | ViewOffset: 0x" << std::hex << outView.offset
+                  << std::dec << " | Extent: " << out_extent << " B\n";
 
         // Input details
         std::cout << "Inputs (" << inst.children.size() << "):\n";
@@ -450,20 +455,20 @@ int main(int argc, char *argv[])
                 }
             }
 
-            std::cout << "  [" << i << "] EClass: " << c_id.value << " | Buf ID " << inBuf.id.value
-                      << " | " << inBuf.mem_space << " | Offset: 0x" << std::hex << inBuf.offset << std::dec
+            std::cout << "  [" << i << "] EClass: " << c_id.value << " | Buf ID " << inBuf.id.value << " | "
+                      << inBuf.mem_space << " | Offset: 0x" << std::hex << inBuf.offset << std::dec
                       << " | Size: " << inBuf.size << " B" << const_desc << "\n";
             std::cout << "      View: " << toString(inView.dtype) << " " << toString(inView.getShape())
-                      << " | Strides: " << toString(inView.strides)
-                      << " | ViewOffset: 0x" << std::hex << inView.offset << std::dec
-                      << " | Extent: " << in_extent << " B\n";
+                      << " | Strides: " << toString(inView.strides) << " | ViewOffset: 0x" << std::hex << inView.offset
+                      << std::dec << " | Extent: " << in_extent << " B\n";
 
             // Bounds check
             if (inBuf.mem_space.type != HandleType::STORAGE)
             {
                 if (inBuf.offset < 0)
                 {
-                    std::cerr << "  [PRE-FLIGHT ERROR] Input #" << i << " buffer has negative offset (" << inBuf.offset << ")!\n";
+                    std::cerr << "  [PRE-FLIGHT ERROR] Input #" << i << " buffer has negative offset (" << inBuf.offset
+                              << ")!\n";
                     preflight_ok = false;
                 }
                 if (inView.offset < static_cast<uint64_t>(inBuf.offset))
@@ -474,8 +479,9 @@ int main(int argc, char *argv[])
                 }
                 if (inView.offset + in_extent > static_cast<uint64_t>(inBuf.offset) + inBuf.size)
                 {
-                    std::cerr << "  [PRE-FLIGHT ERROR] Input #" << i << " view extent (0x" << std::hex << (inView.offset + in_extent)
-                              << ") overflows buffer bounds (0x" << (inBuf.offset + inBuf.size) << std::dec << ")!\n";
+                    std::cerr << "  [PRE-FLIGHT ERROR] Input #" << i << " view extent (0x" << std::hex
+                              << (inView.offset + in_extent) << ") overflows buffer bounds (0x"
+                              << (inBuf.offset + inBuf.size) << std::dec << ")!\n";
                     preflight_ok = false;
                 }
             }
@@ -486,7 +492,8 @@ int main(int argc, char *argv[])
         {
             if (inst.outBuffer.offset < 0)
             {
-                std::cerr << "  [PRE-FLIGHT ERROR] Output buffer has negative offset (" << inst.outBuffer.offset << ")!\n";
+                std::cerr << "  [PRE-FLIGHT ERROR] Output buffer has negative offset (" << inst.outBuffer.offset
+                          << ")!\n";
                 preflight_ok = false;
             }
             if (outView.offset < static_cast<uint64_t>(inst.outBuffer.offset))
@@ -498,7 +505,8 @@ int main(int argc, char *argv[])
             if (outView.offset + out_extent > static_cast<uint64_t>(inst.outBuffer.offset) + inst.outBuffer.size)
             {
                 std::cerr << "  [PRE-FLIGHT ERROR] Output view extent (0x" << std::hex << (outView.offset + out_extent)
-                          << ") overflows buffer bounds (0x" << (inst.outBuffer.offset + inst.outBuffer.size) << std::dec << ")!\n";
+                          << ") overflows buffer bounds (0x" << (inst.outBuffer.offset + inst.outBuffer.size)
+                          << std::dec << ")!\n";
                 preflight_ok = false;
             }
         }
@@ -559,7 +567,8 @@ int main(int argc, char *argv[])
                 if (!inBufObj)
                     Error::throw_err("Input DeviceBuffer not found");
 
-                LogicalId lid = compiled.has_logical_id(inst.children[i]) ? compiled.get_logical_id(inst.children[i]) : LogicalId{UINT32_MAX};
+                LogicalId lid = compiled.has_logical_id(inst.children[i]) ? compiled.get_logical_id(inst.children[i])
+                                                                          : LogicalId{UINT32_MAX};
                 inBufObj->setupInput(ctx, inView, lid);
             }
 
@@ -567,7 +576,8 @@ int main(int argc, char *argv[])
             if (!outBufObj)
                 Error::throw_err("Output DeviceBuffer not found");
 
-            LogicalId out_lid = compiled.has_logical_id(inst.eclass_id) ? compiled.get_logical_id(inst.eclass_id) : LogicalId{UINT32_MAX};
+            LogicalId out_lid = compiled.has_logical_id(inst.eclass_id) ? compiled.get_logical_id(inst.eclass_id)
+                                                                        : LogicalId{UINT32_MAX};
             outBufObj->setupOutput(ctx, outView, out_lid);
 
             std::cout << "Pointer Diagnostics:\n";
@@ -608,7 +618,8 @@ int main(int argc, char *argv[])
                 if (check_nan && ctx.outputs[0] && outView.dtype == DType::FLOAT32)
                 {
                     std::vector<float> host_out;
-                    const float *host_ptr = sync_output_to_host(static_cast<const float *>(ctx.outputs[0]), countElements(outView.getShape()), host_out);
+                    const float *host_ptr = sync_output_to_host(static_cast<const float *>(ctx.outputs[0]),
+                                                                countElements(outView.getShape()), host_out);
                     uint64_t n_elems = countElements(outView.getShape());
                     uint64_t nan_count = 0;
                     for (uint64_t k = 0; k < n_elems; ++k)
@@ -618,7 +629,8 @@ int main(int argc, char *argv[])
                     }
                     if (nan_count > 0)
                     {
-                        std::cerr << "  [CHECK-NAN WARNING] Found " << nan_count << " NaN/Inf values in output tensor!\n";
+                        std::cerr << "  [CHECK-NAN WARNING] Found " << nan_count
+                                  << " NaN/Inf values in output tensor!\n";
                     }
                     else
                     {
@@ -632,7 +644,8 @@ int main(int argc, char *argv[])
                     if (outView.dtype == DType::FLOAT32)
                     {
                         std::vector<float> host_out;
-                        const float *host_ptr = sync_output_to_host(static_cast<const float *>(ctx.outputs[0]), countElements(outView.getShape()), host_out);
+                        const float *host_ptr = sync_output_to_host(static_cast<const float *>(ctx.outputs[0]),
+                                                                    countElements(outView.getShape()), host_out);
                         uint64_t n_elems = std::min<uint64_t>(8, countElements(outView.getShape()));
                         for (uint64_t k = 0; k < n_elems; ++k)
                         {

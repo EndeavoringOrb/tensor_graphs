@@ -169,7 +169,8 @@ inline void runKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const KernelContext &c
         std::vector<uint8_t> gate_data(bytes);
         std::vector<uint8_t> up_data(bytes);
 
-        kreaMlp_v2_readFromFileAtOffset(fd_gate, off_gate + static_cast<uint64_t>(i_start) * K, gate_data.data(), bytes);
+        kreaMlp_v2_readFromFileAtOffset(fd_gate, off_gate + static_cast<uint64_t>(i_start) * K, gate_data.data(),
+                                        bytes);
         kreaMlp_v2_readFromFileAtOffset(fd_up, off_up + static_cast<uint64_t>(i_start) * K, up_data.data(), bytes);
 
         constexpr uint32_t CHUNK = 64;
@@ -232,7 +233,8 @@ inline void runKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const KernelContext &c
                         u_val += x_row[k] * wu[k];
                     }
 
-                    float sig = (g_val >= 0.0f) ? (1.0f / (1.0f + std::exp(-g_val))) : (std::exp(g_val) / (1.0f + std::exp(g_val)));
+                    float sig = (g_val >= 0.0f) ? (1.0f / (1.0f + std::exp(-g_val)))
+                                                : (std::exp(g_val) / (1.0f + std::exp(g_val)));
                     swiglu_row[ni] = (g_val * sig) * u_val;
                 }
             }
@@ -255,7 +257,8 @@ inline void runKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const KernelContext &c
         uint64_t bytes = static_cast<uint64_t>(num_k) * I;
 
         std::vector<uint8_t> down_data(bytes);
-        kreaMlp_v2_readFromFileAtOffset(fd_down, off_down + static_cast<uint64_t>(k_start) * I, down_data.data(), bytes);
+        kreaMlp_v2_readFromFileAtOffset(fd_down, off_down + static_cast<uint64_t>(k_start) * I, down_data.data(),
+                                        bytes);
 
         constexpr uint32_t CHUNK = 64;
         std::vector<float> down_tile(CHUNK * I);
@@ -308,7 +311,8 @@ inline void runKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const KernelContext &c
     });
 }
 
-inline LogicalId refFactoryKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const std::vector<LogicalId> &inputs, Graph &graph)
+inline LogicalId refFactoryKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const std::vector<LogicalId> &inputs,
+                                                                      Graph &graph)
 {
     LogicalId x = inputs[0];
     auto sX = graph.getNode(x).getShape();
@@ -352,8 +356,7 @@ inline LogicalId refFactoryKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2(const std:
 REGISTER_KERNEL("Fused_Krea_SwiGLU_MLP_StreamingStorage_F8_E4M3_v2", 4, 4,
                 matchKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2, runKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2,
                 refFactoryKreaSwiGLU_MLP_StreamingStorage_F8_E4M3_v2, {}, MemSpace(1, HandleType::CPP),
-                {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::F8_E4M3, DType::F8_E4M3, DType::F8_E4M3},
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::F8_E4M3, DType::F8_E4M3, DType::F8_E4M3},
                 {{1, 4224, 6144}, {16384, 6144}, {16384, 6144}, {6144, 16384}}, {true, true, true, true},
                 {{MemSpace(1, HandleType::CPP)},
                  {MemSpace(0, HandleType::STORAGE)},

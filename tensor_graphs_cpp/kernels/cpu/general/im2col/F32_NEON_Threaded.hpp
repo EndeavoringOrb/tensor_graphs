@@ -152,10 +152,9 @@ inline LogicalId refFactoryIm2ColF32_NEON_Threaded(const std::vector<LogicalId> 
 }
 
 REGISTER_KERNEL("Im2Col_F32_NEON_Threaded", 4, 4, matchIm2ColF32_NEON_Threaded, runIm2ColF32_NEON_Threaded,
-                refFactoryIm2ColF32_NEON_Threaded, {}, MemSpace(1, HandleType::CPP),
-                {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
-                {{1, 96, 64, 64}, {1}, {1}, {1}}, {false, false, false, false},
+                refFactoryIm2ColF32_NEON_Threaded, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 96, 64, 64}, {1}, {1}, {1}},
+                {false, false, false, false},
                 {{MemSpace(1, HandleType::CPP)},
                  {MemSpace(1, HandleType::CPP)},
                  {MemSpace(1, HandleType::CPP)},

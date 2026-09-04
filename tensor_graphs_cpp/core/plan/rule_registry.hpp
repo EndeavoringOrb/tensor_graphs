@@ -1,8 +1,8 @@
 #pragma once
 
-#include "core/plan/extractor.hpp"      // AllDispatchRuleTypes + AllExtractRuleTypes
-#include "core/plan/planner.hpp"        // AllCacheRuleTypes + AllENodeDominationRuleTypes
-#include "core/plan/mem.hpp" // AllBufferizeRuleTypes + AllMallocRuleTypes
+#include "core/plan/extractor.hpp" // AllDispatchRuleTypes + AllExtractRuleTypes
+#include "core/plan/mem.hpp"       // AllBufferizeRuleTypes + AllMallocRuleTypes
+#include "core/plan/planner.hpp"   // AllCacheRuleTypes + AllENodeDominationRuleTypes
 
 inline constexpr auto kAllRuleSpecsArray = prune::concat_arrays(
     prune::make_category_specs<AllDispatchRuleTypes>("dispatch"),

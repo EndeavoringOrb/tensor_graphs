@@ -19,9 +19,9 @@
 
 #include "core/common/constants.hpp"
 #include "core/plan/extractor.hpp"
+#include "core/plan/mem.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/rule_registry.hpp"
-#include "core/plan/mem.hpp"
 #include "core/settings.hpp"
 #include "core/types.hpp"
 #include "tests/common.hpp"
@@ -1347,6 +1347,67 @@ inline void runCategoryFromTuple(std::tuple<RuleTypes...>, const std::string &ca
 }
 
 } // namespace prune_test
+
+// =============================================================================
+// Push/pop state restoration tests
+// =============================================================================
+
+inline bool runPruningStateTests()
+{
+    using namespace prune_test;
+
+    std::cout << "\nRunning pruning-rule push/pop state tests\n";
+
+    Graph graph;
+    LogicalId root = buildWideShallow(graph, 2);
+    MockCtx mock;
+    mock.build(graph, root);
+
+    std::vector<EClassId> ordered;
+    ordered.reserve(mock.selection_map.size());
+    for (const auto &entry : mock.selection_map)
+        ordered.push_back(entry.first);
+    std::sort(ordered.begin(), ordered.end(), [](EClassId a, EClassId b) { return a.value < b.value; });
+
+    std::vector<EClassId> active_nodes;
+    for (EClassId node : ordered)
+    {
+        uint32_t sel = mock.selection_map.at(node);
+        const ENode &enode = mock.egraph.getENode(mock.egraph.getEClass(node).enodes[sel]);
+        if (!enode.getChildren().empty())
+            active_nodes.push_back(node);
+    }
+
+    if (active_nodes.size() < 2)
+    {
+        std::cerr << "  pruning state test setup produced too few operation nodes\n";
+        return false;
+    }
+
+    std::vector<EClassId> current_ready{active_nodes[0], active_nodes[1]};
+    DispatchContext ctx{mock.egraph, mock.selection_map, mock.enodeInfos, ordered, current_ready,
+                        0,           mock.mem_caps,      nullptr};
+
+    MemoryPressureDispatchRule rule;
+    rule.init(ctx);
+    const MemoryPressureDispatchRule initial = rule;
+
+    // Exercise nested DFS state and both allocation/free paths. Every push is
+    // undone in LIFO order, so the complete rule state must be restored.
+    rule.on_push(active_nodes[0], ctx);
+    rule.on_push(active_nodes[1], ctx);
+    rule.on_pop(active_nodes[1], ctx);
+    rule.on_pop(active_nodes[0], ctx);
+
+    if (rule != initial)
+    {
+        std::cerr << "  MemoryPressureDispatchRule state was not restored after nested push/pop\n";
+        return false;
+    }
+
+    std::cout << "  MemoryPressureDispatchRule push/pop state: PASS\n";
+    return true;
+}
 
 // =============================================================================
 // Top-Level Entry Point: Unified Multi-Scale Testing & Combination Benchmarking

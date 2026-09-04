@@ -21,6 +21,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--no-records"}, "Disable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
+    parser.add_flag({"--pruning-state"}, "Run only pruning-rule push/pop state restoration tests.");
     parser.add_option({"--timeout"}, "Timeout in seconds for each pruning test run (default: 15.0).", "15.0");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
@@ -37,6 +38,7 @@ int main(int argc, char *argv[])
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    bool pruningStateOnly = parser.get_flag("--pruning-state");
     double timeoutSeconds = 5.0;
     std::string timeoutOpt = parser.get_option("--timeout");
     if (!timeoutOpt.empty())
@@ -48,6 +50,11 @@ int main(int argc, char *argv[])
         catch (...)
         {
         }
+    }
+
+    if (pruningStateOnly)
+    {
+        return runPruningStateTests() ? 0 : 1;
     }
 
     if (targetKernel.empty() && cachePath.empty())

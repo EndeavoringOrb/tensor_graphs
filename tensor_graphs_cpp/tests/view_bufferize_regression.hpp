@@ -14,8 +14,8 @@
 #include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/plan/planner.hpp"
 #include "core/plan/mem.hpp"
+#include "core/plan/planner.hpp"
 #include "core/types.hpp"
 #include "tests/common.hpp"
 

@@ -555,7 +555,18 @@ class MemoryPressureDispatchRule
         EClassId node;
         MemSpace ms;
         uint64_t allocated_bytes;
+        std::vector<EClassId> decremented_children;
         std::vector<std::pair<EClassId, uint64_t>> freed_children;
+        std::unordered_map<MemSpace, uint64_t> previous_live_mem;
+        std::unordered_set<MemSpace> previously_absent_live_mem;
+
+        bool operator==(const UndoState &other) const
+        {
+            return node == other.node && ms == other.ms && allocated_bytes == other.allocated_bytes &&
+                   decremented_children == other.decremented_children && freed_children == other.freed_children &&
+                   previous_live_mem == other.previous_live_mem &&
+                   previously_absent_live_mem == other.previously_absent_live_mem;
+        }
     };
     std::vector<UndoState> undo_stack;
 
@@ -600,6 +611,17 @@ class MemoryPressureDispatchRule
     }
 
   public:
+    bool operator==(const MemoryPressureDispatchRule &other) const
+    {
+        return enabled == other.enabled && current_live_mem == other.current_live_mem &&
+               remaining_users == other.remaining_users && undo_stack == other.undo_stack;
+    }
+
+    bool operator!=(const MemoryPressureDispatchRule &other) const
+    {
+        return !(*this == other);
+    }
+
     void init(const DispatchContext &ctx)
     {
         current_live_mem.clear();
@@ -678,10 +700,22 @@ class MemoryPressureDispatchRule
         state.ms = ms;
         state.allocated_bytes = 0;
 
+        auto save_live_mem_state = [&](MemSpace touched_ms) {
+            if (state.previous_live_mem.find(touched_ms) != state.previous_live_mem.end() ||
+                state.previously_absent_live_mem.find(touched_ms) != state.previously_absent_live_mem.end())
+                return;
+            auto it = current_live_mem.find(touched_ms);
+            if (it == current_live_mem.end())
+                state.previously_absent_live_mem.insert(touched_ms);
+            else
+                state.previous_live_mem.emplace(touched_ms, it->second);
+        };
+
         if (ms.type != HandleType::STORAGE && enode.getOpType() != OpType::INPUT &&
             enode.getOpType() != OpType::CACHE && !can_execute_inplace(enode, info, ctx))
         {
             state.allocated_bytes = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
+            save_live_mem_state(ms);
             current_live_mem[ms] += state.allocated_bytes;
         }
 
@@ -692,6 +726,7 @@ class MemoryPressureDispatchRule
             if (canon_child.value < remaining_users.size())
             {
                 remaining_users[canon_child.value]--;
+                state.decremented_children.push_back(canon_child);
                 if (remaining_users[canon_child.value] == 0)
                 {
                     const EClass &cCls = ctx.egraph.getEClass(canon_child);
@@ -700,6 +735,7 @@ class MemoryPressureDispatchRule
                         uint64_t freed = (getSizeBytes(cCls.shape, cCls.dtype) + 4095) & ~4095ULL;
                         if (current_live_mem[cCls.mem_space] >= freed)
                         {
+                            save_live_mem_state(cCls.mem_space);
                             current_live_mem[cCls.mem_space] -= freed;
                             state.freed_children.push_back({canon_child, freed});
                         }
@@ -718,17 +754,13 @@ class MemoryPressureDispatchRule
         UndoState state = std::move(undo_stack.back());
         undo_stack.pop_back();
 
-        if (state.allocated_bytes > 0)
-        {
-            current_live_mem[state.ms] -= state.allocated_bytes;
-        }
+        for (EClassId child : state.decremented_children)
+            remaining_users[child.value]++;
 
-        for (const auto &p : state.freed_children)
-        {
-            const EClass &cCls = ctx.egraph.getEClass(p.first);
-            current_live_mem[cCls.mem_space] += p.second;
-            remaining_users[p.first.value]++;
-        }
+        for (const auto &[ms, value] : state.previous_live_mem)
+            current_live_mem[ms] = value;
+        for (MemSpace ms : state.previously_absent_live_mem)
+            current_live_mem.erase(ms);
     }
 };
 
@@ -985,8 +1017,7 @@ template <typename... Rules> struct DispatchIterator
                     f.dp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cost : 0.0f;
                     f.min_dp_cp_cost =
                         (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
-                    f.rev_cp_cost =
-                        (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
+                    f.rev_cp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
                     f.dp_mem = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_mem : 0.0f;
                     f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                     f.mem_space = enode.getMemSpace();
@@ -2054,8 +2085,8 @@ class ExtractorCycleStepRule
     }
 
   private:
-    std::vector<uint32_t> ord;                 // Node -> topological position index
-    std::vector<EClassId> node_at_pos;         // Topological position index -> Node
+    std::vector<uint32_t> ord;                  // Node -> topological position index
+    std::vector<EClassId> node_at_pos;          // Topological position index -> Node
     std::vector<std::vector<EClassId>> adj;     // v -> consumers u (v is input to u)
     std::vector<std::vector<EClassId>> rev_adj; // u -> inputs v
 
@@ -2794,8 +2825,8 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
                                              timeout, std::forward<Rules>(rules)...);
 }
 
-using AllExtractRuleTypes = std::tuple<InfiniteCostSkipRule, ExtractorCycleStepRule,
-                                       ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
+using AllExtractRuleTypes =
+    std::tuple<InfiniteCostSkipRule, ExtractorCycleStepRule, ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,

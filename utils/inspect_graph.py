@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # File: utils/inspect_graph.py
 import argparse
-import json
 import os
 import re
 import struct
@@ -20,11 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from binary import DTYPES, load_cache_file
 from common import (
     format_ms,
-    format_num_or_str,
     format_op_name,
     format_size,
     load_uids_from_cpp,
-    num_elements,
 )
 
 console = Console()
@@ -74,7 +71,11 @@ def get_view_extent_bytes(view: dict) -> int:
 def format_constant_data(data_bytes: bytes | None, dtype: Any) -> str:
     if not data_bytes:
         return ""
-    dt_str = DTYPES[dtype] if isinstance(dtype, int) and dtype < len(DTYPES) else str(dtype).upper()
+    dt_str = (
+        DTYPES[dtype]
+        if isinstance(dtype, int) and dtype < len(DTYPES)
+        else str(dtype).upper()
+    )
     if dt_str == "INT32":
         count = len(data_bytes) // 4
         if count == 0:
@@ -85,7 +86,9 @@ def format_constant_data(data_bytes: bytes | None, dtype: Any) -> str:
         count = len(data_bytes) // 4
         if count == 0:
             return "[]"
-        vals = [round(v, 4) for v in struct.unpack(f"<{count}f", data_bytes[: count * 4])]
+        vals = [
+            round(v, 4) for v in struct.unpack(f"<{count}f", data_bytes[: count * 4])
+        ]
         return str(vals) if len(vals) <= 6 else f"{vals[:6]}... ({count} floats)"
     return f"<{len(data_bytes)} bytes>"
 
@@ -108,7 +111,9 @@ def parse_inst_range(inst_str: str | None, max_len: int) -> list[int]:
         idx = int(s)
         if 0 <= idx < max_len:
             return [idx]
-        console_err.print(f"[bold red]Error:[/bold red] Instruction index {idx} out of range [0..{max_len - 1}]")
+        console_err.print(
+            f"[bold red]Error:[/bold red] Instruction index {idx} out of range [0..{max_len - 1}]"
+        )
         return []
     except ValueError:
         return []
@@ -154,7 +159,9 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
     # 2. Check each instruction
     for idx, inst in enumerate(instructions):
         kid = inst.get("kernelId", 0)
-        info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        info = (
+            uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        )
         op_name = format_op_name(info, f"Kernel_{hex(kid)}")
 
         eclass = inst.get("eclassId")
@@ -165,12 +172,14 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
 
         # Unallocated output buffer check
         if out_buf.get("memSpaceType") != "STORAGE" and out_buf.get("offset", -1) < 0:
-            issues.append({
-                "severity": "ERROR",
-                "inst": idx,
-                "op": op_name,
-                "msg": f"Output buffer {out_buf.get('id')} has negative/unallocated offset ({out_buf.get('offset')})",
-            })
+            issues.append(
+                {
+                    "severity": "ERROR",
+                    "inst": idx,
+                    "op": op_name,
+                    "msg": f"Output buffer {out_buf.get('id')} has negative/unallocated offset ({out_buf.get('offset')})",
+                }
+            )
 
         # Out buffer capacity vs View extent check
         if out_buf.get("memSpaceType") != "STORAGE" and out_view:
@@ -180,44 +189,52 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
             v_off = out_view.get("offset", 0)
 
             if v_off < b_off:
-                issues.append({
-                    "severity": "ERROR",
-                    "inst": idx,
-                    "op": op_name,
-                    "msg": f"Output view offset (0x{v_off:x}) starts before buffer offset (0x{b_off:x})",
-                })
+                issues.append(
+                    {
+                        "severity": "ERROR",
+                        "inst": idx,
+                        "op": op_name,
+                        "msg": f"Output view offset (0x{v_off:x}) starts before buffer offset (0x{b_off:x})",
+                    }
+                )
             if (v_off - b_off) + v_extent > b_size:
-                issues.append({
-                    "severity": "ERROR",
-                    "inst": idx,
-                    "op": op_name,
-                    "msg": (
-                        f"Output view extent ({v_extent} B at rel offset 0x{v_off - b_off:x}) "
-                        f"exceeds buffer {out_buf.get('id')} capacity ({b_size} B)"
-                    ),
-                })
+                issues.append(
+                    {
+                        "severity": "ERROR",
+                        "inst": idx,
+                        "op": op_name,
+                        "msg": (
+                            f"Output view extent ({v_extent} B at rel offset 0x{v_off - b_off:x}) "
+                            f"exceeds buffer {out_buf.get('id')} capacity ({b_size} B)"
+                        ),
+                    }
+                )
 
         # Input buffer checks
         for c_idx, child in enumerate(children):
             c_view = node_views.get(child, {})
             c_buf = in_bufs[c_idx] if c_idx < len(in_bufs) else {}
             if not c_view:
-                issues.append({
-                    "severity": "ERROR",
-                    "inst": idx,
-                    "op": op_name,
-                    "msg": f"Child {c_idx} (EClass {child}) missing from nodeViews",
-                })
+                issues.append(
+                    {
+                        "severity": "ERROR",
+                        "inst": idx,
+                        "op": op_name,
+                        "msg": f"Child {c_idx} (EClass {child}) missing from nodeViews",
+                    }
+                )
                 continue
 
             if c_buf.get("memSpaceType") != "STORAGE":
                 if c_buf.get("offset", -1) < 0:
-                    issues.append({
-                        "severity": "ERROR",
-                        "inst": idx,
-                        "op": op_name,
-                        "msg": f"Input #{c_idx} buffer {c_buf.get('id')} has unallocated offset ({c_buf.get('offset')})",
-                    })
+                    issues.append(
+                        {
+                            "severity": "ERROR",
+                            "inst": idx,
+                            "op": op_name,
+                            "msg": f"Input #{c_idx} buffer {c_buf.get('id')} has unallocated offset ({c_buf.get('offset')})",
+                        }
+                    )
 
                 v_extent = get_view_extent_bytes(c_view)
                 b_size = c_buf.get("size", 0)
@@ -225,47 +242,57 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
                 v_off = c_view.get("offset", 0)
 
                 if v_off < b_off:
-                    issues.append({
-                        "severity": "ERROR",
-                        "inst": idx,
-                        "op": op_name,
-                        "msg": f"Input #{c_idx} view offset (0x{v_off:x}) starts before buffer offset (0x{b_off:x})",
-                    })
+                    issues.append(
+                        {
+                            "severity": "ERROR",
+                            "inst": idx,
+                            "op": op_name,
+                            "msg": f"Input #{c_idx} view offset (0x{v_off:x}) starts before buffer offset (0x{b_off:x})",
+                        }
+                    )
                 if (v_off - b_off) + v_extent > b_size:
-                    issues.append({
-                        "severity": "ERROR",
-                        "inst": idx,
-                        "op": op_name,
-                        "msg": (
-                            f"Input #{c_idx} view extent ({v_extent} B at rel offset 0x{v_off - b_off:x}) "
-                            f"exceeds buffer {c_buf.get('id')} capacity ({b_size} B)"
-                        ),
-                    })
+                    issues.append(
+                        {
+                            "severity": "ERROR",
+                            "inst": idx,
+                            "op": op_name,
+                            "msg": (
+                                f"Input #{c_idx} view extent ({v_extent} B at rel offset 0x{v_off - b_off:x}) "
+                                f"exceeds buffer {c_buf.get('id')} capacity ({b_size} B)"
+                            ),
+                        }
+                    )
 
                 # Lifetime use-after-death check
                 if idx > c_buf.get("end", 0):
-                    issues.append({
-                        "severity": "WARNING",
-                        "inst": idx,
-                        "op": op_name,
-                        "msg": (
-                            f"Input #{c_idx} (Buf {c_buf.get('id')}) read at step {idx} "
-                            f"is after buffer death time ({c_buf.get('end')})"
-                        ),
-                    })
+                    issues.append(
+                        {
+                            "severity": "WARNING",
+                            "inst": idx,
+                            "op": op_name,
+                            "msg": (
+                                f"Input #{c_idx} (Buf {c_buf.get('id')}) read at step {idx} "
+                                f"is after buffer death time ({c_buf.get('end')})"
+                            ),
+                        }
+                    )
 
         # Specific validation for CONCAT
         if "CONCAT" in op_name.upper():
             if len(children) < 2:
-                issues.append({
-                    "severity": "ERROR",
-                    "inst": idx,
-                    "op": op_name,
-                    "msg": f"CONCAT requires at least 2 inputs (axis + data), got {len(children)}",
-                })
+                issues.append(
+                    {
+                        "severity": "ERROR",
+                        "inst": idx,
+                        "op": op_name,
+                        "msg": f"CONCAT requires at least 2 inputs (axis + data), got {len(children)}",
+                    }
+                )
             else:
                 axis_child = children[0]
-                axis_raw = constants_map.get(axis_child) or constants_map.get(eclass_to_logical.get(axis_child))
+                axis_raw = constants_map.get(axis_child) or constants_map.get(
+                    eclass_to_logical.get(axis_child)
+                )
                 axis_val = None
                 if axis_raw and len(axis_raw) >= 4:
                     axis_val = struct.unpack("<i", axis_raw[:4])[0]
@@ -275,45 +302,53 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
                 if axis_val is not None:
                     norm_axis = axis_val if axis_val >= 0 else axis_val + rank
                     if norm_axis < 0 or norm_axis >= rank:
-                        issues.append({
-                            "severity": "ERROR",
-                            "inst": idx,
-                            "op": op_name,
-                            "msg": f"CONCAT axis {axis_val} out of bounds for output rank {rank}",
-                        })
+                        issues.append(
+                            {
+                                "severity": "ERROR",
+                                "inst": idx,
+                                "op": op_name,
+                                "msg": f"CONCAT axis {axis_val} out of bounds for output rank {rank}",
+                            }
+                        )
                     else:
                         sum_dim = 0
                         for d_idx, data_child in enumerate(children[1:]):
                             d_view = node_views.get(data_child, {})
                             d_shape = d_view.get("shape", [])
                             if len(d_shape) != rank:
-                                issues.append({
-                                    "severity": "ERROR",
-                                    "inst": idx,
-                                    "op": op_name,
-                                    "msg": f"CONCAT input #{d_idx + 1} rank ({len(d_shape)}) != output rank ({rank})",
-                                })
+                                issues.append(
+                                    {
+                                        "severity": "ERROR",
+                                        "inst": idx,
+                                        "op": op_name,
+                                        "msg": f"CONCAT input #{d_idx + 1} rank ({len(d_shape)}) != output rank ({rank})",
+                                    }
+                                )
                             else:
                                 for dim_i in range(rank):
                                     if dim_i == norm_axis:
                                         sum_dim += d_shape[dim_i]
                                     elif d_shape[dim_i] != out_shape[dim_i]:
-                                        issues.append({
-                                            "severity": "ERROR",
-                                            "inst": idx,
-                                            "op": op_name,
-                                            "msg": (
-                                                f"CONCAT input #{d_idx + 1} dim {dim_i} ({d_shape[dim_i]}) "
-                                                f"mismatch with output ({out_shape[dim_i]})"
-                                            ),
-                                        })
+                                        issues.append(
+                                            {
+                                                "severity": "ERROR",
+                                                "inst": idx,
+                                                "op": op_name,
+                                                "msg": (
+                                                    f"CONCAT input #{d_idx + 1} dim {dim_i} ({d_shape[dim_i]}) "
+                                                    f"mismatch with output ({out_shape[dim_i]})"
+                                                ),
+                                            }
+                                        )
                         if sum_dim != out_shape[norm_axis]:
-                            issues.append({
-                                "severity": "ERROR",
-                                "inst": idx,
-                                "op": op_name,
-                                "msg": f"CONCAT sum of input axis dims ({sum_dim}) != output dim ({out_shape[norm_axis]})",
-                            })
+                            issues.append(
+                                {
+                                    "severity": "ERROR",
+                                    "inst": idx,
+                                    "op": op_name,
+                                    "msg": f"CONCAT sum of input axis dims ({sum_dim}) != output dim ({out_shape[norm_axis]})",
+                                }
+                            )
 
     # 3. Check for temporal memory collisions between live buffers
     for ms, b_list in buffers_by_ms.items():
@@ -331,21 +366,25 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
 
                 # Check lifetime overlap
                 if max(b1["start"], b2["start"]) <= min(b1["end"], b2["end"]):
-                    issues.append({
-                        "severity": "CRITICAL",
-                        "inst": b2["first_def"],
-                        "op": "MEMORY_COLLISION",
-                        "msg": (
-                            f"Live buffers {b1['id']} (lifetime [{b1['start']}..{b1['end']}], 0x{b1['offset']:x}..0x{b1['offset'] + b1['size']:x}) "
-                            f"and {b2['id']} (lifetime [{b2['start']}..{b2['end']}], 0x{b2['offset']:x}..0x{b2['offset'] + b2['size']:x}) "
-                            f"collide in MemSpace {ms[0]}({ms[1]})"
-                        ),
-                    })
+                    issues.append(
+                        {
+                            "severity": "CRITICAL",
+                            "inst": b2["first_def"],
+                            "op": "MEMORY_COLLISION",
+                            "msg": (
+                                f"Live buffers {b1['id']} (lifetime [{b1['start']}..{b1['end']}], 0x{b1['offset']:x}..0x{b1['offset'] + b1['size']:x}) "
+                                f"and {b2['id']} (lifetime [{b2['start']}..{b2['end']}], 0x{b2['offset']:x}..0x{b2['offset'] + b2['size']:x}) "
+                                f"collide in MemSpace {ms[0]}({ms[1]})"
+                            ),
+                        }
+                    )
 
     return issues
 
 
-def inspect_instruction_detail(idx: int, inst: dict, graph: dict, constants_map: dict, uid_map: dict) -> None:
+def inspect_instruction_detail(
+    idx: int, inst: dict, graph: dict, constants_map: dict, uid_map: dict
+) -> None:
     kid = inst.get("kernelId", 0)
     info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
     op_name = format_op_name(info, f"Kernel_{hex(kid)}")
@@ -371,10 +410,17 @@ def inspect_instruction_detail(idx: int, inst: dict, graph: dict, constants_map:
     header_text.append(f"(UID: 0x{kid:x})", style="dim")
 
     lines = []
-    lines.append(f"[bold white]Debug Origin:[/bold white] [dim cyan]{debug_origin or 'N/A'}[/dim cyan]")
-    lines.append(f"[bold white]Est. Cost:[/bold white]    [green]{format_ms(cost)}[/green]")
+    lines.append(
+        f"[bold white]Debug Origin:[/bold white] [dim cyan]{debug_origin or 'N/A'}[/dim cyan]"
+    )
+    lines.append(
+        f"[bold white]Est. Cost:[/bold white]    [green]{format_ms(cost)}[/green]"
+    )
 
-    eng_str = ", ".join(f"Engine(idx={e.get('idx')}, type={e.get('type')})" for e in engines) or "CPU(0)"
+    eng_str = (
+        ", ".join(f"Engine(idx={e.get('idx')}, type={e.get('type')})" for e in engines)
+        or "CPU(0)"
+    )
     lines.append(f"[bold white]Engines:[/bold white]      {eng_str}")
     lines.append("")
 
@@ -389,7 +435,7 @@ def inspect_instruction_detail(idx: int, inst: dict, graph: dict, constants_map:
 
     lines.append("[bold magenta]Output Tensor:[/bold magenta]")
     lines.append(
-        f"  [bold]EClass:[/bold] {eclass:<6} [bold]LogicalId:[/bold] {str(logical):<8} "
+        f"  [bold]EClass:[/bold] {eclass:<6} [bold]LogicalId:[/bold] {logical!s:<8} "
         f"[bold]Buffer ID:[/bold] {out_buf.get('id', '?')} | [bold]MemSpace:[/bold] {out_ms}"
     )
     lines.append(
@@ -416,10 +462,14 @@ def inspect_instruction_detail(idx: int, inst: dict, graph: dict, constants_map:
         c_v_off = c_view.get("offset", 0)
 
         const_data = constants_map.get(child) or constants_map.get(c_logical)
-        const_note = f" [bold green](Constant: {format_constant_data(const_data, c_dt)})[/bold green]" if const_data else ""
+        const_note = (
+            f" [bold green](Constant: {format_constant_data(const_data, c_dt)})[/bold green]"
+            if const_data
+            else ""
+        )
 
         lines.append(
-            f"  [bold cyan][In {c_idx}][/bold cyan] [bold]EClass:[/bold] {child:<6} [bold]LogicalId:[/bold] {str(c_logical):<8}{const_note}"
+            f"  [bold cyan][In {c_idx}][/bold cyan] [bold]EClass:[/bold] {child:<6} [bold]LogicalId:[/bold] {c_logical!s:<8}{const_note}"
         )
         lines.append(
             f"       [bold]Buffer:[/bold] ID {c_buf.get('id', '?')} | {c_ms} | 0x{c_off:x}..0x{c_off + c_buf.get('size', 0):x} "
@@ -431,7 +481,9 @@ def inspect_instruction_detail(idx: int, inst: dict, graph: dict, constants_map:
         )
 
     content = "\n".join(lines)
-    console.print(Panel(content, title=header_text, border_style="cyan", box=box.ROUNDED))
+    console.print(
+        Panel(content, title=header_text, border_style="cyan", box=box.ROUNDED)
+    )
 
 
 def trace_buffer_timeline(target_buf_id: int, graph: dict, uid_map: dict) -> None:
@@ -453,16 +505,28 @@ def trace_buffer_timeline(target_buf_id: int, graph: dict, uid_map: dict) -> Non
                 consumers.append((idx, c_idx, inst))
 
     if not producers and not consumers:
-        console.print(f"[bold red]Buffer ID {target_buf_id} not found in instructions.[/bold red]")
+        console.print(
+            f"[bold red]Buffer ID {target_buf_id} not found in instructions.[/bold red]"
+        )
         return
 
-    b_ms = f"{buf_info.get('memSpaceType', '?')}({buf_info.get('memSpaceIdx', '?')})" if buf_info else "?"
+    b_ms = (
+        f"{buf_info.get('memSpaceType', '?')}({buf_info.get('memSpaceIdx', '?')})"
+        if buf_info
+        else "?"
+    )
     b_off = f"0x{buf_info.get('offset', 0):x}" if buf_info else "?"
     b_sz = format_size(buf_info.get("size", 0)) if buf_info else "?"
-    b_life = f"[{buf_info.get('start', '?')}..{buf_info.get('end', '?')}]" if buf_info else "?"
+    b_life = (
+        f"[{buf_info.get('start', '?')}..{buf_info.get('end', '?')}]"
+        if buf_info
+        else "?"
+    )
 
     console.rule(f"[bold yellow]Trace Buffer ID {target_buf_id}[/bold yellow]")
-    console.print(f"[bold]MemSpace:[/bold] {b_ms} | [bold]Offset:[/bold] {b_off} | [bold]Size:[/bold] {b_sz} | [bold]Lifetime:[/bold] {b_life}\n")
+    console.print(
+        f"[bold]MemSpace:[/bold] {b_ms} | [bold]Offset:[/bold] {b_off} | [bold]Size:[/bold] {b_sz} | [bold]Lifetime:[/bold] {b_life}\n"
+    )
 
     table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
     table.add_column("Step", style="bold cyan", justify="right")
@@ -473,20 +537,40 @@ def trace_buffer_timeline(target_buf_id: int, graph: dict, uid_map: dict) -> Non
 
     for p_idx, inst in producers:
         kid = inst.get("kernelId", 0)
-        info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        info = (
+            uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        )
         op = format_op_name(info, f"Kernel_{hex(kid)}")
         v = node_views.get(inst.get("eclassId"), {})
         v_str = f"{v.get('dtype', '?')}{v.get('shape', [])!s}"
-        table.add_row(str(p_idx), "[green]Producer (Out)[/green]", op, v_str, inst.get("debugOrigin", ""))
+        table.add_row(
+            str(p_idx),
+            "[green]Producer (Out)[/green]",
+            op,
+            v_str,
+            inst.get("debugOrigin", ""),
+        )
 
     for c_idx, in_slot, inst in consumers:
         kid = inst.get("kernelId", 0)
-        info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        info = (
+            uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        )
         op = format_op_name(info, f"Kernel_{hex(kid)}")
-        child_id = inst.get("children", [])[in_slot] if in_slot < len(inst.get("children", [])) else None
+        child_id = (
+            inst.get("children", [])[in_slot]
+            if in_slot < len(inst.get("children", []))
+            else None
+        )
         v = node_views.get(child_id, {})
         v_str = f"{v.get('dtype', '?')}{v.get('shape', [])!s}"
-        table.add_row(str(c_idx), f"[blue]Consumer (In {in_slot})[/blue]", op, v_str, inst.get("debugOrigin", ""))
+        table.add_row(
+            str(c_idx),
+            f"[blue]Consumer (In {in_slot})[/blue]",
+            op,
+            v_str,
+            inst.get("debugOrigin", ""),
+        )
 
     console.print(table)
 
@@ -508,7 +592,9 @@ def trace_eclass_flow(target_eclass: int, graph: dict, uid_map: dict) -> None:
     console.rule(f"[bold yellow]Trace EClass {target_eclass}[/bold yellow]")
     logical = eclass_to_logical.get(target_eclass, "N/A")
     view = node_views.get(target_eclass, {})
-    console.print(f"[bold]Logical ID:[/bold] {logical} | [bold]View:[/bold] {view.get('dtype', '?')}{view.get('shape', [])!s} | [bold]Strides:[/bold] {view.get('strides', [])!s}\n")
+    console.print(
+        f"[bold]Logical ID:[/bold] {logical} | [bold]View:[/bold] {view.get('dtype', '?')}{view.get('shape', [])!s} | [bold]Strides:[/bold] {view.get('strides', [])!s}\n"
+    )
 
     table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
     table.add_column("Step", style="bold cyan", justify="right")
@@ -518,13 +604,27 @@ def trace_eclass_flow(target_eclass: int, graph: dict, uid_map: dict) -> None:
 
     for p_idx, inst in producers:
         kid = inst.get("kernelId", 0)
-        info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
-        table.add_row(str(p_idx), "[green]Defining Inst[/green]", format_op_name(info, f"Kernel_{hex(kid)}"), inst.get("debugOrigin", ""))
+        info = (
+            uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        )
+        table.add_row(
+            str(p_idx),
+            "[green]Defining Inst[/green]",
+            format_op_name(info, f"Kernel_{hex(kid)}"),
+            inst.get("debugOrigin", ""),
+        )
 
     for c_idx, slot, inst in consumers:
         kid = inst.get("kernelId", 0)
-        info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
-        table.add_row(str(c_idx), f"[blue]Consumer (In {slot})[/blue]", format_op_name(info, f"Kernel_{hex(kid)}"), inst.get("debugOrigin", ""))
+        info = (
+            uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+        )
+        table.add_row(
+            str(c_idx),
+            f"[blue]Consumer (In {slot})[/blue]",
+            format_op_name(info, f"Kernel_{hex(kid)}"),
+            inst.get("debugOrigin", ""),
+        )
 
     console.print(table)
 
@@ -547,7 +647,10 @@ def print_memory_summary(graph: dict) -> None:
                 total_buf_bytes += out_buf.get("size", 0)
 
         for in_buf in inst.get("inBuffers", []):
-            if in_buf.get("memSpaceType") != "STORAGE" and in_buf.get("offset", -1) >= 0:
+            if (
+                in_buf.get("memSpaceType") != "STORAGE"
+                and in_buf.get("offset", -1) >= 0
+            ):
                 ms = (in_buf.get("memSpaceType"), in_buf.get("memSpaceIdx"))
                 end_off = in_buf.get("offset", 0) + in_buf.get("size", 0)
                 peak_by_ms[ms] = max(peak_by_ms[ms], end_off)
@@ -567,25 +670,72 @@ def print_memory_summary(graph: dict) -> None:
 
     console.print(table)
     console.print(f"[bold]Total Unique Buffers:[/bold] {len(buffers_seen):,}")
-    console.print(f"[bold]Total Buffer Capacity (summed):[/bold] {format_size(total_buf_bytes)}\n")
+    console.print(
+        f"[bold]Total Buffer Capacity (summed):[/bold] {format_size(total_buf_bytes)}\n"
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Inspect, query, and statically validate TensorGraph compiled graph cache files (.bin)."
     )
-    parser.add_argument("graph_pos", nargs="?", default=None, help="Path to compiled graph .bin file")
-    parser.add_argument("--graph", "-g", dest="graph_opt", default=None, help="Path to compiled graph .bin file")
-    parser.add_argument("--bucket", "-b", type=int, default=None, help="Bucket index (default: 0)")
-    parser.add_argument("--inst", "-i", type=str, default=None, help="Instruction index or range (e.g. 30402, 30385:30405)")
-    parser.add_argument("--validate", action="store_true", help="Run static safety & bounds validation checks")
-    parser.add_argument("--trace-buffer", type=int, default=None, help="Trace producer and consumers of buffer ID")
-    parser.add_argument("--trace-eclass", type=int, default=None, help="Trace producer and consumers of EClass ID")
-    parser.add_argument("--trace-logical", type=int, default=None, help="Trace producer and consumers of Logical ID")
-    parser.add_argument("--op", type=str, default=None, help="Filter instructions by op name or regex")
-    parser.add_argument("--mem-summary", action="store_true", help="Show memory arena extents and summary")
-    parser.add_argument("--summary", action="store_true", help="Display summary overview of the graph")
-    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    parser.add_argument(
+        "graph_pos", nargs="?", default=None, help="Path to compiled graph .bin file"
+    )
+    parser.add_argument(
+        "--graph",
+        "-g",
+        dest="graph_opt",
+        default=None,
+        help="Path to compiled graph .bin file",
+    )
+    parser.add_argument(
+        "--bucket", "-b", type=int, default=None, help="Bucket index (default: 0)"
+    )
+    parser.add_argument(
+        "--inst",
+        "-i",
+        type=str,
+        default=None,
+        help="Instruction index or range (e.g. 30402, 30385:30405)",
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run static safety & bounds validation checks",
+    )
+    parser.add_argument(
+        "--trace-buffer",
+        type=int,
+        default=None,
+        help="Trace producer and consumers of buffer ID",
+    )
+    parser.add_argument(
+        "--trace-eclass",
+        type=int,
+        default=None,
+        help="Trace producer and consumers of EClass ID",
+    )
+    parser.add_argument(
+        "--trace-logical",
+        type=int,
+        default=None,
+        help="Trace producer and consumers of Logical ID",
+    )
+    parser.add_argument(
+        "--op", type=str, default=None, help="Filter instructions by op name or regex"
+    )
+    parser.add_argument(
+        "--mem-summary",
+        action="store_true",
+        help="Show memory arena extents and summary",
+    )
+    parser.add_argument(
+        "--summary", action="store_true", help="Display summary overview of the graph"
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Output results in JSON format"
+    )
 
     args = parser.parse_args()
     graph_path_str = args.graph_opt or args.graph_pos
@@ -594,25 +744,35 @@ def main() -> None:
         candidate_caches = list(Path("dirty_region_caches").glob("*.bin"))
         if candidate_caches:
             graph_path_str = str(candidate_caches[0])
-            console.print(f"[dim]No graph path specified. Defaulting to: {graph_path_str}[/dim]")
+            console.print(
+                f"[dim]No graph path specified. Defaulting to: {graph_path_str}[/dim]"
+            )
         else:
-            console_err.print("[bold red]Error:[/bold red] No graph path specified and no files found in dirty_region_caches/.")
+            console_err.print(
+                "[bold red]Error:[/bold red] No graph path specified and no files found in dirty_region_caches/."
+            )
             sys.exit(1)
 
     if not os.path.exists(graph_path_str):
-        console_err.print(f"[bold red]Error:[/bold red] Cache file '{graph_path_str}' does not exist.")
+        console_err.print(
+            f"[bold red]Error:[/bold red] Cache file '{graph_path_str}' does not exist."
+        )
         sys.exit(1)
 
     cache_entries = load_cache_file(graph_path_str, string_enums=True)
     buckets = [e for e in cache_entries if e.get("type") == "compiled_bucket"]
 
     if not buckets:
-        console_err.print(f"[bold red]Error:[/bold red] No compiled buckets found in '{graph_path_str}'.")
+        console_err.print(
+            f"[bold red]Error:[/bold red] No compiled buckets found in '{graph_path_str}'."
+        )
         sys.exit(1)
 
     target_bucket_idx = args.bucket if args.bucket is not None else 0
     if target_bucket_idx < 0 or target_bucket_idx >= len(buckets):
-        console_err.print(f"[bold red]Error:[/bold red] Bucket index {target_bucket_idx} out of range (0..{len(buckets) - 1})")
+        console_err.print(
+            f"[bold red]Error:[/bold red] Bucket index {target_bucket_idx} out of range (0..{len(buckets) - 1})"
+        )
         sys.exit(1)
 
     compiled_graph = buckets[target_bucket_idx]["graph"]
@@ -622,7 +782,9 @@ def main() -> None:
 
     # ---- Validation Mode ----
     if args.validate:
-        console.rule(f"[bold cyan]Static Validation Check: Bucket {target_bucket_idx} ({len(instructions)} Instructions)[/bold cyan]")
+        console.rule(
+            f"[bold cyan]Static Validation Check: Bucket {target_bucket_idx} ({len(instructions)} Instructions)[/bold cyan]"
+        )
         issues = validate_graph(compiled_graph, constants_map, uid_map)
 
         if not issues:
@@ -645,7 +807,9 @@ def main() -> None:
             warn_count = sum(1 for x in issues if x["severity"] == "WARNING")
 
             for issue in issues:
-                color = "red" if issue["severity"] in ("ERROR", "CRITICAL") else "yellow"
+                color = (
+                    "red" if issue["severity"] in ("ERROR", "CRITICAL") else "yellow"
+                )
                 tbl.add_row(
                     f"[{color}]{issue['severity']}[/{color}]",
                     str(issue["inst"]),
@@ -680,7 +844,9 @@ def main() -> None:
         log_to_eclass = {v: k for k, v in eclass_to_log.items()}
         target_ec = log_to_eclass.get(args.trace_logical)
         if target_ec is None:
-            console.print(f"[bold red]Logical ID {args.trace_logical} not found in eclassToLogical mapping.[/bold red]")
+            console.print(
+                f"[bold red]Logical ID {args.trace_logical} not found in eclassToLogical mapping.[/bold red]"
+            )
         else:
             trace_eclass_flow(target_ec, compiled_graph, uid_map)
         return
@@ -689,7 +855,13 @@ def main() -> None:
     inst_indices = parse_inst_range(args.inst, len(instructions))
     if inst_indices:
         if len(inst_indices) == 1:
-            inspect_instruction_detail(inst_indices[0], instructions[inst_indices[0]], compiled_graph, constants_map, uid_map)
+            inspect_instruction_detail(
+                inst_indices[0],
+                instructions[inst_indices[0]],
+                compiled_graph,
+                constants_map,
+                uid_map,
+            )
         else:
             tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
             tbl.add_column("Inst", justify="right", style="bold cyan")
@@ -704,7 +876,11 @@ def main() -> None:
             for idx in inst_indices:
                 inst = instructions[idx]
                 kid = inst.get("kernelId", 0)
-                info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+                info = (
+                    uid_map.get(kid)
+                    or uid_map.get(str(kid))
+                    or uid_map.get(hex(kid).lower())
+                )
                 op = format_op_name(info, f"Kernel_{hex(kid)}")
                 out_v = node_views.get(inst.get("eclassId"), {})
                 out_b = inst.get("outBuffer", {})
@@ -728,12 +904,18 @@ def main() -> None:
         matching_indices = []
         for idx, inst in enumerate(instructions):
             kid = inst.get("kernelId", 0)
-            info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+            info = (
+                uid_map.get(kid)
+                or uid_map.get(str(kid))
+                or uid_map.get(hex(kid).lower())
+            )
             op = format_op_name(info, f"Kernel_{hex(kid)}")
             if pattern.search(op) or pattern.search(inst.get("debugOrigin", "")):
                 matching_indices.append(idx)
 
-        console.rule(f"[bold yellow]Found {len(matching_indices)} instruction(s) matching '{args.op}'[/bold yellow]")
+        console.rule(
+            f"[bold yellow]Found {len(matching_indices)} instruction(s) matching '{args.op}'[/bold yellow]"
+        )
         tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
         tbl.add_column("Inst", justify="right", style="bold cyan")
         tbl.add_column("Operation", style="bold yellow")
@@ -746,16 +928,29 @@ def main() -> None:
         for idx in matching_indices[:100]:
             inst = instructions[idx]
             kid = inst.get("kernelId", 0)
-            info = uid_map.get(kid) or uid_map.get(str(kid)) or uid_map.get(hex(kid).lower())
+            info = (
+                uid_map.get(kid)
+                or uid_map.get(str(kid))
+                or uid_map.get(hex(kid).lower())
+            )
             op = format_op_name(info, f"Kernel_{hex(kid)}")
             out_v = node_views.get(inst.get("eclassId"), {})
             out_b = inst.get("outBuffer", {})
             v_str = f"{out_v.get('dtype', '?')}{out_v.get('shape', [])!s}"
-            tbl.add_row(str(idx), op, v_str, str(out_b.get("id")), f"0x{out_b.get('offset', 0):x}", inst.get("debugOrigin", ""))
+            tbl.add_row(
+                str(idx),
+                op,
+                v_str,
+                str(out_b.get("id")),
+                f"0x{out_b.get('offset', 0):x}",
+                inst.get("debugOrigin", ""),
+            )
 
         console.print(tbl)
         if len(matching_indices) > 100:
-            console.print(f"[dim]... and {len(matching_indices) - 100} more matches.[/dim]")
+            console.print(
+                f"[dim]... and {len(matching_indices) - 100} more matches.[/dim]"
+            )
         return
 
     # ---- Default: Summary Mode ----
@@ -765,7 +960,9 @@ def main() -> None:
         g = b["graph"]
         inst_count = len(g.get("instructions", []))
         total_time = sum(g.get("nodeCosts", {}).values())
-        console.print(f"  [cyan]Bucket {b_i}:[/cyan] {inst_count:,} instructions | Est. Cost: {format_ms(total_time)}")
+        console.print(
+            f"  [cyan]Bucket {b_i}:[/cyan] {inst_count:,} instructions | Est. Cost: {format_ms(total_time)}"
+        )
     console.print(
         "\n[white]Available inspection options:[/white]\n"
         "  [cyan]--validate[/cyan]            Run static memory bounds and lifetime collision checker\n"

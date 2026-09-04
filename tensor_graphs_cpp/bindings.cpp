@@ -9,45 +9,61 @@
 #define NOMINMAX
 #endif
 
-#include <windows.h>
-#include <dbghelp.h>
-#include <iostream>
-#include <iomanip>
-#include <cstring>
 #include <cstdio>
+#include <cstring>
+#include <dbghelp.h>
+#include <iomanip>
+#include <iostream>
+#include <windows.h>
 
 #pragma comment(lib, "dbghelp.lib")
 
-inline const char* get_exception_code_name(DWORD code) {
-    switch (code) {
-        case EXCEPTION_ACCESS_VIOLATION:      return "EXCEPTION_ACCESS_VIOLATION (0xc0000005)";
-        case EXCEPTION_IN_PAGE_ERROR:         return "EXCEPTION_IN_PAGE_ERROR (0xc0000006)";
-        case EXCEPTION_ILLEGAL_INSTRUCTION:   return "EXCEPTION_ILLEGAL_INSTRUCTION (0xc000001d)";
-        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED (0xc000008c)";
-        case EXCEPTION_DATATYPE_MISALIGNMENT: return "EXCEPTION_DATATYPE_MISALIGNMENT (0xc0000002)";
-        case EXCEPTION_STACK_OVERFLOW:        return "EXCEPTION_STACK_OVERFLOW (0xc00000fd)";
-        case EXCEPTION_INT_DIVIDE_BY_ZERO:    return "EXCEPTION_INT_DIVIDE_BY_ZERO (0xc0000094)";
-        case EXCEPTION_FLT_DIVIDE_BY_ZERO:    return "EXCEPTION_FLT_DIVIDE_BY_ZERO (0xc000008e)";
-        default:                              return "UNKNOWN_FATAL_EXCEPTION";
+inline const char *get_exception_code_name(DWORD code)
+{
+    switch (code)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:
+        return "EXCEPTION_ACCESS_VIOLATION (0xc0000005)";
+    case EXCEPTION_IN_PAGE_ERROR:
+        return "EXCEPTION_IN_PAGE_ERROR (0xc0000006)";
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+        return "EXCEPTION_ILLEGAL_INSTRUCTION (0xc000001d)";
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED (0xc000008c)";
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+        return "EXCEPTION_DATATYPE_MISALIGNMENT (0xc0000002)";
+    case EXCEPTION_STACK_OVERFLOW:
+        return "EXCEPTION_STACK_OVERFLOW (0xc00000fd)";
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        return "EXCEPTION_INT_DIVIDE_BY_ZERO (0xc0000094)";
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        return "EXCEPTION_FLT_DIVIDE_BY_ZERO (0xc000008e)";
+    default:
+        return "UNKNOWN_FATAL_EXCEPTION";
     }
 }
 
-inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx) {
+inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
+{
     // 1. Resolve module name and relative base offset
     char mod_name[MAX_PATH] = "<unknown>";
     DWORD64 mod_base = SymGetModuleBase64(process, addr);
-    if (!mod_base) {
+    if (!mod_base)
+    {
         MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) {
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+        {
             mod_base = reinterpret_cast<DWORD64>(mbi.AllocationBase);
         }
     }
-    if (mod_base) {
+    if (mod_base)
+    {
         char full_path[MAX_PATH] = {0};
-        if (GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), full_path, sizeof(full_path))) {
-            const char* slash = strrchr(full_path, '\\');
-            const char* fslash = strrchr(full_path, '/');
-            const char* base_name = slash ? slash + 1 : (fslash ? fslash + 1 : full_path);
+        if (GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), full_path, sizeof(full_path)))
+        {
+            const char *slash = strrchr(full_path, '\\');
+            const char *fslash = strrchr(full_path, '/');
+            const char *base_name = slash ? slash + 1 : (fslash ? fslash + 1 : full_path);
             strncpy_s(mod_name, sizeof(mod_name), base_name, _TRUNCATE);
         }
     }
@@ -56,7 +72,7 @@ inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx) {
 
     // 2. Resolve symbol using stack-allocated memory (no heap allocations)
     alignas(SYMBOL_INFO) char symbol_buffer[sizeof(SYMBOL_INFO) + 256] = {0};
-    SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(symbol_buffer);
+    SYMBOL_INFO *symbol = reinterpret_cast<SYMBOL_INFO *>(symbol_buffer);
     symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
     symbol->MaxNameLen = 255;
     DWORD64 sym_disp = 0;
@@ -68,50 +84,55 @@ inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx) {
     DWORD line_disp = 0;
     bool has_line = SymGetLineFromAddr64(process, addr, &line_disp, &line);
 
-    if (frame_idx >= 0) {
+    if (frame_idx >= 0)
+    {
         std::cerr << "  [" << std::setw(2) << frame_idx << "] ";
-    } else {
+    }
+    else
+    {
         std::cerr << "  ";
     }
 
-    std::cerr << "0x" << std::hex << std::setw(16) << std::setfill('0') << addr << std::dec << std::setfill(' ')
-              << " " << mod_name;
+    std::cerr << "0x" << std::hex << std::setw(16) << std::setfill('0') << addr << std::dec << std::setfill(' ') << " "
+              << mod_name;
 
-    if (mod_base) {
+    if (mod_base)
+    {
         std::cerr << " + 0x" << std::hex << offset_in_mod << std::dec;
     }
-    if (has_sym) {
+    if (has_sym)
+    {
         std::cerr << " : " << symbol->Name;
     }
-    if (has_line) {
+    if (has_line)
+    {
         std::cerr << " (" << line.FileName << ":" << line.LineNumber << ")";
     }
     std::cerr << "\n";
 }
 
-inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS* ep) {
-    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) {
+inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+    {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
     DWORD code = ep->ExceptionRecord->ExceptionCode;
 
     // Filter strictly for fatal hardware/memory errors
-    if (code != EXCEPTION_ACCESS_VIOLATION &&
-        code != EXCEPTION_IN_PAGE_ERROR &&
-        code != EXCEPTION_ILLEGAL_INSTRUCTION &&
-        code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
-        code != EXCEPTION_DATATYPE_MISALIGNMENT &&
-        code != EXCEPTION_STACK_OVERFLOW &&
-        code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
-        code != EXCEPTION_FLT_DIVIDE_BY_ZERO)
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO)
     {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
     // Reentrancy guard: prevent infinite recursion if symbol resolution faults
     static volatile LONG g_in_handler = 0;
-    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0) {
+    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
+    {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -129,15 +150,17 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS* ep) {
               << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
 
     // Diagnostic information for Access Violations
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+    {
         ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
         ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
-        const char* op = (access_type == 0) ? "read from" :
-                         (access_type == 1) ? "write to" :
-                         (access_type == 8) ? "execute at" : "access";
-        std::cerr << "  Details: Attempted to " << op << " invalid address 0x"
-                  << std::hex << fault_target << std::dec;
-        if (fault_target < 0x1000) {
+        const char *op = (access_type == 0)   ? "read from"
+                         : (access_type == 1) ? "write to"
+                         : (access_type == 8) ? "execute at"
+                                              : "access";
+        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
+        if (fault_target < 0x1000)
+        {
             std::cerr << " (Null / near-null pointer dereference)";
         }
         std::cerr << "\n";
@@ -156,42 +179,44 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS* ep) {
 
 #if defined(_M_ARM64) || defined(__aarch64__)
     machineType = IMAGE_FILE_MACHINE_ARM64;
-    frame.AddrPC.Offset    = ctx.Pc;
-    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrPC.Offset = ctx.Pc;
+    frame.AddrPC.Mode = AddrModeFlat;
     frame.AddrFrame.Offset = ctx.Fp;
-    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrFrame.Mode = AddrModeFlat;
     frame.AddrStack.Offset = ctx.Sp;
-    frame.AddrStack.Mode   = AddrModeFlat;
+    frame.AddrStack.Mode = AddrModeFlat;
 #elif defined(_M_X64) || defined(__x86_64__)
     machineType = IMAGE_FILE_MACHINE_AMD64;
-    frame.AddrPC.Offset    = ctx.Rip;
-    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
     frame.AddrFrame.Offset = ctx.Rbp;
-    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrFrame.Mode = AddrModeFlat;
     frame.AddrStack.Offset = ctx.Rsp;
-    frame.AddrStack.Mode   = AddrModeFlat;
+    frame.AddrStack.Mode = AddrModeFlat;
 #elif defined(_M_IX86) || defined(__i386__)
     machineType = IMAGE_FILE_MACHINE_I386;
-    frame.AddrPC.Offset    = ctx.Eip;
-    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrPC.Offset = ctx.Eip;
+    frame.AddrPC.Mode = AddrModeFlat;
     frame.AddrFrame.Offset = ctx.Ebp;
-    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrFrame.Mode = AddrModeFlat;
     frame.AddrStack.Offset = ctx.Esp;
-    frame.AddrStack.Mode   = AddrModeFlat;
+    frame.AddrStack.Mode = AddrModeFlat;
 #endif
 
     int frame_idx = 0;
     DWORD64 prev_pc = 0;
 
-    while (frame_idx < 64) {
-        if (!StackWalk64(machineType, process, thread, &frame, &ctx,
-                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+    while (frame_idx < 64)
+    {
+        if (!StackWalk64(machineType, process, thread, &frame, &ctx, NULL, SymFunctionTableAccess64, SymGetModuleBase64,
+                         NULL))
         {
             break;
         }
 
         DWORD64 pc = frame.AddrPC.Offset;
-        if (pc == 0 || pc == prev_pc) {
+        if (pc == 0 || pc == prev_pc)
+        {
             break;
         }
         prev_pc = pc;
@@ -201,7 +226,8 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS* ep) {
     }
 
     // If StackWalk64 was unable to unwind even frame 0, print the fault PC directly
-    if (frame_idx == 0) {
+    if (frame_idx == 0)
+    {
         print_frame_info(process, fault_pc, 0);
     }
 
@@ -212,8 +238,10 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-struct InstallCrashHandler {
-    InstallCrashHandler() {
+struct InstallCrashHandler
+{
+    InstallCrashHandler()
+    {
         HANDLE process = GetCurrentProcess();
         SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
         SymInitialize(process, NULL, TRUE);

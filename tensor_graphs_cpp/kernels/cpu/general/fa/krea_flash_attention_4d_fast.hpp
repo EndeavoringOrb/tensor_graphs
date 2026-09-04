@@ -224,10 +224,14 @@ inline void runKreaFlashAttention4DFast(const KernelContext &ctx)
                         d = 0;
                         for (; d + 16 <= D; d += 16)
                         {
-                            vst1q_f32(o_row + d + 0, vfmaq_f32(vld1q_f32(o_row + d + 0), v_p, vld1q_f32(v_row + d + 0)));
-                            vst1q_f32(o_row + d + 4, vfmaq_f32(vld1q_f32(o_row + d + 4), v_p, vld1q_f32(v_row + d + 4)));
-                            vst1q_f32(o_row + d + 8, vfmaq_f32(vld1q_f32(o_row + d + 8), v_p, vld1q_f32(v_row + d + 8)));
-                            vst1q_f32(o_row + d + 12, vfmaq_f32(vld1q_f32(o_row + d + 12), v_p, vld1q_f32(v_row + d + 12)));
+                            vst1q_f32(o_row + d + 0,
+                                      vfmaq_f32(vld1q_f32(o_row + d + 0), v_p, vld1q_f32(v_row + d + 0)));
+                            vst1q_f32(o_row + d + 4,
+                                      vfmaq_f32(vld1q_f32(o_row + d + 4), v_p, vld1q_f32(v_row + d + 4)));
+                            vst1q_f32(o_row + d + 8,
+                                      vfmaq_f32(vld1q_f32(o_row + d + 8), v_p, vld1q_f32(v_row + d + 8)));
+                            vst1q_f32(o_row + d + 12,
+                                      vfmaq_f32(vld1q_f32(o_row + d + 12), v_p, vld1q_f32(v_row + d + 12)));
                         }
                         for (; d < D; ++d)
                             o_row[d] += p_val * v_row[d];
