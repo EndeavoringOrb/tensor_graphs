@@ -1513,7 +1513,7 @@ struct Planner
         EClassId rootEClassId = egraph.findConst(rootIt->second);
         if (egraph.getEClass(rootEClassId).enodes.empty())
         {
-            Error::throw_err("[Planner.extractBest] Root EClass has no valid ENodes remaining after pruning.");
+            Error::throw_err("[Planner.extractBest] Root EClass has no valid ENodes remaining after pruning. Try benchmarking kernels.");
         }
 
         const uint64_t numClasses = egraph.getClasses().size();
