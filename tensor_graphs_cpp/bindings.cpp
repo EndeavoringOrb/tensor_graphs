@@ -9,12 +9,14 @@
 #define NOMINMAX
 #endif
 
+// clang-format off
 #include <cstdio>
 #include <cstring>
-#include <dbghelp.h>
 #include <iomanip>
 #include <iostream>
 #include <windows.h>
+#include <dbghelp.h>
+// clang-format on
 
 #pragma comment(lib, "dbghelp.lib")
 
