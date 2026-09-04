@@ -31,6 +31,7 @@ class TrainConfig:
     model_path: str = "models/google/gemma-3-270m"
     seq_len: int = 128
     log_cost_calls: bool = False  # <--- Added
+    bucket_weights: list[float] = dataclasses.field(default_factory=list)
 
     # Random Graph Generator Settings
     random_min_nodes: int = 10

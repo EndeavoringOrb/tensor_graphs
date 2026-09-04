@@ -65,6 +65,9 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         self.path_len_stack: list[int] = []
         self.active_path: list[tuple[int, np.ndarray]] = []
         self.completed_trajectories: list[dict] = []
+        self.pending_bucket_paths: dict[
+            int, tuple[float, list[tuple[int, np.ndarray]]]
+        ] = {}
 
     def export_and_reset(self) -> tuple[list[dict], list[float]]:
         """Exports all completed trajectories collected during the episode and resets state."""
@@ -76,6 +79,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         self.active_path.clear()
         self.hidden_stack.clear()
         self.path_len_stack.clear()
+        self.pending_bucket_paths.clear()
 
         return trajectories, leaf_costs
 
@@ -85,6 +89,16 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         self.path_len_stack.clear()
         self.active_path.clear()
         self.completed_trajectories.clear()
+        self.pending_bucket_paths.clear()
+
+    def on_bucket_leaf_evaluated(self, bucket_idx: int, cost: float):
+        """Retains the best bucket-local path until its global cache cost is known."""
+        cost_val = safe_float(cost)
+        if not math.isfinite(cost_val) or not self.is_training or not self.active_path:
+            return
+        previous = self.pending_bucket_paths.get(bucket_idx)
+        if previous is None or cost_val < previous[0]:
+            self.pending_bucket_paths[bucket_idx] = (cost_val, list(self.active_path))
 
     def fast_fail(self) -> bool:
         return False
@@ -104,21 +118,26 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
     def on_leaf_evaluated(self, cost: float):
         cost_val = safe_float(cost)
         if math.isfinite(cost_val) and self.is_training:
-            if len(self.completed_trajectories) >= self.max_trajectories_per_episode:
-                return
-            if not self.active_path:
-                return
-
-            phases = np.array([p for p, _ in self.active_path], dtype=np.int32)
-            actions = np.array([a for _, a in self.active_path], dtype=np.float32)
-            self.completed_trajectories.append(
-                {
-                    "phases": phases,
-                    "actions": actions,
-                    "cost": cost_val,
-                    "length": len(phases),
-                }
-            )
+            paths = [path for _, path in self.pending_bucket_paths.values()]
+            if not paths and self.active_path:
+                paths = [list(self.active_path)]
+            for path in paths:
+                if (
+                    len(self.completed_trajectories)
+                    >= self.max_trajectories_per_episode
+                ):
+                    break
+                phases = np.array([p for p, _ in path], dtype=np.int32)
+                actions = np.array([a for _, a in path], dtype=np.float32)
+                self.completed_trajectories.append(
+                    {
+                        "phases": phases,
+                        "actions": actions,
+                        "cost": cost_val,
+                        "length": len(phases),
+                    }
+                )
+        self.pending_bucket_paths.clear()
 
     @torch.inference_mode()
     def _order_items(self, items, phase_name: str, extract_fn) -> list[int]:

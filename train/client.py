@@ -131,15 +131,11 @@ def client_worker_process(
             )
             break
 
-        num_buckets = getattr(egraph_context, "num_buckets", 1)
-        bucket_idx = rank % max(1, num_buckets)
-
         delegate.reset()
 
         try:
             costs = tensor_graphs.run_hierarchical_simulations(
                 egraph_context,
-                bucket_idx,
                 delegate,
                 [1, 1, 1, 1],  # Standard single extraction pass
                 config.log_cost_calls,

@@ -242,6 +242,8 @@ class ModelGraphProvider:
                 True,
                 config.seq_len,
             )
+            if config.bucket_weights:
+                self._cached_context.bucket_weights = config.bucket_weights
         return self._cached_context
 
 
@@ -281,6 +283,8 @@ class RandomGraphProvider:
             self._cached_context = tensor_graphs.build_and_saturate_egraph_from_graph(
                 graph, root, buckets, config.log_cost_calls, mem_cap
             )
+            if config.bucket_weights:
+                self._cached_context.bucket_weights = config.bucket_weights
             self._last_sampled_episode = episode
 
         return self._cached_context

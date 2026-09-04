@@ -70,6 +70,9 @@ struct Settings
     bool reference_only = false;
     bool only_plan = false;
     bool compile_decode_buckets = false;
+    // Optional raw weights in bucket insertion order. Session normalizes these
+    // when scoring shared cache selections.
+    std::vector<float> bucket_weights;
     std::string write_refs = "";
     std::string compare_refs = "";
     std::string model_name = "gemma-3-270m";
@@ -345,6 +348,9 @@ struct Settings
             if (root.contains("cache_file") && root["cache_file"].is_string())
                 cache_file = root["cache_file"].get<std::string>();
 
+            if (root.contains("bucket_weights") && root["bucket_weights"].is_array())
+                bucket_weights = root["bucket_weights"].get<std::vector<float>>();
+
             if (root.contains("num_threads") && root["num_threads"].is_number_integer())
                 num_threads = root["num_threads"].get<uint32_t>();
             else if (root.contains("threads") && root["threads"].is_number_integer())
@@ -396,6 +402,7 @@ struct Settings
         parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
         parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
         parser.add_option({"--threads"}, "Number of C++ threads (0 = auto-detect).", "0");
+        parser.add_option({"--bucket-weights"}, "Comma-separated raw bucket weights in bucket insertion order.", "");
         parser.add_option({"--mem-cap"},
                           "Comma-separated list of <mem_space>=<bytes> overrides for planner memory caps, e.g. "
                           "'cpp=8388608,opencl1=1073741824'. Mem space is <type> or <type><idx> with type in "
@@ -458,6 +465,24 @@ struct Settings
             }
             catch (...)
             {
+            }
+        }
+
+        std::string cli_bucket_weights = parser.get_option("--bucket-weights");
+        if (!cli_bucket_weights.empty())
+        {
+            std::vector<float> parsed_weights;
+            std::stringstream ss(cli_bucket_weights);
+            std::string item;
+            try
+            {
+                while (std::getline(ss, item, ','))
+                    parsed_weights.push_back(std::stof(item));
+                bucket_weights = std::move(parsed_weights);
+            }
+            catch (...)
+            {
+                Error::throw_err("[Settings] Invalid --bucket-weights value: " + cli_bucket_weights);
             }
         }
 

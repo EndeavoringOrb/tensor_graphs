@@ -52,7 +52,7 @@ static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector
 
 struct Session
 {
-    static constexpr uint32_t kCacheFileVersion = 3;
+    static constexpr uint32_t kCacheFileVersion = 4;
 
     Graph &graph;
     MemoryManager &memManager;
@@ -67,6 +67,7 @@ struct Session
     std::string cachePath;
     std::vector<CompiledGraph> cachedGraphs;
     std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::vector<float> cachedBucketWeights;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
@@ -128,6 +129,7 @@ struct Session
         bw.write<uint32_t>(kCacheFileVersion);
         bw.write<LogicalId>(rootId);
         bw.write(selectedCachedNodes);
+        bw.write(normalizedBucketWeights(manualBuckets));
 
         for (const CompiledGraph &g : cachedGraphs)
         {
@@ -154,9 +156,23 @@ struct Session
     }
 
     void addBucket(const std::unordered_map<LogicalId, std::vector<Region>> &inputDirtyRegions,
-                   const std::vector<Region> &outputNeededRegion)
+                   const std::vector<Region> &outputNeededRegion, float weight = 1.0f)
     {
-        manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
+        Bucket bucket{inputDirtyRegions, outputNeededRegion};
+        bucket.weight = weight;
+        manualBuckets.push_back(std::move(bucket));
+    }
+
+    void setBucketWeights(const std::vector<float> &weights)
+    {
+        if (weights.size() != manualBuckets.size())
+        {
+            Error::throw_err("[Session.setBucketWeights] expected " + std::to_string(manualBuckets.size()) +
+                             " weights, got " + std::to_string(weights.size()));
+        }
+        (void)normalizedBucketWeights(weights);
+        for (size_t i = 0; i < weights.size(); ++i)
+            manualBuckets[i].weight = weights[i];
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, Repo *_repo = nullptr,
@@ -243,6 +259,25 @@ struct Session
         prop.inferShapeRecursive(rootId, graph);
 
         ensureFullBucket();
+        if (!settings.bucket_weights.empty())
+            setBucketWeights(settings.bucket_weights);
+
+        const std::vector<float> requestedWeights = normalizedBucketWeights(manualBuckets);
+        bool cacheMatchesBuckets =
+            cachedGraphs.size() == manualBuckets.size() && cachedBucketWeights.size() == requestedWeights.size();
+        for (size_t i = 0; cacheMatchesBuckets && i < manualBuckets.size(); ++i)
+        {
+            cacheMatchesBuckets = cachedGraphs[i].bucket == manualBuckets[i] &&
+                                  std::abs(cachedBucketWeights[i] - requestedWeights[i]) <= 1e-6f;
+        }
+        if (isPlanned && !cacheMatchesBuckets)
+        {
+            std::cout << "[Session.compile] Cached buckets or weights changed; replanning." << std::endl;
+            cachedGraphs.clear();
+            selectedCachedNodes.clear();
+            cachedBucketWeights.clear();
+            isPlanned = false;
+        }
 
         if (isPlanned)
         {
@@ -486,6 +521,7 @@ struct Session
         });
 
         selectedCachedNodes = std::move(bestCachedNodes);
+        cachedBucketWeights = normalizedBucketWeights(manualBuckets);
 
         if (cachedGraphs.size() != manualBuckets.size())
         {
@@ -583,6 +619,7 @@ struct Session
         {
             cachedGraphs = std::move(cache.compiledGraphs);
             selectedCachedNodes = std::move(cache.selectedCachedNodes);
+            cachedBucketWeights = std::move(cache.bucketWeights);
             isPlanned = true;
         }
     }

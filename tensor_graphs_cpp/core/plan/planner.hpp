@@ -810,11 +810,14 @@ struct Planner
                                                                  std::shared_ptr<SearchDelegate> delegate = nullptr,
                                                                  float minCompileSeconds = 0.0f)
     {
+        const std::vector<float> bucketWeights = normalizedBucketWeights(buckets);
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
 
-        std::unordered_map<LogicalId, bool> logicalDirty;
+        // A shared cached value is usable only when it is clean in every bucket.
+        std::unordered_map<LogicalId, bool> dirtyInAnyBucket;
         for (const auto &bucket : buckets)
         {
+            std::unordered_map<LogicalId, bool> logicalDirty;
             for (LogicalId nodeId : topo)
             {
                 if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
@@ -832,16 +835,16 @@ struct Planner
                             break;
                         }
                     }
-                    if (isDirty)
-                        logicalDirty[nodeId] = isDirty;
+                    logicalDirty[nodeId] = isDirty;
                 }
+                dirtyInAnyBucket[nodeId] = dirtyInAnyBucket[nodeId] || logicalDirty[nodeId];
             }
         }
 
         std::vector<LogicalId> candidates;
         for (LogicalId nodeId : topo)
         {
-            if (!logicalDirty[nodeId] && graph.getNode(nodeId).getSizeBytes() > 0)
+            if (!dirtyInAnyBucket[nodeId] && graph.getNode(nodeId).getSizeBytes() > 0)
             {
                 candidates.push_back(nodeId);
             }
@@ -868,9 +871,6 @@ struct Planner
         std::unordered_map<LogicalId, MemSpace> current_cache;
         std::unordered_map<LogicalId, MemSpace> best_cache;
 
-        uint32_t rep_bucket_idx = buckets.size() > 1 ? 1 : 0;
-        const Bucket &rep_bucket = buckets[rep_bucket_idx];
-
         auto start_time = std::chrono::high_resolution_clock::now();
         uint32_t max_cache_evals = 100;
         uint32_t eval_count = 0;
@@ -883,9 +883,22 @@ struct Planner
                 std::unordered_map<LogicalId, ParallelBuffer> preallocated;
                 preallocateLogicalBuffers(graph, current_cache, preallocated);
 
-                CompiledGraph plan_res =
-                    plan(rootId, graph, rep_bucket, current_cache, true, true, nullptr, preallocated, 0.0f, delegate);
-                float cost = plan_res.cost();
+                double weightedCost = 0.0;
+                for (size_t bucketIdx = 0; bucketIdx < buckets.size(); ++bucketIdx)
+                {
+                    CompiledGraph planResult = plan(rootId, graph, buckets[bucketIdx], current_cache, true, true,
+                                                    nullptr, preallocated, 0.0f, delegate);
+                    weightedCost += static_cast<double>(bucketWeights[bucketIdx]) * planResult.cost();
+                }
+
+                const float cost = static_cast<float>(weightedCost);
+                // Inner planning points the delegate at bucket-local costs. Restore
+                // the shared-cache objective before reporting this cache candidate.
+                if (delegate)
+                {
+                    delegate->set_best_cost_ptr(&best_cost);
+                    delegate->on_leaf_evaluated(cost);
+                }
                 if (cost < best_cost)
                 {
                     best_cost = cost;
@@ -894,6 +907,8 @@ struct Planner
             }
             catch (...)
             {
+                if (delegate)
+                    delegate->set_best_cost_ptr(&best_cost);
             }
 
             if (best_cost < TGConstants::INF && minCompileSeconds == 0.0f)
@@ -912,6 +927,8 @@ struct Planner
                 break;
         }
 
+        if (delegate)
+            delegate->set_best_cost_ptr(nullptr);
         return best_cache;
     }
 

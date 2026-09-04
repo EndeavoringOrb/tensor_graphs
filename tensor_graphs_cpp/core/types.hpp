@@ -19,6 +19,7 @@ typedef uint32_t cl_uint;
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -1539,7 +1540,51 @@ struct Bucket
 {
     std::unordered_map<LogicalId, std::vector<Region>> inputDirtyRegions;
     std::vector<Region> outputNeededRegion;
+    // Relative expected frequency of this bucket. Planner entry points normalize
+    // all bucket weights before using them in the shared-cache objective.
+    float weight = 1.0f;
 };
+
+inline std::vector<float> normalizedBucketWeights(const std::vector<float> &weights)
+{
+    if (weights.empty())
+    {
+        Error::throw_err("[normalizedBucketWeights] at least one bucket is required");
+    }
+
+    double total = 0.0;
+    for (float weight : weights)
+    {
+        if (!std::isfinite(weight) || weight < 0.0f)
+        {
+            Error::throw_err("[normalizedBucketWeights] bucket weights must be "
+                             "finite and non-negative");
+        }
+        total += static_cast<double>(weight);
+    }
+    if (!(total > 0.0) || !std::isfinite(total))
+    {
+        Error::throw_err("[normalizedBucketWeights] bucket weights must have a "
+                         "positive finite sum");
+    }
+
+    std::vector<float> normalized;
+    normalized.reserve(weights.size());
+    for (float weight : weights)
+    {
+        normalized.push_back(static_cast<float>(static_cast<double>(weight) / total));
+    }
+    return normalized;
+}
+
+inline std::vector<float> normalizedBucketWeights(const std::vector<Bucket> &buckets)
+{
+    std::vector<float> weights;
+    weights.reserve(buckets.size());
+    for (const Bucket &bucket : buckets)
+        weights.push_back(bucket.weight);
+    return normalizedBucketWeights(weights);
+}
 
 inline void tg_serialize(BinaryWriter &bw, const Bucket &val)
 {

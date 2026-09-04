@@ -712,6 +712,7 @@ struct CacheFile
     uint32_t version = 0;
     LogicalId rootId;
     std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::vector<float> bucketWeights;
     std::vector<CompiledGraph> compiledGraphs;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constants;
     bool isValid = true;
@@ -749,6 +750,8 @@ inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernel
                 br.read(cache.version);
                 br.read(cache.rootId);
                 br.read(cache.selectedCachedNodes);
+                if (cache.version >= 4)
+                    br.read(cache.bucketWeights);
             }
             else if (type == 1) // Compiled Bucket
             {

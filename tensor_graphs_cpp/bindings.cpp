@@ -284,6 +284,10 @@ class PySearchDelegate : public SearchDelegate
     {
         PYBIND11_OVERRIDE(void, SearchDelegate, on_leaf_evaluated, cost);
     }
+    void on_bucket_leaf_evaluated(uint32_t bucket_idx, float cost) override
+    {
+        PYBIND11_OVERRIDE(void, SearchDelegate, on_bucket_leaf_evaluated, bucket_idx, cost);
+    }
 
     void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
                           const std::vector<uint32_t> &edge_dst) override
@@ -362,7 +366,7 @@ class LLMSession
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
-               uint32_t threads = 0, bool log_cost_calls = true)
+               uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {})
     {
         if (threads > 0)
         {
@@ -429,6 +433,12 @@ class LLMSession
                 outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
                 session->addBucket(inputDirty, {outputNeeded});
             }
+        }
+
+        if (!bucket_weights.empty())
+        {
+            session->ensureFullBucket();
+            session->setBucketWeights(bucket_weights);
         }
 
         session->compile(true);
@@ -737,7 +747,8 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<Bucket>(m, "Bucket")
         .def(py::init<>())
         .def_readwrite("inputDirtyRegions", &Bucket::inputDirtyRegions)
-        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion);
+        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion)
+        .def_readwrite("weight", &Bucket::weight);
 
     py::class_<MemSpace>(m, "MemSpace")
         .def(py::init<>())
@@ -860,6 +871,7 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("push_state", &SearchDelegate::push_state)
         .def("pop_state", &SearchDelegate::pop_state)
         .def("on_leaf_evaluated", &SearchDelegate::on_leaf_evaluated)
+        .def("on_bucket_leaf_evaluated", &SearchDelegate::on_bucket_leaf_evaluated)
         .def("init_cache_graph", &SearchDelegate::init_cache_graph)
         .def("init_egraph", &SearchDelegate::init_egraph)
         .def("init_dispatch_graph", &SearchDelegate::init_dispatch_graph)
@@ -879,7 +891,9 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     // Saturated E-Graph Context & Simulations
     py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")
-        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); });
+        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); })
+        .def_property("bucket_weights", &SaturatedEGraphContext::getBucketWeights,
+                      &SaturatedEGraphContext::setBucketWeights);
 
     m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
           py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true, py::arg("max_seq_len") = 8);
@@ -888,19 +902,30 @@ PYBIND11_MODULE(tensor_graphs, m)
           py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false,
           py::arg("mem_cap_override") = 0);
 
-    m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
-          py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false,
+    using WeightedSimulationFn =
+        std::vector<float> (*)(std::shared_ptr<SaturatedEGraphContext>, std::shared_ptr<SearchDelegate>,
+                               const std::vector<uint32_t> &, bool, float);
+    m.def("run_hierarchical_simulations", static_cast<WeightedSimulationFn>(&run_hierarchical_simulations),
+          py::arg("ctx"), py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false,
           py::arg("min_compile_seconds") = 0.0f);
+
+    using LegacySimulationFn =
+        std::vector<float> (*)(std::shared_ptr<SaturatedEGraphContext>, int, std::shared_ptr<SearchDelegate>,
+                               const std::vector<uint32_t> &, bool, float);
+    m.def("run_hierarchical_simulations", static_cast<LegacySimulationFn>(&run_hierarchical_simulations),
+          py::arg("ctx"), py::arg("bucket_idx"), py::arg("delegate"), py::arg("level_simulations"),
+          py::arg("log_cost_calls") = false, py::arg("min_compile_seconds") = 0.0f);
 
     m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
           py::arg("log_cost_calls") = false);
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t, bool>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true)
+             py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
+             py::arg("bucket_weights") = std::vector<float>{})
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

@@ -89,6 +89,13 @@ class SearchDelegate
     {
     }
 
+    // Called while the bucket-local action path is still active. Learning
+    // delegates can retain that path and label it later from the single
+    // weighted cache-candidate result delivered to on_leaf_evaluated().
+    virtual void on_bucket_leaf_evaluated(uint32_t bucket_idx, float cost)
+    {
+    }
+
     virtual void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
                                   const std::vector<uint32_t> &edge_dst)
     {
