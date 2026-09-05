@@ -845,23 +845,12 @@ struct Planner
         bool changed = true;
         uint32_t nMatches = 0;
         ProgressTimer timer(0, "saturating");
-#ifdef TG_PROFILE
-        auto last_profile_report_time = std::chrono::steady_clock::now();
-#endif
         while (changed)
         {
             iterations++;
             uint32_t preUniqueNodes = egraph.getNumUniqueENodes();
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
-#ifdef TG_PROFILE
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration<double>(now - last_profile_report_time).count() >= 15.0)
-                {
-                    last_profile_report_time = now;
-                    printRewriteProfileSummary();
-                }
-#endif
                 for (const auto &rule : rules)
                 {
                     bool matched;
@@ -911,6 +900,9 @@ struct Planner
             }
             timer.tick();
         }
+#ifdef TG_PROFILE
+        printRewriteProfileSummary();
+#endif
     }
 
     uint32_t deathCascade(EGraph &egraph)

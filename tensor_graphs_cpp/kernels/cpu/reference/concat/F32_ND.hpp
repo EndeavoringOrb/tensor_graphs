@@ -30,7 +30,7 @@ inline void runConcatF32_ND(const KernelContext &ctx)
         axis += static_cast<int32_t>(rank);
     if (axis < 0 || axis >= static_cast<int32_t>(rank))
     {
-        Error::throw_err("[ConcatF32_ND] Axis is outside the output rank.");
+        Error::throw_err("[ConcatF32_ND] Axis " + std::to_string(axis) + " is outside the output rank.");
     }
 
     // Calculate outer_dim (product of dimensions before axis)

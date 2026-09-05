@@ -370,6 +370,7 @@ struct FusionRule : public Rule
         std::vector<DType> dtypes;
         std::vector<std::vector<uint32_t>> dummyShapes;
         Graph graph;
+        std::string pattern_hash;
     };
 
     struct MatchResult
@@ -381,6 +382,49 @@ struct FusionRule : public Rule
 
     std::unordered_map<OpType, std::vector<Pattern>> patternsByOp;
     std::vector<MatchResult> activeMatches;
+
+    struct ApplicationKey
+    {
+        uint32_t root_idx;
+        const Pattern *pattern;
+        EClassId destination;
+        std::vector<EClassId> inputs;
+        std::vector<std::vector<uint8_t>> constants;
+
+        bool operator==(const ApplicationKey &other) const
+        {
+            return root_idx == other.root_idx && pattern == other.pattern && destination == other.destination &&
+                   inputs == other.inputs && constants == other.constants;
+        }
+    };
+
+    struct ApplicationHash
+    {
+        size_t operator()(const ApplicationKey &key) const
+        {
+            uint64_t hash_value = key.root_idx;
+            tg_hash::hashCombine(hash_value, std::hash<const Pattern *>{}(key.pattern));
+            tg_hash::hashCombine(hash_value, key.destination.value);
+            for (EClassId input_id : key.inputs)
+                tg_hash::hashCombine(hash_value, input_id.value);
+            // Constant bytes participate in equality; unchanged class IDs make a
+            // good bucket key without hashing potentially large buffers again.
+            return static_cast<size_t>(hash_value);
+        }
+    };
+
+    // Scoped to one saturation, whose kernel registry, hardware and cost records
+    // are fixed. E-class tensor metadata is invariant; merges change canonical
+    // IDs, and late constants change the exact snapshot below. Matching still
+    // runs every sweep, so new bindings at arbitrary pattern depth are observed.
+    std::unordered_set<ApplicationKey, ApplicationHash> completed_applications;
+    uint64_t application_cache_hits = 0;
+
+    ~FusionRule() override
+    {
+        LOG(DEBUG) << "Fusion application cache: " << application_cache_hits << " hits, "
+                   << completed_applications.size() << " completed applications";
+    }
 
     FusionRule(bool disableFusion = false)
     {
@@ -404,6 +448,7 @@ struct FusionRule : public Rule
             }
 
             pattern.rootOpType = pattern.graph.getNode(pattern.rootId).opType;
+            pattern.pattern_hash = computeGraphHash(pattern.graph, {pattern.rootId});
             pattern.dtypes = entry.dtypes;
             pattern.dummyShapes = entry.dummyShapes;
 
@@ -451,6 +496,34 @@ struct FusionRule : public Rule
         {
             const Pattern &pattern = *match.pattern;
             const auto &binding = match.binding;
+
+            ApplicationKey application_key;
+            application_key.root_idx = eNodeIdx;
+            application_key.pattern = &pattern;
+            application_key.destination = egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx}));
+            if (!match.variadicConcatTensorEClasses.empty())
+            {
+                application_key.inputs.push_back(egraph.findConst(binding.at(pattern.variables.back())));
+                for (EClassId input_id : match.variadicConcatTensorEClasses)
+                    application_key.inputs.push_back(egraph.findConst(input_id));
+            }
+            else
+            {
+                for (LogicalId var : pattern.variables)
+                    application_key.inputs.push_back(egraph.findConst(binding.at(var)));
+            }
+            for (EClassId input_id : application_key.inputs)
+            {
+                auto it = egraph.constantStaging.find(input_id);
+                application_key.constants.push_back(it == egraph.constantStaging.end()
+                                                       ? std::vector<uint8_t>{}
+                                                       : *it->second);
+            }
+            if (completed_applications.count(application_key))
+            {
+                ++application_cache_hits;
+                continue;
+            }
 
             std::vector<EClassId> inputs;
             std::vector<TensorNode> inputNodes;
@@ -529,9 +602,9 @@ struct FusionRule : public Rule
 
             for (const auto &target_ms : candidateSpaces)
             {
-                std::vector<KernelId> kernelMatches = KernelRegistry::get().findMatchingKernelsByPattern(
-                    pattern.graph, pattern.rootId, inputNodes, outputNode, false, target_ms, {}, {}, true,
-                    ignoreInputMemSpaces, true, true);
+                std::vector<KernelId> kernelMatches = KernelRegistry::get().findMatchingKernelsByPatternHash(
+                    pattern.graph, pattern.rootId, pattern.pattern_hash, inputNodes, outputNode, false, target_ms,
+                    {}, {}, true, ignoreInputMemSpaces, true, true);
 
                 std::vector<std::pair<const KernelEntry *, std::pair<std::vector<Engine>, std::vector<MemSpace>>>>
                     matched_kernels;
@@ -549,6 +622,7 @@ struct FusionRule : public Rule
 
                 addFusedCandidates(ctx, matched_kernels, target_ms, inputs, ENodeId{eNodeIdx});
             }
+            completed_applications.insert(std::move(application_key));
         }
     }
 
