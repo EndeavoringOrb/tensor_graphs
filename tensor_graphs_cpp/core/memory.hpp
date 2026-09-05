@@ -205,6 +205,8 @@ struct CudaBuffer : public DeviceBuffer
             init();
         cudaSetDevice(mem_space.idx);
         cudaError_t err = cudaMemcpy(arena_ptr + offset, data, size, cudaMemcpyHostToDevice);
+        if (err == cudaSuccess)
+            err = cudaStreamSynchronize(nullptr);
         if (err != cudaSuccess)
             Error::throw_err("cudaMemcpy HostToDevice failed on device " + std::to_string(mem_space.idx) + ": " +
                              cudaGetErrorString(err));

@@ -8,11 +8,13 @@
 
 // Non-pruning / Structural Regression Tests
 #include "tests/constant_view_regression.hpp"
+#include "tests/cuda_sync_regression.hpp"
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/shape_propagation.hpp"
+#include "tests/storage_output_regression.hpp"
 #include "tests/view_bufferize_regression.hpp"
 
 int main(int argc, char *argv[])
@@ -22,6 +24,7 @@ int main(int argc, char *argv[])
     parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--pruning-state"}, "Run only pruning-rule push/pop state restoration tests.");
+    parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
     parser.add_option({"--timeout"}, "Timeout in seconds for each pruning test run (default: 15.0).", "15.0");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
@@ -57,6 +60,12 @@ int main(int argc, char *argv[])
         return runPruningStateTests() ? 0 : 1;
     }
 
+    if (parser.get_flag("--cuda-sync"))
+    {
+        runCudaSyncRegressionTests();
+        return 0;
+    }
+
     if (targetKernel.empty() && cachePath.empty())
     {
         // Auto-discovers and benchmarks all Dispatch, Bufferize, Malloc, Cache, Extract, and ENode rules and
@@ -67,8 +76,10 @@ int main(int argc, char *argv[])
         runRegionMergeTests();
         runShapePropagationTests();
         runInputHashconsTests();
+        testStorageOutputMatching();
         runViewBufferizeRegressionTests();
         runConstantViewRegressionTests();
+        runCudaSyncRegressionTests();
     }
 
     if (!skipFused)
