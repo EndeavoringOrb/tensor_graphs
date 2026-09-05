@@ -263,12 +263,13 @@ class HeuristicSearchDelegate : public SearchDelegate
         }
         else
         {
-            // Prioritize freeing memory and fitting within memory footprint
+            // Prioritize freeing memory and fitting within memory footprint:
+            // Prioritize nodes closest to output (smallest rev_cp_cost) to finish paths and free intermediate buffers
             std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
+                    return ready_nodes[a].rev_cp_cost < ready_nodes[b].rev_cp_cost;
                 if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)
                     return ready_nodes[a].min_dp_cp_cost > ready_nodes[b].min_dp_cp_cost;
-                if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
-                    return ready_nodes[a].rev_cp_cost > ready_nodes[b].rev_cp_cost;
                 if (ready_nodes[a].dp_mem != ready_nodes[b].dp_mem)
                     return ready_nodes[a].dp_mem < ready_nodes[b].dp_mem;
                 if (ready_nodes[a].size != ready_nodes[b].size)
