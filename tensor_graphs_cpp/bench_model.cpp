@@ -266,6 +266,7 @@ int main(int argc, char *argv[])
     parser.add_option({"--tg"}, "Text generation token position (default: 128).", "128");
     parser.add_option({"--iters", "-i", "-n"}, "Benchmark iterations (default: 5).", "5");
     parser.add_option({"--warmup", "-w"}, "Warmup iterations (default: 1).", "1");
+    parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
     parser.add_positional("pos_model", "Model name or path (optional).", "");
     parser.add_positional("pos_model_path", "Model path (optional).", "");
 
@@ -279,6 +280,7 @@ int main(int argc, char *argv[])
     }
 
     settings.load(remaining_args);
+    settings.apply_cli_args(parser);
 
     std::string model_name = parser.get_option("--model");
     std::string model_path = parser.get_option("--model-path");
@@ -328,6 +330,15 @@ int main(int argc, char *argv[])
 
     int iters = std::max(1, std::stoi(parser.get_option("--iters")));
     int warmup = std::max(0, std::stoi(parser.get_option("--warmup")));
+
+    float min_compile_time = 0.0f;
+    try
+    {
+        min_compile_time = std::stof(parser.get_option("--min-compile-time"));
+    }
+    catch (...)
+    {
+    }
 
     if (settings.num_threads > 0)
     {
@@ -394,6 +405,7 @@ int main(int argc, char *argv[])
     }
     Settings sessionSettings = settings;
     sessionSettings.cache_file = cache_file;
+    sessionSettings.min_compile_seconds = min_compile_time;
 
     Session session(g, mem, logits_id, sessionSettings, &repo);
 

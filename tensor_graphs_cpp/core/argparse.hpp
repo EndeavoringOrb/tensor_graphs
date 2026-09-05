@@ -33,6 +33,10 @@ class ArgParser
 
     void add_flag(const std::vector<std::string> &names, const std::string &help)
     {
+        if (!names.empty() && options.find(names[0]) != options.end())
+        {
+            return;
+        }
         ArgOption opt{names[0], names, help, true, "false", false};
         for (const auto &name : names)
         {
@@ -44,6 +48,10 @@ class ArgParser
     void add_option(const std::vector<std::string> &names, const std::string &help, const std::string &default_val = "",
                     bool required = false)
     {
+        if (!names.empty() && options.find(names[0]) != options.end())
+        {
+            return;
+        }
         ArgOption opt{names[0], names, help, false, default_val, required};
         for (const auto &name : names)
         {
