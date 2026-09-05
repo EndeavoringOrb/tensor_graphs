@@ -1352,6 +1352,94 @@ inline void runCategoryFromTuple(std::tuple<RuleTypes...>, const std::string &ca
 // Push/pop state restoration tests
 // =============================================================================
 
+inline bool runDispatchLocalityTests()
+{
+    using namespace prune_test;
+    Graph graph;
+    std::vector<LogicalId> branches;
+    for (int i = 0; i < 8; ++i)
+    {
+        auto input = graph.input({8, 8}, DType::FLOAT32);
+        branches.push_back(graph.neg(graph.add(input, input)));
+    }
+    while (branches.size() > 1)
+    {
+        std::vector<LogicalId> parents;
+        for (size_t i = 0; i < branches.size(); i += 2)
+            parents.push_back(graph.add(branches[i], branches[i + 1]));
+        branches = std::move(parents);
+    }
+    MockCtx mock;
+    mock.build(graph, branches.front());
+    // Model misleading cost distances that prefer starting every leaf branch.
+    for (auto &info : mock.enodeInfos)
+        info.rev_cp_cost = 100.0f;
+    for (const auto &entry : mock.selection_map)
+    {
+        auto id = mock.egraph.getEClass(entry.first).enodes[entry.second];
+        const auto &node = mock.egraph.getENode(id);
+        bool leaf = true;
+        for (auto child : node.getChildren())
+        {
+            child = mock.egraph.findConst(child);
+            auto child_id = mock.egraph.getEClass(child).enodes[mock.selection_map.at(child)];
+            leaf &= mock.egraph.getENode(child_id).getOpType() == OpType::INPUT;
+        }
+        if (leaf)
+            mock.enodeInfos[id.value].rev_cp_cost = 0.0f;
+    }
+    class LegacyDelegate : public HeuristicSearchDelegate
+    {
+      public:
+        std::vector<uint32_t> order_dispatch(const std::vector<ActionFeatureExtractDispatch> &nodes) override
+        {
+            auto features = nodes;
+            for (auto &feature : features)
+                feature.schedule_rank = UINT32_MAX;
+            return HeuristicSearchDelegate::order_dispatch(features);
+        }
+    };
+    auto measurePeak = [&](std::shared_ptr<SearchDelegate> delegate) {
+        auto iterator = makeDispatchIteratorWithDelegate(mock.egraph, mock.selection_map, mock.enodeInfos,
+                                                         delegate, nullptr, &mock.mem_caps);
+        std::vector<EClassId> order;
+        if (!iterator.getNextDispatchOrder(mock.selection_map, order))
+            throw std::runtime_error("No dispatch order in locality regression");
+        std::unordered_map<EClassId, size_t> remaining;
+        std::unordered_set<EClassId> seen;
+        for (auto node : order)
+        {
+            auto id = mock.egraph.getEClass(node).enodes[mock.selection_map.at(node)];
+            for (auto child : mock.egraph.getENode(id).getChildren())
+                ++remaining[mock.egraph.findConst(child)];
+        }
+        size_t live = 0, peak = 0;
+        for (auto node : order)
+        {
+            auto id = mock.egraph.getEClass(node).enodes[mock.selection_map.at(node)];
+            const auto &enode = mock.egraph.getENode(id);
+            ++live;
+            peak = std::max(peak, live);
+            for (auto child : enode.getChildren())
+            {
+                child = mock.egraph.findConst(child);
+                if (!seen.count(child))
+                    throw std::runtime_error("Non-topological dispatch order");
+                if (--remaining[child] == 0)
+                    --live;
+            }
+            seen.insert(node);
+        }
+        if (seen.size() != mock.selection_map.size())
+            throw std::runtime_error("Incomplete dispatch order");
+        return peak;
+    };
+    auto old_peak = measurePeak(std::make_shared<LegacyDelegate>());
+    auto new_peak = measurePeak(std::make_shared<HeuristicSearchDelegate>());
+    std::cout << "  Dispatch locality peak live tensors: " << old_peak << " -> " << new_peak << '\n';
+    return new_peak < old_peak;
+}
+
 inline bool runPruningStateTests()
 {
     using namespace prune_test;
@@ -1406,7 +1494,7 @@ inline bool runPruningStateTests()
     }
 
     std::cout << "  MemoryPressureDispatchRule push/pop state: PASS\n";
-    return true;
+    return runDispatchLocalityTests();
 }
 
 // =============================================================================

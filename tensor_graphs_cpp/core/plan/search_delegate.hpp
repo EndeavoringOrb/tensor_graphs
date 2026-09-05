@@ -31,6 +31,7 @@ struct ActionFeatureExtractDispatch
     uint32_t num_edges = 0;
     MemSpace mem_space;
     uint64_t mem_cap = 0;
+    uint32_t schedule_rank = UINT32_MAX; // Selected-DAG depth-first postorder
 };
 
 struct ActionFeatureMalloc
@@ -263,9 +264,11 @@ class HeuristicSearchDelegate : public SearchDelegate
         }
         else
         {
-            // Prioritize freeing memory and fitting within memory footprint:
-            // Prioritize nodes closest to output (smallest rev_cp_cost) to finish paths and free intermediate buffers
+            // Finish dependency branches before opening unrelated ones. Cost-based
+            // distances alone can eagerly load weights for many future layers.
             std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+                if (ready_nodes[a].schedule_rank != ready_nodes[b].schedule_rank)
+                    return ready_nodes[a].schedule_rank < ready_nodes[b].schedule_rank;
                 if (ready_nodes[a].rev_cp_cost != ready_nodes[b].rev_cp_cost)
                     return ready_nodes[a].rev_cp_cost < ready_nodes[b].rev_cp_cost;
                 if (ready_nodes[a].min_dp_cp_cost != ready_nodes[b].min_dp_cp_cost)

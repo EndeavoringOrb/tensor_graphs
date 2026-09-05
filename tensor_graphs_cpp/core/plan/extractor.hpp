@@ -1019,6 +1019,7 @@ template <typename... Rules> struct DispatchIterator
                         (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_cp_cost : 0.0f;
                     f.rev_cp_cost = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].rev_cp_cost : 0.0f;
                     f.dp_mem = (enodeId.value < enodeInfos.size()) ? enodeInfos[enodeId.value].dp_mem : 0.0f;
+                    f.schedule_rank = schedule_rank[id.value];
                     f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
                     f.mem_space = enode.getMemSpace();
                     auto cap_it = mem_caps.find(enode.getMemSpace());
@@ -1128,6 +1129,7 @@ template <typename... Rules> struct DispatchIterator
     std::vector<EClassId> ordered;
     std::vector<int32_t> current_in_degree;
     std::vector<std::vector<EClassId>> dependents;
+    std::vector<uint32_t> schedule_rank;
 
     std::vector<EClassId> current_ready;
     std::vector<std::vector<EClassId>> added_nodes_at_pos;
@@ -1230,6 +1232,62 @@ template <typename... Rules> struct DispatchIterator
             for (EClassId canon_child : unique_children)
             {
                 dependents[canon_child.value].push_back(node);
+            }
+        }
+
+        // Build a deterministic postorder of the selected DAG, not the entire
+        // egraph. Visit expensive-memory subtrees first (Sethi-Ullman ordering),
+        // retaining their results while evaluating smaller siblings. Iterative
+        // traversal also handles deeply unrolled inference graphs safely.
+        schedule_rank.assign(max_class_id, UINT32_MAX);
+        std::vector<uint8_t> visit_state(max_class_id, 0);
+        std::vector<EClassId> roots;
+        for (const auto &entry : selection_map)
+            if (dependents[entry.first.value].empty())
+                roots.push_back(entry.first);
+        std::sort(roots.begin(), roots.end(), [](EClassId a, EClassId b) { return a.value < b.value; });
+        uint32_t next_rank = 0;
+        std::vector<std::pair<EClassId, bool>> stack;
+        for (EClassId root : roots)
+        {
+            stack.emplace_back(root, false);
+            while (!stack.empty())
+            {
+                auto [node, exiting] = stack.back();
+                stack.pop_back();
+                if (exiting)
+                {
+                    visit_state[node.value] = 2;
+                    schedule_rank[node.value] = next_rank++;
+                    continue;
+                }
+                if (visit_state[node.value])
+                    continue;
+                visit_state[node.value] = 1;
+                stack.emplace_back(node, true);
+                const auto &enode = egraph.getENode(egraph.getEClass(node).enodes[selection_map.at(node)]);
+                std::vector<EClassId> children;
+                for (EClassId child : enode.getChildren())
+                {
+                    child = egraph.findConst(child);
+                    if (selection_map.count(child))
+                        children.push_back(child);
+                }
+                auto memoryPriority = [&](EClassId child) {
+                    const auto &cls = egraph.getEClass(child);
+                    ENodeId id = cls.enodes[selection_map.at(child)];
+                    double peak = id.value < enodeInfos.size() ? enodeInfos[id.value].dp_mem : 0.0;
+                    return peak - static_cast<double>(getSizeBytes(cls.shape, cls.dtype));
+                };
+                // Stack order is reversed: highest temporary-memory requirement first.
+                std::sort(children.begin(), children.end(), [&](EClassId a, EClassId b) {
+                    double a_priority = memoryPriority(a), b_priority = memoryPriority(b);
+                    if (a_priority != b_priority)
+                        return a_priority < b_priority;
+                    return a.value > b.value;
+                });
+                for (EClassId child : children)
+                    stack.emplace_back(child, false);
             }
         }
 
