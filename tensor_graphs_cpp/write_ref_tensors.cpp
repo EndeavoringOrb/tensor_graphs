@@ -21,7 +21,8 @@
 
 // We use a custom version of executeReferenceGraph for clean tensors
 void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &rootIds,
-                                 const std::vector<LogicalId> &dynamicInputs, Repo &repo)
+                                 const std::vector<LogicalId> &dynamicInputs, Repo &repo,
+                                 bool fold_weights = false)
 {
     std::vector<LogicalId> topo = topologicalSort(rootIds, graph);
 
@@ -35,8 +36,23 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
         const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
         {
-            // If the node is a dynamic input, it is not considered clean/static
-            is_clean[nodeId] = (dynamicInputSet.count(nodeId) == 0);
+            if (dynamicInputSet.count(nodeId) > 0)
+            {
+                is_clean[nodeId] = false;
+            }
+            else
+            {
+                InputDataType input_data_type = graph.getInputDataType(nodeId);
+                if (fold_weights)
+                {
+                    is_clean[nodeId] = (input_data_type == InputDataType::CONSTANT ||
+                                        input_data_type == InputDataType::STORAGE);
+                }
+                else
+                {
+                    is_clean[nodeId] = (input_data_type == InputDataType::CONSTANT);
+                }
+            }
         }
         else
         {
@@ -223,6 +239,7 @@ int main(int argc, char *argv[])
                           "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.", "models/google/gemma-3-270m");
     parser.add_option({"--seq-len"}, "Maximum model sequence length (default: 128).", "128");
+    parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
 
     if (!parser.parse(argc, argv))
     {
@@ -231,6 +248,7 @@ int main(int argc, char *argv[])
 
     std::string model = parser.get_positional("model");
     std::string model_path = parser.get_positional("model_path");
+    bool fold_weights = parser.get_flag("--fold-weights");
 
     MemoryManager mem;
     Graph g;
@@ -284,7 +302,7 @@ int main(int argc, char *argv[])
 
     Repo repo(repoPath, gHash, false);
 
-    computeAndWriteCleanTensors(g, roots.roots, roots.inputs, repo);
+    computeAndWriteCleanTensors(g, roots.roots, roots.inputs, repo, fold_weights);
 
     std::cout << "Done writing reference tensors." << std::endl;
     return 0;
