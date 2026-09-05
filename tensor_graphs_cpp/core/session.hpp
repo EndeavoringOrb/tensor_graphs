@@ -488,6 +488,12 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
+        std::shared_ptr<SearchDelegate> search_delegate = delegate;
+        if (!search_delegate)
+        {
+            search_delegate = std::make_shared<HeuristicSearchDelegate>();
+        }
+
         Planner planner(costModel, settings);
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -575,7 +581,7 @@ struct Session
 
             float bestCost = TGConstants::INF;
             TimeoutChecker timeoutChecker(minCompileSeconds);
-            auto cache_iter = makeConfiguredCacheIterator(graph, candidates, availMemSpaces, delegate, settings,
+            auto cache_iter = makeConfiguredCacheIterator(graph, candidates, availMemSpaces, search_delegate, settings,
                                                           &bestCost, &timeoutChecker);
             std::unordered_map<LogicalId, MemSpace> currentCache;
             const auto searchStart = std::chrono::high_resolution_clock::now();
@@ -598,7 +604,7 @@ struct Session
                         threadPlanner.baseState = planner.baseState;
                         threadPlanner.baseStateInitialized = true;
                         CompiledGraph candidate = threadPlanner.plan(rootId, graph, manualBuckets[bucketIdx], currentCache,
-                                                                     doSaturate, true, repo, preallocated, 0.0f, nullptr);
+                                                                     doSaturate, true, repo, preallocated, minCompileSeconds, search_delegate);
                         bucketCosts[bucketIdx] = candidate.cost();
                         candidate.bucket = manualBuckets[bucketIdx];
                         candidateGraphs[bucketIdx] = std::move(candidate);
@@ -615,14 +621,14 @@ struct Session
                     for (size_t bucketIdx = 0; bucketIdx < bucketCosts.size(); ++bucketIdx)
                     {
                         weightedCost += static_cast<double>(bucketWeights[bucketIdx]) * bucketCosts[bucketIdx];
-                        if (delegate)
-                            delegate->on_bucket_leaf_evaluated(static_cast<uint32_t>(bucketIdx), bucketCosts[bucketIdx]);
+                        if (search_delegate)
+                            search_delegate->on_bucket_leaf_evaluated(static_cast<uint32_t>(bucketIdx), bucketCosts[bucketIdx]);
                     }
                     const float cost = static_cast<float>(weightedCost);
-                    if (delegate)
+                    if (search_delegate)
                     {
-                        delegate->set_best_cost_ptr(&bestCost);
-                        delegate->on_leaf_evaluated(cost);
+                        search_delegate->set_best_cost_ptr(&bestCost);
+                        search_delegate->on_leaf_evaluated(cost);
                     }
                     if (cost < bestCost)
                     {
@@ -639,13 +645,13 @@ struct Session
                         minCompileSeconds)
                     break;
             }
-            if (delegate)
-                delegate->set_best_cost_ptr(nullptr);
+            if (search_delegate)
+                search_delegate->set_best_cost_ptr(nullptr);
         }
 
         // Cache search already planned every bucket for the winning selection.
         // Only the no-cache path still needs a standalone bucket-planning pass.
-        if (disableCaching)
+        if (!cachedGraphs.empty())
         {
             std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
             planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
@@ -662,7 +668,7 @@ struct Session
 
                 const Bucket &bucket = manualBuckets[i];
                 CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, bestCachedNodes, doSaturate, true, repo,
-                                                        preallocatedBuffers, minCompileSeconds, nullptr);
+                                                        preallocatedBuffers, minCompileSeconds, search_delegate);
                 plan.bucket = bucket;
                 cachedGraphs[i] = std::move(plan);
             });
