@@ -8,6 +8,7 @@ commands.txt
 *.egg-info
 resources/*.safetensors
 resources/*.html
+*.so
 resources/*.json
 *pack.bat
 .vscode
@@ -24,9 +25,11 @@ wsl_env
 egraph_viewer/egraphs
 tensor_graphs_cpp/main
 tensor_graphs_cpp/bench
+tensor_graphs_cpp/bench_model
 tensor_graphs_cpp/test
 tensor_graphs_cpp/main.exe
 tensor_graphs_cpp/bench.exe
+tensor_graphs_cpp/bench_model.exe
 tensor_graphs_cpp/test.exe
 hwinfo*.txt
 *.png
