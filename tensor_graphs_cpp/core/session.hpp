@@ -710,7 +710,7 @@ struct Session
 
         // Cache search already planned every bucket for the winning selection.
         // Only the no-cache path still needs a standalone bucket-planning pass.
-        if (!cachedGraphs.empty())
+        if (cachedGraphs.empty())
         {
             std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
             planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
