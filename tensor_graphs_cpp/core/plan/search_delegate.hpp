@@ -200,6 +200,18 @@ class HeuristicSearchDelegate : public SearchDelegate
     {
         std::vector<uint32_t> res(choices.size());
         std::iota(res.begin(), res.end(), 0);
+        // Decode buckets update only a small slice of the runtime token input.
+        // Explore retaining that backing tensor before the uncached alternative,
+        // so partial-path planning can preserve the previous KV-producing state.
+        std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
+            const bool a_runtime_cache = choices[a].is_cached > 0.0f &&
+                                         choices[a].mem_space.type != HandleType::STORAGE && choices[a].num_users > 1;
+            const bool b_runtime_cache = choices[b].is_cached > 0.0f &&
+                                         choices[b].mem_space.type != HandleType::STORAGE && choices[b].num_users > 1;
+            if (a_runtime_cache != b_runtime_cache)
+                return a_runtime_cache > b_runtime_cache;
+            return choices[a].is_cached > choices[b].is_cached;
+        });
         return res;
     }
 

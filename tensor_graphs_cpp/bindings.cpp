@@ -366,8 +366,10 @@ class LLMSession
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
-               uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {})
+               uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
+               uint32_t max_sequence_length = 128)
     {
+        max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
         {
             set_num_threads(threads);
@@ -408,13 +410,14 @@ class LLMSession
         }
 
         std::string gHash = computeGraphHash(*g, {logitsId});
-        repo = std::make_unique<Repo>("benchmarks/repo_" + model_name, gHash, true);
+        repo = std::make_unique<Repo>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
+                                      gHash, true);
 
         std::string actual_cache = cache_file;
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            actual_cache = "dirty_region_caches/" + model_name + "-cpp.bin";
+            actual_cache = "dirty_region_caches/" + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
@@ -921,11 +924,11 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t, bool, const std::vector<float> &>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
-             py::arg("bucket_weights") = std::vector<float>{})
+             py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

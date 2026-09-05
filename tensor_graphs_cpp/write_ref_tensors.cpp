@@ -222,6 +222,7 @@ int main(int argc, char *argv[])
                           "qwen-3.6-35b-a3b).",
                           "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.", "models/google/gemma-3-270m");
+    parser.add_option({"--seq-len"}, "Maximum model sequence length (default: 128).", "128");
 
     if (!parser.parse(argc, argv))
     {
@@ -234,7 +235,16 @@ int main(int argc, char *argv[])
     MemoryManager mem;
     Graph g;
 
-    uint32_t max_seq_len = 8;
+    uint32_t max_seq_len = 128;
+    try
+    {
+        max_seq_len = std::max(1u, static_cast<uint32_t>(std::stoul(parser.get_option("--seq-len"))));
+    }
+    catch (...)
+    {
+        std::cerr << "Invalid --seq-len value provided.\n";
+        return 1;
+    }
     std::cout << "Building " << model << " Graph for Reference Tensors..." << std::endl;
     ModelGraphRoots roots;
 
@@ -267,7 +277,7 @@ int main(int argc, char *argv[])
     }
 
     std::string gHash = computeGraphHash(g, roots.roots);
-    std::string repoPath = "benchmarks/repo_" + model;
+    std::string repoPath = "benchmarks/repo_" + model + "-seq" + std::to_string(max_seq_len);
 
     std::cout << "Graph Hash: " << gHash << std::endl;
     std::cout << "Using Repo: " << repoPath << std::endl;

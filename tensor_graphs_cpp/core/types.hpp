@@ -18,6 +18,7 @@ typedef uint32_t cl_uint;
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -277,10 +278,13 @@ class LogicalIdAllocator
 
     LogicalId _allocate()
     {
-        return nextId++;
+        // Logical IDs are used as keys in each temporary graph constructed by
+        // parallel bucket planning.  The allocator is global, so uniqueness
+        // must hold across worker threads as well.
+        return LogicalId{nextId.fetch_add(1, std::memory_order_relaxed)};
     }
 
-    LogicalId nextId{0};
+    std::atomic<uint32_t> nextId{0};
 };
 
 struct EClassId

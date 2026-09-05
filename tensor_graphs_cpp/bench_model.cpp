@@ -383,7 +383,7 @@ int main(int argc, char *argv[])
     LogicalId input_ids_id = roots.inputs[0];
 
     std::string gHash = computeGraphHash(g, roots.roots);
-    Repo repo("benchmarks/repo_" + model_name, gHash, true);
+    Repo repo("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len), gHash, true);
 
     std::string cache_file = settings.cache_file;
     if (cache_file.empty())
@@ -539,9 +539,6 @@ int main(int argc, char *argv[])
 
     std::string size_str = format_size(model_bytes);
     std::string params_str = format_params(model_params);
-    std::string backend_str = get_backend_name();
-    std::string ngl_str = (backend_str == "CPU") ? "0" : "-1";
-
     std::string pp_test_name = "pp" + std::to_string(pp);
     std::string tg_test_name = "tg" + std::to_string(tg);
 
@@ -551,8 +548,6 @@ int main(int argc, char *argv[])
     std::cout << "| " << pad_right_utf8("model", 30)
               << " | " << pad_left_utf8("size", 10)
               << " | " << pad_left_utf8("params", 10)
-              << " | " << pad_right_utf8("backend", 10)
-              << " | " << pad_left_utf8("ngl", 3)
               << " | " << pad_left_utf8("test", 15)
               << " | " << pad_left_utf8("t/s", 20)
               << " |\n";
@@ -560,8 +555,6 @@ int main(int argc, char *argv[])
     std::cout << "| " << std::string(30, '-')
               << " | " << std::string(9, '-') << ":"
               << " | " << std::string(9, '-') << ":"
-              << " | " << std::string(10, '-')
-              << " | " << std::string(2, '-') << ":"
               << " | " << std::string(14, '-') << ":"
               << " | " << std::string(19, '-') << ":"
               << " |\n";
@@ -569,8 +562,6 @@ int main(int argc, char *argv[])
     std::cout << "| " << pad_right_utf8(model_desc, 30)
               << " | " << pad_left_utf8(size_str, 10)
               << " | " << pad_left_utf8(params_str, 10)
-              << " | " << pad_right_utf8(backend_str, 10)
-              << " | " << pad_left_utf8(ngl_str, 3)
               << " | " << pad_left_utf8(pp_test_name, 15)
               << " | " << pad_left_utf8(pp_tps_str, 20)
               << " |\n";
@@ -578,8 +569,6 @@ int main(int argc, char *argv[])
     std::cout << "| " << pad_right_utf8(model_desc, 30)
               << " | " << pad_left_utf8(size_str, 10)
               << " | " << pad_left_utf8(params_str, 10)
-              << " | " << pad_right_utf8(backend_str, 10)
-              << " | " << pad_left_utf8(ngl_str, 3)
               << " | " << pad_left_utf8(tg_test_name, 15)
               << " | " << pad_left_utf8(tg_tps_str, 20)
               << " |\n";

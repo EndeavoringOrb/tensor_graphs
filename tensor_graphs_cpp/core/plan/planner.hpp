@@ -76,6 +76,13 @@ class SingleUseSkipRule
             return false;
         if (ctx.choice <= 0)
             return false;
+        // A runtime input may have a single graph consumer but still backs every
+        // decode step.  Keeping it is what lets partial-path planning retain the
+        // clean token/KV prefix between buckets.
+        LogicalId id = ctx.candidate_nodes[ctx.k];
+        auto input_it = ctx.graph.input_data_types.find(id);
+        if (input_it != ctx.graph.input_data_types.end() && input_it->second == InputDataType::RUNTIME)
+            return false;
         return ctx.num_users[ctx.k] <= 1;
     }
 };
@@ -803,133 +810,6 @@ struct Planner
             buf.offset = static_cast<int64_t>(offset);
             out[e.logicalId] = std::move(buf);
         }
-    }
-
-    std::unordered_map<LogicalId, MemSpace> searchBestCacheNodes(LogicalId rootId, const Graph &graph,
-                                                                 const std::vector<Bucket> &buckets,
-                                                                 std::shared_ptr<SearchDelegate> delegate = nullptr,
-                                                                 float minCompileSeconds = 0.0f)
-    {
-        const std::vector<float> bucketWeights = normalizedBucketWeights(buckets);
-        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-
-        // A shared cached value is usable only when it is clean in every bucket.
-        std::unordered_map<LogicalId, bool> dirtyInAnyBucket;
-        for (const auto &bucket : buckets)
-        {
-            std::unordered_map<LogicalId, bool> logicalDirty;
-            for (LogicalId nodeId : topo)
-            {
-                if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
-                {
-                    logicalDirty[nodeId] = true;
-                }
-                else
-                {
-                    bool isDirty = false;
-                    for (LogicalId pid : graph.getNode(nodeId).child_ids)
-                    {
-                        if (logicalDirty[pid])
-                        {
-                            isDirty = true;
-                            break;
-                        }
-                    }
-                    logicalDirty[nodeId] = isDirty;
-                }
-                dirtyInAnyBucket[nodeId] = dirtyInAnyBucket[nodeId] || logicalDirty[nodeId];
-            }
-        }
-
-        std::vector<LogicalId> candidates;
-        for (LogicalId nodeId : topo)
-        {
-            if (!dirtyInAnyBucket[nodeId] && graph.getNode(nodeId).getSizeBytes() > 0)
-            {
-                candidates.push_back(nodeId);
-            }
-        }
-
-        std::vector<MemSpace> avail_mem_spaces;
-        for (const auto &kv : settings.mem_caps)
-        {
-            if (kv.first.type != HandleType::STORAGE)
-            {
-                avail_mem_spaces.push_back(kv.first);
-            }
-        }
-        std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b) {
-            if (a.type != b.type)
-                return a.type < b.type;
-            return a.idx < b.idx;
-        });
-
-        float best_cost = TGConstants::INF;
-        TimeoutChecker timeout_checker(minCompileSeconds);
-        auto cache_iter = makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, delegate, settings,
-                                                      &best_cost, &timeout_checker);
-        std::unordered_map<LogicalId, MemSpace> current_cache;
-        std::unordered_map<LogicalId, MemSpace> best_cache;
-
-        auto start_time = std::chrono::high_resolution_clock::now();
-        uint32_t max_cache_evals = 100;
-        uint32_t eval_count = 0;
-
-        while (cache_iter.getNextCacheSelection(current_cache))
-        {
-            eval_count++;
-            try
-            {
-                std::unordered_map<LogicalId, ParallelBuffer> preallocated;
-                preallocateLogicalBuffers(graph, current_cache, preallocated);
-
-                double weightedCost = 0.0;
-                for (size_t bucketIdx = 0; bucketIdx < buckets.size(); ++bucketIdx)
-                {
-                    CompiledGraph planResult = plan(rootId, graph, buckets[bucketIdx], current_cache, true, true,
-                                                    nullptr, preallocated, 0.0f, delegate);
-                    weightedCost += static_cast<double>(bucketWeights[bucketIdx]) * planResult.cost();
-                }
-
-                const float cost = static_cast<float>(weightedCost);
-                // Inner planning points the delegate at bucket-local costs. Restore
-                // the shared-cache objective before reporting this cache candidate.
-                if (delegate)
-                {
-                    delegate->set_best_cost_ptr(&best_cost);
-                    delegate->on_leaf_evaluated(cost);
-                }
-                if (cost < best_cost)
-                {
-                    best_cost = cost;
-                    best_cache = current_cache;
-                }
-            }
-            catch (...)
-            {
-                if (delegate)
-                    delegate->set_best_cost_ptr(&best_cost);
-            }
-
-            if (best_cost < TGConstants::INF && minCompileSeconds == 0.0f)
-            {
-                break;
-            }
-
-            if (minCompileSeconds > 0.0f)
-            {
-                auto now = std::chrono::high_resolution_clock::now();
-                float elapsed = std::chrono::duration<float>(now - start_time).count();
-                if (elapsed >= minCompileSeconds)
-                    break;
-            }
-            if (eval_count >= max_cache_evals)
-                break;
-        }
-
-        if (delegate)
-            delegate->set_best_cost_ptr(nullptr);
-        return best_cache;
     }
 
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)

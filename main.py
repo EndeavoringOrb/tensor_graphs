@@ -66,6 +66,12 @@ def main():
         help="Max tokens to generate per response turn",
     )
     parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=128,
+        help="Maximum model sequence length (also determines the decode buckets)",
+    )
+    parser.add_argument(
         "--min-compile-time",
         type=float,
         default=0.0,
@@ -149,6 +155,7 @@ def main():
         disable_caching=args.disable_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
+        max_sequence_length=args.seq_len,
     )
 
     print(f"Loading tokenizer for {args.model}...")

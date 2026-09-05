@@ -399,7 +399,7 @@ struct CostModel
     std::unordered_set<uint64_t> loggedCalls;
     std::ofstream callFile;
     std::mutex logMtx;
-    bool doneWarning = false;
+    std::atomic<bool> doneWarning{false};
     bool enableLogging = false;
 
     CostModel(bool logCalls = true, const std::string &recordsPath = "benchmarks/records.bin") : enableLogging(logCalls)
@@ -688,10 +688,9 @@ struct CostModel
         {
             log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
 
-            if (!doneWarning)
+            if (!doneWarning.exchange(true, std::memory_order_relaxed))
             {
                 std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
-                doneWarning = true;
             }
             return std::numeric_limits<float>::infinity();
         }
