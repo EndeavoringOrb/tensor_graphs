@@ -11,6 +11,7 @@ resources/*.html
 resources/*.json
 *pack.bat
 .vscode
+.*
 flux-klein-4b
 malloc_heuristic/build
 patching

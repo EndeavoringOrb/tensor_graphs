@@ -189,6 +189,52 @@ inline void testRootNodeIsViewOp()
     }
 }
 
+inline void testAnalysisConstantsDoNotOverwriteViewStorage()
+{
+    std::cout << "  - running testAnalysisConstantsDoNotOverwriteViewStorage..." << std::endl;
+    Graph graph;
+    MemoryManager mem;
+    LogicalId x = graph.input({8, 2048}, DType::FLOAT32);
+    LogicalId ones = graph.fill(1.0f, {8, 2048});
+    LogicalId sum = graph.add(x, ones);
+    LogicalId out = graph.concat({sum, sum}, 1);
+    CostModel cost_model(false, "");
+    populateAllKernelDummyRecords(cost_model);
+    Settings settings = Settings::get_default();
+    setupTestSettings(settings);
+    Planner planner(cost_model, settings);
+    planner.initBaseEGraph(out, graph, topologicalSort({out}, graph));
+
+    // InfinityDomination loads dense reference data for views during analysis.
+    // Reproduce that state without depending on model weights or a reference repo.
+    EClassId ones_class = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(ones));
+    std::vector<float> dense_ones(8 * 2048, 1.0f);
+    auto snapshot = std::make_shared<std::vector<uint8_t>>(dense_ones.size() * sizeof(float));
+    std::memcpy(snapshot->data(), dense_ones.data(), snapshot->size());
+    planner.baseState.egraph.constantStaging[ones_class] = snapshot;
+    Session session(graph, mem, out, "", 0, nullptr, true);
+    session.ensureFullBucket();
+    Bucket bucket = session.manualBuckets.at(session.fullBucketIdx);
+    CompiledGraph compiled = planner.plan(out, graph, bucket, {}, false);
+    if (compiled.constantStaging.count(ones_class))
+        Error::throw_err("[Regression Test Failed] Broadcast analysis snapshot became a runtime constant!");
+
+    compiled.bucket = bucket;
+    session.cachedGraphs.push_back(std::move(compiled));
+    session.cachedBucketWeights = {1.0f};
+    session.isPlanned = true;
+    session.compile(false);
+    std::vector<float> input(8 * 2048, 2.0f);
+    std::vector<float> expected(8 * 4096, 3.0f);
+    for (int iteration = 0; iteration < 2; ++iteration)
+    {
+        session.writeInput(x, input.data(), input.size() * sizeof(float));
+        const float *actual = static_cast<const float *>(session.run(bucket));
+        if (!compareOutputs(expected.data(), actual, expected.size()))
+            Error::throw_err("[Regression Test Failed] Analysis snapshot corrupted concat inputs!");
+    }
+}
+
 } // namespace ConstantViewRegression
 
 inline void runConstantViewRegressionTests()
@@ -198,4 +244,5 @@ inline void runConstantViewRegressionTests()
     ConstantViewRegression::testMultiConstantArithmeticPipeline();
     ConstantViewRegression::testWriteInputThroughViewOps();
     ConstantViewRegression::testRootNodeIsViewOp();
+    ConstantViewRegression::testAnalysisConstantsDoNotOverwriteViewStorage();
 }

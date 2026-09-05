@@ -105,7 +105,22 @@ class Executor
             bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
-                kernel.run(ctx);
+                try
+                {
+                    kernel.run(ctx);
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "[Executor ERROR at instruction " << idx << "] kernel=" << kernel_name
+                              << " eclass=" << inst.eclass_id.value
+                              << " logical_id=" << inst.logical_id.value
+                              << " debugOrigin=" << inst.debugOrigin << std::endl;
+                    std::cerr << "  children: ";
+                    for (auto c : inst.children)
+                        std::cerr << c.value << " ";
+                    std::cerr << std::endl;
+                    throw;
+                }
                 issued_work = true;
             }
 

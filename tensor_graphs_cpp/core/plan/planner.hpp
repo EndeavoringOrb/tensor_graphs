@@ -1810,7 +1810,11 @@ struct Planner
                 inst.debugOrigin = graph.getNode(logical_id).debugOrigin;
             }
 
-            if (egraph.constantStaging.count(eclass_id))
+            // Analysis also stages dense reference snapshots of computed nodes and
+            // views. Only INPUT nodes own constant storage: copying a dense snapshot
+            // into a broadcast view would overwrite its scalar and adjacent buffers.
+            if (enode.getOpType() == OpType::INPUT && enode.getMemSpace().type == HandleType::CPP &&
+                egraph.constantStaging.count(eclass_id))
             {
                 compiled.constantStaging[eclass_id] = egraph.constantStaging.at(eclass_id);
             }

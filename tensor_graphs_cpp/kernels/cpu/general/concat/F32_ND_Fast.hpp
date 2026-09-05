@@ -23,6 +23,12 @@ inline void runConcatF32_Fast(const KernelContext &ctx)
     if (axis < 0)
         axis += out_shape.size();
 
+    if (axis < 0 || axis >= static_cast<int32_t>(out_shape.size()))
+    {
+        Error::throw_err("[ConcatF32_Fast] Axis " + std::to_string(axis) + " is outside output rank (" +
+                         std::to_string(out_shape.size()) + ").");
+    }
+
     uint64_t outer = 1, inner = 1;
     for (int i = 0; i < axis; ++i)
         outer *= out_shape[i];

@@ -504,14 +504,14 @@ struct PreparedKernel
                     }
                     else if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
                     {
-                        if (idx == r.inputShapes.size() - 1)
+                        if (idx == 0)
                         {
                             int32_t concat_axis = -1;
-                            if (!r.inputShapes.empty() && !r.outputShape.empty())
+                            if (!r.inputShapes.empty() && !r.outputShape.empty() && r.inputShapes.size() > 1)
                             {
                                 for (uint64_t d = 0; d < r.outputShape.size(); ++d)
                                 {
-                                    if (r.outputShape[d] != r.inputShapes[0][d])
+                                    if (r.outputShape[d] != r.inputShapes[1][d])
                                     {
                                         concat_axis = (int32_t)d;
                                         break;

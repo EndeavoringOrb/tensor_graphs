@@ -30,6 +30,20 @@ inline void runConcatF32_ND(const KernelContext &ctx)
         axis += static_cast<int32_t>(rank);
     if (axis < 0 || axis >= static_cast<int32_t>(rank))
     {
+        std::cerr << "[ConcatF32_ND DIAGNOSTIC] rank=" << rank << " axis=" << axis << " (raw=" << *static_cast<const int32_t *>(ctx.inputs[0]) << ", as_float=" << *static_cast<const float *>(ctx.inputs[0]) << ")" << std::endl;
+        std::cerr << "  outShape=" << toString(outShape) << " outOffset=" << ctx.outViews[0].offset << std::endl;
+        std::cerr << "  num_inputs=" << ctx.inputs.size() << std::endl;
+        for (size_t i = 0; i < ctx.inputs.size(); ++i)
+        {
+            std::cerr << "  in[" << i << "]: ptr=" << ctx.inputs[i] << " offset=" << ctx.inViews[i].offset
+                      << " dtype=" << toString(ctx.inViews[i].dtype) << " shape=" << toString(ctx.inViews[i].getShape());
+            if (ctx.inputs[i])
+            {
+                std::cerr << " int32_val=" << *static_cast<const int32_t *>(ctx.inputs[i])
+                          << " float_val=" << *static_cast<const float *>(ctx.inputs[i]);
+            }
+            std::cerr << std::endl;
+        }
         Error::throw_err("[ConcatF32_ND] Axis " + std::to_string(axis) + " is outside the output rank.");
     }
 

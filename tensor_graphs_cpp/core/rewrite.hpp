@@ -503,7 +503,7 @@ struct FusionRule : public Rule
             application_key.destination = egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx}));
             if (!match.variadicConcatTensorEClasses.empty())
             {
-                application_key.inputs.push_back(egraph.findConst(binding.at(pattern.variables.back())));
+                application_key.inputs.push_back(egraph.findConst(binding.at(pattern.variables.front())));
                 for (EClassId input_id : match.variadicConcatTensorEClasses)
                     application_key.inputs.push_back(egraph.findConst(input_id));
             }
@@ -533,7 +533,7 @@ struct FusionRule : public Rule
                 // CONCAT's graph and kernel ABI is [axis, tensor0, tensor1, ...].
                 // Keep that order when materializing a variadic fused match; otherwise
                 // the first FLOAT32 tensor is interpreted as the INT32 axis at runtime.
-                LogicalId axisVar = pattern.variables.back();
+                LogicalId axisVar = pattern.variables.front();
                 EClassId axisEClass = binding.at(axisVar);
                 inputs.push_back(axisEClass);
                 const EClass &axisParent = egraph.getEClass(axisEClass);
