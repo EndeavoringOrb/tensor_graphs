@@ -139,6 +139,12 @@ class TopologyMapper
             return !out_binding.engines.empty();
         }
 
+        // Storage is read-only. Only metadata views may retain a storage output;
+        // executable kernels must never treat an explicit storage target as a wildcard.
+        if (kernel_out_ms.type == HandleType::STORAGE ||
+            (!ignore_out_ms && target_out_ms.type == HandleType::STORAGE))
+            return false;
+
         std::unordered_map<MemSpace, MemSpace> local_to_actual_mem;
         std::unordered_map<MemSpace, MemSpace> actual_to_local_mem;
         const auto reconcileMem = [&](const MemSpace &local, const MemSpace &actual) {

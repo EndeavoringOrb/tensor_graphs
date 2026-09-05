@@ -54,7 +54,7 @@ static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector
 
 struct Session
 {
-    static constexpr uint32_t kCacheFileVersion = 5;
+    static constexpr uint32_t kCacheFileVersion = 6;
 
     Graph &graph;
     MemoryManager &memManager;

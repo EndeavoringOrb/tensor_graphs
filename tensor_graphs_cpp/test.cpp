@@ -13,6 +13,7 @@
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/shape_propagation.hpp"
+#include "tests/storage_output_regression.hpp"
 #include "tests/view_bufferize_regression.hpp"
 
 int main(int argc, char *argv[])
@@ -67,6 +68,7 @@ int main(int argc, char *argv[])
         runRegionMergeTests();
         runShapePropagationTests();
         runInputHashconsTests();
+        testStorageOutputMatching();
         runViewBufferizeRegressionTests();
         runConstantViewRegressionTests();
     }
