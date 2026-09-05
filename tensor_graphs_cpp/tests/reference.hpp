@@ -63,7 +63,7 @@ void runRefTests(std::string testDir = "tensor_graphs_cpp/tests/data")
         br.read(rec);
         OpType opType = static_cast<OpType>(rec.kernelId.value);
 
-        SafetensorsLoader loader(dataPath);
+        SafetensorsStore loader(dataPath);
         std::vector<std::vector<uint8_t>> inputData;
         std::vector<TensorView> inViews;
         std::vector<TensorNode> dummyInputNodes;

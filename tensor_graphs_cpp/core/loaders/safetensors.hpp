@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/loaders/base_loader.hpp"
+#include "core/loaders/store.hpp"
 #include "core/types.hpp"
 
 namespace fs = std::filesystem;
@@ -25,10 +25,10 @@ struct SafetensorsTensorMetadata
     }
 };
 
-class SafetensorsLoader : public ModelLoader
+class SafetensorsStore : public ITensorStore
 {
   public:
-    SafetensorsLoader(const std::string &path)
+    SafetensorsStore(const std::string &path)
     {
         std::vector<std::string> filepaths;
 
@@ -43,7 +43,7 @@ class SafetensorsLoader : public ModelLoader
             }
             if (filepaths.empty())
             {
-                Error::throw_err("[SafetensorsLoader] No .safetensors files found in directory: " + path);
+                Error::throw_err("[SafetensorsStore] No .safetensors files found in directory: " + path);
             }
             std::sort(filepaths.begin(), filepaths.end());
         }
@@ -51,7 +51,7 @@ class SafetensorsLoader : public ModelLoader
         {
             if (!fs::exists(path))
             {
-                Error::throw_err("[SafetensorsLoader] Safetensors file not found: " + path);
+                Error::throw_err("[SafetensorsStore] Safetensors file not found: " + path);
             }
             filepaths.push_back(path);
         }
@@ -67,7 +67,7 @@ class SafetensorsLoader : public ModelLoader
         auto it = metadata.find(name);
         if (it == metadata.end())
         {
-            Error::throw_err("[SafetensorsLoader.getMetadata] Tensor not found: " + name);
+            Error::throw_err("[SafetensorsStore.getMetadata] Tensor not found: " + name);
         }
         const auto &meta = it->second;
 
@@ -78,9 +78,21 @@ class SafetensorsLoader : public ModelLoader
         return TensorMetadata{meta.dtype, meta.shape, absoluteStart, absoluteEnd, files[meta.fileIndex].path};
     }
 
-    bool hasTensor(const std::string &name) const override
+    bool has(const std::string &name) const override
     {
         return metadata.find(name) != metadata.end();
+    }
+
+    std::vector<uint8_t> read(const std::string &name) const override
+    {
+        auto it = metadata.find(name);
+        if (it == metadata.end())
+        {
+            Error::throw_err("[SafetensorsStore.read] Tensor not found: " + name);
+        }
+        std::vector<uint8_t> result(it->second.sizeBytes());
+        loadTensor(name, result.data(), result.size());
+        return result;
     }
 
     void loadTensor(const std::string &name, void *dest, uint64_t destSize) const override
@@ -88,12 +100,12 @@ class SafetensorsLoader : public ModelLoader
         auto it = metadata.find(name);
         if (it == metadata.end())
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Tensor not found: " + name);
+            Error::throw_err("[SafetensorsStore.loadTensor] Tensor not found: " + name);
         }
         const auto &meta = it->second;
         if (meta.sizeBytes() > destSize)
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too "
+            Error::throw_err("[SafetensorsStore.loadTensor] Destination buffer too "
                              "small for tensor '" +
                              name + "' (dst=" + std::to_string(destSize) +
                              "), (tensor_size=" + std::to_string(meta.sizeBytes()) + ")");
@@ -103,7 +115,7 @@ class SafetensorsLoader : public ModelLoader
         std::ifstream file(fname, std::ios::binary);
         if (!file.is_open())
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Could not open file: " + fname);
+            Error::throw_err("[SafetensorsStore.loadTensor] Could not open file: " + fname);
         }
 
         file.seekg(files[meta.fileIndex].dataStartOffset + meta.dataOffsetStart, std::ios::beg);
@@ -125,19 +137,19 @@ class SafetensorsLoader : public ModelLoader
         std::ifstream file(filepath, std::ios::binary);
         if (!file.is_open())
         {
-            Error::throw_err("[SafetensorsLoader] Could not open: " + filepath);
+            Error::throw_err("[SafetensorsStore] Could not open: " + filepath);
         }
 
         uint64_t headerSize = 0;
         if (!file.read(reinterpret_cast<char *>(&headerSize), sizeof(headerSize)))
         {
-            Error::throw_err("[SafetensorsLoader] Could not read header size from: " + filepath);
+            Error::throw_err("[SafetensorsStore] Could not read header size from: " + filepath);
         }
 
         std::string jsonHeader(headerSize, '\0');
         if (!file.read(&jsonHeader[0], headerSize))
         {
-            Error::throw_err("[SafetensorsLoader] Could not read JSON header from: " + filepath);
+            Error::throw_err("[SafetensorsStore] Could not read JSON header from: " + filepath);
         }
 
         FileInfo info;
@@ -170,7 +182,7 @@ class SafetensorsLoader : public ModelLoader
 
             if (metadata.count(key))
             {
-                Error::throw_err("[SafetensorsLoader] Duplicate tensor '" + key + "' found in shards.");
+                Error::throw_err("[SafetensorsStore] Duplicate tensor '" + key + "' found in shards.");
             }
             metadata[key] = std::move(meta);
         }

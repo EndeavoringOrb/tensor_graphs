@@ -51,7 +51,7 @@
 #include "core/kernels.hpp"
 #include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/repo.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/session.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
@@ -193,7 +193,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem, int width, in
     cs.root_id = model.build_graph(cs.patch_input_id);
 
     std::string gHash = computeGraphHash(*cs.graph, {cs.root_id});
-    Repo repo("benchmarks/repo_jina-embeddings-v5-omni-nano-retrieval", gHash, true);
+    TGStore repo("benchmarks/repo_jina-embeddings-v5-omni-nano-retrieval", gHash, true);
 
     std::string cache_file =
         "dirty_region_caches/jina-v5-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";

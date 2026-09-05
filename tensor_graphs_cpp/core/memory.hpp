@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "core/hardware.hpp"
-#include "core/loaders/loader.hpp"
+#include "core/loaders/resolver.hpp"
 #include "core/types.hpp"
 
 #ifdef TG_USE_CUDA
@@ -68,12 +68,12 @@ struct StorageBuffer : public DeviceBuffer
             Error::throw_err("StorageBuffer::setupInput: logicalId is uninitialized (UINT32_MAX). "
                              "Check that storage EClass was properly mapped to its source weight LogicalId.");
         }
-        TensorMetadata meta = FileRegistry::get().getNodeMeta(logicalId);
+        TensorMetadata meta = TensorResolver::get().getNodeMeta(logicalId);
         TensorView v = view;
         v.offset = meta.dataOffsetStart + view.offset;
         ctx.inViews.push_back(v);
         ctx.inputs.push_back(nullptr);
-        ctx.fd.push_back(FileRegistry::get().getNodeFd(logicalId));
+        ctx.fd.push_back(TensorResolver::get().getNodeFd(logicalId));
         ctx.cl_inputs.push_back(nullptr);
     }
     void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override

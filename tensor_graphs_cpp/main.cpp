@@ -30,7 +30,7 @@
 #include "core/kernels.hpp"
 #include "core/logging.hpp"
 #include "core/memory.hpp"
-#include "core/repo.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/session.hpp"
 #include "core/settings.hpp"
 #include "core/types.hpp"
@@ -95,7 +95,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
     LogicalId inputIdsId = roots.inputs[0];
 
     std::string gHash = computeGraphHash(g, roots.roots);
-    Repo repo("benchmarks/repo_" + model_name, gHash, true);
+    TGStore repo("benchmarks/repo_" + model_name, gHash, true);
 
     Settings sessionSettings = settings;
     sessionSettings.cache_file = cache_file;

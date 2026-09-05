@@ -14,10 +14,11 @@
 #include "core/cost_model.hpp"
 #include "core/executor.hpp"
 #include "core/graph.hpp"
+#include "core/loaders/resolver.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/rule_registry.hpp"
-#include "core/repo.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
@@ -75,8 +76,8 @@ struct Session
     std::string recordsPath = "benchmarks/records.bin";
 
     uint32_t fullBucketIdx;
-    Repo *repo;
-    std::unique_ptr<Repo> owned_repo;
+    TGStore *repo;
+    std::unique_ptr<TGStore> owned_repo;
     bool disableCaching = false;
     float minCompileSeconds = 0.0f;
     std::shared_ptr<SearchDelegate> delegate = nullptr;
@@ -84,7 +85,7 @@ struct Session
 
     Settings settings;
 
-    void initRepo(Repo *_repo)
+    void initRepo(TGStore *_repo)
     {
         if (_repo)
         {
@@ -95,8 +96,13 @@ struct Session
         {
             std::string g_hash = computeGraphHash(graph, {rootId});
             std::string repo_path = settings.repo_path.empty() ? ("benchmarks/repo_" + g_hash) : settings.repo_path;
-            owned_repo = std::make_unique<Repo>(repo_path, g_hash, false);
+            owned_repo = std::make_unique<TGStore>(repo_path, g_hash, false);
             repo = owned_repo.get();
+        }
+        if (repo)
+        {
+            TensorResolver::get().registerStore(repo->getBasePath(),
+                                                std::shared_ptr<ITensorStore>(repo, [](ITensorStore *) {}));
         }
     }
 
@@ -225,7 +231,7 @@ struct Session
             manualBuckets[i].weight = weights[i];
     }
 
-    Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, Repo *_repo = nullptr,
+    Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, TGStore *_repo = nullptr,
             std::shared_ptr<SearchDelegate> _delegate = nullptr)
         : graph(g), memManager(mem), rootId(root), settings(_settings), isPlanned(false), isCompiled(false),
           cachePath(_settings.cache_file), nBucketSizes(0), repo(_repo), disableCaching(_settings.disable_caching),
@@ -245,7 +251,7 @@ struct Session
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
-            Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
+            TGStore *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
             std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true,
             const std::string &_recordsPath = "benchmarks/records.bin")
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),

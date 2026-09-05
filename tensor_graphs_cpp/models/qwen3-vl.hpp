@@ -46,7 +46,7 @@ class Qwen3VLModel
         for (const auto &prefix : candidate_prefixes)
         {
             std::string full_name = prefix + name;
-            if (FileRegistry::get().hasTensor(w_path, full_name))
+            if (TensorResolver::get().hasTensor(w_path, full_name))
             {
                 return full_name;
             }
@@ -57,12 +57,12 @@ class Qwen3VLModel
     LogicalId weight(const std::string &name)
     {
         std::string resolved = resolve_weight_name(name);
-        TensorMetadata meta = FileRegistry::get().getMetadata(w_path, resolved);
+        TensorMetadata meta = TensorResolver::get().getMetadata(w_path, resolved);
         LogicalId raw_weight = g.weight(w_path, resolved);
         LogicalId weight_f32 = g.cast(raw_weight, DType::FLOAT32);
 
         std::string scale_name = resolved + "_scale";
-        if (FileRegistry::get().hasTensor(w_path, scale_name))
+        if (TensorResolver::get().hasTensor(w_path, scale_name))
         {
             LogicalId raw_scale = g.weight(w_path, scale_name);
             LogicalId scale_f32 = g.cast(raw_scale, DType::FLOAT32);
@@ -82,7 +82,7 @@ class Qwen3VLModel
         if (!b_name.empty())
         {
             std::string resolved_b = resolve_weight_name(b_name);
-            if (FileRegistry::get().hasTensor(w_path, resolved_b))
+            if (TensorResolver::get().hasTensor(w_path, resolved_b))
             {
                 LogicalId b = weight(b_name);
                 LogicalId b_exp = g.repeat(g.reshape(b, {1, 1, (int32_t)out_d}), S, 1);

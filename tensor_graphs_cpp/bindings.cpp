@@ -354,7 +354,7 @@ class LLMSession
 {
     std::unique_ptr<MemoryManager> mem;
     std::unique_ptr<Graph> g;
-    std::unique_ptr<Repo> repo;
+    std::unique_ptr<TGStore> repo;
     std::unique_ptr<Session> session;
     LogicalId inputIdsId;
     LogicalId logitsId;
@@ -410,7 +410,7 @@ class LLMSession
         }
 
         std::string gHash = computeGraphHash(*g, {logitsId});
-        repo = std::make_unique<Repo>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
+        repo = std::make_unique<TGStore>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
                                       gHash, true);
 
         std::string actual_cache = cache_file;
@@ -534,7 +534,7 @@ class Krea2Session
 {
     std::unique_ptr<MemoryManager> mem;
     std::unique_ptr<Graph> g;
-    std::unique_ptr<Repo> repo;
+    std::unique_ptr<TGStore> repo;
     std::unique_ptr<Session> session;
     LogicalId inputIdsId;
     LogicalId latentInputId;
@@ -613,7 +613,7 @@ class Krea2Session
         latentInputId = roots.inputs[1];
 
         std::string gHash = computeGraphHash(*g, {imageOutputId});
-        repo = std::make_unique<Repo>("benchmarks/repo_krea-2-turbo-pipeline", gHash, true);
+        repo = std::make_unique<TGStore>("benchmarks/repo_krea-2-turbo-pipeline", gHash, true);
 
         std::string actual_cache = cache_file;
         if (actual_cache.empty())

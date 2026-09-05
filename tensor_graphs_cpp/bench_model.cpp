@@ -28,7 +28,7 @@
 #include "core/kernels.hpp"
 #include "core/logging.hpp"
 #include "core/memory.hpp"
-#include "core/repo.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/session.hpp"
 #include "core/settings.hpp"
 #include "core/types.hpp"
@@ -383,7 +383,7 @@ int main(int argc, char *argv[])
     LogicalId input_ids_id = roots.inputs[0];
 
     std::string gHash = computeGraphHash(g, roots.roots);
-    Repo repo("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len), gHash, true);
+    TGStore repo("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len), gHash, true);
 
     std::string cache_file = settings.cache_file;
     if (cache_file.empty())

@@ -14,10 +14,10 @@
 
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
-#include "core/loaders/loader.hpp"
+#include "core/loaders/resolver.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/repo.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
@@ -178,17 +178,7 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
             else if (graph.input_data_types.count(node_id) &&
                      graph.input_data_types.at(node_id) == InputDataType::STORAGE)
             {
-                TensorMetadata meta = FileRegistry::get().getNodeMeta(node_id);
-                uint64_t size_bytes = meta.dataOffsetEnd - meta.dataOffsetStart;
-                raw_bytes.resize(size_bytes);
-
-                std::ifstream file(meta.filePath, std::ios::binary);
-                if (!file.is_open())
-                {
-                    Error::throw_err("[executeReferenceGraph] Failed to open model file: " + meta.filePath);
-                }
-                file.seekg(meta.dataOffsetStart, std::ios::beg);
-                file.read(reinterpret_cast<char *>(raw_bytes.data()), size_bytes);
+                raw_bytes = TensorResolver::get().readNode(node_id);
             }
             else if (store.has(node_id))
             {

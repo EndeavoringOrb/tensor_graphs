@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/loaders/loader.hpp"
+#include "core/loaders/resolver.hpp"
 #include "core/memory.hpp"
 #include "core/types.hpp"
 
@@ -128,19 +128,19 @@ struct Graph
 
     LogicalId weight(const std::string &path, const std::string &name, SourceLocation loc = SourceLocation::current())
     {
-        if (!FileRegistry::get().hasTensor(path, name))
+        if (!TensorResolver::get().hasTensor(path, name))
         {
             Error::throw_err("Tensor '" + name + "' not found in: " + path);
         }
 
-        const auto &meta = FileRegistry::get().getMetadata(path, name);
+        const auto &meta = TensorResolver::get().getMetadata(path, name);
         TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, "", loc);
 
         SHA256 sha;
         sha.update(path + "::" + name + "::" + toString(node.id));
         node.contentHash = sha.digest();
 
-        FileRegistry::get().registerNode(node.id, path, name);
+        TensorResolver::get().registerNode(node.id, path, name);
         input_data_types[node.id] = InputDataType::STORAGE;
         TensorNode &copyNode = allocateNode(OpType::COPY_TO, "", meta.dtype, {node.id}, {}, {}, "", loc);
 

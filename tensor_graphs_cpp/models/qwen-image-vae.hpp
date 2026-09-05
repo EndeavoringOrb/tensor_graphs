@@ -58,7 +58,7 @@ class Krea2TurboVAEModel
         for (const auto &prefix : candidate_prefixes)
         {
             std::string full_name = prefix + name;
-            if (FileRegistry::get().hasTensor(w_path, full_name))
+            if (TensorResolver::get().hasTensor(w_path, full_name))
             {
                 return full_name;
             }
@@ -77,7 +77,7 @@ class Krea2TurboVAEModel
     LogicalId load_conv_weight(const std::string &name, uint32_t out_c, uint32_t in_c, uint32_t k)
     {
         std::string resolved = resolve_weight_name(name);
-        TensorMetadata meta = FileRegistry::get().getMetadata(w_path, resolved);
+        TensorMetadata meta = TensorResolver::get().getMetadata(w_path, resolved);
         LogicalId raw = g.weight(w_path, resolved);
         LogicalId raw_f32 = g.cast(raw, DType::FLOAT32);
 
@@ -124,7 +124,7 @@ class Krea2TurboVAEModel
         if (!b_name.empty())
         {
             std::string resolved_b = resolve_weight_name(b_name);
-            if (FileRegistry::get().hasTensor(w_path, resolved_b))
+            if (TensorResolver::get().hasTensor(w_path, resolved_b))
             {
                 LogicalId b = weight(b_name);
                 LogicalId b_4d = g.reshape(b, {1, (int32_t)out_c, 1, 1});
@@ -148,7 +148,7 @@ class Krea2TurboVAEModel
         if (!gamma_name.empty())
         {
             std::string resolved_gamma = resolve_weight_name(gamma_name);
-            if (FileRegistry::get().hasTensor(w_path, resolved_gamma))
+            if (TensorResolver::get().hasTensor(w_path, resolved_gamma))
             {
                 LogicalId gamma = weight(gamma_name);
                 LogicalId gamma_4d = g.reshape(gamma, {1, (int32_t)C, 1, 1});

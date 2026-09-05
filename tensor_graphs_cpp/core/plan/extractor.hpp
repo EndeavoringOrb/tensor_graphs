@@ -2490,7 +2490,6 @@ template <typename... Rules> struct Extractor
 
     bool getNextSelection()
     {
-        LOG(DEBUG) << "getNextSelection";
         if (is_done())
             return false;
 

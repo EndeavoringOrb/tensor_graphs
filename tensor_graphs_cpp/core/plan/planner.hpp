@@ -823,7 +823,7 @@ struct Planner
 
     void saturate(EGraph &egraph, const std::unordered_set<EClassId> &protectedEClasses,
                   std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool injected,
-                  bool allowPushDownOnProtected = false, Repo *repo = nullptr)
+                  bool allowPushDownOnProtected = false, TGStore *repo = nullptr)
     {
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo, &costModel};
         std::vector<std::unique_ptr<Rule>> rules;
@@ -2008,7 +2008,7 @@ struct Planner
     BaseEGraphState baseState;
     bool baseStateInitialized = false;
 
-    void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, Repo *repo = nullptr)
+    void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, TGStore *repo = nullptr)
     {
         if (KernelRegistry::get().nKernels() == 0)
         {
@@ -2606,7 +2606,7 @@ struct Planner
 
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
                        const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
-                       bool strictCache = false, Repo *repo = nullptr,
+                       bool strictCache = false, TGStore *repo = nullptr,
                        const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {},
                        float minCompileSeconds = 0.0f, std::shared_ptr<SearchDelegate> delegate = nullptr)
     {

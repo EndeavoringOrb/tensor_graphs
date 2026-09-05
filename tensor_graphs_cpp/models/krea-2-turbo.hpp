@@ -100,7 +100,7 @@ class Krea2TurboModel
         LogicalId out =
             g.reshape(out_flat, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(out_d)});
 
-        if (!b_name.empty() && FileRegistry::get().hasTensor(w_path, b_name))
+        if (!b_name.empty() && TensorResolver::get().hasTensor(w_path, b_name))
         {
             LogicalId b = weight(b_name, loc);
             LogicalId b_3d = g.reshape(b, {1, 1, static_cast<int32_t>(out_d)});
@@ -126,7 +126,7 @@ class Krea2TurboModel
         LogicalId inv_std = g.repeat(g.div(g.fill(1.0f, {B, S, 1}), std), D, 2);
         LogicalId x_norm = g.mul(x, inv_std);
 
-        if (!w_name.empty() && FileRegistry::get().hasTensor(w_path, w_name))
+        if (!w_name.empty() && TensorResolver::get().hasTensor(w_path, w_name))
         {
             LogicalId w = weight(w_name);
             LogicalId w_3d = g.reshape(w, {1, 1, static_cast<int32_t>(D)});
@@ -154,7 +154,7 @@ class Krea2TurboModel
         LogicalId inv_std = g.repeat(g.div(g.fill(1.0f, {B, num_heads, S, 1}), std), head_dim, 3);
         LogicalId x_norm = g.mul(x, inv_std);
 
-        if (!w_name.empty() && FileRegistry::get().hasTensor(w_path, w_name))
+        if (!w_name.empty() && TensorResolver::get().hasTensor(w_path, w_name))
         {
             LogicalId w = weight(w_name);
             LogicalId w_4d = g.reshape(w, {1, 1, 1, static_cast<int32_t>(head_dim)});

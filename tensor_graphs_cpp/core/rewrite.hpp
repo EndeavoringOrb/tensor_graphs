@@ -21,7 +21,7 @@
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/ops/ops.hpp"
-#include "core/repo.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/shape_propagator.hpp"
 
 inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpace dst, const TensorNode &node,
@@ -101,7 +101,7 @@ struct RuleCtx
     EGraph &egraph;
     const std::unordered_set<EClassId> &protectedEClasses;
     std::unordered_map<EClassId, LogicalId> &eclassToLogical;
-    Repo *repo;
+    TGStore *repo;
     CostModel *costModel = nullptr;
 };
 
