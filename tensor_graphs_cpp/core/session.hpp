@@ -555,185 +555,160 @@ struct Session
 
         Planner planner(costModel, settings);
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-        Graph tempGraph = graph;
-        planner.initBaseEGraph(rootId, tempGraph, topo, repo);
+        Graph temp_graph = graph;
+        planner.initBaseEGraph(rootId, temp_graph, topo, repo);
 
-        const std::vector<float> bucketWeights = normalizedBucketWeights(manualBuckets);
-        std::unordered_map<LogicalId, MemSpace> bestCachedNodes;
+        const std::vector<float> bucket_weights = normalizedBucketWeights(manualBuckets);
+        std::unordered_map<LogicalId, MemSpace> best_cached_nodes;
 
+        std::vector<LogicalId> candidates;
         if (!disableCaching)
         {
             // A node is a cache candidate when it can remain clean in a bucket,
             // plus runtime inputs.  The latter are deliberately included even
             // when every bucket dirties a slice: their cached backing buffer is
             // the starting point for partial recomputation of decode/KV state.
-            std::unordered_map<LogicalId, bool> cleanInAnyBucket;
+            std::unordered_map<LogicalId, bool> clean_in_any_bucket;
             for (const Bucket &bucket : manualBuckets)
             {
-                std::unordered_map<LogicalId, bool> logicalDirty;
-                for (LogicalId nodeId : topo)
+                std::unordered_map<LogicalId, bool> logical_dirty;
+                for (LogicalId node_id : topo)
                 {
-                    bool isDirty = bucket.inputDirtyRegions.count(nodeId) &&
-                                   !bucket.inputDirtyRegions.at(nodeId).empty();
-                    if (!isDirty)
+                    bool is_dirty = bucket.inputDirtyRegions.count(node_id) &&
+                                   !bucket.inputDirtyRegions.at(node_id).empty();
+                    if (!is_dirty)
                     {
-                        for (LogicalId parentId : graph.getNode(nodeId).child_ids)
+                        for (LogicalId parent_id : graph.getNode(node_id).child_ids)
                         {
-                            if (logicalDirty[parentId])
+                            if (logical_dirty[parent_id])
                             {
-                                isDirty = true;
+                                is_dirty = true;
                                 break;
                             }
                         }
                     }
-                    logicalDirty[nodeId] = isDirty;
-                    cleanInAnyBucket[nodeId] = cleanInAnyBucket[nodeId] || !isDirty;
+                    logical_dirty[node_id] = is_dirty;
+                    clean_in_any_bucket[node_id] = clean_in_any_bucket[node_id] || !is_dirty;
                 }
             }
 
-            std::vector<LogicalId> candidates;
-            bool hasPartialRuntimeInputBucket = false;
+            bool has_partial_runtime_input_bucket = false;
             for (const Bucket &bucket : manualBuckets)
             {
-                for (const auto &dirtyInput : bucket.inputDirtyRegions)
+                for (const auto &dirty_input : bucket.inputDirtyRegions)
                 {
-                    if (!graph.hasNode(dirtyInput.first) || graph.getNode(dirtyInput.first).opType != OpType::INPUT)
+                    if (!graph.hasNode(dirty_input.first) || graph.getNode(dirty_input.first).opType != OpType::INPUT)
                         continue;
-                    const auto &shape = graph.getNode(dirtyInput.first).getShape();
-                    for (const Region &region : dirtyInput.second)
+                    const auto &shape = graph.getNode(dirty_input.first).getShape();
+                    for (const Region &region : dirty_input.second)
                     {
-                        bool isFull = region.region.size() == shape.size();
-                        for (size_t dim = 0; isFull && dim < shape.size(); ++dim)
-                            isFull = region.region[dim].start == 0 && region.region[dim].stop == shape[dim];
-                        hasPartialRuntimeInputBucket = hasPartialRuntimeInputBucket || !isFull;
+                        bool is_full = region.region.size() == shape.size();
+                        for (size_t dim = 0; is_full && dim < shape.size(); ++dim)
+                            is_full = region.region[dim].start == 0 && region.region[dim].stop == shape[dim];
+                        has_partial_runtime_input_bucket = has_partial_runtime_input_bucket || !is_full;
                     }
                 }
             }
-            for (LogicalId nodeId : topo)
+            for (LogicalId node_id : topo)
             {
-                const TensorNode &node = graph.getNode(nodeId);
-                const bool runtimeInput = node.opType == OpType::INPUT &&
-                                          graph.getInputDataType(nodeId) == InputDataType::RUNTIME;
+                const TensorNode &node = graph.getNode(node_id);
+                const bool runtime_input = node.opType == OpType::INPUT &&
+                                           graph.getInputDataType(node_id) == InputDataType::RUNTIME;
                 // Decode searches should retain only their runtime input state.
                 // Allowing every clean intermediate into the first heuristic
                 // candidate turns one decode choice into a huge all-buffer plan.
-                if (node.getSizeBytes() > 0 && (runtimeInput || (!hasPartialRuntimeInputBucket && cleanInAnyBucket[nodeId])))
-                    candidates.push_back(nodeId);
+                if (node.getSizeBytes() > 0 && (runtime_input || (!has_partial_runtime_input_bucket && clean_in_any_bucket[node_id])))
+                    candidates.push_back(node_id);
             }
             std::stable_sort(candidates.begin(), candidates.end(), [&](LogicalId a, LogicalId b) {
-                const bool aRuntime = graph.getNode(a).opType == OpType::INPUT &&
-                                      graph.getInputDataType(a) == InputDataType::RUNTIME;
-                const bool bRuntime = graph.getNode(b).opType == OpType::INPUT &&
-                                      graph.getInputDataType(b) == InputDataType::RUNTIME;
-                return aRuntime > bRuntime;
+                const bool a_runtime = graph.getNode(a).opType == OpType::INPUT &&
+                                       graph.getInputDataType(a) == InputDataType::RUNTIME;
+                const bool b_runtime = graph.getNode(b).opType == OpType::INPUT &&
+                                       graph.getInputDataType(b) == InputDataType::RUNTIME;
+                return a_runtime > b_runtime;
             });
-
-            std::vector<MemSpace> availMemSpaces;
-            for (const auto &entry : settings.mem_caps)
-            {
-                if (entry.first.type != HandleType::STORAGE)
-                    availMemSpaces.push_back(entry.first);
-            }
-            std::sort(availMemSpaces.begin(), availMemSpaces.end(), [](const MemSpace &a, const MemSpace &b) {
-                return a.type != b.type ? a.type < b.type : a.idx < b.idx;
-            });
-
-            float bestCost = TGConstants::INF;
-            TimeoutChecker timeoutChecker(minCompileSeconds);
-            auto cache_iter = makeConfiguredCacheIterator(graph, candidates, availMemSpaces, search_delegate, settings,
-                                                          &bestCost, &timeoutChecker);
-            std::unordered_map<LogicalId, MemSpace> currentCache;
-            const auto searchStart = std::chrono::high_resolution_clock::now();
-
-            // Cache selection and bucket planning are one search: each selection
-            // is evaluated by planning all buckets in parallel, with the same repo
-            // and rewrite space used for the final compiled graphs.
-            for (uint32_t evalCount = 0; cache_iter.getNextCacheSelection(currentCache); ++evalCount)
-            {
-                std::unordered_map<LogicalId, ParallelBuffer> preallocated;
-                planner.preallocateLogicalBuffers(graph, currentCache, preallocated);
-                std::vector<float> bucketCosts(manualBuckets.size(), TGConstants::INF);
-                std::vector<CompiledGraph> candidateGraphs(manualBuckets.size());
-                std::atomic<bool> failed{false};
-
-                ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucketIdx) {
-                    try
-                    {
-                        Planner threadPlanner(costModel, settings);
-                        threadPlanner.baseState = planner.baseState;
-                        threadPlanner.baseStateInitialized = true;
-                        CompiledGraph candidate = threadPlanner.plan(rootId, graph, manualBuckets[bucketIdx], currentCache,
-                                                                     doSaturate, true, repo, preallocated, minCompileSeconds, search_delegate);
-                        bucketCosts[bucketIdx] = candidate.cost();
-                        candidate.bucket = manualBuckets[bucketIdx];
-                        candidateGraphs[bucketIdx] = std::move(candidate);
-                    }
-                    catch (...)
-                    {
-                        failed.store(true, std::memory_order_relaxed);
-                    }
-                });
-
-                if (!failed.load(std::memory_order_relaxed))
-                {
-                    double weightedCost = 0.0;
-                    for (size_t bucketIdx = 0; bucketIdx < bucketCosts.size(); ++bucketIdx)
-                    {
-                        weightedCost += static_cast<double>(bucketWeights[bucketIdx]) * bucketCosts[bucketIdx];
-                        if (search_delegate)
-                            search_delegate->on_bucket_leaf_evaluated(static_cast<uint32_t>(bucketIdx), bucketCosts[bucketIdx]);
-                    }
-                    const float cost = static_cast<float>(weightedCost);
-                    if (search_delegate)
-                    {
-                        search_delegate->set_best_cost_ptr(&bestCost);
-                        search_delegate->on_leaf_evaluated(cost);
-                    }
-                    if (cost < bestCost)
-                    {
-                        bestCost = cost;
-                        bestCachedNodes = currentCache;
-                        cachedGraphs = std::move(candidateGraphs);
-                    }
-                }
-
-                if (bestCost < TGConstants::INF && minCompileSeconds == 0.0f)
-                    break;
-                if (minCompileSeconds > 0.0f &&
-                    std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - searchStart).count() >=
-                        minCompileSeconds)
-                    break;
-            }
-            if (search_delegate)
-                search_delegate->set_best_cost_ptr(nullptr);
         }
 
-        // Cache search already planned every bucket for the winning selection.
-        // Only the no-cache path still needs a standalone bucket-planning pass.
-        if (cachedGraphs.empty())
+        std::vector<MemSpace> avail_mem_spaces;
+        for (const auto &entry : settings.mem_caps)
         {
-            std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
-            planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
-
-            std::cout << "[Session.ensureCacheCoverage] Planning buckets with " << bestCachedNodes.size()
-                      << " cached nodes across physical cores..." << std::endl;
-
-            cachedGraphs.resize(manualBuckets.size());
-
-            ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t i) {
-                Planner threadPlanner(costModel, settings);
-                threadPlanner.baseState = planner.baseState;
-                threadPlanner.baseStateInitialized = true;
-
-                const Bucket &bucket = manualBuckets[i];
-                CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, bestCachedNodes, doSaturate, true, repo,
-                                                        preallocatedBuffers, minCompileSeconds, search_delegate);
-                plan.bucket = bucket;
-                cachedGraphs[i] = std::move(plan);
-            });
+            if (entry.first.type != HandleType::STORAGE)
+                avail_mem_spaces.push_back(entry.first);
         }
+        std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b) {
+            return a.type != b.type ? a.type < b.type : a.idx < b.idx;
+        });
 
-        selectedCachedNodes = std::move(bestCachedNodes);
+        float best_cost = TGConstants::INF;
+        TimeoutChecker timeout_checker(minCompileSeconds);
+        auto cache_iter = makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, search_delegate, settings,
+                                                      &best_cost, &timeout_checker);
+        std::unordered_map<LogicalId, MemSpace> current_cache;
+        const auto search_start = std::chrono::high_resolution_clock::now();
+
+        // Cache selection and bucket planning are one search: each selection
+        // is evaluated by planning all buckets in parallel, with the same repo
+        // and rewrite space used for the final compiled graphs.
+        for (uint32_t eval_count = 0; cache_iter.getNextCacheSelection(current_cache); ++eval_count)
+        {
+            std::unordered_map<LogicalId, ParallelBuffer> preallocated;
+            planner.preallocateLogicalBuffers(graph, current_cache, preallocated);
+            std::vector<float> bucket_costs(manualBuckets.size(), TGConstants::INF);
+            std::vector<CompiledGraph> candidate_graphs(manualBuckets.size());
+            std::atomic<bool> failed{false};
+
+            ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
+                try
+                {
+                    Planner thread_planner(costModel, settings);
+                    thread_planner.baseState = planner.baseState;
+                    thread_planner.baseStateInitialized = true;
+                    CompiledGraph candidate = thread_planner.plan(rootId, graph, manualBuckets[bucket_idx], current_cache,
+                                                                 doSaturate, true, repo, preallocated, minCompileSeconds, search_delegate);
+                    bucket_costs[bucket_idx] = candidate.cost();
+                    candidate.bucket = manualBuckets[bucket_idx];
+                    candidate_graphs[bucket_idx] = std::move(candidate);
+                }
+                catch (...)
+                {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            });
+
+            if (!failed.load(std::memory_order_relaxed))
+            {
+                double weighted_cost = 0.0;
+                for (size_t bucket_idx = 0; bucket_idx < bucket_costs.size(); ++bucket_idx)
+                {
+                    weighted_cost += static_cast<double>(bucket_weights[bucket_idx]) * bucket_costs[bucket_idx];
+                    if (search_delegate)
+                        search_delegate->on_bucket_leaf_evaluated(static_cast<uint32_t>(bucket_idx), bucket_costs[bucket_idx]);
+                }
+                const float cost = static_cast<float>(weighted_cost);
+                if (search_delegate)
+                {
+                    search_delegate->set_best_cost_ptr(&best_cost);
+                    search_delegate->on_leaf_evaluated(cost);
+                }
+                if (cost < best_cost)
+                {
+                    best_cost = cost;
+                    best_cached_nodes = current_cache;
+                    cachedGraphs = std::move(candidate_graphs);
+                }
+            }
+
+            if (best_cost < TGConstants::INF && minCompileSeconds == 0.0f)
+                break;
+            if (minCompileSeconds > 0.0f &&
+                std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - search_start).count() >=
+                    minCompileSeconds)
+                break;
+        }
+        if (search_delegate)
+            search_delegate->set_best_cost_ptr(nullptr);
+
+        selectedCachedNodes = std::move(best_cached_nodes);
         cachedBucketWeights = normalizedBucketWeights(manualBuckets);
 
         if (cachedGraphs.size() != manualBuckets.size())
