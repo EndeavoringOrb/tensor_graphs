@@ -34,7 +34,6 @@ ALL_TARGETS = [
     "main.cpp",
     "test.cpp",
     "test_inst.cpp",
-    "write_ref_tensors.cpp",
     "bindings.cpp",
 ]
 

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/common/bench_utils.hpp"
+#include "core/common/execute_ref_graph.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/memory.hpp"
@@ -63,173 +64,7 @@ void fillRandom(void *ptr, uint64_t elements, DType dtype)
     }
 }
 
-std::vector<float> executeReferenceGraph(LogicalId rootId, Graph &graph,
-                                         const std::unordered_map<LogicalId, std::vector<uint8_t>> &rawInputData,
-                                         bool forceNonContiguous = false)
-{
-    std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-    ShapePropagator prop;
-    for (LogicalId nodeId : topo)
-    {
-        prop.inferShape(nodeId, graph);
-    }
 
-    std::unordered_map<LogicalId, std::vector<uint8_t>> results;
-    std::unordered_map<LogicalId, TensorView> views;
-    for (LogicalId nodeId : topo)
-    {
-        const TensorNode &node = graph.getNode(nodeId);
-        uint64_t elemSize = getDTypeSize(node.dtype);
-
-        if (node.opType == OpType::INPUT || node.opType == OpType::CACHE)
-        {
-            TensorView view = makeView(node);
-            if (forceNonContiguous)
-            {
-                for (auto &s : view.strides)
-                    s *= 2;
-            }
-            views[nodeId] = view;
-            uint64_t bufElements = getRequiredBufferSize(view);
-            results[nodeId].resize(bufElements * elemSize, 0);
-            std::vector<uint8_t> rawBytes;
-            auto it = rawInputData.find(nodeId);
-            if (it != rawInputData.end())
-            {
-                rawBytes = it->second;
-            }
-            else if (graph.constantStaging.count(nodeId))
-            {
-                rawBytes = *graph.constantStaging.at(nodeId);
-            }
-            else
-            {
-                Error::throw_err("[executeReferenceGraph] input node value not found "
-                                 "in constantStaging or inputData");
-            }
-
-            uint64_t numElements = countElements(view);
-            for (uint64_t i = 0; i < numElements; ++i)
-            {
-                uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
-                std::memcpy(results[nodeId].data() + idx * elemSize, rawBytes.data() + i * elemSize, elemSize);
-            }
-            continue;
-        }
-
-        std::vector<const void *> inputPtrs;
-        std::vector<TensorView> inputViews;
-        std::vector<TensorNode> inputNodes;
-        for (LogicalId pid : node.child_ids)
-        {
-            auto resultIt = results.find(pid);
-            if (resultIt == results.end())
-            {
-                Error::throw_err("Parent node " + std::to_string(pid.value) + " not found in results");
-            }
-            inputPtrs.push_back(resultIt->second.data());
-            inputViews.push_back(views[pid]);
-            TensorNode inNode = graph.getNode(pid);
-            inNode.strides = views[pid].strides;
-            inputNodes.push_back(inNode);
-        }
-
-        TensorView outViewContig = makeView(node);
-        TensorView outViewNonContig = outViewContig;
-        if (forceNonContiguous)
-        {
-            for (auto &s : outViewNonContig.strides)
-                s *= 2;
-        }
-
-        TensorNode outNodeNC = node;
-        bool ignore_in_ms = (node.opType != OpType::COPY_TO);
-        auto refs_nc = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName, inputNodes, outNodeNC, true, MemSpace{1, HandleType::CPP}, {},
-            {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
-        TensorView chosenOutView;
-        KernelId chosenKernelUid = KernelId{0};
-        if (forceNonContiguous && !refs_nc.empty())
-        {
-            chosenOutView = outViewNonContig;
-            chosenKernelUid = refs_nc.front();
-        }
-        else
-        {
-            TensorNode outNodeC = node;
-            auto refs_c = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, inputNodes, outNodeC, true, MemSpace{1, HandleType::CPP}, {},
-                {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
-            if (refs_c.empty())
-            {
-                Error::throw_err("No reference kernel found for node " + std::to_string(nodeId.value) +
-                                 " op=" + toString(node.opType) +
-                                 (node.opType == OpType::FUSED ? " (" + node.opName + ")" : ""));
-            }
-            chosenOutView = outViewContig;
-            chosenKernelUid = refs_c.front();
-        }
-
-        const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
-        if (kernel.is_view)
-        {
-            TensorView dummyOutView(node, 0);
-            kernel.inferView(inputNodes, dummyOutView, graph);
-            LogicalId parentId = node.child_ids[0];
-            results[nodeId] = results[parentId];
-            chosenOutView.strides = dummyOutView.strides;
-            views[nodeId] = chosenOutView;
-            continue;
-        }
-
-        views[nodeId] = chosenOutView;
-        uint64_t bufElements = getRequiredBufferSize(chosenOutView);
-        results[nodeId].resize(bufElements * elemSize, 0);
-        std::vector<void *> outputPtrs = {results[nodeId].data()};
-        std::vector<TensorView> outputViews = {chosenOutView};
-
-        if (kernel.run)
-        {
-            kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews));
-        }
-    }
-
-    uint64_t numRootElems = countElements(graph.getNode(rootId));
-    std::vector<float> finalOut(numRootElems, 0.0f);
-    TensorView rootView = views[rootId];
-    for (uint64_t i = 0; i < numRootElems; ++i)
-    {
-        uint64_t idx = getStridedIndex(i, rootView.getShape(), rootView.strides);
-        if (graph.getNode(rootId).dtype == DType::FLOAT32)
-        {
-            std::memcpy(&finalOut[i], results[rootId].data() + idx * 4, 4);
-        }
-        else if (graph.getNode(rootId).dtype == DType::INT32)
-        {
-            int32_t val;
-            std::memcpy(&val, results[rootId].data() + idx * 4, 4);
-            finalOut[i] = static_cast<float>(val);
-        }
-        else if (graph.getNode(rootId).dtype == DType::BF16)
-        {
-            uint16_t val;
-            std::memcpy(&val, results[rootId].data() + idx * 2, 2);
-            uint32_t f32_bits = static_cast<uint32_t>(val) << 16;
-            std::memcpy(&finalOut[i], &f32_bits, 4);
-        }
-        else if (graph.getNode(rootId).dtype == DType::BOOL)
-        {
-            uint8_t val;
-            std::memcpy(&val, results[rootId].data() + idx, 1);
-            finalOut[i] = static_cast<float>(val);
-        }
-        else
-        {
-            Error::throw_err("[executeReferenceGraph] Unsupported dtype");
-        }
-    }
-    return finalOut;
-}
 
 std::vector<float> executeFusedKernel(const KernelEntry &kernel, const std::vector<std::vector<uint8_t>> &inputData,
                                       const std::vector<LogicalId> &inputIds, const std::vector<uint32_t> &outShape,
@@ -651,7 +486,11 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
         LogicalId rootId = kernel.refFactory(inputIds, graph);
 
         // Reference graph will handle the continuous mapping identically internally
-        std::vector<float> refOutput = executeReferenceGraph(rootId, graph, rawInputData, false);
+        InMemoryTensorStore ref_store;
+        RefGraphOptions ref_options;
+        ref_options.raw_input_data = &rawInputData;
+        ref_options.force_non_contiguous = false;
+        std::vector<float> refOutput = executeReferenceGraph(graph, {rootId}, ref_store, ref_options);
         // Target fused execution resolves dynamically spread arrays
         std::vector<float> tgtOutput =
             executeFusedKernel(kernel, rawData, inputIds, outShape, outStrides, outDType, graph);
@@ -757,7 +596,11 @@ void runNonReferenceKernelTests(const std::string &targetKernel, bool useRecords
                 }
             }
 
-            std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
+            InMemoryTensorStore ref_store;
+            RefGraphOptions ref_options;
+            ref_options.raw_input_data = &refInputs.rawInputData;
+            ref_options.force_non_contiguous = false;
+            std::vector<float> refOutput = executeReferenceGraph(refGraph, {rootId}, ref_store, ref_options);
             uint64_t elements = refOutput.size();
 
             const TensorNode &rootNode = refGraph.getNode(rootId);

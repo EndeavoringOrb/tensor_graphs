@@ -38,7 +38,72 @@ inline void tg_deserialize(BinaryReader &br, RefMetaEntry &val)
     br.read(val.shape);
 }
 
-class Repo
+class ITensorStore
+{
+  public:
+    virtual ~ITensorStore() = default;
+    virtual bool isValid() const = 0;
+    virtual bool has(LogicalId logical_id) const = 0;
+    virtual std::vector<uint8_t> read(LogicalId logical_id) const = 0;
+    virtual void write(LogicalId logical_id, const TensorView &view, const void *data, uint64_t size_bytes) = 0;
+};
+
+class InMemoryTensorStore : public ITensorStore
+{
+    mutable std::mutex store_mtx;
+    std::unordered_map<LogicalId, std::vector<uint8_t>> data_store;
+    std::unordered_map<LogicalId, TensorView> view_store;
+
+  public:
+    InMemoryTensorStore() = default;
+    explicit InMemoryTensorStore(std::unordered_map<LogicalId, std::vector<uint8_t>> initial_data)
+        : data_store(std::move(initial_data))
+    {
+    }
+
+    bool isValid() const override
+    {
+        return true;
+    }
+
+    bool has(LogicalId logical_id) const override
+    {
+        std::lock_guard<std::mutex> lock(store_mtx);
+        return data_store.count(logical_id) > 0;
+    }
+
+    std::vector<uint8_t> read(LogicalId logical_id) const override
+    {
+        std::lock_guard<std::mutex> lock(store_mtx);
+        auto it = data_store.find(logical_id);
+        if (it != data_store.end())
+        {
+            return it->second;
+        }
+        return {};
+    }
+
+    void write(LogicalId logical_id, const TensorView &view, const void *data, uint64_t size_bytes) override
+    {
+        std::lock_guard<std::mutex> lock(store_mtx);
+        const uint8_t *byte_ptr = static_cast<const uint8_t *>(data);
+        data_store[logical_id].assign(byte_ptr, byte_ptr + size_bytes);
+        view_store[logical_id] = view;
+    }
+
+    const TensorView &getView(LogicalId logical_id) const
+    {
+        std::lock_guard<std::mutex> lock(store_mtx);
+        return view_store.at(logical_id);
+    }
+
+    const std::unordered_map<LogicalId, std::vector<uint8_t>> &getData() const
+    {
+        return data_store;
+    }
+};
+
+class Repo : public ITensorStore
 {
     std::string metaPath;
     std::string dataPath;
@@ -84,6 +149,9 @@ class Repo
             std::error_code ec;
             std::filesystem::remove(metaPath, ec);
             std::filesystem::remove(dataPath, ec);
+            std::filesystem::path meta_parent = std::filesystem::path(metaPath).parent_path();
+            if (!meta_parent.empty())
+                std::filesystem::create_directories(meta_parent);
             metaOut.open(metaPath, std::ios::binary | std::ios::trunc);
             BinaryWriter bw(metaOut);
             bw.write(graphHash);
@@ -103,17 +171,52 @@ class Repo
         }
     }
 
-    bool isValid() const
+    bool enableWriting()
+    {
+        std::lock_guard<std::mutex> lock(repoMtx);
+        if (!readOnly && valid)
+            return true;
+        readOnly = false;
+        if (!valid)
+        {
+            std::error_code ec;
+            std::filesystem::remove(metaPath, ec);
+            std::filesystem::remove(dataPath, ec);
+            std::filesystem::path meta_parent = std::filesystem::path(metaPath).parent_path();
+            if (!meta_parent.empty())
+                std::filesystem::create_directories(meta_parent);
+            metaOut.open(metaPath, std::ios::binary | std::ios::trunc);
+            BinaryWriter bw(metaOut);
+            bw.write(graphHash);
+            metaOut.flush();
+            dataOut.open(dataPath, std::ios::binary | std::ios::trunc);
+            valid = true;
+        }
+        else
+        {
+            if (!metaOut.is_open())
+                metaOut.open(metaPath, std::ios::binary | std::ios::app);
+            if (!dataOut.is_open())
+                dataOut.open(dataPath, std::ios::binary | std::ios::app);
+        }
+        if (!dataIn.is_open())
+        {
+            dataIn.open(dataPath, std::ios::binary);
+        }
+        return valid;
+    }
+
+    bool isValid() const override
     {
         return valid;
     }
 
-    bool has(LogicalId logicalId) const
+    bool has(LogicalId logicalId) const override
     {
         return entries.count(logicalId) > 0;
     }
 
-    std::vector<uint8_t> read(LogicalId logicalId) const
+    std::vector<uint8_t> read(LogicalId logicalId) const override
     {
         std::lock_guard<std::mutex> lock(repoMtx);
         if (!has(logicalId))
@@ -125,7 +228,7 @@ class Repo
         return data;
     }
 
-    void write(LogicalId logicalId, const TensorView &view, const void *data, uint64_t sizeBytes)
+    void write(LogicalId logicalId, const TensorView &view, const void *data, uint64_t sizeBytes) override
     {
         std::lock_guard<std::mutex> lock(repoMtx);
         if (readOnly || !valid)

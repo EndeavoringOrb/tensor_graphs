@@ -60,6 +60,7 @@ struct Settings
     std::string records_path = "benchmarks/records.bin";
     std::string rule_benchmarks_path = "benchmarks/rules.bin";
     std::string settings_json_path = "settings.json";
+    std::string repo_path = "";
 
     // Engine, Session, & Planner parameters
     bool disable_caching = false;
@@ -70,6 +71,7 @@ struct Settings
     bool reference_only = false;
     bool only_plan = false;
     bool compile_decode_buckets = false;
+    bool fold_weights = false;
     // Optional raw weights in bucket insertion order. Session normalizes these
     // when scoring shared cache selections.
     std::vector<float> bucket_weights;
@@ -397,6 +399,8 @@ struct Settings
         parser.add_option({"--disable-rule"}, "Comma-separated list of rule names to force disable.", "");
         parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
         parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
+        parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
+        parser.add_option({"--repo-path"}, "Path to the tensor repository (benchmarks/repo_<name>).", "");
         parser.add_option({"--records"}, "Path to kernel benchmark records file.", records_path);
         parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
         parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
@@ -431,6 +435,13 @@ struct Settings
 
         if (parser.get_flag("--only-plan"))
             only_plan = true;
+
+        if (parser.get_flag("--fold-weights"))
+            fold_weights = true;
+
+        std::string cli_repo_path = parser.get_option("--repo-path");
+        if (!cli_repo_path.empty())
+            repo_path = cli_repo_path;
 
         std::string min_comp = parser.get_option("--min-compile-time");
         if (!min_comp.empty())

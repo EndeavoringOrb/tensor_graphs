@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "core/common/bench_utils.hpp"
+#include "core/common/execute_ref_graph.hpp"
 #include "core/common/thread_pool.hpp"
 #include "core/cost_model.hpp"
 #include "core/executor.hpp"
@@ -75,12 +76,61 @@ struct Session
 
     uint32_t fullBucketIdx;
     Repo *repo;
+    std::unique_ptr<Repo> owned_repo;
     bool disableCaching = false;
     float minCompileSeconds = 0.0f;
     std::shared_ptr<SearchDelegate> delegate = nullptr;
     bool logCostCalls = false;
 
     Settings settings;
+
+    void initRepo(Repo *_repo)
+    {
+        if (_repo)
+        {
+            repo = _repo;
+            repo->enableWriting();
+        }
+        else
+        {
+            std::string g_hash = computeGraphHash(graph, {rootId});
+            std::string repo_path = settings.repo_path.empty() ? ("benchmarks/repo_" + g_hash) : settings.repo_path;
+            owned_repo = std::make_unique<Repo>(repo_path, g_hash, false);
+            repo = owned_repo.get();
+        }
+    }
+
+    void foldCleanTensors()
+    {
+        if (!repo)
+            return;
+
+        repo->enableWriting();
+
+        std::vector<LogicalId> dynamic_inputs;
+        for (const auto &pair : graph.nodes)
+        {
+            if (pair.second.opType == OpType::INPUT &&
+                graph.getInputDataType(pair.first) == InputDataType::RUNTIME)
+            {
+                dynamic_inputs.push_back(pair.first);
+            }
+        }
+        for (const auto &bucket : manualBuckets)
+        {
+            for (const auto &pair : bucket.inputDirtyRegions)
+            {
+                dynamic_inputs.push_back(pair.first);
+            }
+        }
+
+        RefGraphOptions ref_options;
+        ref_options.only_clean_nodes = true;
+        ref_options.fold_weights = settings.fold_weights;
+        ref_options.dynamic_inputs = &dynamic_inputs;
+
+        executeReferenceGraph(graph, {rootId}, *repo, ref_options);
+    }
 
     void ensureOutputDirectories() const
     {
@@ -183,6 +233,7 @@ struct Session
           delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()),
           logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
     {
+        initRepo(_repo);
         if (!settings.is_rules_defined("dispatch") || !settings.is_rules_defined("extract") ||
             !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
             !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
@@ -210,6 +261,7 @@ struct Session
         settings.log_cost_calls = _logCostCalls;
         if (!_recordsPath.empty())
             settings.records_path = _recordsPath;
+        initRepo(_repo);
         if (!settings.is_rules_defined("dispatch") || !settings.is_rules_defined("extract") ||
             !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
             !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
@@ -286,6 +338,7 @@ struct Session
         else
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
+            foldCleanTensors();
             ensureCacheCoverage(doSaturate);
             persistCache();
             isPlanned = true;

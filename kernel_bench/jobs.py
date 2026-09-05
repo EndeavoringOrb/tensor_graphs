@@ -291,13 +291,6 @@ def run_worker():
             print(f"[JOB {job_id}] Step 3/7: Running inference to build calls.bin...")
             run_cmd(
                 [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "write_ref_tensors"),
-                    target_model,
-                ],
-                TIMEOUTS["infer"],
-            )
-            run_cmd(
-                [
                     str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"),
                     target_model,
                     "--only-plan",
