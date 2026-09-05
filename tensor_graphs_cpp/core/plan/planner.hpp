@@ -1175,6 +1175,7 @@ struct Planner
         std::vector<float> eclass_dp_cost(egraph.getClasses().size(), TGConstants::INF);
         std::vector<float> eclass_dp_cp_cost(egraph.getClasses().size(), TGConstants::INF);
         std::vector<float> eclass_dp_mem(egraph.getClasses().size(), TGConstants::INF);
+        std::vector<uint32_t> eclass_depth(egraph.getClasses().size(), UINT32_MAX);
 
         for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
         {
@@ -1188,6 +1189,7 @@ struct Planner
                     {
                         eclass_dp_cost[i] = 0.0f;
                         eclass_dp_cp_cost[i] = 0.0f;
+                        eclass_depth[i] = 0;
                         const ENode &enode = egraph.getENode(enodeId);
                         float node_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
                         eclass_dp_mem[i] = node_size;
@@ -1215,24 +1217,28 @@ struct Planner
 
                 float sum_child_cost = 0.0f;
                 float max_child_cp_cost = 0.0f;
+                uint32_t max_child_depth = 0;
                 bool all_children_ready = true;
                 for (EClassId child : enode.getChildren())
                 {
                     EClassId canon = egraph.findConst(child);
                     if (eclass_dp_cost[canon.value] == TGConstants::INF ||
-                        eclass_dp_mem[canon.value] == TGConstants::INF)
+                        eclass_dp_mem[canon.value] == TGConstants::INF ||
+                        eclass_depth[canon.value] == UINT32_MAX)
                     {
                         all_children_ready = false;
                         break;
                     }
                     sum_child_cost += eclass_dp_cost[canon.value];
                     max_child_cp_cost = std::max(max_child_cp_cost, eclass_dp_cp_cost[canon.value]);
+                    max_child_depth = std::max(max_child_depth, eclass_depth[canon.value]);
                 }
 
                 if (all_children_ready)
                 {
                     float total_cost = cost + sum_child_cost;
                     float total_cp_cost = cost + max_child_cp_cost;
+                    uint32_t total_depth = max_child_depth + 1;
 
                     // Sethi-Ullman Memory Calculation:
                     struct ChildMem
@@ -1292,6 +1298,15 @@ struct Planner
                     float op_exec_mem = sum_child_sizes + (can_be_inplace ? 0.0f : out_size);
                     float total_mem = std::max(peak_child_eval, op_exec_mem);
 
+                    EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
+                    EClassId canon = egraph.findConst(e_class_id);
+
+                    if (total_depth < eclass_depth[canon.value])
+                    {
+                        eclass_depth[canon.value] = total_depth;
+                        changed = true;
+                    }
+
                     if (total_cost < enodeInfos[i].dp_cost || total_cp_cost < enodeInfos[i].dp_cp_cost ||
                         total_mem < enodeInfos[i].dp_mem)
                     {
@@ -1303,8 +1318,6 @@ struct Planner
                             enodeInfos[i].dp_mem = total_mem;
                         changed = true;
 
-                        EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
-                        EClassId canon = egraph.findConst(e_class_id);
                         if (total_cost < eclass_dp_cost[canon.value])
                         {
                             eclass_dp_cost[canon.value] = total_cost;
@@ -1324,15 +1337,36 @@ struct Planner
         }
 
         // Backward DP pass for rev_cp_cost (Distance to Output)
+        // Impose strict DAG condition: only propagate reverse critical path across edges
+        // that strictly advance in topological depth, preventing cycles in saturated e-graphs.
         std::vector<float> eclass_rev_cp_cost(egraph.getClasses().size(), 0.0f);
         std::vector<std::vector<ENodeId>> consumers(egraph.getClasses().size());
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
         {
+            if (enodeInfos[i].cost == TGConstants::INF)
+                continue;
+
             const ENode &enode = egraph.getENodes()[i];
+            EClassId parent_canon = egraph.findConst(egraph.getENodeEClass(ENodeId{i}));
+            if (eclass_depth[parent_canon.value] == UINT32_MAX)
+                continue;
+
+            std::vector<EClassId> unique_children;
             for (EClassId child : enode.getChildren())
             {
-                EClassId canon = egraph.findConst(child);
-                consumers[canon.value].push_back(ENodeId{i});
+                EClassId child_canon = egraph.findConst(child);
+                if (eclass_depth[child_canon.value] == UINT32_MAX)
+                    continue;
+
+                // Enforce strict DAG condition
+                if (eclass_depth[parent_canon.value] > eclass_depth[child_canon.value])
+                {
+                    if (std::find(unique_children.begin(), unique_children.end(), child_canon) == unique_children.end())
+                    {
+                        unique_children.push_back(child_canon);
+                        consumers[child_canon.value].push_back(ENodeId{i});
+                    }
+                }
             }
         }
 
@@ -1343,9 +1377,12 @@ struct Planner
 
         bool rev_changed = true;
         ProgressTimer timer3(0, "calculating enode reverse dp cost");
-        while (rev_changed)
+        int rev_iters = 0;
+        const int max_rev_iters = static_cast<int>(egraph.getClasses().size());
+        while (rev_changed && rev_iters < max_rev_iters)
         {
             rev_changed = false;
+            rev_iters++;
 
             for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
             {
