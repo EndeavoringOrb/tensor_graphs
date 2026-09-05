@@ -2725,8 +2725,6 @@ template <typename... Rules> struct Extractor
 
     void ascend()
     {
-        LOG(DEBUG) << "ascend";
-
         while (!path.empty())
         {
             EClassId current = path.back();
