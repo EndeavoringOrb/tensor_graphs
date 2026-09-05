@@ -827,17 +827,17 @@ struct Planner
     {
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo, &costModel};
         std::vector<std::unique_ptr<Rule>> rules;
-        rules.emplace_back(std::make_unique<FusionRule>());
-        rules.emplace_back(std::make_unique<DotSplitRule>());
-        rules.emplace_back(std::make_unique<RemoveContiguous>());
-        rules.emplace_back(std::make_unique<RemoveCopyChains>());
-        rules.emplace_back(std::make_unique<ConsumerWeightReuseRule>());
-        rules.emplace_back(std::make_unique<RemoveRedundantReshape>());
+        rules.emplace_back(makeProfiledRewriteRule<FusionRule>());
+        rules.emplace_back(makeProfiledRewriteRule<DotSplitRule>());
+        rules.emplace_back(makeProfiledRewriteRule<RemoveContiguous>());
+        rules.emplace_back(makeProfiledRewriteRule<RemoveCopyChains>());
+        rules.emplace_back(makeProfiledRewriteRule<ConsumerWeightReuseRule>());
+        rules.emplace_back(makeProfiledRewriteRule<RemoveRedundantReshape>());
         if (injected)
         {
-            rules.emplace_back(std::make_unique<InfinityDomination>());
-            rules.emplace_back(std::make_unique<SlicePushDownElementwise>(allowPushDownOnProtected));
-            rules.emplace_back(std::make_unique<SlicePushDownDot>(allowPushDownOnProtected));
+            rules.emplace_back(makeProfiledRewriteRule<InfinityDomination>());
+            rules.emplace_back(makeProfiledRewriteRule<SlicePushDownElementwise>(allowPushDownOnProtected));
+            rules.emplace_back(makeProfiledRewriteRule<SlicePushDownDot>(allowPushDownOnProtected));
         }
 
         std::map<std::string, uint32_t> ruleMatchCounts;
@@ -845,18 +845,50 @@ struct Planner
         bool changed = true;
         uint32_t nMatches = 0;
         ProgressTimer timer(0, "saturating");
+#ifdef TG_PROFILE
+        auto last_profile_report_time = std::chrono::steady_clock::now();
+#endif
         while (changed)
         {
             iterations++;
             uint32_t preUniqueNodes = egraph.getNumUniqueENodes();
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
+#ifdef TG_PROFILE
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration<double>(now - last_profile_report_time).count() >= 15.0)
+                {
+                    last_profile_report_time = now;
+                    printRewriteProfileSummary();
+                }
+#endif
                 for (const auto &rule : rules)
                 {
-                    if (!rule->match(eNodeIdx, ctx))
+                    bool matched;
+#ifdef TG_PROFILE
+                    auto match_start_time = std::chrono::steady_clock::now();
+                    matched = rule->match(eNodeIdx, ctx);
+                    auto match_end_time = std::chrono::steady_clock::now();
+                    RewriteRuleProfiler::get().recordMatch(
+                        rule->name(),
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(match_end_time - match_start_time).count(),
+                        matched);
+#else
+                    matched = rule->match(eNodeIdx, ctx);
+#endif
+                    if (!matched)
                         continue;
 
+#ifdef TG_PROFILE
+                    auto apply_start_time = std::chrono::steady_clock::now();
                     rule->apply(eNodeIdx, ctx);
+                    auto apply_end_time = std::chrono::steady_clock::now();
+                    RewriteRuleProfiler::get().recordApply(
+                        rule->name(),
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(apply_end_time - apply_start_time).count());
+#else
+                    rule->apply(eNodeIdx, ctx);
+#endif
                     changed = true;
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;

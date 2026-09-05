@@ -8,7 +8,7 @@
 
 inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Axis tensor is the last input. We need at least one data tensor + axis.
+    // Graph::concat stores the INT32 axis as input 0, followed by the data tensors.
     return isContiguous(output);
 }
 
@@ -18,14 +18,20 @@ inline void runConcatF32_ND(const KernelContext &ctx)
     const std::vector<uint32_t> &outShape = ctx.outViews[0].getShape();
     uint32_t rank = static_cast<uint32_t>(outShape.size());
 
-    // The axis is stored in the first input tensor
+    // CONCAT's ABI is strictly [axis, data...]. Do not recover from a
+    // reordered instruction: that is a planner/executor correctness error.
+    if (ctx.inputs.empty() || ctx.inViews.empty() || ctx.inViews[0].dtype != DType::INT32)
+    {
+        Error::throw_err("[ConcatF32_ND] Expected INT32 axis as input 0.");
+    }
+
     int32_t axis = *static_cast<const int32_t *>(ctx.inputs[0]);
-    LOG(DEBUG) << "CONCAT INFO";
-    LOG(DEBUG) << "outShape " << toString(outShape);
-    LOG(DEBUG) << "axis " << axis;
-    LOG(DEBUG) << "# inputs " << ctx.inputs.size();
     if (axis < 0)
         axis += static_cast<int32_t>(rank);
+    if (axis < 0 || axis >= static_cast<int32_t>(rank))
+    {
+        Error::throw_err("[ConcatF32_ND] Axis is outside the output rank.");
+    }
 
     // Calculate outer_dim (product of dimensions before axis)
     uint64_t outer_dim = 1;
@@ -41,7 +47,7 @@ inline void runConcatF32_ND(const KernelContext &ctx)
         inner_dim *= outShape[i];
     }
 
-    size_t num_data_tensors = ctx.inputs.size() - 1; // input 0 is the axis tensor
+    size_t num_data_tensors = ctx.inputs.size() - 1;
 
     // Precompute per-input slice metadata outside the execution loop
     struct InputSlice

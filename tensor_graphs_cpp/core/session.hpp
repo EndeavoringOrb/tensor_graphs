@@ -583,11 +583,12 @@ struct Session
             // Cache selection and bucket planning are one search: each selection
             // is evaluated by planning all buckets in parallel, with the same repo
             // and rewrite space used for the final compiled graphs.
-            for (uint32_t evalCount = 0; evalCount < 100 && cache_iter.getNextCacheSelection(currentCache); ++evalCount)
+            for (uint32_t evalCount = 0; cache_iter.getNextCacheSelection(currentCache); ++evalCount)
             {
                 std::unordered_map<LogicalId, ParallelBuffer> preallocated;
                 planner.preallocateLogicalBuffers(graph, currentCache, preallocated);
                 std::vector<float> bucketCosts(manualBuckets.size(), TGConstants::INF);
+                std::vector<CompiledGraph> candidateGraphs(manualBuckets.size());
                 std::atomic<bool> failed{false};
 
                 ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucketIdx) {
@@ -599,6 +600,8 @@ struct Session
                         CompiledGraph candidate = threadPlanner.plan(rootId, graph, manualBuckets[bucketIdx], currentCache,
                                                                      doSaturate, true, repo, preallocated, 0.0f, nullptr);
                         bucketCosts[bucketIdx] = candidate.cost();
+                        candidate.bucket = manualBuckets[bucketIdx];
+                        candidateGraphs[bucketIdx] = std::move(candidate);
                     }
                     catch (...)
                     {
@@ -625,6 +628,7 @@ struct Session
                     {
                         bestCost = cost;
                         bestCachedNodes = currentCache;
+                        cachedGraphs = std::move(candidateGraphs);
                     }
                 }
 
@@ -639,25 +643,30 @@ struct Session
                 delegate->set_best_cost_ptr(nullptr);
         }
 
-        std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
-        planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
+        // Cache search already planned every bucket for the winning selection.
+        // Only the no-cache path still needs a standalone bucket-planning pass.
+        if (disableCaching)
+        {
+            std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
+            planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
 
-        std::cout << "[Session.ensureCacheCoverage] Planning buckets with " << bestCachedNodes.size()
-                  << " cached nodes across physical cores..." << std::endl;
+            std::cout << "[Session.ensureCacheCoverage] Planning buckets with " << bestCachedNodes.size()
+                      << " cached nodes across physical cores..." << std::endl;
 
-        cachedGraphs.resize(manualBuckets.size());
+            cachedGraphs.resize(manualBuckets.size());
 
-        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t i) {
-            Planner threadPlanner(costModel, settings);
-            threadPlanner.baseState = planner.baseState;
-            threadPlanner.baseStateInitialized = true;
+            ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t i) {
+                Planner threadPlanner(costModel, settings);
+                threadPlanner.baseState = planner.baseState;
+                threadPlanner.baseStateInitialized = true;
 
-            const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, bestCachedNodes, doSaturate, true, repo,
-                                                    preallocatedBuffers, minCompileSeconds, nullptr);
-            plan.bucket = bucket;
-            cachedGraphs[i] = std::move(plan);
-        });
+                const Bucket &bucket = manualBuckets[i];
+                CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, bestCachedNodes, doSaturate, true, repo,
+                                                        preallocatedBuffers, minCompileSeconds, nullptr);
+                plan.bucket = bucket;
+                cachedGraphs[i] = std::move(plan);
+            });
+        }
 
         selectedCachedNodes = std::move(bestCachedNodes);
         cachedBucketWeights = normalizedBucketWeights(manualBuckets);

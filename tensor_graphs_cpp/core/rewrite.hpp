@@ -1,11 +1,20 @@
 #pragma once
 #include <algorithm>
+#include <cstdint>
+#ifdef TG_PROFILE
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#endif
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/egraph.hpp"
@@ -103,6 +112,117 @@ struct Rule
     virtual bool match(uint32_t eNodeIdx, RuleCtx &ctx) = 0;
     virtual void apply(uint32_t eNodeIdx, RuleCtx &ctx) = 0;
 };
+
+// Enabled only in --profile builds. Keeping the instrumentation at the Rule
+// dispatch boundary measures every rewrite implementation without requiring
+// boilerplate in each individual rule.
+#ifdef TG_PROFILE
+struct RewriteRuleTimingStats
+{
+    uint64_t constructor_ns = 0;
+    uint64_t constructor_calls = 0;
+    uint64_t match_ns = 0;
+    uint64_t match_calls = 0;
+    uint64_t match_hits = 0;
+    uint64_t apply_ns = 0;
+    uint64_t apply_calls = 0;
+};
+
+class RewriteRuleProfiler
+{
+  public:
+    static RewriteRuleProfiler &get()
+    {
+        static RewriteRuleProfiler instance;
+        return instance;
+    }
+
+    void recordConstructor(const std::string &name, uint64_t ns)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto &stats = stats_by_rule[name];
+        stats.constructor_ns += ns;
+        stats.constructor_calls++;
+    }
+
+    void recordMatch(const std::string &name, uint64_t ns, bool matched)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto &stats = stats_by_rule[name];
+        stats.match_ns += ns;
+        stats.match_calls++;
+        if (matched)
+            stats.match_hits++;
+    }
+
+    void recordApply(const std::string &name, uint64_t ns)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto &stats = stats_by_rule[name];
+        stats.apply_ns += ns;
+        stats.apply_calls++;
+    }
+
+    void printSummary() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (stats_by_rule.empty())
+            return;
+
+        std::cout << "\n========================================================================================================\n";
+        std::cout << " [Rewrite Rule Profiling Report]\n";
+        std::cout << "========================================================================================================\n";
+        std::cout << std::left << std::setw(34) << "Rule Name" << std::right << std::setw(12) << "Ctor (ms)"
+                  << std::setw(12) << "Ctor Calls" << std::setw(12) << "Match (ms)" << std::setw(14)
+                  << "Match Calls" << std::setw(10) << "Hits" << std::setw(12) << "Apply (ms)" << std::setw(12)
+                  << "Total (ms)\n";
+        std::cout << std::string(118, '-') << "\n";
+
+        for (const auto &[name, stats] : stats_by_rule)
+        {
+            double constructor_ms = stats.constructor_ns / 1e6;
+            double match_ms = stats.match_ns / 1e6;
+            double apply_ms = stats.apply_ns / 1e6;
+            double total_ms = constructor_ms + match_ms + apply_ms;
+            std::cout << std::left << std::setw(34) << name.substr(0, 33) << std::right << std::fixed
+                      << std::setprecision(2) << std::setw(12) << constructor_ms << std::setw(12)
+                      << stats.constructor_calls << std::setw(12) << match_ms << std::setw(14) << stats.match_calls
+                      << std::setw(10) << stats.match_hits << std::setw(12) << apply_ms << std::setw(12) << total_ms
+                      << "\n";
+        }
+        std::cout << "========================================================================================================\n\n"
+                  << std::flush;
+    }
+
+  private:
+    mutable std::mutex mutex;
+    std::unordered_map<std::string, RewriteRuleTimingStats> stats_by_rule;
+};
+
+template <typename RuleT, typename... Args> std::unique_ptr<Rule> makeProfiledRewriteRule(Args &&...args)
+{
+    auto start_time = std::chrono::steady_clock::now();
+    auto rule = std::make_unique<RuleT>(std::forward<Args>(args)...);
+    auto end_time = std::chrono::steady_clock::now();
+    RewriteRuleProfiler::get().recordConstructor(
+        rule->name(), std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count());
+    return rule;
+}
+
+inline void printRewriteProfileSummary()
+{
+    RewriteRuleProfiler::get().printSummary();
+}
+#else
+template <typename RuleT, typename... Args> std::unique_ptr<Rule> makeProfiledRewriteRule(Args &&...args)
+{
+    return std::make_unique<RuleT>(std::forward<Args>(args)...);
+}
+
+inline void printRewriteProfileSummary()
+{
+}
+#endif
 
 inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClassId> &children,
                               const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
@@ -337,6 +457,20 @@ struct FusionRule : public Rule
 
             if (!match.variadicConcatTensorEClasses.empty())
             {
+                // CONCAT's graph and kernel ABI is [axis, tensor0, tensor1, ...].
+                // Keep that order when materializing a variadic fused match; otherwise
+                // the first FLOAT32 tensor is interpreted as the INT32 axis at runtime.
+                LogicalId axisVar = pattern.variables.back();
+                EClassId axisEClass = binding.at(axisVar);
+                inputs.push_back(axisEClass);
+                const EClass &axisParent = egraph.getEClass(axisEClass);
+                TensorNode axisInputNode;
+                axisInputNode.opType = OpType::INPUT;
+                axisInputNode.dtype = axisParent.dtype;
+                axisInputNode.setShape(axisParent.shape);
+                axisInputNode.strides = axisParent.strides;
+                inputNodes.push_back(std::move(axisInputNode));
+
                 for (EClassId tensorEClass : match.variadicConcatTensorEClasses)
                 {
                     inputs.push_back(tensorEClass);
@@ -348,16 +482,6 @@ struct FusionRule : public Rule
                     inputNode.strides = parent.strides;
                     inputNodes.push_back(std::move(inputNode));
                 }
-                LogicalId axisVar = pattern.variables.back();
-                EClassId axisEClass = binding.at(axisVar);
-                inputs.push_back(axisEClass);
-                const EClass &axisParent = egraph.getEClass(axisEClass);
-                TensorNode axisInputNode;
-                axisInputNode.opType = OpType::INPUT;
-                axisInputNode.dtype = axisParent.dtype;
-                axisInputNode.setShape(axisParent.shape);
-                axisInputNode.strides = axisParent.strides;
-                inputNodes.push_back(std::move(axisInputNode));
             }
             else
             {
