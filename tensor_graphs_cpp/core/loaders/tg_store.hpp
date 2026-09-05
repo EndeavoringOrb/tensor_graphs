@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/graph.hpp"
 #include "core/loaders/store.hpp"
 #include "core/types.hpp"
 
