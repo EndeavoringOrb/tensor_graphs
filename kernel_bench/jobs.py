@@ -12,6 +12,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KERNELS_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "kernels"
+CORE_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "core"
 BENCHMARKS_DIR = PROJECT_ROOT / "benchmarks"
 CACHE_DIR = PROJECT_ROOT / "dirty_region_caches"
 VERSIONS_DIR = PROJECT_ROOT / "versions"

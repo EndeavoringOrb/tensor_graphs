@@ -109,6 +109,16 @@ class KernelBenchClient:
         res.raise_for_status()
         return res.json().get("content", "")
 
+    def listCoreHeaders(self) -> List[str]:
+        res = requests.get(f"{self.base_url}/api/core/list")
+        res.raise_for_status()
+        return res.json().get("files", [])
+
+    def readCoreHeader(self, path: str) -> str:
+        res = requests.get(f"{self.base_url}/api/core/read_source", params={"path": path})
+        res.raise_for_status()
+        return res.json().get("content", "")
+
     def readModelSource(self, target_model: str = "gemma-3-270m") -> str:
         res = requests.get(f"{self.base_url}/api/model/source", params={"target_model": target_model})
         res.raise_for_status()
@@ -235,6 +245,10 @@ class WorkerAgent(threading.Thread):
                 return self.client.listKernelFiles()
             elif name == "read_kernel_source":
                 return self.client.readKernelSource(args["path"])
+            elif name in ("list_core_headers", "list_core_files"):
+                return self.client.listCoreHeaders()
+            elif name in ("read_core_header", "read_core_source"):
+                return self.client.readCoreHeader(args["path"])
             elif name == "read_model_source":
                 return self.client.readModelSource(args.get("target_model", self.target_model))
             elif name == "submit_iteration":

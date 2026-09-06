@@ -12,6 +12,7 @@ from flask import Flask, Response, jsonify, render_template, request
 from .jobs import (
     BENCHMARKS_DIR,
     CACHE_DIR,
+    CORE_DIR,
     GENERATED_DIR,
     KERNELS_DIR,
     LLAMA_CPP_TARGETS,
@@ -122,11 +123,11 @@ def buildAgentIndexData(target_model: str = "gemma-3-270m") -> dict:
         },
         {
             "step": 3,
-            "title": "Inspect Existing Kernels & Graph Definition",
-            "description": "Review existing kernel implementations and model computation graph to understand memory layouts, data types, and operation signatures.",
-            "endpoint": "GET /api/kernels/list, GET /api/kernels/read_source, GET /api/model/source",
-            "tool": "list_kernel_files, read_kernel_source, read_model_source",
-            "example": "curl -s 'http://localhost:8080/api/kernels/read_source?path=cpu/reference/mul/F32_ND.hpp'",
+            "title": "Inspect Existing Kernels, Core Headers & Graph Definition",
+            "description": "Review existing kernel implementations, core engine definitions (TensorNode, TensorView, KernelContext, REGISTER_KERNEL macros in types.hpp, kernels.hpp), and model computation graph to understand memory layouts, data types, and operation signatures.",
+            "endpoint": "GET /api/kernels/list, GET /api/kernels/read_source, GET /api/core/list, GET /api/core/read_source, GET /api/model/source",
+            "tool": "list_kernel_files, read_kernel_source, list_core_headers, read_core_header, read_model_source",
+            "example": "curl -s 'http://localhost:8080/api/core/read_source?path=types.hpp'",
         },
         {
             "step": 4,
@@ -211,7 +212,9 @@ def buildAgentIndexData(target_model: str = "gemma-3-270m") -> dict:
         {"method": "GET", "path": "/api/versions", "description": "List all previous iteration versions and metrics"},
         {"method": "GET", "path": "/api/versions/{version_id}", "description": "Full logs (idea.md, build.log, bench_model.log, cache_analysis.log)"},
         {"method": "GET", "path": "/api/kernels/list", "description": "List all existing C++ and CUDA kernel source files"},
-        {"method": "GET", "path": "/api/kernels/read_source", "description": "Read source code of any kernel file (?path=...)"},
+        {"method": "GET", "path": "/api/kernels/read_source", "description": "Read source code of any kernel file or core header (?path=...)"},
+        {"method": "GET", "path": "/api/core/list", "description": "List all core C++ engine headers and types (e.g. types.hpp, kernels.hpp)"},
+        {"method": "GET", "path": "/api/core/read_source", "description": "Read source code of core engine headers (?path=types.hpp)"},
         {"method": "GET", "path": "/api/model/source", "description": "Read C++ model graph definition (?target_model=...)"},
         {"method": "GET", "path": "/api/benchmarks/records", "description": "Query recorded benchmarks from records.bin (?op=...&shape=...)"},
         {"method": "GET", "path": "/api/benchmarks/calls", "description": "Query benchmark invocation calls from calls.bin"},
@@ -568,11 +571,36 @@ def getAgentTools():
                 "type": "function",
                 "function": {
                     "name": "read_kernel_source",
-                    "description": "Read the source code of any kernel file.",
+                    "description": "Read the source code of any kernel file (e.g. 'cuda/mul/F32_ND.cu') or core header (e.g. 'core/types.hpp').",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Relative path under tensor_graphs_cpp/kernels (e.g. 'cuda/mul/F32_ND.cu' or 'cublas/dot_f32.cu')."}
+                            "path": {"type": "string", "description": "Relative path under tensor_graphs_cpp/kernels (e.g. 'cuda/mul/F32_ND.cu') or core header (e.g. 'core/types.hpp')."}
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_core_headers",
+                    "description": "List all engine core header and source files under tensor_graphs_cpp/core (e.g. types.hpp, kernels.hpp, graph.hpp, ops/*.hpp).",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_core_header",
+                    "description": "Read engine core header or source file from tensor_graphs_cpp/core (e.g. types.hpp, kernels.hpp, graph.hpp, ops/add.hpp).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path under tensor_graphs_cpp/core (e.g. 'types.hpp', 'kernels.hpp', 'ops/add.hpp')."
+                            }
                         },
                         "required": ["path"],
                     },
@@ -732,6 +760,56 @@ def getOpenApiSpec():
                         {"name": "limit", "in": "query", "schema": {"type": "integer"}}
                     ],
                     "responses": {"200": {"description": "Kernel operations, bottlenecks, and CPU fallbacks"}}
+                }
+            },
+            "/api/core/list": {
+                "get": {
+                    "summary": "List all core engine header and source files",
+                    "responses": {"200": {"description": "List of core files"}}
+                }
+            },
+            "/api/core/read_source": {
+                "get": {
+                    "summary": "Read source code of a core engine header",
+                    "parameters": [
+                        {"name": "path", "in": "query", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Core header source code and path"},
+                        "400": {"description": "Missing path parameter"},
+                        "404": {"description": "File not found"}
+                    }
+                }
+            },
+            "/api/kernels/list": {
+                "get": {
+                    "summary": "List all existing C++ and CUDA kernel files",
+                    "responses": {"200": {"description": "List of kernel files"}}
+                }
+            },
+            "/api/kernels/read_source": {
+                "get": {
+                    "summary": "Read source code of a kernel file or core header",
+                    "parameters": [
+                        {"name": "path", "in": "query", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Kernel source code and path"},
+                        "400": {"description": "Missing path parameter"},
+                        "404": {"description": "File not found"}
+                    }
+                }
+            },
+            "/api/model/source": {
+                "get": {
+                    "summary": "Read C++ model graph definition",
+                    "parameters": [
+                        {"name": "target_model", "in": "query", "schema": {"type": "string", "default": "gemma-3-270m"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Model source code and path"},
+                        "404": {"description": "Model not found"}
+                    }
                 }
             },
             "/api/kernels/test": {
@@ -1172,6 +1250,61 @@ def getBenchmarkCalls():
     return jsonify({"calls": calls, "total_calls": len(calls)})
 
 
+@app.get("/api/core/list")
+@app.get("/api/core/headers")
+def listCoreFiles():
+    try:
+        files = []
+        for path in CORE_DIR.rglob("*"):
+            if path.is_file() and path.suffix in (".hpp", ".h", ".cpp", ".cu", ".cuh"):
+                files.append(str(path.relative_to(CORE_DIR)))
+        return jsonify({"files": sorted(files)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/core/read_source")
+@app.get("/api/core/source")
+def readCoreSource():
+    rel_path = request.args.get("path")
+    if not rel_path:
+        return jsonify({"error": "Missing 'path' parameter"}), 400
+
+    cpp_dir = (PROJECT_ROOT / "tensor_graphs_cpp").resolve()
+    core_dir_resolved = CORE_DIR.resolve()
+    clean_path = rel_path.strip().lstrip("/")
+    if clean_path.startswith("tensor_graphs_cpp/core/"):
+        clean_path = clean_path[len("tensor_graphs_cpp/core/"):]
+    elif clean_path.startswith("tensor_graphs_cpp/"):
+        clean_path = clean_path[len("tensor_graphs_cpp/"):]
+    elif clean_path.startswith("core/"):
+        clean_path = clean_path[len("core/"):]
+
+    candidates = [
+        (CORE_DIR / clean_path).resolve(),
+        (cpp_dir / "core" / clean_path).resolve(),
+    ]
+
+    target_path = None
+    for cand in candidates:
+        if cand.is_file() and str(cand).startswith(str(core_dir_resolved)):
+            target_path = cand
+            break
+
+    if not target_path:
+        return jsonify({"error": f"Core file '{rel_path}' not found"}), 404
+
+    try:
+        content = target_path.read_text(encoding="utf-8", errors="ignore")
+        return jsonify({
+            "content": content,
+            "path": rel_path,
+            "resolved_path": str(target_path.relative_to(cpp_dir)),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.get("/api/kernels/list")
 def listKernelFiles():
     try:
@@ -1190,16 +1323,40 @@ def readKernelSource():
     if not rel_path:
         return jsonify({"error": "Missing 'path' parameter"}), 400
 
+    cpp_dir = (PROJECT_ROOT / "tensor_graphs_cpp").resolve()
+    clean_path = rel_path.strip().lstrip("/")
+
+    if clean_path.startswith("tensor_graphs_cpp/"):
+        clean_path = clean_path[len("tensor_graphs_cpp/"):]
+
+    candidates = []
+    if clean_path.startswith("core/"):
+        candidates.append((CORE_DIR / clean_path[5:]).resolve())
+        candidates.append((cpp_dir / clean_path).resolve())
+    elif clean_path.startswith("kernels/"):
+        candidates.append((KERNELS_DIR / clean_path[8:]).resolve())
+        candidates.append((cpp_dir / clean_path).resolve())
+    else:
+        candidates.append((KERNELS_DIR / clean_path).resolve())
+        candidates.append((CORE_DIR / clean_path).resolve())
+        candidates.append((cpp_dir / clean_path).resolve())
+
+    target_path = None
+    for cand in candidates:
+        if cand.is_file() and str(cand).startswith(str(cpp_dir)):
+            target_path = cand
+            break
+
+    if not target_path:
+        return jsonify({"error": f"File '{rel_path}' not found"}), 404
+
     try:
-        full_path = (KERNELS_DIR / rel_path).resolve()
-        if not str(full_path).startswith(str(KERNELS_DIR.resolve())):
-            full_path = (PROJECT_ROOT / "tensor_graphs_cpp" / rel_path).resolve()
-
-        if not full_path.exists():
-            return jsonify({"error": f"File '{rel_path}' not found"}), 404
-
-        content = full_path.read_text(encoding="utf-8", errors="ignore")
-        return jsonify({"content": content, "path": rel_path})
+        content = target_path.read_text(encoding="utf-8", errors="ignore")
+        return jsonify({
+            "content": content,
+            "path": rel_path,
+            "resolved_path": str(target_path.relative_to(cpp_dir)),
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
