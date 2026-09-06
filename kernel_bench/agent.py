@@ -1,266 +1,269 @@
 # File: kernel_bench/agent.py
 import json
+import os
+import sys
 import threading
 import time
+from typing import Any, Dict, List, Optional
 
 import requests
 
-BENCH_API_URL = "http://127.0.0.1:8080"
+BENCH_SERVER_URL = os.environ.get("BENCH_SERVER_URL", "http://localhost:8080")
 
-# Configure multiple agents and URLs here!
-AGENT_CONFIGS = [
+DEFAULT_AGENT_CONFIGS = [
     {
-        "url": "http://localhost:11434/v1/chat/completions",
-        "model": "qwen3.6:35b",
-        "target_model": "flux-klein-4b",
+        "url": os.environ.get("LLM_API_URL", "http://localhost:11434/v1/chat/completions"),
+        "model": os.environ.get("LLM_MODEL", "qwen3.6:35b"),
+        "target_model": "gemma-3-270m",
         "instances": 1,
-    },
-    {
-        "url": "http://localhost:11435/v1/chat/completions",
-        "model": "qwen3.6:35b",
-        "target_model": "flux-klein-4b",
-        "instances": 1,
-    },
-]
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_hw_info",
-            "description": "Get hardware specifications of the machine.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_performance_history",
-            "description": "Get the historical performance of all submitted kernels.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_analysis",
-            "description": "Get the current total estimated execution time, top heaviest chains, and extracted UIDs.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_benchmarks",
-            "description": "Read all recorded benchmarks (shapes/strides) to find targets to optimize.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "op": {
-                        "type": "string",
-                        "description": "Regex pattern to filter OpName (e.g., 'Dot.*F32' or '^Softmax'). Case-insensitive.",
-                    },
-                    "shape": {
-                        "type": "string",
-                        "description": "Regex pattern to filter OutputShape or InputShape (e.g., '128, 768' or '\\[.*, 4096\\]').",
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "submit_and_test_kernel",
-            "description": "Submit a C++ kernel for compilation, testing, and benchmarking.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "source": {
-                        "type": "string",
-                        "description": "The full C++ source code of the kernel.",
-                    },
-                    "opname": {
-                        "type": "string",
-                        "description": "The operation name (e.g. Dot_F32_3D_Optimized).",
-                    },
-                    "backend": {
-                        "type": "string",
-                        "enum": ["cpu", "cuda"],
-                        "description": "Target backend.",
-                    },
-                },
-                "required": ["source", "opname", "backend"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_kernel_files",
-            "description": "Recursively list all existing C++ and CUDA kernel files to see what is already implemented.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_target_model_source",
-            "description": "Read the C++ source code of the current target model to understand its graph structure.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_kernel_source",
-            "description": "Read the source code of an existing kernel file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "The relative path of the file (e.g., 'cpu/general/matmul.hpp' or 'cpu/general/generated/00010.hpp.failed').",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "report_issue",
-            "description": "Report an issue with the testing harness, codebase, or environment. Use this if a failure seems completely anomalous or outside your control.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "issue_description": {
-                        "type": "string",
-                        "description": "Detailed explanation of the issue encountered.",
-                    }
-                },
-                "required": ["issue_description"],
-            },
-        },
-    },
+    }
 ]
 
 print_lock = threading.Lock()
 
 
-def safe_print(*args, **kwargs):
+def safePrint(*args, **kwargs) -> None:
     with print_lock:
         print(*args, **kwargs)
 
 
+class KernelBenchClient:
+    """Client for any agentic harness to interface with the KernelBench server at localhost:8080."""
+
+    def __init__(self, base_url: str = BENCH_SERVER_URL):
+        self.base_url = base_url.rstrip("/")
+
+    def getStatus(self, target_model: str = "gemma-3-270m") -> Dict[str, Any]:
+        res = requests.get(f"{self.base_url}/api/status", params={"target_model": target_model})
+        res.raise_for_status()
+        return res.json()
+
+    def getTools(self) -> List[Dict[str, Any]]:
+        res = requests.get(f"{self.base_url}/api/tools")
+        res.raise_for_status()
+        return res.json().get("tools", [])
+
+    def getOpenApi(self) -> Dict[str, Any]:
+        res = requests.get(f"{self.base_url}/api/openapi.json")
+        res.raise_for_status()
+        return res.json()
+
+    def getBottleneckAnalysis(
+        self,
+        target_model: str = "gemma-3-270m",
+        search: str = "",
+        filter_type: str = "all",
+        sort_by: str = "time",
+        sort_order: str = "desc",
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Fetch bottleneck analysis for the current performance cache with optional filtering."""
+        params: Dict[str, Any] = {"target_model": target_model}
+        if search:
+            params["search"] = search
+        if filter_type and filter_type != "all":
+            params["filter"] = filter_type
+        if sort_by != "time":
+            params["sort_by"] = sort_by
+        if sort_order != "desc":
+            params["sort_order"] = sort_order
+        if limit > 0:
+            params["limit"] = limit
+        res = requests.get(f"{self.base_url}/api/analyze", params=params)
+        res.raise_for_status()
+        return res.json()
+
+    def getVersions(self) -> List[Dict[str, Any]]:
+        res = requests.get(f"{self.base_url}/api/versions")
+        res.raise_for_status()
+        return res.json().get("versions", [])
+
+    def getVersionDetails(self, version_id: int) -> Dict[str, Any]:
+        res = requests.get(f"{self.base_url}/api/versions/{version_id}")
+        res.raise_for_status()
+        return res.json()
+
+    def queryBenchmarkRecords(self, op: str = "", shape: str = "") -> List[Dict[str, Any]]:
+        res = requests.get(f"{self.base_url}/api/benchmarks/records", params={"op": op, "shape": shape})
+        res.raise_for_status()
+        return res.json().get("records", [])
+
+    def listKernelFiles(self) -> List[str]:
+        res = requests.get(f"{self.base_url}/api/kernels/list")
+        res.raise_for_status()
+        return res.json().get("files", [])
+
+    def readKernelSource(self, path: str) -> str:
+        res = requests.get(f"{self.base_url}/api/kernels/read_source", params={"path": path})
+        res.raise_for_status()
+        return res.json().get("content", "")
+
+    def readModelSource(self, target_model: str = "gemma-3-270m") -> str:
+        res = requests.get(f"{self.base_url}/api/model/source", params={"target_model": target_model})
+        res.raise_for_status()
+        return res.json().get("content", "")
+
+    def submitIteration(
+        self,
+        idea: str,
+        source: str = "",
+        filename: str = "",
+        opname: str = "",
+        backend: str = "cuda",
+        target_model: str = "gemma-3-270m",
+        pp: int = 512,
+        tg: int = 128,
+        min_compile_time: float = 90.0,
+        kernel_name: str = "",
+    ) -> Dict[str, Any]:
+        payload = {
+            "idea": idea,
+            "source": source,
+            "filename": filename,
+            "opname": opname,
+            "backend": backend,
+            "target_model": target_model,
+            "pp": pp,
+            "tg": tg,
+            "min_compile_time": min_compile_time,
+            "kernel_name": kernel_name,
+        }
+        res = requests.post(f"{self.base_url}/api/iteration/submit", json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    def getJobStatus(self, job_id: str) -> Dict[str, Any]:
+        res = requests.get(f"{self.base_url}/api/jobs/{job_id}")
+        res.raise_for_status()
+        return res.json()
+
+    def getJobLogs(self, job_id: str) -> Dict[str, Any]:
+        res = requests.get(f"{self.base_url}/api/jobs/{job_id}/logs")
+        res.raise_for_status()
+        return res.json()
+
+    def pollJobUntilComplete(self, job_id: str, interval: int = 5, timeout: int = 1800) -> Dict[str, Any]:
+        start = time.time()
+        while time.time() - start < timeout:
+            job = self.getJobStatus(job_id)
+            status = job.get("status")
+            step = job.get("step")
+            safePrint(f"  [Job {job_id}] Status: {status}, Current Step: {step}")
+            if status in ("completed", "failed"):
+                return job
+            time.sleep(interval)
+        raise TimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+
+    def suggestApiChange(
+        self,
+        title: str,
+        description: str,
+        suggested_endpoint: str = "",
+        proposed_changes: str = "",
+        category: str = "new_endpoint",
+    ) -> Dict[str, Any]:
+        payload = {
+            "title": title,
+            "description": description,
+            "suggested_endpoint": suggested_endpoint,
+            "proposed_changes": proposed_changes,
+            "category": category,
+        }
+        res = requests.post(f"{self.base_url}/api/suggestions", json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    def getSuggestions(self, category: str = "", status: str = "") -> List[Dict[str, Any]]:
+        params = {}
+        if category:
+            params["category"] = category
+        if status:
+            params["status"] = status
+        res = requests.get(f"{self.base_url}/api/suggestions", params=params)
+        res.raise_for_status()
+        return res.json().get("suggestions", [])
+
+
 class WorkerAgent(threading.Thread):
-    def __init__(self, agent_id, config):
+    """Autonomous agent runner driving iterative optimization against KernelBench."""
+
+    def __init__(self, agent_id: str, config: Dict[str, Any]):
         super().__init__(daemon=True)
         self.agent_id = agent_id
-        self.api_url = config["url"]
-        self.model = config["model"]
-        self.target_model = config["target_model"]
+        self.api_url = config.get("url", "http://localhost:11434/v1/chat/completions")
+        self.model = config.get("model", "qwen3.6:35b")
+        self.target_model = config.get("target_model", "gemma-3-270m")
+        self.client = KernelBenchClient(config.get("bench_url", BENCH_SERVER_URL))
 
-    def call_bench_api(self, path, method="GET", json_data=None):
-        url = f"{BENCH_API_URL}{path}"
+    def executeTool(self, name: str, args: Dict[str, Any]) -> Any:
+        safePrint(f"\n[Agent {self.agent_id} calling tool: {name}]")
         try:
-            if method == "GET":
-                res = requests.get(url, params=json_data)
-            else:
-                res = requests.post(url, json=json_data)
-            return res.json()
+            if name == "get_system_status":
+                return self.client.getStatus(args.get("target_model", self.target_model))
+            elif name == "get_bottleneck_analysis":
+                return self.client.getBottleneckAnalysis(
+                    target_model=args.get("target_model", self.target_model),
+                    search=args.get("search", args.get("query", args.get("q", ""))),
+                    filter_type=args.get("filter", args.get("filter_type", "all")),
+                    sort_by=args.get("sort_by", "time"),
+                    sort_order=args.get("sort_order", "desc"),
+                    limit=int(args.get("limit", 0)),
+                )
+            elif name == "get_versions_history":
+                return self.client.getVersions()
+            elif name == "get_version_details":
+                return self.client.getVersionDetails(args["version_id"])
+            elif name == "read_benchmark_records":
+                return self.client.queryBenchmarkRecords(args.get("op", ""), args.get("shape", ""))
+            elif name == "list_kernel_files":
+                return self.client.listKernelFiles()
+            elif name == "read_kernel_source":
+                return self.client.readKernelSource(args["path"])
+            elif name == "read_model_source":
+                return self.client.readModelSource(args.get("target_model", self.target_model))
+            elif name == "submit_iteration":
+                args.setdefault("target_model", self.target_model)
+                sub_res = self.client.submitIteration(**args)
+                job_id = sub_res.get("job_id")
+                if not job_id:
+                    return {"error": "Submission failed", "response": sub_res}
+                safePrint(f"  [Agent {self.agent_id}] Job {job_id} queued. Polling...")
+                return self.client.pollJobUntilComplete(job_id)
+            elif name == "get_job_status":
+                return self.client.getJobStatus(args["job_id"])
+            elif name == "report_issue":
+                requests.post(f"{self.client.base_url}/api/reports", json=args)
+                return {"status": "success", "message": "Issue recorded"}
+            elif name == "suggest_api_change":
+                res = self.client.suggestApiChange(**args)
+                return {"status": "success", "message": "Suggestion recorded", "details": res}
+            return {"error": f"Unknown tool: {name}"}
         except Exception as e:
-            return {"error": f"Failed to reach Benchmark API: {e!s}"}
+            return {"error": str(e)}
 
-    def handle_tool_call(self, tool_call):
-        name = tool_call["function"]["name"]
+    def run(self) -> None:
+        safePrint(f"[Agent {self.agent_id}] Started autonomous optimization loop...")
+        tools = self.client.getTools()
 
-        try:
-            args = json.loads(tool_call["function"]["arguments"])
-        except json.JSONDecodeError:
-            return {"error": "Invalid JSON arguments generated"}
+        system_prompt = (
+            f"You are an elite CUDA and C++ high-performance optimization AI agent.\n"
+            f"Target Model: {self.target_model}\n"
+            "Goal: Optimize Tensor Graphs kernels to beat llama.cpp for pp512 and tg128.\n"
+            "Rules:\n"
+            "1. NEVER modify existing kernel files; only add new files in tensor_graphs_cpp/kernels/.\n"
+            "2. Keep a running list of changes across versions/0, versions/1, versions/N.\n"
+            "3. Analyze bottlenecks via get_bottleneck_analysis. Eliminate CPU reference fallbacks (e.g. REF_MUL, REF_DIVIDE, REF_NEGATE) by providing CUDA kernels supporting non-contiguous/broadcast strides.\n"
+            "4. Check get_system_status to monitor progress against llama.cpp targets.\n"
+            "5. Iterate continuously until targets are beaten.\n"
+        )
 
-        safe_print(f"\n[Agent {self.agent_id} executing tool: {name}]")
-
-        if name == "get_hw_info":
-            return self.call_bench_api("/api/hwinfo")
-        elif name == "get_performance_history":
-            return self.call_bench_api("/api/history")
-        elif name == "get_analysis":
-            return self.call_bench_api(
-                "/api/analyze", json_data={"target_model": self.target_model}
-            )
-        elif name == "read_benchmarks":
-            # Pass the target model context
-            args["target_model"] = self.target_model
-            return self.call_bench_api("/api/read_benchmarks", json_data=args)
-        elif name == "read_target_model_source":
-            return self.call_bench_api(
-                "/api/kernels/read_model", json_data={"target_model": self.target_model}
-            )
-        elif name == "list_kernel_files":
-            return self.call_bench_api("/api/kernels/list")
-        elif name == "read_kernel_source":
-            return self.call_bench_api("/api/kernels/read_source", json_data=args)
-        elif name == "report_issue":
-            args["agent_id"] = self.agent_id
-            res = self.call_bench_api("/api/reports", method="POST", json_data=args)
-            return {"status": "Issue reported successfully.", "details": res}
-        elif name == "submit_and_test_kernel":
-            args["target_model"] = self.target_model
-            res = self.call_bench_api(
-                "/api/kernels/test", method="POST", json_data=args
-            )
-            job_id = res.get("job_id")
-            if not job_id:
-                return {"error": "Submission failed", "details": res}
-
-            safe_print(
-                f"  -> [Agent {self.agent_id}] Job {job_id} queued for {self.target_model}. Polling..."
-            )
-            while True:
-                time.sleep(5)
-                status = self.call_bench_api(f"/api/jobs/{job_id}")
-                if status.get("status") in ["completed", "failed"]:
-                    safe_print(
-                        f"  -> [Agent {self.agent_id}] Job finished with status '{status.get('status')}'"
-                    )
-                    return status
-
-        return {"error": f"Unknown tool {name}"}
-
-    def get_initial_messages(self):
-        return [
-            {
-                "role": "system",
-                "content": (
-                    f"You are an elite C++ and CUDA/NEON performance optimization AI agent. "
-                    f"Your target model for optimization is {self.target_model}. "
-                    "Your goal is to optimize tensor operations to reduce 'Total Estimated Execution Time'. "
-                    "You work in a loop: analyze current performance, generate an optimized kernel, submit it, "
-                    "and learn from the test results and benchmarks. "
-                    "The test pipeline steps are: Compile -> Test(No Rec) -> Matched in Graph -> Test(Records) -> Benchmark -> Extracted in final graph. "
-                    "Iterate infinitely. Use the provided tools.\n\n"
-                    "CRITICAL INSTRUCTIONS:\n"
-                    "1. Your conversation history is reset after EVERY kernel submission to keep the prompt context small. You MUST call `get_performance_history` in your first step to remember past tests!\n"
-                    "2. To avoid repeating previous mistakes, locate failed jobs in the history and strictly read their error messages (which contain full compiler/test output).\n"
-                    "3. If you want to read a failed kernel's code, use `read_kernel_source` and pass the `agent_file_path` provided for it in the history.\n"
-                    "4. A kernel is only considered successful if it passes ALL stages (including being extracted in the final graph which means it was faster than previous options). Failures at any stage will mark it as failed.\n"
-                    "5. If you encounter persistent bugs or environment problems outside your control, use the `report_issue` tool."
-                ),
-            },
+        messages = [
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": "Begin optimizing. Step 1: Call `get_performance_history` and `get_analysis`. Step 2: Either read_model to look for new sequences that can be fused (bypassing the need for certain kernels), or choose a specific existing kernel to optimize and read benchmarks to find a target. Step 3: Get hardware info. Step 4: Write and submit your kernel.",
+                "content": "Begin optimizing. Step 1: Call get_system_status and get_bottleneck_analysis. Step 2: Formulate your idea, write your kernel, and submit via submit_iteration.",
             },
         ]
-
-    def run(self):
-        messages = self.get_initial_messages()
-        safe_print(
-            f"[Agent {self.agent_id}] Started Autonomous Optimization Loop on {self.api_url}..."
-        )
 
         while True:
             try:
@@ -270,71 +273,71 @@ class WorkerAgent(threading.Thread):
                     "tools": tools,
                     "tool_choice": "auto",
                 }
-
-                response = requests.post(self.api_url, json=payload)
-                response.raise_for_status()
-                response_data = response.json()
-                message = response_data["choices"][0]["message"]
+                res = requests.post(self.api_url, json=payload, timeout=120)
+                res.raise_for_status()
+                data = res.json()
+                choice = data["choices"][0]
+                message = choice["message"]
                 messages.append(message)
 
                 if message.get("tool_calls"):
-                    reset_context = False
-                    for tool_call in message["tool_calls"]:
-                        result = self.handle_tool_call(tool_call)
+                    for call in message["tool_calls"]:
+                        fn_name = call["function"]["name"]
+                        try:
+                            fn_args = json.loads(call["function"]["arguments"])
+                        except Exception:
+                            fn_args = {}
+                        tool_result = self.executeTool(fn_name, fn_args)
 
-                        if tool_call["function"]["name"] == "submit_and_test_kernel":
-                            reset_context = True
+                        # Truncate large tool content to prevent context overflow
+                        result_str = json.dumps(tool_result)
+                        if len(result_str) > 8000:
+                            result_str = result_str[:8000] + "... [truncated]"
 
-                        content = json.dumps(result, indent=2)
-                        if len(content) > 10000:
-                            content = "Content exceeded maximum length. Please narrow parameters."
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "name": fn_name,
+                            "content": result_str,
+                        })
 
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call["id"],
-                                "name": tool_call["function"]["name"],
-                                "content": content,
-                            }
-                        )
-
-                    if reset_context:
-                        safe_print(
-                            f"\n[Agent {self.agent_id}] Submission complete! Resetting context...\n"
-                        )
-                        messages = self.get_initial_messages()
+                        if fn_name == "submit_iteration" and tool_result.get("target_beaten"):
+                            safePrint(f"\n[Agent {self.agent_id}] TARGET BEATEN! Goal achieved!\n")
+                            return
 
                 else:
-                    safe_print(
-                        f"\n[Agent {self.agent_id} says]:\n{message.get('content')}\n"
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "Please continue optimizing. Generate and submit your next kernel.",
-                        }
-                    )
+                    safePrint(f"\n[Agent {self.agent_id} response]:\n{message.get('content')}\n")
+                    messages.append({
+                        "role": "user",
+                        "content": "Analyze the results from the last run, formulate the next hypothesis, and submit your next kernel.",
+                    })
 
-            except Exception as e:
-                safe_print(
-                    f"[Agent {self.agent_id}] Error communicating with LLM server: {e}"
-                )
+            except Exception as err:
+                safePrint(f"[Agent {self.agent_id}] Error in optimization loop: {err}")
                 time.sleep(10)
 
 
 if __name__ == "__main__":
+    client = KernelBenchClient(BENCH_SERVER_URL)
+    try:
+        status = client.getStatus()
+        print(f"[KernelBench] Connected to server at {BENCH_SERVER_URL}")
+        print(f"  Target: {status.get('target_model')}")
+        print(f"  Current Best: {status.get('current_best')}")
+        print(f"  Llama.cpp Targets: {status.get('targets')}")
+    except Exception as e:
+        print(f"[KernelBench] Warning: Could not reach server at {BENCH_SERVER_URL}: {e}")
+        print("Make sure the server is running: .venv/bin/python -m kernel_bench.app")
+        sys.exit(1)
+
     threads = []
     agent_counter = 1
-
-    for config in AGENT_CONFIGS:
-        num_instances = config.get("instances", 1)
-        for _ in range(num_instances):
-            agent_id = f"Agent-{agent_counter}"
-            t = WorkerAgent(agent_id, config)
+    for config in DEFAULT_AGENT_CONFIGS:
+        for _ in range(config.get("instances", 1)):
+            t = WorkerAgent(f"Agent-{agent_counter}", config)
             t.start()
             threads.append(t)
             agent_counter += 1
 
-    # Keep main thread alive
     for t in threads:
         t.join()

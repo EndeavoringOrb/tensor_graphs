@@ -1,488 +1,1247 @@
-<!-- File: kernel_bench/templates/index.html -->
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
-    <title>Kernel Bench Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KernelBench | Iterative GPU Optimization Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
+        :root {
+            --bg-color: #0d1117;
+            --surface-color: #161b22;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #bc8cff;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: sans-serif;
-            background: #f4f4f9;
-            margin: 0;
-            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            padding: 24px;
+            line-height: 1.5;
         }
 
         .container {
-            max-width: 1300px;
-            margin: auto;
-            background: white;
-            padding: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 24px;
+        }
+
+        .header-title h1 {
+            font-size: 24px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 12px;
+            text-transform: uppercase;
+        }
+        .badge-cuda { background: rgba(88, 166, 255, 0.2); color: var(--accent); border: 1px solid var(--accent); }
+        .badge-pass { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); border: 1px solid var(--accent-green); }
+        .badge-fail { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); border: 1px solid var(--accent-red); }
+
+        /* Target Cards */
+        .targets-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: var(--surface-color);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            padding: 18px;
         }
 
-        h1 {
-            color: #333;
-            margin-top: 0;
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
         }
 
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-main {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+        }
+        .metric-unit { font-size: 16px; color: var(--text-secondary); font-weight: normal; }
+
+        .metric-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+        }
+
+        .progress-bar-bg {
+            background: #21262d;
+            border-radius: 4px;
+            height: 8px;
+            margin-top: 12px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            background: var(--accent);
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.4s ease;
+        }
+
+        /* Tabs */
         .tabs {
             display: flex;
-            border-bottom: 2px solid #ddd;
+            border-bottom: 1px solid var(--border-color);
             margin-bottom: 20px;
+            gap: 8px;
         }
 
-        .tab {
-            padding: 10px 20px;
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            padding: 10px 16px;
             cursor: pointer;
-            background: #f8f9fa;
-            border: 1px solid transparent;
-            border-bottom: none;
-            margin-right: 5px;
-            border-radius: 5px 5px 0 0;
-            font-weight: bold;
-            color: #555;
+            font-size: 14px;
+            font-weight: 600;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .tab-btn:hover { color: var(--text-primary); }
+        .tab-btn.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
         }
 
-        .tab.active {
-            background: #007bff;
-            color: white;
-            border-color: #007bff;
-        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
 
-        .tab-content {
-            display: none;
-        }
-
-        .tab-content.active {
-            display: block;
-        }
-
-        /* Dashboard Styles */
-        canvas {
-            max-width: 100%;
-            margin-bottom: 30px;
-        }
-
+        /* Tables */
         table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 20px;
-            font-size: 0.9em;
+            font-size: 13px;
         }
 
-        th,
-        td {
-            padding: 8px;
-            border: 1px solid #ddd;
-            text-align: center;
+        th, td {
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
         }
 
         th {
-            background: #007bff;
-            color: white;
+            background: #1c2128;
+            color: var(--text-secondary);
+            font-weight: 600;
         }
 
-        .text-left {
-            text-align: left;
+        tr:hover { background: rgba(255, 255, 255, 0.02); }
+
+        /* Code & Pre */
+        pre {
+            background: #090d13;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 14px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 12px;
+            color: #7ee787;
+            overflow-x: auto;
+            max-height: 450px;
+            white-space: pre-wrap;
+            word-break: break-all;
         }
 
-        .status-completed {
-            color: green;
-            font-weight: bold;
+        /* Forms & Inputs */
+        .form-group {
+            margin-bottom: 16px;
         }
-
-        .status-failed {
-            color: red;
-            font-weight: bold;
+        label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: var(--text-secondary);
         }
-
-        .check {
-            color: green;
-            font-weight: bold;
-        }
-
-        .cross {
-            color: red;
-            font-weight: bold;
-        }
-
-        .scores {
-            font-size: 0.8em;
-            color: #555;
-        }
-
-        textarea.source-input {
+        input, select, textarea {
             width: 100%;
-            height: 150px;
-            margin-bottom: 10px;
+            background: #0d1117;
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 10px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        textarea {
             font-family: monospace;
+            min-height: 220px;
         }
-
-        /* General Controls */
-        input,
-        select {
-            margin-bottom: 10px;
-            padding: 6px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
+        input:focus, select:focus, textarea:focus {
+            border-color: var(--accent);
+            outline: none;
         }
-
-        button {
-            padding: 8px 15px;
-            background: #28a745;
+        .btn {
+            background: #238636;
             color: white;
-            border: none;
+            border: 1px solid rgba(240, 246, 252, 0.1);
+            padding: 8px 16px;
+            border-radius: 6px;
             cursor: pointer;
-            border-radius: 4px;
-            font-weight: bold;
-            margin-bottom: 5px;
+            font-weight: 600;
+            font-size: 13px;
         }
-
-        button:hover {
-            background: #218838;
+        .btn:hover { background: #2ea043; }
+        .btn-secondary {
+            background: #21262d;
+            color: var(--text-primary);
+            border-color: var(--border-color);
         }
+        .btn-secondary:hover { background: #30363d; }
 
-        .btn-blue {
-            background: #007bff;
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
         }
-
-        .btn-blue:hover {
-            background: #0056b3;
-        }
-
-        /* Agent Tools Layout */
-        .tools-layout {
-            display: flex;
-            gap: 20px;
-        }
-
-        .tools-sidebar {
-            flex: 1;
-            max-width: 400px;
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-
-        .tool-card {
-            background: #f8f9fa;
-            padding: 15px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-        }
-
-        .tool-card h4 {
-            margin-top: 0;
-            margin-bottom: 10px;
-            color: #333;
-        }
-
-        .tools-output {
-            flex: 2;
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: var(--surface-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            width: 90%;
+            max-width: 1000px;
+            max-height: 85vh;
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
-
-        .output-box {
-            flex-grow: 1;
-            background: #2d2d2d;
-            color: #a6e22e;
-            padding: 15px;
-            border-radius: 6px;
-            font-family: monospace;
+        .modal-header {
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-body {
+            padding: 20px;
             overflow-y: auto;
-            height: 600px;
-            white-space: pre-wrap;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 20px;
+            cursor: pointer;
         }
 
-        /* Reports Table */
-        .report-desc {
-            text-align: left;
-            max-width: 600px;
-            white-space: pre-wrap;
-            font-family: monospace;
-            font-size: 0.9em;
+        .alert-warning {
+            background: rgba(210, 153, 34, 0.15);
+            border: 1px solid var(--accent-orange);
+            color: #e3b341;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            font-size: 13px;
         }
     </style>
 </head>
-
 <body>
-    <div class="container">
-        <h1>Kernel Bench Harness</h1>
-
-        <div class="tabs">
-            <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
-            <div class="tab" onclick="switchTab('tools')">Agent Tools</div>
-            <div class="tab" onclick="switchTab('reports')">Issue Reports</div>
+<div class="container">
+    <header>
+        <div class="header-title">
+            <h1>
+                KernelBench Optimizer
+                <span class="badge badge-cuda">sm_52 (Quadro M4000)</span>
+                <span id="targetStatusBadge" class="badge badge-fail">Target Pending</span>
+            </h1>
+            <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">
+                Iterative optimization pipeline for <strong id="modelNameText">gemma-3-270m</strong>
+            </p>
         </div>
-
-        <!-- DASHBOARD TAB -->
-        <div id="dashboard" class="tab-content active">
-            <canvas id="progressChart"></canvas>
-
-            <h3>Submit Manual Kernel</h3>
-            <input type="text" id="opname" placeholder="OpName (e.g. Dot_F32_3D_Optimized)">
-            <select id="target_model">
-                <option value="gemma-3-270m">gemma-3-270m</option>
-                <option value="flux-klein-4b">flux-klein-4b</option>
-            </select>
-            <select id="backend">
-                <option value="cpu">CPU</option>
-                <option value="cuda">CUDA</option>
-            </select><br>
-            <textarea id="source" class="source-input"
-                placeholder="#pragma once\n// Write C++ Kernel here..."></textarea><br>
-            <button onclick="submitKernel()">Submit Kernel</button>
-            <span id="submitMsg" style="margin-left: 10px; font-weight: bold;"></span>
-
-            <h3>Job History</h3>
-            <table id="historyTable">
-                <thead>
-                    <tr>
-                        <th class="text-left">Time</th>
-                        <th class="text-left">OpName</th>
-                        <th>Model</th>
-                        <th>Status</th>
-                        <th>Compile</th>
-                        <th>Test (No Rec)</th>
-                        <th>Matched</th>
-                        <th>Test (Rec)</th>
-                        <th>Extracted</th>
-                        <th>Bench Scores (ms)</th>
-                        <th>Total Est. Time (ms)</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
+        <div>
+            <button class="btn btn-secondary" onclick="fetchStatus()">Refresh Status</button>
+            <a href="/api/openapi.json" target="_blank" class="btn btn-secondary" style="text-decoration:none; margin-left: 6px;">OpenAPI Spec</a>
         </div>
+    </header>
 
-        <!-- AGENT TOOLS TAB -->
-        <div id="tools" class="tab-content">
-            <div class="tools-layout">
-                <div class="tools-sidebar">
-                    <div class="tool-card">
-                        <h4>Hardware & Analysis</h4>
-                        <button class="btn-blue" onclick="callApi('/api/hwinfo')">Get HW Info</button>
-                        <br><br>
-                        <select id="analyze_model">
-                            <option value="gemma-3-270m">gemma-3-270m</option>
-                            <option value="flux-klein-4b">flux-klein-4b</option>
-                        </select>
-                        <button class="btn-blue" onclick="callAnalyze()">Get Analysis</button>
-                    </div>
-
-                    <div class="tool-card">
-                        <h4>Read Benchmarks</h4>
-                        <select id="bench_model">
-                            <option value="gemma-3-270m">gemma-3-270m</option>
-                            <option value="flux-klein-4b">flux-klein-4b</option>
-                        </select><br>
-                        <input type="text" id="bench_op" placeholder="Regex OpName (Optional)" style="width: 90%;">
-                        <input type="text" id="bench_shape" placeholder="Regex Shape (Optional)" style="width: 90%;">
-                        <button class="btn-blue" onclick="callBenchmarks()">Read Benchmarks</button>
-                    </div>
-
-                    <div class="tool-card">
-                        <h4>Source & Kernels</h4>
-                        <button class="btn-blue" onclick="callApi('/api/kernels/list')">List Kernel Files</button>
-                        <br><br>
-                        <select id="read_model_sel">
-                            <option value="gemma-3-270m">gemma-3-270m</option>
-                            <option value="flux-klein-4b">flux-klein-4b</option>
-                        </select>
-                        <button class="btn-blue" onclick="callReadModel()">Read Target Model</button>
-                        <br><br>
-                        <input type="text" id="read_path" placeholder="Kernel file path (e.g. cpu/general/00010.hpp)"
-                            style="width: 90%;">
-                        <button class="btn-blue" onclick="callReadSource()">Read Kernel Source</button>
-                    </div>
-                </div>
-
-                <div class="tools-output">
-                    <h4>Tool Output</h4>
-                    <pre id="toolOutputBox"
-                        class="output-box">Select a tool on the left to see the raw API output here...</pre>
-                </div>
+    <!-- Target Comparison Cards -->
+    <div class="targets-grid">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Prompt Processing (pp512)</span>
+                <span class="badge badge-cuda" id="ppPctBadge">0%</span>
+            </div>
+            <div class="metric-main">
+                <span id="ppCurrentVal">--</span>
+                <span class="metric-unit">t/s</span>
+            </div>
+            <div class="metric-sub">
+                Target (llama.cpp): <strong id="ppTargetVal">3439.99 ± 127.06</strong> t/s
+            </div>
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="ppProgressFill" style="width: 0%;"></div>
             </div>
         </div>
 
-        <!-- REPORTS TAB -->
-        <div id="reports" class="tab-content">
-            <h3>Agent Issue Reports</h3>
-            <button class="btn-blue" onclick="loadReports()">Refresh Reports</button>
-            <table id="reportsTable">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Text Generation (tg128)</span>
+                <span class="badge badge-cuda" id="tgPctBadge">0%</span>
+            </div>
+            <div class="metric-main">
+                <span id="tgCurrentVal">--</span>
+                <span class="metric-unit">t/s</span>
+            </div>
+            <div class="metric-sub">
+                Target (llama.cpp): <strong id="tgTargetVal">69.16 ± 1.28</strong> t/s
+            </div>
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="tgProgressFill" style="width: 0%; background: var(--accent-purple);"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Current Iteration</span>
+                <span class="badge badge-pass" id="latestVersionBadge">v0</span>
+            </div>
+            <div class="metric-main" style="font-size: 20px;" id="latestIdeaText">
+                Loading...
+            </div>
+            <div class="metric-sub" id="execTimeText">
+                Total Execution Time: -- ms
+            </div>
+            <div class="metric-sub" style="margin-top: 8px;">
+                Next Version ID: <strong id="nextVersionIdText">--</strong>
+            </div>
+        </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('versionsTab', this)">Versions History</button>
+        <button class="tab-btn" onclick="switchTab('bottlenecksTab', this)">Bottleneck Analysis</button>
+        <button class="tab-btn" onclick="switchTab('submitTab', this)">Submit Kernel / Idea</button>
+        <button class="tab-btn" onclick="switchTab('jobsTab', this)">Active Jobs</button>
+        <button class="tab-btn" onclick="switchTab('recordsTab', this)">Benchmark Records</button>
+        <button class="tab-btn" onclick="switchTab('agentDocsTab', this)">Agent API Docs</button>
+        <button class="tab-btn" onclick="switchTab('suggestionsTab', this)">API Suggestions</button>
+    </div>
+
+    <!-- TAB 1: Versions History -->
+    <div id="versionsTab" class="tab-panel active">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">All Optimization Iterations (versions/N)</span>
+            </div>
+            <table>
                 <thead>
                     <tr>
-                        <th style="width: 15%;">Timestamp</th>
-                        <th style="width: 15%;">Agent ID</th>
-                        <th class="text-left">Issue Description</th>
+                        <th>Version</th>
+                        <th>Idea / Hypothesis</th>
+                        <th>pp512 (t/s)</th>
+                        <th>tg128 (t/s)</th>
+                        <th>Est. Time</th>
+                        <th>Status</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
-                <tbody></tbody>
+                <tbody id="versionsTableBody">
+                    <tr><td colspan="7" style="text-align: center;">Loading versions...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- TAB 2: Bottleneck Analysis -->
+    <div id="bottlenecksTab" class="tab-panel">
+        <div class="card" style="margin-bottom: 20px;">
+            <div class="card-header">
+                <div>
+                    <span class="card-title">Top Time-Consuming Operations</span>
+                    <span style="font-size: 12px; color: var(--text-secondary); margin-left: 8px;">Breakdown of slowest kernel executions</span>
+                </div>
+                <div>
+                    <span class="badge badge-cuda" id="analysisTotalTimeBadge">0.00 ms total</span>
+                </div>
+            </div>
+            <div style="height: 320px; max-height: 320px;">
+                <canvas id="opsChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
+                <div>
+                    <span class="card-title">Kernel Breakdown & Bottlenecks</span>
+                    <span style="font-size: 12px; color: var(--text-secondary); margin-left: 8px;" id="analysisKernelCountText">Showing all kernels</span>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <span class="badge badge-cuda" id="analysisTotalKernelsBadge">0 kernels</span>
+                    <span class="badge badge-fail" id="analysisFallbacksBadge">0 fallbacks</span>
+                </div>
+            </div>
+
+            <div class="alert-warning" id="fallbackWarning">
+                Scanning dirty region cache for fallback kernels...
+            </div>
+
+            <!-- Search and Filter Controls -->
+            <div style="display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;">
+                <div style="flex: 2; min-width: 220px;">
+                    <input type="text" id="analysisSearchInput" placeholder="Search kernels by name, path, or UID (e.g. REF_MUL, cuda, 0x6d...)" oninput="filterAnalysisTable()">
+                </div>
+                <div style="flex: 1; min-width: 150px; max-width: 200px;">
+                    <select id="analysisFilterSelect" onchange="filterAnalysisTable()">
+                        <option value="all">All Kernels</option>
+                        <option value="fallback">CPU Fallbacks Only</option>
+                        <option value="cuda">CUDA / GPU Only</option>
+                        <option value="cpu">CPU Only</option>
+                    </select>
+                </div>
+                <div style="flex: 1; min-width: 150px; max-width: 200px;">
+                    <select id="analysisSortSelect" onchange="filterAnalysisTable()">
+                        <option value="time_desc">Time (High → Low)</option>
+                        <option value="time_asc">Time (Low → High)</option>
+                        <option value="count_desc">Count (High → Low)</option>
+                        <option value="name_asc">Name (A → Z)</option>
+                        <option value="pct_desc">% Total (High → Low)</option>
+                    </select>
+                </div>
+                <button class="btn btn-secondary" onclick="resetAnalysisFilters()" style="padding: 8px 12px;">Reset</button>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Kernel / Operation</th>
+                            <th>Type</th>
+                            <th>Source File</th>
+                            <th>UID</th>
+                            <th>Count</th>
+                            <th>Time (ms)</th>
+                            <th>% Total</th>
+                            <th>Cause / Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="analysisTableBody">
+                        <tr><td colspan="8" style="text-align:center;">Loading kernels...</td></tr>
+                    </tbody>
+                    <!-- Fallback body kept for backwards compatibility -->
+                    <tbody id="fallbacksTableBody" style="display:none;"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB 3: Submit Kernel -->
+    <div id="submitTab" class="tab-panel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Submit Iteration Pipeline</span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+                Submitting will create <code>versions/N</code>, write <code>idea.md</code>, compile, clear cache, populate calls, run bench, execute bench_model, analyze the cache, and write <code>README.md</code>.
+            </p>
+            <form id="submitKernelForm" onsubmit="handleKernelSubmit(event)">
+                <div class="form-group">
+                    <label>Idea / Hypothesis (required)</label>
+                    <input type="text" id="subIdea" placeholder="e.g. Add CUDA broadcast multiply kernel to eliminate REF_MUL fallback" required>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+                    <div class="form-group">
+                        <label>Target Filename (relative, optional)</label>
+                        <input type="text" id="subFilename" placeholder="e.g. kernels/cuda/mul/NC_F32_ND.cu">
+                    </div>
+                    <div class="form-group">
+                        <label>Backend</label>
+                        <select id="subBackend">
+                            <option value="cuda">CUDA</option>
+                            <option value="cublas">cuBLAS</option>
+                            <option value="cpu">CPU</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Min Compile Time (seconds)</label>
+                        <input type="number" id="subCompileTime" value="90" max="90" min="0" step="5">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>C++ / CUDA Kernel Source Code (optional if re-benchmarking)</label>
+                    <textarea id="subSource" placeholder="#ifdef TG_USE_CUDA&#10;#include &quot;core/kernels.hpp&quot;&#10;...&#10;REGISTER_KERNEL(...);&#10;#endif"></textarea>
+                </div>
+                <button type="submit" class="btn" id="submitBtn">Launch Iteration Pipeline</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- TAB 4: Active Jobs -->
+    <div id="jobsTab" class="tab-panel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Active & Recent Jobs</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job ID</th>
+                        <th>Version</th>
+                        <th>Idea</th>
+                        <th>Status</th>
+                        <th>Step</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="jobsTableBody">
+                    <tr><td colspan="6" style="text-align: center;">No active jobs.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- TAB 5: Benchmark Records -->
+    <div id="recordsTab" class="tab-panel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Recorded Benchmarks (benchmarks/records.bin)</span>
+            </div>
+            <div style="display: flex; gap: 12px; margin-bottom: 14px;">
+                <input type="text" id="recordFilterOp" placeholder="Filter by op name (regex)..." oninput="fetchRecords()">
+                <input type="text" id="recordFilterShape" placeholder="Filter by shape (e.g. 512, 640)..." oninput="fetchRecords()">
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Operation</th>
+                        <th>Output Shape</th>
+                        <th>Input Shapes</th>
+                        <th>Benchmark Time (ms)</th>
+                    </tr>
+                </thead>
+                <tbody id="recordsTableBody">
+                    <tr><td colspan="4" style="text-align: center;">Loading records...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- TAB 6: Agent Docs -->
+    <div id="agentDocsTab" class="tab-panel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Agentic Harness Integration Specification</span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+                Any AI agent (Claude, GPT-4, Gemini, LangChain, Cursor, custom sidecar) running on this machine can connect to <code>http://localhost:8080</code>.
+            </p>
+            <h4 style="margin: 16px 0 8px;">1. Fetch Available Tools</h4>
+            <pre>GET /api/tools</pre>
+            <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">
+                Returns standard OpenAI / Anthropic function calling JSON schemas.
+            </p>
+
+            <h4 style="margin: 16px 0 8px;">2. Autonomous Optimization Loop</h4>
+            <pre>
+1. GET /api/status -> check targets (pp512: 3439.99, tg128: 69.16) & latest version
+2. GET /api/analyze -> inspect slowest ops & CPU fallbacks (e.g. REF_MUL)
+3. GET /api/versions -> review past attempts to avoid duplicate work
+4. POST /api/iteration/submit -> submit idea & new CUDA kernel code
+5. GET /api/jobs/{job_id} -> poll until status == 'completed'
+6. Repeat until target_beaten == true!
+            </pre>
+
+            <h4 style="margin: 16px 0 8px;">3. Python Client Example</h4>
+            <pre>
+import requests
+
+bench_url = "http://localhost:8080"
+status = requests.get(f"{bench_url}/api/status").json()
+print("Current best:", status["current_best"])
+
+# Submit optimization
+job = requests.post(f"{bench_url}/api/iteration/submit", json={
+    "idea": "Non-contiguous CUDA Multiply Kernel",
+    "filename": "kernels/cuda/mul/NC_F32_ND.cu",
+    "source": "&lt;kernel code&gt;",
+    "backend": "cuda",
+    "min_compile_time": 90.0
+}).json()
+print("Job queued:", job["job_id"])
+            </pre>
+        </div>
+    </div>
+
+    <!-- TAB 7: API Suggestions -->
+    <div id="suggestionsTab" class="tab-panel">
+        <div class="card" style="margin-bottom: 20px;">
+            <div class="card-header">
+                <span class="card-title">Agent & Developer API Suggestions</span>
+                <span class="badge badge-cuda" id="suggestionCountBadge">0 suggestions</span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+                Suggestions submitted via <code>POST /api/suggestions</code> or the form below. Agents use this to propose API enhancements or harness features.
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Category</th>
+                        <th>Suggested Endpoint</th>
+                        <th>Description / Rationale</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody id="suggestionsTableBody">
+                    <tr><td colspan="7" style="text-align: center;">Loading suggestions...</td></tr>
+                </tbody>
             </table>
         </div>
 
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Submit API Improvement Suggestion</span>
+            </div>
+            <form id="submitSuggestionForm" onsubmit="handleSuggestionSubmit(event)">
+                <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px;">
+                    <div class="form-group">
+                        <label>Title (required)</label>
+                        <input type="text" id="sugTitle" placeholder="e.g. Add streaming logs endpoint for live kernel builds" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Category</label>
+                        <select id="sugCategory">
+                            <option value="new_endpoint">New Endpoint</option>
+                            <option value="schema_change">Schema Change</option>
+                            <option value="performance">Performance & Profiling</option>
+                            <option value="developer_experience">Developer / Agent Experience</option>
+                            <option value="other">Other</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Suggested Endpoint (optional)</label>
+                    <input type="text" id="sugEndpoint" placeholder="e.g. GET /api/jobs/{job_id}/stream">
+                </div>
+                <div class="form-group">
+                    <label>Description & Rationale (required)</label>
+                    <textarea id="sugDescription" style="min-height: 100px;" placeholder="Explain why this change is helpful for agentic optimization harnesses..." required></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Proposed Schema / Implementation Notes (optional)</label>
+                    <textarea id="sugProposed" style="min-height: 100px;" placeholder="Sample JSON payload or implementation ideas..."></textarea>
+                </div>
+                <button type="submit" class="btn" id="sugSubmitBtn">Submit Suggestion</button>
+            </form>
+        </div>
     </div>
+</div>
 
-    <script>
-        function switchTab(tabId) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-            document.getElementById(tabId).classList.add('active');
-            event.currentTarget.classList.add('active');
+<!-- Log Viewer Modal -->
+<div class="modal-overlay" id="logModal" onclick="closeModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3 id="modalTitle">Version Details</h3>
+            <button class="close-btn" onclick="closeModalDirect()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="tabs" style="margin-bottom: 14px;">
+                <button class="tab-btn active" onclick="switchModalTab('mReadmeTab', this)">README.md</button>
+                <button class="tab-btn" onclick="switchModalTab('mIdeaTab', this)">idea.md</button>
+                <button class="tab-btn" onclick="switchModalTab('mTestTab', this)">test.log</button>
+                <button class="tab-btn" onclick="switchModalTab('mBenchTab', this)">bench_model.log</button>
+                <button class="tab-btn" onclick="switchModalTab('mCacheTab', this)">cache_analysis.log</button>
+                <button class="tab-btn" onclick="switchModalTab('mBuildTab', this)">build.log</button>
+            </div>
+            <div id="mReadmeTab" class="modal-tab-content active"><pre id="mReadmeContent">Loading...</pre></div>
+            <div id="mIdeaTab" class="modal-tab-content" style="display:none;"><pre id="mIdeaContent">Loading...</pre></div>
+            <div id="mTestTab" class="modal-tab-content" style="display:none;"><pre id="mTestContent">Loading...</pre></div>
+            <div id="mBenchTab" class="modal-tab-content" style="display:none;"><pre id="mBenchContent">Loading...</pre></div>
+            <div id="mCacheTab" class="modal-tab-content" style="display:none;"><pre id="mCacheContent">Loading...</pre></div>
+            <div id="mBuildTab" class="modal-tab-content" style="display:none;"><pre id="mBuildContent">Loading...</pre></div>
+        </div>
+    </div>
+</div>
 
-            if (tabId === 'reports') loadReports();
+<script>
+let opsChart = null;
+
+function switchTab(tabId, btn) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(tabId).classList.add('active');
+    btn.classList.add('active');
+    if (tabId === 'bottlenecksTab') fetchAnalysis();
+    if (tabId === 'recordsTab') fetchRecords();
+    if (tabId === 'suggestionsTab') fetchSuggestions();
+}
+
+function switchModalTab(tabId, btn) {
+    document.querySelectorAll('.modal-tab-content').forEach(p => p.style.display = 'none');
+    document.querySelectorAll('.modal .tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(tabId).style.display = 'block';
+    btn.classList.add('active');
+}
+
+async function fetchStatus() {
+    try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        document.getElementById('modelNameText').innerText = data.target_model || 'gemma-3-270m';
+        const best = data.current_best || {};
+        const targets = data.targets || {};
+
+        document.getElementById('ppCurrentVal').innerText = best.pp512_tps ? best.pp512_tps.toFixed(2) : '--';
+        document.getElementById('tgCurrentVal').innerText = best.tg128_tps ? best.tg128_tps.toFixed(2) : '--';
+
+        const ppTarget = targets.pp512 ? targets.pp512.tps : 3439.99;
+        const tgTarget = targets.tg128 ? targets.tg128.tps : 69.16;
+
+        document.getElementById('ppTargetVal').innerText = ppTarget.toFixed(2);
+        document.getElementById('tgTargetVal').innerText = tgTarget.toFixed(2);
+
+        document.getElementById('ppPctBadge').innerText = (best.pp512_pct || 0) + '%';
+        document.getElementById('tgPctBadge').innerText = (best.tg128_pct || 0) + '%';
+
+        document.getElementById('ppProgressFill').style.width = Math.min(100, best.pp512_pct || 0) + '%';
+        document.getElementById('tgProgressFill').style.width = Math.min(100, best.tg128_pct || 0) + '%';
+
+        const badge = document.getElementById('targetStatusBadge');
+        if (data.target_beaten) {
+            badge.className = 'badge badge-pass';
+            badge.innerText = 'Target Beaten!';
+        } else {
+            badge.className = 'badge badge-fail';
+            badge.innerText = 'Below Target';
         }
 
-        // ====== Dashboard Logic ======
-        async function loadHistory() {
-            if (!document.getElementById('dashboard').classList.contains('active')) return;
+        const latest = data.latest_version;
+        if (latest) {
+            document.getElementById('latestVersionBadge').innerText = 'v' + latest.version;
+            document.getElementById('latestIdeaText').innerText = latest.idea || 'Iterative test';
+            document.getElementById('execTimeText').innerText = 'Total Est. Time: ' + (latest.total_estimated_time_ms ? latest.total_estimated_time_ms.toFixed(1) + ' ms' : '--');
+        }
+        document.getElementById('nextVersionIdText').innerText = 'v' + data.next_version_id;
 
-            const res = await fetch('/api/history');
-            const data = await res.json();
+        fetchVersions();
+    } catch (e) {
+        console.error("Status fetch failed:", e);
+    }
+}
 
-            const tbody = document.querySelector('#historyTable tbody');
-            tbody.innerHTML = '';
+async function fetchVersions() {
+    try {
+        const res = await fetch('/api/versions');
+        const data = await res.json();
+        const tbody = document.getElementById('versionsTableBody');
+        tbody.innerHTML = '';
 
-            const chartLabels = [];
-            const chartData = [];
+        if (!data.versions || data.versions.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No versions found.</td></tr>';
+            return;
+        }
 
-            data.history.forEach(job => {
-                const timeStr = new Date(job.started_at || job.completed_at || Date.now()).toLocaleString();
-                if (job.status === 'completed' && job.total_estimated_time_ms) {
-                    chartLabels.push(timeStr);
-                    chartData.push(job.total_estimated_time_ms);
-                }
+        data.versions.forEach(v => {
+            const tr = document.createElement('tr');
+            const pp = v.metrics && v.metrics.pp512 ? v.metrics.pp512.tps.toFixed(2) : '--';
+            const tg = v.metrics && v.metrics.tg128 ? v.metrics.tg128.tps.toFixed(2) : '--';
+            const est = v.total_estimated_time_ms ? v.total_estimated_time_ms.toFixed(1) + ' ms' : '--';
 
-                const tr = document.createElement('tr');
-                const getIcon = (cond) => cond ? '<span class="check">✔</span>' : '<span class="cross">✘</span>';
-                const s = job.steps || {};
-                const scores = (job.benchmark_scores || []).map(num => num.toFixed(3)).join(', ');
+            tr.innerHTML = `
+                <td><strong>v${v.version}</strong></td>
+                <td>${v.idea || 'Iteration'}</td>
+                <td>${pp}</td>
+                <td>${tg}</td>
+                <td>${est}</td>
+                <td><span class="badge ${v.status === 'completed' ? 'badge-pass' : 'badge-cuda'}">${v.status}</span></td>
+                <td>
+                    <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewVersionLogs(${v.version})">View Logs</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error("Versions fetch failed:", e);
+    }
+}
 
-                tr.innerHTML = `
-                <td class="text-left">${timeStr}</td>
-                <td class="text-left">${job.opname}</td>
-                <td>${job.target_model || '-'}</td>
-                <td class="status-${job.status}">${job.status}</td>
-                <td>${getIcon(s.compile && s.compile.exit_code === 0)}</td>
-                <td>${getIcon(s.test_no_records && s.test_no_records.exit_code === 0)}</td>
-                <td>${getIcon(s.matched)}</td>
-                <td>${getIcon(s.test_records && s.test_records.exit_code === 0)}</td>
-                <td>${getIcon(s.extracted)}</td>
-                <td class="scores">${scores || '-'}</td>
-                <td><strong>${job.total_estimated_time_ms ? job.total_estimated_time_ms.toFixed(2) : '-'}</strong></td>
-                `;
-                tbody.appendChild(tr);
-            });
+async function viewVersionLogs(versionId) {
+    document.getElementById('modalTitle').innerText = `Version ${versionId} Details`;
+    document.getElementById('logModal').classList.add('open');
 
-            const ctx = document.getElementById('progressChart').getContext('2d');
-            if (window.myChart) window.myChart.destroy();
-            window.myChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: chartLabels,
-                    datasets: [{
-                        label: 'Total Estimated Execution Time (ms)',
-                        data: chartData,
-                        borderColor: '#007bff',
-                        backgroundColor: 'rgba(0, 123, 255, 0.1)',
-                        tension: 0.1,
-                        fill: true
-                    }]
+    try {
+        const res = await fetch(`/api/versions/${versionId}`);
+        const data = await res.json();
+        const files = data.files || {};
+
+        document.getElementById('mReadmeContent').innerText = files['README.md'] || 'No README.md found.';
+        document.getElementById('mIdeaContent').innerText = files['idea.md'] || 'No idea.md found.';
+        document.getElementById('mTestContent').innerText = files['test.log'] || 'No test.log found.';
+        document.getElementById('mBenchContent').innerText = files['bench_model.log'] || 'No bench_model.log found.';
+        document.getElementById('mCacheContent').innerText = files['cache_analysis.log'] || 'No cache_analysis.log found.';
+        document.getElementById('mBuildContent').innerText = files['build.log'] || 'No build.log found.';
+    } catch (e) {
+        alert("Failed to load logs: " + e);
+    }
+}
+
+function closeModal(e) {
+    if (e.target.id === 'logModal') {
+        document.getElementById('logModal').classList.remove('open');
+    }
+}
+function closeModalDirect() {
+    document.getElementById('logModal').classList.remove('open');
+}
+
+let currentAnalysisKernels = [];
+let opsChart = null;
+
+async function fetchAnalysis() {
+    try {
+        const res = await fetch('/api/analyze');
+        const data = await res.json();
+        if (data.error) {
+            const warnEl = document.getElementById('fallbackWarning');
+            if (warnEl) {
+                warnEl.innerText = data.error;
+                warnEl.style.display = 'block';
+            }
+            return;
+        }
+
+        const totalTime = data.total_estimated_time_ms || 0.0;
+        const totalTimeEl = document.getElementById('analysisTotalTimeBadge');
+        if (totalTimeEl) {
+            totalTimeEl.innerText = `${totalTime.toFixed(2)} ms total`;
+        }
+
+        // Store kernels (all kernels by default)
+        currentAnalysisKernels = data.kernels || data.all_kernels || data.top_ops || [];
+
+        // Summary metrics
+        const totalCount = (data.summary && data.summary.total_kernels) || currentAnalysisKernels.length;
+        const fallbacksCount = (data.summary && data.summary.fallback_count) || (data.cpu_fallbacks ? data.cpu_fallbacks.length : 0);
+        const fallbackTime = (data.summary && data.summary.fallback_time_ms) || 0;
+        const fallbackPct = (data.summary && data.summary.fallback_percentage) || 0;
+
+        const totalKernelsBadge = document.getElementById('analysisTotalKernelsBadge');
+        if (totalKernelsBadge) totalKernelsBadge.innerText = `${totalCount} kernels`;
+
+        const fallbacksBadge = document.getElementById('analysisFallbacksBadge');
+        if (fallbacksBadge) fallbacksBadge.innerText = `${fallbacksCount} fallbacks`;
+
+        // Update fallback warning banner
+        const warnEl = document.getElementById('fallbackWarning');
+        if (warnEl) {
+            if (fallbacksCount === 0) {
+                warnEl.innerHTML = 'All operations running on GPU! No CPU reference kernel fallbacks detected.';
+                warnEl.style.background = 'rgba(63, 185, 80, 0.15)';
+                warnEl.style.borderColor = 'var(--accent-green)';
+                warnEl.style.color = '#7ee787';
+            } else {
+                warnEl.innerHTML = `Warning: <strong>${fallbacksCount} operations</strong> fall back to CPU reference implementations, costing <strong>~${fallbackTime.toFixed(1)} ms</strong> (${fallbackPct.toFixed(1)}% of total execution time). <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px; margin-left: 8px;" onclick="showFallbacksOnly()">Filter Fallbacks</button>`;
+                warnEl.style.background = 'rgba(210, 153, 34, 0.15)';
+                warnEl.style.borderColor = 'var(--accent-orange)';
+                warnEl.style.color = '#e3b341';
+            }
+        }
+
+        // Render Ops Chart (Top 10 operations with clean useful names)
+        const topOps = (data.top_ops || currentAnalysisKernels).slice(0, 10);
+        const labels = topOps.map(o => (o.op || o.name || 'Unknown'));
+        const values = topOps.map(o => o.time_ms);
+        const colors = topOps.map(o => {
+            if (o.is_fallback || (o.op && o.op.includes('REF_'))) return '#f85149';
+            if (o.device === 'CUDA' || o.category === 'cuda') return '#58a6ff';
+            return '#a371f7';
+        });
+
+        const ctx = document.getElementById('opsChart').getContext('2d');
+        if (opsChart) opsChart.destroy();
+        opsChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Execution Time (ms)',
+                    data: values,
+                    backgroundColor: colors,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const k = topOps[context.dataIndex];
+                                return [
+                                    `Time: ${k.time_ms.toFixed(2)} ms (${k.percentage || 0}%)`,
+                                    `Device: ${k.device || 'Unknown'}`,
+                                    `Count: ${k.count != null ? k.count.toLocaleString() : '--'}`,
+                                    k.path ? `Path: ${k.path}` : ''
+                                ].filter(Boolean);
+                            }
+                        }
+                    }
                 },
-                options: { scales: { y: { beginAtZero: false } } }
-            });
-        }
-
-        async function submitKernel() {
-            const source = document.getElementById('source').value;
-            const opname = document.getElementById('opname').value;
-            const backend = document.getElementById('backend').value;
-            const target_model = document.getElementById('target_model').value;
-
-            document.getElementById('submitMsg').innerText = "Submitting...";
-            document.getElementById('submitMsg').style.color = "orange";
-
-            const res = await fetch('/api/kernels/test', {
-                method: 'POST',
-                body: JSON.stringify({ source, opname, backend, target_model })
-            });
-            const data = await res.json();
-            document.getElementById('submitMsg').innerText = "Queued: " + data.job_id;
-            document.getElementById('submitMsg').style.color = "green";
-            setTimeout(loadHistory, 1000);
-        }
-
-        // ====== Agent Tools Logic ======
-        function displayOutput(data) {
-            document.getElementById('toolOutputBox').innerText = typeof data === 'object' ? JSON.stringify(data, null, 2) : data;
-        }
-
-        async function callApi(endpoint) {
-            document.getElementById('toolOutputBox').innerText = "Loading...";
-            try {
-                const res = await fetch(endpoint);
-                displayOutput(await res.json());
-            } catch (err) {
-                displayOutput("Error: " + err);
-            }
-        }
-
-        async function callAnalyze() {
-            const tm = document.getElementById('analyze_model').value;
-            callApi(`/api/analyze?target_model=${tm}`);
-        }
-
-        async function callBenchmarks() {
-            const tm = document.getElementById('bench_model').value;
-            const op = encodeURIComponent(document.getElementById('bench_op').value);
-            const shape = encodeURIComponent(document.getElementById('bench_shape').value);
-            callApi(`/api/read_benchmarks?target_model=${tm}&op=${op}&shape=${shape}`);
-        }
-
-        async function callReadModel() {
-            const tm = document.getElementById('read_model_sel').value;
-            callApi(`/api/kernels/read_model?target_model=${tm}`);
-        }
-
-        async function callReadSource() {
-            const path = encodeURIComponent(document.getElementById('read_path').value);
-            if (!path) return displayOutput("Please enter a path.");
-            callApi(`/api/kernels/read_source?path=${path}`);
-        }
-
-        // ====== Reports Logic ======
-        async function loadReports() {
-            const tbody = document.querySelector('#reportsTable tbody');
-            tbody.innerHTML = '<tr><td colspan="3">Loading...</td></tr>';
-            try {
-                const res = await fetch('/api/reports');
-                const data = await res.json();
-                tbody.innerHTML = '';
-                if (data.reports.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3">No reports found.</td></tr>';
-                    return;
+                scales: {
+                    x: {
+                        ticks: {
+                            color: '#8b949e',
+                            font: { size: 11 },
+                            maxRotation: 30,
+                            minRotation: 0
+                        }
+                    },
+                    y: {
+                        ticks: { color: '#8b949e' },
+                        grid: { color: '#21262d' }
+                    }
                 }
-                data.reports.forEach(r => {
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = `
-                        <td>${new Date(r.timestamp).toLocaleString()}</td>
-                        <td>${r.agent_id || 'N/A'}</td>
-                        <td class="report-desc">${r.issue_description || ''}</td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-            } catch (e) {
-                tbody.innerHTML = `<tr><td colspan="3">Error loading reports: ${e}</td></tr>`;
             }
+        });
+
+        // Populate table with all kernels by default
+        filterAnalysisTable();
+
+    } catch (e) {
+        console.error("Analysis fetch error:", e);
+    }
+}
+
+function renderAnalysisTable(kernels) {
+    const tbody = document.getElementById('analysisTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (!kernels || kernels.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-secondary); padding:20px;">No matching kernels found.</td></tr>';
+        return;
+    }
+
+    kernels.forEach(k => {
+        const tr = document.createElement('tr');
+        const isRef = k.is_fallback || (k.name && k.name.includes('REF_'));
+        let typeBadge = '<span class="badge" style="background:rgba(163,113,247,0.15);color:#a371f7;border:1px solid rgba(163,113,247,0.4);">CPU General</span>';
+        if (isRef) {
+            typeBadge = '<span class="badge badge-fail">CPU Fallback</span>';
+        } else if (k.device === 'CUDA' || k.category === 'cuda') {
+            typeBadge = '<span class="badge badge-cuda">CUDA</span>';
         }
 
-        // Init
-        loadHistory();
-        setInterval(loadHistory, 10000); 
-    </script>
-</body>
+        const causeText = k.cause || (isRef ? 'CPU reference fallback' : (k.device === 'CUDA' ? 'Native GPU execution' : 'General CPU kernel'));
+        const countStr = k.count != null ? k.count.toLocaleString() : '--';
+        const pctStr = k.percentage != null ? `${k.percentage.toFixed(1)}%` : '--';
+        const pctBadgeClass = k.percentage > 15 ? 'badge-fail' : (k.percentage > 5 ? 'badge-cuda' : '');
 
+        tr.innerHTML = `
+            <td><strong style="color:${isRef ? '#f85149' : 'var(--text-primary)'}; font-family:monospace; font-size:12px;">${k.op || k.name}</strong></td>
+            <td>${typeBadge}</td>
+            <td><code style="font-size:11px; color:#8b949e;" title="${k.path || ''}">${k.path ? (k.path.length > 35 ? '...' + k.path.slice(-32) : k.path) : '--'}</code></td>
+            <td><code style="font-size:11px; color:#8b949e;">${k.kernel_id || '--'}</code></td>
+            <td>${countStr}</td>
+            <td><strong>${k.time_ms.toFixed(2)}</strong></td>
+            <td><span class="badge ${pctBadgeClass}">${pctStr}</span></td>
+            <td style="font-size:12px; color:var(--text-secondary);">${causeText}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function filterAnalysisTable() {
+    const search = (document.getElementById('analysisSearchInput')?.value || '').trim().toLowerCase();
+    const filterCat = document.getElementById('analysisFilterSelect')?.value || 'all';
+    const sortBy = document.getElementById('analysisSortSelect')?.value || 'time_desc';
+
+    let list = [...currentAnalysisKernels];
+
+    // Filter
+    list = list.filter(k => {
+        const isFallback = k.is_fallback || (k.name && k.name.includes('REF_'));
+        const category = k.category || (isFallback ? 'fallback' : (k.device === 'CUDA' ? 'cuda' : 'cpu'));
+
+        if (filterCat === 'fallback' && !isFallback) return false;
+        if (filterCat === 'cuda' && category !== 'cuda') return false;
+        if (filterCat === 'cpu' && category !== 'cpu' && !isFallback) return false;
+
+        if (search) {
+            const str = `${k.name || ''} ${k.op || ''} ${k.path || ''} ${k.kernel_id || ''} ${k.cause || ''} ${k.device || ''}`.toLowerCase();
+            if (!str.includes(search)) return false;
+        }
+        return true;
+    });
+
+    // Sort
+    list.sort((a, b) => {
+        if (sortBy === 'time_desc') return (b.time_ms || 0) - (a.time_ms || 0);
+        if (sortBy === 'time_asc') return (a.time_ms || 0) - (b.time_ms || 0);
+        if (sortBy === 'count_desc') return (b.count || 0) - (a.count || 0);
+        if (sortBy === 'pct_desc') return (b.percentage || 0) - (a.percentage || 0);
+        if (sortBy === 'name_asc') return (a.name || a.op || '').localeCompare(b.name || b.op || '');
+        return (b.time_ms || 0) - (a.time_ms || 0);
+    });
+
+    const countText = document.getElementById('analysisKernelCountText');
+    if (countText) {
+        countText.innerText = `Showing ${list.length} of ${currentAnalysisKernels.length} kernels`;
+    }
+
+    renderAnalysisTable(list);
+}
+
+function resetAnalysisFilters() {
+    const searchInput = document.getElementById('analysisSearchInput');
+    const filterSelect = document.getElementById('analysisFilterSelect');
+    const sortSelect = document.getElementById('analysisSortSelect');
+    if (searchInput) searchInput.value = '';
+    if (filterSelect) filterSelect.value = 'all';
+    if (sortSelect) sortSelect.value = 'time_desc';
+    filterAnalysisTable();
+}
+
+function showFallbacksOnly() {
+    const filterSelect = document.getElementById('analysisFilterSelect');
+    if (filterSelect) {
+        filterSelect.value = 'fallback';
+        filterAnalysisTable();
+    }
+}
+
+async function handleKernelSubmit(e) {
+    e.preventDefault();
+    const btn = document.getElementById('submitBtn');
+    btn.disabled = true;
+    btn.innerText = 'Submitting Iteration...';
+
+    const payload = {
+        idea: document.getElementById('subIdea').value,
+        filename: document.getElementById('subFilename').value,
+        backend: document.getElementById('subBackend').value,
+        source: document.getElementById('subSource').value,
+        min_compile_time: parseFloat(document.getElementById('subCompileTime').value || 90)
+    };
+
+    try {
+        const res = await fetch('/api/iteration/submit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert(`Iteration job queued successfully! Job ID: ${data.job_id}, Version: v${data.version}`);
+            switchTab('jobsTab', document.querySelectorAll('.tabs button')[3]);
+            fetchJobs();
+        } else {
+            alert("Submission error: " + (data.error || JSON.stringify(data)));
+        }
+    } catch (err) {
+        alert("Failed submitting: " + err);
+    } finally {
+        btn.disabled = false;
+        btn.innerText = 'Launch Iteration Pipeline';
+    }
+}
+
+async function fetchJobs() {
+    try {
+        const res = await fetch('/api/history');
+        const data = await res.json();
+        const tbody = document.getElementById('jobsTableBody');
+        tbody.innerHTML = '';
+        const list = data.history || [];
+        if (list.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;">No job history yet.</td></tr>';
+            return;
+        }
+        list.slice(0, 10).forEach(j => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><code>${j.job_id}</code></td>
+                <td>v${j.version !== undefined ? j.version : '--'}</td>
+                <td>${j.idea || '--'}</td>
+                <td><span class="badge ${j.status === 'completed' ? 'badge-pass' : (j.status === 'failed' ? 'badge-fail' : 'badge-cuda')}">${j.status}</span></td>
+                <td>${j.step || '--'}</td>
+                <td><button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewVersionLogs(${j.version})">Logs</button></td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error("Fetch jobs error:", e);
+    }
+}
+
+async function fetchRecords() {
+    const op = document.getElementById('recordFilterOp').value;
+    const shape = document.getElementById('recordFilterShape').value;
+    try {
+        const res = await fetch(`/api/benchmarks/records?op=${encodeURIComponent(op)}&shape=${encodeURIComponent(shape)}`);
+        const data = await res.json();
+        const tbody = document.getElementById('recordsTableBody');
+        tbody.innerHTML = '';
+
+        const recs = (data.records || []).slice(0, 50);
+        if (recs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;">No matching records found.</td></tr>';
+            return;
+        }
+
+        recs.forEach(r => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><code>${r.opName}</code></td>
+                <td>${JSON.stringify(r.outputShapes || r.outputShape)}</td>
+                <td>${JSON.stringify(r.inputShapes)}</td>
+                <td>${r.runTime ? r.runTime.toFixed(4) : '--'}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error("Fetch records error:", e);
+    }
+}
+
+async function fetchSuggestions() {
+    try {
+        const res = await fetch('/api/suggestions');
+        const data = await res.json();
+        const tbody = document.getElementById('suggestionsTableBody');
+        tbody.innerHTML = '';
+
+        const list = data.suggestions || [];
+        document.getElementById('suggestionCountBadge').innerText = `${list.length} suggestion${list.length === 1 ? '' : 's'}`;
+
+        if (list.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No suggestions submitted yet. Use the form below or POST /api/suggestions.</td></tr>';
+            return;
+        }
+
+        list.forEach(s => {
+            const tr = document.createElement('tr');
+            const dateStr = s.timestamp ? new Date(s.timestamp).toLocaleString() : '--';
+            const actionHtml = s.status !== 'resolved'
+                ? `<button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="resolveSuggestion('${s.suggestion_id}')">Mark Resolved</button>`
+                : `<span style="font-size: 11px; color: var(--accent-green); font-weight: 600;">✓ Resolved</span>`;
+            tr.innerHTML = `
+                <td><strong>${s.title}</strong></td>
+                <td><span class="badge badge-cuda">${s.category || 'general'}</span></td>
+                <td><code>${s.suggested_endpoint || '--'}</code></td>
+                <td>
+                    <div style="font-size: 12px; color: var(--text-primary);">${s.description}</div>
+                    ${s.proposed_changes ? `<pre style="margin-top:6px; max-height:100px; padding:6px; font-size:11px;">${s.proposed_changes}</pre>` : ''}
+                </td>
+                <td><span class="badge ${s.status === 'resolved' ? 'badge-pass' : 'badge-cuda'}">${s.status || 'open'}</span></td>
+                <td>${actionHtml}</td>
+                <td style="font-size: 11px; color: var(--text-secondary); white-space: nowrap;">${dateStr}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error("Fetch suggestions error:", e);
+    }
+}
+
+async function resolveSuggestion(id) {
+    try {
+        const res = await fetch(`/api/suggestions/${id}/resolve`, { method: 'POST' });
+        if (res.ok) {
+            fetchSuggestions();
+        } else {
+            const err = await res.json();
+            alert("Failed to update suggestion: " + (err.error || JSON.stringify(err)));
+        }
+    } catch (e) {
+        alert("Error updating suggestion: " + e);
+    }
+}
+
+async function handleSuggestionSubmit(e) {
+    e.preventDefault();
+    const btn = document.getElementById('sugSubmitBtn');
+    btn.disabled = true;
+    btn.innerText = 'Submitting...';
+
+    const payload = {
+        title: document.getElementById('sugTitle').value,
+        category: document.getElementById('sugCategory').value,
+        suggested_endpoint: document.getElementById('sugEndpoint').value,
+        description: document.getElementById('sugDescription').value,
+        proposed_changes: document.getElementById('sugProposed').value,
+        agent_id: 'dashboard-user'
+    };
+
+    try {
+        const res = await fetch('/api/suggestions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert(`Suggestion submitted successfully! ID: ${data.suggestion_id}`);
+            document.getElementById('submitSuggestionForm').reset();
+            fetchSuggestions();
+        } else {
+            alert("Error: " + (data.error || JSON.stringify(data)));
+        }
+    } catch (err) {
+        alert("Failed to submit suggestion: " + err);
+    } finally {
+        btn.disabled = false;
+        btn.innerText = 'Submit Suggestion';
+    }
+}
+
+// Initial poll
+fetchStatus();
+setInterval(fetchStatus, 10000);
+</script>
+</body>
 </html>

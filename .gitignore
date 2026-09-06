@@ -23,6 +23,8 @@ wsl_venv
 diff.txt
 wsl_env
 egraph_viewer/egraphs
+versions/
+kernel_bench/suggestions.jsonl
 tensor_graphs_cpp/main
 tensor_graphs_cpp/bench
 tensor_graphs_cpp/bench_model

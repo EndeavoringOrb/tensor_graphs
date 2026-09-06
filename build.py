@@ -755,7 +755,10 @@ class CodeGenerator:
 
             if not self.config.use_opencl and ("kernels/opencl" in inc_path.lower()):
                 continue
-            if not self.config.use_cuda and ("kernels/cuda" in inc_path.lower()):
+            if not self.config.use_cuda and (
+                "kernels/cuda" in inc_path.lower()
+                or "kernels/cublas" in inc_path.lower()
+            ):
                 continue
 
             file_hash = self.get_file_hash(path)
@@ -974,6 +977,7 @@ class Toolchain:
                 if not self.platform.is_windows:
                     flags.append(f"-Wl,-rpath,{self.platform.cuda_lib_dir}")
             flags.append("-lcudart")
+            flags.append("-lcublas")
 
         if self.config.use_opencl:
             if self.platform.opencl_lib_dir:

@@ -1,4 +1,4 @@
-# kernel_bench/jobs.py
+# File: kernel_bench/jobs.py
 import json
 import os
 import re
@@ -14,45 +14,57 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KERNELS_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "kernels"
 BENCHMARKS_DIR = PROJECT_ROOT / "benchmarks"
 CACHE_DIR = PROJECT_ROOT / "dirty_region_caches"
+VERSIONS_DIR = PROJECT_ROOT / "versions"
 HISTORY_FILE = PROJECT_ROOT / "kernel_bench" / "jobs_history.jsonl"
 REPORTS_FILE = PROJECT_ROOT / "kernel_bench" / "reports.jsonl"
+SUGGESTIONS_FILE = PROJECT_ROOT / "kernel_bench" / "suggestions.jsonl"
 GENERATED_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "generated"
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from utils.binary import (
-    BinaryReader,
-    load_cache_file,
-)
+from utils.binary import BinaryReader, load_cache_file
+from utils.common import format_op_name, load_uids_from_cpp, natural_sort_key
+
+LLAMA_CPP_TARGETS = {
+    "gemma-3-270m": {
+        "pp512": {"tps": 3439.99, "stdev": 127.06},
+        "tg128": {"tps": 69.16, "stdev": 1.28},
+    }
+}
 
 TIMEOUTS = {
     "build": 600,
-    "test": 600,
-    "infer": 1200,
-    "bench": 1800,
+    "test": 120,
+    "bench_model": 900,
+    "bench": 180,
+    "analysis": 120,
 }
+
+
+def extractRegisteredKernelNames(source_text: str) -> list:
+    if not source_text:
+        return []
+    matches = re.findall(r'REGISTER_KERNEL(?:_VIEW)?\s*\(\s*["\']([^"\']+)["\']', source_text)
+    return list(dict.fromkeys(matches))
+
 
 jobs: dict = {}
 worker_lock = threading.Lock()
 report_lock = threading.Lock()
+suggestion_lock = threading.Lock()
 
 
-def save_report(report_data):
-    with report_lock, open(REPORTS_FILE, "a") as f:
-        f.write(json.dumps(report_data) + "\n")
+def getPythonExe() -> str:
+    if os.name == "nt":
+        venv_py = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_py = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    return sys.executable
 
 
-def load_reports():
-    reports = []
-    if REPORTS_FILE.exists():
-        with report_lock, open(REPORTS_FILE, "r") as f:
-            for line in f:
-                if line.strip():
-                    reports.append(json.loads(line))
-    return list(reversed(reports))
-
-
-def get_hw_info():
+def getHwInfo() -> str:
     info = "not available"
     hwinfo_path = PROJECT_ROOT / "hwinfo.txt"
     if hwinfo_path.exists():
@@ -60,26 +72,302 @@ def get_hw_info():
     return info
 
 
-def save_job_history(job):
-    print(f"[INFO] Saving job {job['job_id']} history to {HISTORY_FILE}")
-    with open(HISTORY_FILE, "a") as f:
-        f.write(json.dumps(job) + "\n")
+def saveReport(report_data: dict) -> None:
+    with report_lock, open(REPORTS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(report_data) + "\n")
 
 
-def load_job_history():
+def loadReports() -> list:
+    reports = []
+    if REPORTS_FILE.exists():
+        with report_lock, open(REPORTS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    reports.append(json.loads(line))
+    return list(reversed(reports))
+
+
+def saveSuggestion(suggestion_data: dict) -> str:
+    suggestion_id = uuid.uuid4().hex[:12]
+    suggestion_data["suggestion_id"] = suggestion_id
+    if "timestamp" not in suggestion_data:
+        suggestion_data["timestamp"] = datetime.now(timezone.utc).isoformat()
+    if "status" not in suggestion_data:
+        suggestion_data["status"] = "open"
+    with suggestion_lock, open(SUGGESTIONS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(suggestion_data) + "\n")
+    return suggestion_id
+
+
+def loadSuggestions() -> list:
+    suggestions = []
+    if SUGGESTIONS_FILE.exists():
+        with suggestion_lock, open(SUGGESTIONS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    suggestions.append(json.loads(line))
+    return list(reversed(suggestions))
+
+
+def updateSuggestionStatus(suggestion_id: str, new_status: str) -> bool:
+    updated = False
+    if not SUGGESTIONS_FILE.exists():
+        return False
+    with suggestion_lock:
+        lines = []
+        with open(SUGGESTIONS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    item = json.loads(line)
+                    if item.get("suggestion_id") == suggestion_id:
+                        item["status"] = new_status
+                        item["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        updated = True
+                    lines.append(json.dumps(item))
+        if updated:
+            with open(SUGGESTIONS_FILE, "w", encoding="utf-8") as f:
+                for line in lines:
+                    f.write(line + "\n")
+    return updated
+
+
+def saveJobHistory(job: dict) -> None:
+    job_record = dict(job)
+    if "source" in job_record:
+        del job_record["source"]
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(job_record) + "\n")
+
+
+def loadJobHistory() -> list:
     history = []
     if HISTORY_FILE.exists():
-        with open(HISTORY_FILE, "r") as f:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     history.append(json.loads(line))
     return history
 
 
-def find_next_slot(backend: str) -> str:
-    base = KERNELS_DIR / backend / "general" / "generated"
-    os.makedirs(base, exist_ok=True)
-    ext = ".cu" if backend == "cuda" else ".hpp"
+def getNextVersionId() -> int:
+    VERSIONS_DIR.mkdir(exist_ok=True)
+    existing = []
+    for item in VERSIONS_DIR.iterdir():
+        if item.is_dir() and item.name.isdigit():
+            existing.append(int(item.name))
+    return max(existing, default=-1) + 1
+
+
+def parseBenchModelMetrics(content: str) -> dict:
+    metrics = {}
+    pattern = re.compile(
+        r"\|\s*([^\s|]+)\s*\|\s*([\d.]+)\s*(?:\+\-|\+\/\-|\±)\s*([\d.]+)\s*\|"
+    )
+    for test_name, mean_str, stdev_str in pattern.findall(content):
+        test_key = test_name.strip()
+        metrics[test_key] = {
+            "tps": float(mean_str),
+            "stdev": float(stdev_str),
+        }
+    return metrics
+
+
+def getFallbackCause(name: str, path: str = "") -> str:
+    name_upper = name.upper()
+    if "COPY_TO" in name_upper:
+        return "Host <-> Device memory transfer"
+    if "CAST" in name_upper:
+        return "Missing GPU type cast kernel"
+    if "NEGATE" in name_upper:
+        return "Missing GPU elementwise negate kernel"
+    if "ARANGE" in name_upper:
+        return "Missing GPU range generation kernel"
+    if "CONCAT" in name_upper:
+        return "Missing GPU concatenation kernel"
+    if "POWER" in name_upper:
+        return "Missing GPU power/exponentiation kernel"
+    if any(k in name_upper for k in ["MUL", "DIVIDE", "ADD", "SUB", "EQ", "LT"]):
+        return "Missing GPU strided/broadcast kernel (requiresContiguous mismatch)"
+    return "Missing GPU implementation (CPU reference fallback)"
+
+
+def parseCacheAnalysis(content: str) -> dict:
+    result = {
+        "total_estimated_time_ms": 0.0,
+        "top_ops": [],
+        "kernels": [],
+        "all_kernels": [],
+        "cpu_fallbacks": [],
+        "summary": {},
+    }
+    time_match = re.search(r"Total Estimated Execution Time:\s*([\d.]+)\s*ms", content)
+    total_time = float(time_match.group(1)) if time_match else 0.0
+    result["total_estimated_time_ms"] = total_time
+
+    count_map = {}
+    top_kernel_pattern = re.compile(
+        r"^([a-zA-Z0-9_]+(?:\s*\[[^\]]+\])?)(?:\([^)]*\))?(?:\s*\[[^\]]*\])?\s*\|\s*(\d+)\s*\|\s*([\d.]+)\s*ms",
+        re.MULTILINE,
+    )
+    for raw_name, cnt, _ in top_kernel_pattern.findall(content):
+        clean_raw = raw_name.strip()
+        count_map[clean_raw] = int(cnt)
+
+    op_matches = re.findall(
+        r"^([a-zA-Z0-9_]+(?:\s*\[[^\]]+\])?)\s*\|\s*([\d.]+)\s*ms",
+        content,
+        re.MULTILINE,
+    )
+
+    all_kernels = []
+    fallbacks = []
+
+    for full_op_str, time_str in op_matches:
+        t_val = float(time_str)
+        full_op_str = full_op_str.strip()
+
+        path_match = re.search(r"\[([^\]]+)\]", full_op_str)
+        kernel_path = path_match.group(1).strip() if path_match else ""
+        kernel_name = re.sub(r"\s*\[[^\]]+\]", "", full_op_str).strip()
+
+        is_fallback = "REF_" in kernel_name or "reference" in kernel_path.lower()
+        if is_fallback:
+            device = "CPU (Reference)"
+            category = "fallback"
+        elif "cuda" in kernel_path.lower() or "cublas" in kernel_path.lower() or kernel_path.endswith(".cu") or "CUDA" in kernel_name or "CuBLAS" in kernel_name:
+            device = "CUDA"
+            category = "cuda"
+        else:
+            device = "CPU"
+            category = "cpu"
+
+        cause = getFallbackCause(kernel_name, kernel_path) if is_fallback else ""
+        pct = round((t_val / total_time * 100), 2) if total_time > 0 else 0.0
+        count = count_map.get(full_op_str, count_map.get(kernel_name, 0))
+
+        k_dict = {
+            "op": kernel_name,
+            "name": kernel_name,
+            "path": kernel_path,
+            "kernel_id": "",
+            "time_ms": t_val,
+            "count": count,
+            "percentage": pct,
+            "is_fallback": is_fallback,
+            "device": device,
+            "category": category,
+            "cause": cause,
+        }
+        all_kernels.append(k_dict)
+        if is_fallback:
+            fallbacks.append(k_dict)
+
+    result["top_ops"] = all_kernels[:20]
+    result["kernels"] = all_kernels
+    result["all_kernels"] = all_kernels
+    result["cpu_fallbacks"] = fallbacks
+
+    fallback_time = sum(f["time_ms"] for f in fallbacks)
+    result["summary"] = {
+        "total_time_ms": total_time,
+        "total_kernels": len(all_kernels),
+        "fallback_count": len(fallbacks),
+        "fallback_time_ms": round(fallback_time, 4),
+        "fallback_percentage": round(fallback_time / total_time * 100, 2) if total_time > 0 else 0.0,
+    }
+
+    return result
+
+
+def getAllVersions() -> list:
+    VERSIONS_DIR.mkdir(exist_ok=True)
+    versions_list = []
+    subdirs = sorted(
+        [d for d in VERSIONS_DIR.iterdir() if d.is_dir() and d.name.isdigit()],
+        key=lambda d: int(d.name),
+    )
+    for v_dir in subdirs:
+        v_id = int(v_dir.name)
+        idea_file = v_dir / "idea.md"
+        bench_file = v_dir / "bench_model.log"
+        cache_file = v_dir / "cache_analysis.log"
+        readme_file = v_dir / "README.md"
+        build_file = v_dir / "build.log"
+
+        idea_text = idea_file.read_text(encoding="utf-8").strip() if idea_file.exists() else ""
+        metrics = {}
+        if bench_file.exists():
+            metrics = parseBenchModelMetrics(bench_file.read_text(encoding="utf-8", errors="ignore"))
+
+        cache_summary = {}
+        if cache_file.exists():
+            cache_summary = parseCacheAnalysis(cache_file.read_text(encoding="utf-8", errors="ignore"))
+
+        readme_text = readme_file.read_text(encoding="utf-8").strip() if readme_file.exists() else ""
+
+        has_build = build_file.exists()
+        has_bench = bench_file.exists()
+        has_cache = cache_file.exists()
+
+        status = "completed" if (has_build and has_bench and has_cache) else "partial"
+
+        pp_metric = metrics.get("pp512", {})
+        tg_metric = metrics.get("tg128", {})
+        target = LLAMA_CPP_TARGETS.get("gemma-3-270m", {})
+
+        target_beaten = False
+        if pp_metric and tg_metric and target:
+            target_beaten = (
+                pp_metric.get("tps", 0) > target["pp512"]["tps"]
+                and tg_metric.get("tps", 0) > target["tg128"]["tps"]
+            )
+
+        versions_list.append({
+            "version": v_id,
+            "path": str(v_dir.relative_to(PROJECT_ROOT)),
+            "idea": idea_text,
+            "status": status,
+            "metrics": metrics,
+            "total_estimated_time_ms": cache_summary.get("total_estimated_time_ms", 0.0),
+            "top_ops": cache_summary.get("top_ops", [])[:5],
+            "cpu_fallbacks": cache_summary.get("cpu_fallbacks", [])[:3],
+            "target_beaten": target_beaten,
+            "has_readme": readme_file.exists(),
+        })
+    return versions_list
+
+
+def getVersionDetails(version_id: int) -> dict:
+    v_dir = VERSIONS_DIR / str(version_id)
+    if not v_dir.exists():
+        return {"error": f"Version {version_id} not found"}
+
+    files = {}
+    for filename in ["idea.md", "build.log", "test.log", "bench_model.log", "cache_analysis.log", "README.md"]:
+        f_path = v_dir / filename
+        if f_path.exists():
+            try:
+                files[filename] = f_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception as e:
+                files[filename] = f"[Error reading file: {e}]"
+        else:
+            files[filename] = None
+
+    metrics = parseBenchModelMetrics(files.get("bench_model.log") or "")
+    cache_analysis = parseCacheAnalysis(files.get("cache_analysis.log") or "")
+
+    return {
+        "version": version_id,
+        "files": files,
+        "metrics": metrics,
+        "cache_analysis": cache_analysis,
+    }
+
+
+def findNextSlot(backend: str, category: str = "generated") -> str:
+    base = KERNELS_DIR / backend / "general" / category
+    base.mkdir(parents=True, exist_ok=True)
+    ext = ".cu" if backend in ("cuda", "cublas") else ".hpp"
     n = 0
     while True:
         path = base / f"{n:05d}{ext}"
@@ -89,132 +377,97 @@ def find_next_slot(backend: str) -> str:
         n += 1
 
 
-def run_cmd(cmd: list[str], timeout: int) -> dict:
-    start = time.time()
+def runCmd(cmd: list[str], timeout: int, log_path: Path = None, append_log: bool = False) -> dict:
+    start_time = time.time()
     cmd_str = " ".join(cmd)
     print(f"[EXEC] Running: {cmd_str} (Timeout: {timeout}s)")
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, cwd=PROJECT_ROOT
         )
-        duration = (time.time() - start) * 1000
-        print(f"[EXEC] Finished in {duration:.2f}ms with exit code {result.returncode}")
-        if result.returncode != 0:
-            print(f"[WARN] Command stderr: {result.stderr.strip()[:200]}...")
+        duration_ms = (time.time() - start_time) * 1000
+        output_text = (result.stdout or "") + (("\n" + result.stderr) if result.stderr else "")
+        if log_path:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "a" if append_log else "w"
+            with open(log_path, mode, encoding="utf-8") as f:
+                f.write(output_text)
 
         return {
             "exit_code": result.returncode,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "duration_ms": duration,
+            "duration_ms": duration_ms,
+            "timed_out": False,
         }
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] Command TIMED OUT after {timeout}s: {cmd_str}")
+    except subprocess.TimeoutExpired as e:
+        duration_ms = timeout * 1000
+        out = (e.stdout.decode("utf-8", errors="ignore") if isinstance(e.stdout, bytes) else (e.stdout or ""))
+        err = (e.stderr.decode("utf-8", errors="ignore") if isinstance(e.stderr, bytes) else (e.stderr or ""))
+        if log_path:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "a" if append_log else "w"
+            with open(log_path, mode, encoding="utf-8") as f:
+                f.write(f"{out}\n{err}\n[TIMED OUT after {timeout}s]\n")
         return {
             "exit_code": -1,
-            "stdout": "",
-            "stderr": "TIMED OUT",
-            "duration_ms": timeout * 1000,
+            "stdout": out,
+            "stderr": f"TIMED OUT after {timeout}s: {err}",
+            "duration_ms": duration_ms,
+            "timed_out": True,
         }
 
 
-def get_uid_for_file(rel_path: str):
-    json_path = GENERATED_DIR / "kernel_uids.json"
-    if json_path.exists():
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                target_rel = rel_path.replace("\\", "/")
-                for key, info in data.items():
-                    if isinstance(info, dict) and info.get("path") == target_rel:
-                        return info.get("hex_uid")
-        except Exception:
-            pass
+def generateVersionReadme(v_id: int, idea: str, metrics: dict, cache_analysis: dict, target_model: str) -> str:
+    target = LLAMA_CPP_TARGETS.get(target_model, {}).get("pp512", {})
+    tg_target = LLAMA_CPP_TARGETS.get(target_model, {}).get("tg128", {})
+    pp_curr = metrics.get("pp512", {"tps": 0.0, "stdev": 0.0})
+    tg_curr = metrics.get("tg128", {"tps": 0.0, "stdev": 0.0})
 
-    header_path = GENERATED_DIR / "kernel_uids.gen.hpp"
-    if not header_path.exists():
-        return None
-    const_name = rel_path.replace("/", "_").replace("\\", "_").replace(".", "_").upper()
-    content = header_path.read_text()
-    match = re.search(
-        rf"constexpr uint64_t {const_name} = (0x[0-9a-fA-F]+ULL);", content
-    )
-    if match:
-        uid = match.group(1).replace("ULL", "")
-        print(f"[INFO] Resolved UID {uid} for {rel_path}")
-        return uid
-    return None
+    top_ops_md = ""
+    for op in cache_analysis.get("top_ops", [])[:10]:
+        top_ops_md += f"- `{op['op']}`: {op['time_ms']:.2f} ms\n"
 
+    cpu_fallbacks_md = ""
+    for op in cache_analysis.get("cpu_fallbacks", [])[:5]:
+        cpu_fallbacks_md += f"- `{op['op']}`: {op['time_ms']:.2f} ms\n"
+    if not cpu_fallbacks_md:
+        cpu_fallbacks_md = "None detected (all operations accelerated on GPU).\n"
 
-def analyze_total_time(target_model: str):
-    print(f"[INFO] Analyzing total time for model: {target_model}")
+    return f"""# Version {v_id}: {idea}
 
-    if target_model == "gemma-3-270m":
-        cache_paths = ["gemma-3-270m-cpp.bin"]
-    elif target_model == "flux-klein-4b":
-        cache_paths = ["flux-text.bin", "flux-trans.bin", "flux-vae.bin"]
-    else:
-        cache_paths = [f"{target_model}-cpp.bin"]
+## Idea
+{idea}
 
-    cache_paths = [CACHE_DIR / cache_path for cache_path in cache_paths]
+## Results
+| Model | Test | Tokens/sec (Achieved) | Tokens/sec (Target Llama.cpp) | Status |
+|---|---|---|---|---|
+| {target_model} | pp512 | {pp_curr.get('tps', 0.0):.2f} ± {pp_curr.get('stdev', 0.0):.2f} | {target.get('tps', 0.0):.2f} ± {target.get('stdev', 0.0):.2f} | {'BEATEN' if pp_curr.get('tps', 0) > target.get('tps', 0) else 'BELOW'} |
+| {target_model} | tg128 | {tg_curr.get('tps', 0.0):.2f} ± {tg_curr.get('stdev', 0.0):.2f} | {tg_target.get('tps', 0.0):.2f} ± {tg_target.get('stdev', 0.0):.2f} | {'BEATEN' if tg_curr.get('tps', 0) > tg_target.get('tps', 0) else 'BELOW'} |
 
-    for check_path in cache_paths:
-        if not check_path.exists():
-            message = f"[WARN] {check_path} file missing, skipping analysis."
-            print(message)
-            return 0.0, set(), message
+## Cache & Performance Analysis
+- **Total Estimated Execution Time**: {cache_analysis.get('total_estimated_time_ms', 0.0):.2f} ms
 
-    total_time = 0.0
-    extracted_uids = set()
+### Top Time-Consuming Operations:
+{top_ops_md if top_ops_md else "No operation breakdown available."}
 
-    for cache_path in cache_paths:
-        cache_entries = load_cache_file(cache_path)
-        for entry in cache_entries:
-            if entry.get("type") == "compiled_bucket":
-                graph = entry["graph"]
-                node_costs = graph.get("nodeCosts", {})
+### CPU Reference Fallbacks (Roundtrip Overhead):
+{cpu_fallbacks_md}
 
-                for inst in graph["instructions"]:
-                    uid = inst.get("kernelId", inst.get("fullKernelId"))
-                    eclass_id = inst.get("eclassId", inst.get("nodeId"))
-                    extracted_uids.add(uid)
-
-                    runtime = node_costs.get(eclass_id, 0.0)
-                    if runtime == float("inf"):
-                        runtime = 0.0
-                    total_time += runtime
-
-    message = f"[INFO] Analysis complete. Total time: {total_time:.4f}ms, Unique UIDs: {len(extracted_uids)}"
-    print(message)
-    return total_time, extracted_uids, message
+## Conclusions & Next Bottlenecks
+Continue iterating to convert remaining high-cost CPU reference fallbacks or naive CUDA kernels into optimized GPU kernels.
+"""
 
 
-def get_benchmark_scores(uid_str):
-    scores = []
-    records_path = BENCHMARKS_DIR / "records.bin"
-    if not records_path.exists() or not uid_str:
-        return scores
-    target_uid = int(uid_str, 16)
-    with open(records_path, "rb") as f:
-        br = BinaryReader(f)
-        while True:
-            r = br.read_record()
-            if r is None:
-                break
-            if r["kernelId"] == target_uid:
-                scores.append(r["runTime"])
-    return scores
-
-
-def run_worker():
-    print("[SYSTEM] Worker thread started and waiting for jobs...")
+def runWorker():
+    print("[SYSTEM] KernelBench worker thread started and listening for jobs...")
     while True:
         job_id = None
         with worker_lock:
-            for jid, job in jobs.items():
-                if job["status"] == "queued":
+            for jid, j in jobs.items():
+                if j["status"] == "queued":
                     job_id = jid
-                    job["status"] = "running"
+                    j["status"] = "running"
                     break
 
         if not job_id:
@@ -223,161 +476,169 @@ def run_worker():
 
         job = jobs[job_id]
         job["started_at"] = datetime.now(timezone.utc).isoformat()
-        opname = job["opname"]
-        target_model = job["target_model"]
+        v_id = job.get("version")
+        if v_id is None:
+            v_id = getNextVersionId()
+            job["version"] = v_id
 
-        print(f"\n[JOB {job_id}] Processing op: {opname} for model: {target_model}")
+        v_dir = VERSIONS_DIR / str(v_id)
+        v_dir.mkdir(parents=True, exist_ok=True)
+
+        idea_text = job.get("idea", "Iterative optimization").strip()
+        (v_dir / "idea.md").write_text(idea_text + "\n", encoding="utf-8")
+
+        print(f"\n[JOB {job_id}] Processing Version {v_id}: {idea_text}")
 
         try:
-            kernel_path = find_next_slot(job["backend"])
-            print(f"[JOB {job_id}] Writing kernel source to {kernel_path}")
-            with open(kernel_path, "w") as f:
-                f.write(job["source"])
-            job["kernel_file"] = kernel_path
-            job["agent_file_path"] = (
-                Path(kernel_path).relative_to(KERNELS_DIR).as_posix()
-            )
+            # Step 1: Write kernel source if supplied
+            if job.get("source"):
+                rel_kernel_path = job.get("filename")
+                if rel_kernel_path:
+                    kernel_path = (PROJECT_ROOT / "tensor_graphs_cpp" / rel_kernel_path).resolve()
+                    if not str(kernel_path).startswith(str((PROJECT_ROOT / "tensor_graphs_cpp" / "kernels").resolve())):
+                        kernel_path = (KERNELS_DIR / rel_kernel_path).resolve()
+                else:
+                    kernel_path = Path(findNextSlot(job.get("backend", "cuda")))
 
-            del job["source"]
+                if kernel_path.exists():
+                    raise Exception(f"Refusing to overwrite existing kernel at {kernel_path}. Never modify existing kernels!")
 
-            rel_path = (
-                Path(kernel_path)
-                .relative_to(PROJECT_ROOT / "tensor_graphs_cpp")
-                .as_posix()
-            )
+                kernel_path.parent.mkdir(parents=True, exist_ok=True)
+                kernel_path.write_text(job["source"], encoding="utf-8")
+                job["kernel_file"] = str(kernel_path)
+                job["agent_file_path"] = str(kernel_path.relative_to(KERNELS_DIR))
+                print(f"[JOB {job_id}] Created new kernel at {kernel_path}")
 
-            cache_file = CACHE_DIR / f"{target_model}-cpp.bin"
-            if cache_file.exists():
-                print(f"[JOB {job_id}] Clearing existing cache: {cache_file}")
-                cache_file.unlink()
+            python_exe = getPythonExe()
+            target_model = job.get("target_model", "gemma-3-270m")
+            pp = job.get("pp", 512)
+            tg = job.get("tg", 128)
+            min_compile_time = min(float(job.get("min_compile_time", 90.0)), 90.0)
 
-            python_path = ".venv/Scripts/python.exe" if os.name == "nt" else "python"
-            print(f"[JOB {job_id}] Step 1/7: Compiling...")
-            build_res = run_cmd(
-                (
-                    [python_path, "build.py", "--cuda"]
-                    if job["backend"] == "cuda"
-                    else [python_path, "build.py"]
-                ),
+            # Step 2: Build test, bench, and bench_model
+            job["step"] = "build"
+            print(f"[JOB {job_id}] Step 1/7: Building test, bench, and bench_model...")
+            build_log = v_dir / "build.log"
+            build_res = runCmd(
+                [python_exe, "build.py", "--targets", "test", "bench", "bench_model", "--log-level", "DEBUG", "--opencl", "0"],
                 TIMEOUTS["build"],
+                log_path=build_log,
             )
-            job["steps"]["compile"] = build_res
+            job["steps"]["build"] = build_res
             if build_res["exit_code"] != 0:
-                raise Exception(
-                    f"Compilation failed.\nSTDOUT:\n{build_res['stdout']}\nSTDERR:\n{build_res['stderr']}"
-                )
+                raise Exception(f"Build failed with exit code {build_res['exit_code']}.\nCheck {build_log}")
 
-            uid_str = get_uid_for_file("kernels/" + rel_path)
-            job["assigned_uid"] = uid_str
+            # Step 3: Clear dirty region caches
+            job["step"] = "clear_cache"
+            print(f"[JOB {job_id}] Step 2/7: Clearing dirty region caches...")
+            CACHE_DIR.mkdir(exist_ok=True)
+            for cache_file in CACHE_DIR.glob("*.bin"):
+                cache_file.unlink(missing_ok=True)
 
-            print(f"[JOB {job_id}] Step 2/7: Testing without records...")
-            test_no_rec_res = run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"),
-                    opname,
-                    "--no-records",
-                ],
-                TIMEOUTS["test"],
+            # Step 4: First pass of bench_model to compile & populate calls.bin
+            job["step"] = "populate_calls"
+            print(f"[JOB {job_id}] Step 3/7: Running bench_model to populate calls.bin...")
+            bench_model_bin = str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench_model")
+            bench_bin = str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench")
+            test_bin = str(PROJECT_ROOT / "tensor_graphs_cpp" / "test")
+
+            pop_res = runCmd(
+                [bench_model_bin, "--min-compile-time", str(min_compile_time), "--pp", str(pp), "--tg", str(tg), "--iters", "1", "--warmup", "0"],
+                TIMEOUTS["bench_model"],
             )
-            job["steps"]["test_no_records"] = test_no_rec_res
-            if (
-                test_no_rec_res["exit_code"] != 0
-                or "FAILED" in test_no_rec_res["stdout"]
-            ):
-                raise Exception(
-                    f"Test without records failed.\nSTDOUT:\n{test_no_rec_res['stdout']}\nSTDERR:\n{test_no_rec_res['stderr']}"
-                )
+            job["steps"]["populate_calls"] = pop_res
 
-            print(f"[JOB {job_id}] Step 3/7: Running inference to build calls.bin...")
-            run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"),
-                    target_model,
-                    "--only-plan",
-                ],
-                TIMEOUTS["infer"],
-            )
-            calls_path = BENCHMARKS_DIR / "calls.bin"
-            matched = False
-            if calls_path.exists() and uid_str:
-                uid_int = int(uid_str, 16)
-                with open(calls_path, "rb") as f:
-                    br = BinaryReader(f)
-                    while True:
-                        r = br.read_record()
-                        if r is None:
-                            break
-                        if r["kernelId"] == uid_int:
-                            matched = True
-                            break
-            print(f"[JOB {job_id}] UID Match Result: {matched}")
-            job["steps"]["matched"] = matched
-            if not matched:
-                raise Exception(
-                    "Kernel UID not matched in inference plan (calls.bin). The kernel might not be utilized or the operation signature/shapes are incorrect."
-                )
+            # Step 5: Test submitted kernel using fused kernel testing on calls.bin shapes
+            kernel_names = []
+            if job.get("kernel_name"):
+                kernel_names = [job["kernel_name"]]
+            elif job.get("source"):
+                kernel_names = extractRegisteredKernelNames(job["source"])
+            elif job.get("kernel_file") and Path(job["kernel_file"]).exists():
+                kernel_names = extractRegisteredKernelNames(Path(job["kernel_file"]).read_text(encoding="utf-8", errors="ignore"))
 
-            print(f"[JOB {job_id}] Step 4/7: Testing with records...")
-            test_rec_res = run_cmd(
-                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"), opname],
-                TIMEOUTS["test"],
-            )
-            job["steps"]["test_records"] = test_rec_res
-            if test_rec_res["exit_code"] != 0 or "FAILED" in test_rec_res["stdout"]:
-                raise Exception(
-                    f"Test with records failed.\nSTDOUT:\n{test_rec_res['stdout']}\nSTDERR:\n{test_rec_res['stderr']}"
-                )
+            if kernel_names:
+                job["step"] = "test_kernel"
+                print(f"[JOB {job_id}] Step 4/7: Testing submitted kernel(s) {kernel_names} on shapes in calls.bin...")
+                test_log = v_dir / "test.log"
+                for kname in kernel_names:
+                    test_res = runCmd([test_bin, kname], TIMEOUTS["test"], log_path=test_log, append_log=True)
+                    job["steps"][f"test_{kname}"] = test_res
+                    if test_res["exit_code"] != 0:
+                        raise Exception(
+                            f"Fused kernel test failed for kernel '{kname}' (exit code {test_res['exit_code']}).\n"
+                            f"Test output:\n{test_res.get('stdout', '')}\n{test_res.get('stderr', '')}"
+                        )
+                print(f"[JOB {job_id}] Kernel test passed successfully!")
 
-            print(f"[JOB {job_id}] Step 5/7: Benchmarking kernel...")
-            bench_res = run_cmd(
-                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench"), opname],
-                TIMEOUTS["bench"],
-            )
+            # Step 6: Benchmark newly added calls using bench (with timeout)
+            job["step"] = "bench_kernels"
+            print(f"[JOB {job_id}] Step 5/7: Running bench to populate records.bin (timeout {TIMEOUTS['bench']}s)...")
+            bench_res = runCmd([bench_bin], TIMEOUTS["bench"])
             job["steps"]["bench"] = bench_res
-            if bench_res["exit_code"] != 0:
-                raise Exception(
-                    f"Benchmark failed.\nSTDOUT:\n{bench_res['stdout']}\nSTDERR:\n{bench_res['stderr']}"
-                )
 
-            print(
-                f"[JOB {job_id}] Step 6/7: Regenerating cache with optimized routes..."
+            # Step 7: Final bench_model run with new records
+            job["step"] = "bench_model"
+            print(f"[JOB {job_id}] Step 6/7: Running bench_model with new records...")
+            bench_log = v_dir / "bench_model.log"
+            bench_final_res = runCmd(
+                [bench_model_bin, "--min-compile-time", str(min_compile_time), "--pp", str(pp), "--tg", str(tg)],
+                TIMEOUTS["bench_model"],
+                log_path=bench_log,
             )
-            run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"),
-                    target_model,
-                    "--only-plan",
-                ],
-                TIMEOUTS["infer"],
-            )
+            job["steps"]["bench_model"] = bench_final_res
+            if bench_final_res["exit_code"] != 0:
+                raise Exception(f"bench_model failed with exit code {bench_final_res['exit_code']}.\nCheck {bench_log}")
 
-            print(f"[JOB {job_id}] Step 7/7: Final time analysis...")
-            total_time, extracted_uids, message = analyze_total_time(target_model)
+            # Step 8: Analyze performance cache
+            job["step"] = "cache_analysis"
+            print(f"[JOB {job_id}] Step 7/7: Running cache analysis...")
+            cache_analysis_log = v_dir / "cache_analysis.log"
+            cache_file_target = CACHE_DIR / f"bench_{target_model}-pp{pp}-tg{tg}.bin"
+            if not cache_file_target.exists():
+                candidate_caches = list(CACHE_DIR.glob(f"*{target_model}*.bin"))
+                if candidate_caches:
+                    cache_file_target = candidate_caches[0]
 
-            is_extracted = False
-            if uid_str:
-                is_extracted = (
-                    uid_str in extracted_uids
-                    or f"0x{int(uid_str, 16):x}" in extracted_uids
+            if cache_file_target.exists():
+                runCmd(
+                    [python_exe, "utils/analyze_performance.py", "--graph", str(cache_file_target)],
+                    TIMEOUTS["analysis"],
+                    log_path=cache_analysis_log,
+                )
+            else:
+                cache_analysis_log.write_text(f"Cache file {cache_file_target} not generated.\n", encoding="utf-8")
+
+            # Parse results
+            metrics = parseBenchModelMetrics(bench_log.read_text(encoding="utf-8", errors="ignore"))
+            cache_analysis = parseCacheAnalysis(cache_analysis_log.read_text(encoding="utf-8", errors="ignore"))
+
+            job["metrics"] = metrics
+            job["cache_analysis"] = cache_analysis
+
+            # Generate README.md
+            readme_text = generateVersionReadme(v_id, idea_text, metrics, cache_analysis, target_model)
+            (v_dir / "README.md").write_text(readme_text, encoding="utf-8")
+
+            pp_res = metrics.get(f"pp{pp}", {})
+            tg_res = metrics.get(f"tg{tg}", {})
+            target_info = LLAMA_CPP_TARGETS.get(target_model, {})
+            target_beaten = False
+            if pp_res and tg_res and target_info:
+                target_beaten = (
+                    pp_res.get("tps", 0) > target_info.get(f"pp{pp}", {}).get("tps", 0)
+                    and tg_res.get("tps", 0) > target_info.get(f"tg{tg}", {}).get("tps", 0)
                 )
 
-            job["steps"]["extracted"] = is_extracted
-
-            if not is_extracted:
-                raise Exception(
-                    "Kernel was not extracted in the final optimized graph. It may be functionally valid but benchmarks slower than existing alternatives or unoptimized defaults."
-                )
-
-            job["total_estimated_time_ms"] = total_time
-            job["benchmark_scores"] = get_benchmark_scores(uid_str)
-
+            job["target_beaten"] = target_beaten
             job["status"] = "completed"
-            print(f"[SUCCESS] Job {job_id} completed successfully.")
+            job["step"] = "done"
+            print(f"[SUCCESS] Version {v_id} completed successfully! Metrics: {metrics}. Target beaten: {target_beaten}")
 
-        except Exception as e:
+        except Exception as err:
             job["status"] = "failed"
-            job["error"] = str(e)
-            print(f"[ERROR] Job {job_id} failed: {e}")
+            job["error"] = str(err)
+            print(f"[ERROR] Version {v_id} job {job_id} failed: {err}")
 
             if job.get("kernel_file") and os.path.exists(job["kernel_file"]):
                 failed_path = job["kernel_file"] + ".failed"
@@ -386,42 +647,60 @@ def run_worker():
                     job["kernel_file"] = failed_path
                     if "agent_file_path" in job:
                         job["agent_file_path"] += ".failed"
-                    print(f"[INFO] Renamed failed kernel to {failed_path}")
-                except Exception as rename_err:
-                    print(f"[WARN] Failed to rename {job['kernel_file']}: {rename_err}")
+                except Exception:
+                    pass
 
         job["completed_at"] = datetime.now(timezone.utc).isoformat()
-        save_job_history(job)
+        saveJobHistory(job)
 
 
-def start_worker():
-    t = threading.Thread(target=run_worker, daemon=True)
+def startWorker():
+    t = threading.Thread(target=runWorker, daemon=True)
     t.start()
     return t
 
 
-def create_job(source: str, opname: str, backend: str, target_model: str) -> str:
+def createJob(
+    source: str = "",
+    opname: str = "",
+    backend: str = "cuda",
+    target_model: str = "gemma-3-270m",
+    idea: str = "",
+    filename: str = "",
+    pp: int = 512,
+    tg: int = 128,
+    min_compile_time: float = 90.0,
+    version: int = None,
+    kernel_name: str = "",
+) -> str:
     job_id = uuid.uuid4().hex[:12]
-    print(f"[SYSTEM] Creating job {job_id} for {opname} ({backend})")
+    if not idea:
+        idea = f"Optimize {opname}" if opname else "Bench iteration"
+
     job = {
         "job_id": job_id,
         "status": "queued",
+        "step": "pending",
+        "version": version,
+        "idea": idea,
         "backend": backend,
         "target_model": target_model,
         "opname": opname,
+        "kernel_name": kernel_name or opname,
         "source": source,
-        "assigned_uid": None,
+        "filename": filename,
+        "pp": pp,
+        "tg": tg,
+        "min_compile_time": min_compile_time,
         "started_at": None,
         "completed_at": None,
-        "total_estimated_time_ms": None,
-        "benchmark_scores": [],
+        "metrics": {},
+        "target_beaten": False,
         "steps": {
-            "compile": None,
-            "test_no_records": None,
-            "matched": False,
-            "test_records": None,
+            "build": None,
+            "populate_calls": None,
             "bench": None,
-            "extracted": False,
+            "bench_model": None,
         },
     }
     with worker_lock:

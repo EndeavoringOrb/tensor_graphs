@@ -511,7 +511,8 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
     }
 }
 
-void runNonReferenceKernelTests(const std::string &targetKernel, bool useRecords, const std::string &cachePath)
+bool runNonReferenceKernelTests(const std::string &targetKernel = "", bool useRecords = true,
+                                const std::string &cachePath = "")
 {
     std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
     if (!cachePath.empty())
@@ -659,4 +660,11 @@ void runNonReferenceKernelTests(const std::string &targetKernel, bool useRecords
     if (skipped > 0)
         std::cout << "Tests Skipped: " << skipped << std::endl;
     std::cout << "----------------------" << std::endl;
+
+    if (!targetKernel.empty() && total == 0)
+    {
+        std::cout << "Error: Target kernel '" << targetKernel << "' not found!" << std::endl;
+        return false;
+    }
+    return (passed == total);
 }

@@ -96,8 +96,8 @@ inline void testMultiConstantArithmeticPipeline()
     LogicalId c1 = graph.constant({1}, &c1_val, DType::FLOAT32);
     LogicalId c2 = graph.constant({1}, &c2_val, DType::FLOAT32);
 
-    LogicalId c1_fill = graph.fill(c1, {4});
-    LogicalId c2_fill = graph.fill(c2, {4});
+    LogicalId c1_fill = graph.fill(c1, std::vector<uint32_t>{4});
+    LogicalId c2_fill = graph.fill(c2, std::vector<uint32_t>{4});
 
     // (x * 0.5) + 10.0
     LogicalId t1 = graph.mul(x, c1_fill);
@@ -130,7 +130,7 @@ inline void testWriteInputThroughViewOps()
     MemoryManager mem;
 
     LogicalId x = graph.input({2, 4}, DType::FLOAT32);
-    LogicalId x_view = graph.reshape(x, {8});
+    LogicalId x_view = graph.reshape(x, std::vector<int32_t>{8});
 
     LogicalId y = graph.input({8}, DType::FLOAT32);
     LogicalId out = graph.add(x_view, y);
@@ -171,7 +171,7 @@ inline void testRootNodeIsViewOp()
     LogicalId doubled = graph.mul(x, two); // [2.0, 4.0, 6.0, 8.0]
 
     // Root output is a slice view: [1..3] -> elements {4.0, 6.0}
-    LogicalId root = graph.slice(doubled, {1}, {3}, {1});
+    LogicalId root = graph.slice(doubled, std::vector<int32_t>{1}, std::vector<int32_t>{3}, std::vector<int32_t>{1});
 
     Session session(graph, mem, root, "", 0, nullptr, /*disableCaching=*/true);
     populateAllKernelDummyRecords(session.costModel);

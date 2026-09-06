@@ -84,7 +84,11 @@ int main(int argc, char *argv[])
 
     if (!skipFused)
     {
-        runNonReferenceKernelTests(targetKernel, useRecords, cachePath);
+        if (!runNonReferenceKernelTests(targetKernel, useRecords, cachePath))
+        {
+            LOG(ERROR) << "Fused kernel tests failed";
+            return 1;
+        }
     }
 
     LOG(INFO) << "finished testing";
