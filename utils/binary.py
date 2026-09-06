@@ -286,12 +286,13 @@ class BinaryReader:
             "dtype": dtype,
         }
 
-    def read_compiled_graph(self):
+    def read_compiled_graph(self, lazy=False):
         bucket = self.read_bucket()
-        node_views = self.read_map(self.read_u32, self.read_tensor_view)
-        instructions = self.read_vector(self.read_op_instruction)
-        node_costs = self.read_map(self.read_u32, self.read_float)
-        eclass_to_logical = self.read_map(self.read_u32, self.read_u32)
+        node_views = self.read_map(self.read_u32, self.read_tensor_view) or {}
+        instructions = self.read_vector(self.read_op_instruction) or []
+        node_costs = self.read_map(self.read_u32, self.read_float) or {}
+        eclass_to_logical = self.read_map(self.read_u32, self.read_u32) or {}
+        logical_to_eclass = self.read_map(self.read_u32, self.read_u32) or {}
 
         const_size = self.read_u32()
         const_staging = []
@@ -299,8 +300,13 @@ class BinaryReader:
             for _ in range(const_size):
                 eclass_id = self.read_u32()
                 data_len = self.read_u32()
-                data = self.f.read(data_len)
-                const_staging.append((eclass_id, data))
+                if data_len is not None:
+                    if lazy:
+                        self.f.seek(data_len, os.SEEK_CUR)
+                        const_staging.append((eclass_id, data_len))
+                    else:
+                        data = self.f.read(data_len)
+                        const_staging.append((eclass_id, data))
 
         return {
             "bucket": bucket,
@@ -308,8 +314,11 @@ class BinaryReader:
             "instructions": instructions,
             "nodeCosts": node_costs,
             "eclassToLogical": eclass_to_logical,
+            "logicalToEclass": logical_to_eclass,
             "constStaging": const_staging,
         }
+
+    readCompiledGraph = read_compiled_graph
 
 
 class BinaryWriter:
@@ -429,7 +438,7 @@ def load_records_file(path):
     return records
 
 
-def load_cache_file(path, string_enums=False):
+def loadCacheFile(path, string_enums=False, lazy=False):
     entries = []
     if os.path.exists(path):
         with open(path, "rb") as f:
@@ -440,8 +449,8 @@ def load_cache_file(path, string_enums=False):
                     break
                 if t == 0:  # Metadata
                     version = br.read_u32()
-                    rootId = br.read_u32()
-                    selectedCachedNodes = br.read_map(
+                    root_id = br.read_u32()
+                    selected_cached_nodes = br.read_map(
                         br.read_u32,
                         lambda: {
                             "idx": br.read_u32(),
@@ -450,30 +459,42 @@ def load_cache_file(path, string_enums=False):
                             ),
                         },
                     )
+                    bucket_weights = []
+                    if version is not None and version >= 4:
+                        bucket_weights = br.read_vector(br.read_float) or []
                     entries.append(
                         {
                             "type": "metadata",
                             "cacheVersion": version,
-                            "rootId": rootId,
-                            "selectedCachedNodes": selectedCachedNodes,
+                            "rootId": root_id,
+                            "selectedCachedNodes": selected_cached_nodes,
+                            "bucketWeights": bucket_weights,
                         }
                     )
                 elif t == 1:  # Compiled Bucket
-                    graph = br.read_compiled_graph()
+                    graph = br.read_compiled_graph(lazy=lazy)
                     entries.append({"type": "compiled_bucket", "graph": graph})
                 elif t == 2:  # Constants
                     constants = {}
                     count = br.read_u32()
                     if count is not None:
                         for _ in range(count):
-                            nodeId = br.read_u32()
+                            node_id = br.read_u32()
                             data_len = br.read_u32()
-                            data = f.read(data_len)
-                            constants[nodeId] = data
+                            if data_len is not None:
+                                if lazy:
+                                    f.seek(data_len, os.SEEK_CUR)
+                                    constants[node_id] = data_len
+                                else:
+                                    data = f.read(data_len)
+                                    constants[node_id] = data
                     entries.append({"type": "constants", "constants": constants})
                 else:
                     break
     return entries
+
+
+load_cache_file = loadCacheFile
 
 
 def get_record_identity(r):

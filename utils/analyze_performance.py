@@ -19,6 +19,9 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
         entry for entry in cache_entries if entry.get("type") == "compiled_bucket"
     ]
     num_buckets = len(compiled_buckets)
+    if num_buckets == 0:
+        print(f"No compiled buckets found in: {cache_file}")
+        return
 
     if bucket_idx is not None:
         if bucket_idx < 0 or bucket_idx >= num_buckets:
