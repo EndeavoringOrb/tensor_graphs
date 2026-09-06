@@ -1,14 +1,16 @@
-# File: kernel_bench/app.py
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import struct
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, redirect, render_template, render_template_string, request
 
 from .jobs import (
     BENCHMARKS_DIR,
@@ -45,6 +47,215 @@ from utils.common import format_op_name, load_uids_from_cpp, natural_sort_key
 
 app = Flask(__name__)
 startWorker()
+
+TOKEN_FILE = PROJECT_ROOT / ".bench_token"
+
+
+def getBenchToken() -> str:
+    env_token = os.environ.get("BENCH_SECRET_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    if TOKEN_FILE.exists():
+        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    new_token = secrets.token_hex(16)
+    try:
+        TOKEN_FILE.write_text(new_token + "\n", encoding="utf-8")
+        TOKEN_FILE.chmod(0o600)
+    except Exception as e:
+        print(f"[SECURITY] Warning: Could not write token to {TOKEN_FILE}: {e}")
+    return new_token
+
+
+BENCH_TOKEN = getBenchToken()
+print(f"[SECURITY] Protected mode active. Access Token: {BENCH_TOKEN}")
+print(f"[SECURITY] Quick access link: https://bench.endeavoringorb.com/?token={BENCH_TOKEN}")
+
+
+def checkToken(candidate: str) -> bool:
+    if not BENCH_TOKEN:
+        return True
+    if not candidate:
+        return False
+    return hmac.compare_digest(candidate.strip(), BENCH_TOKEN.strip())
+
+
+LOGIN_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KernelBench - Access Protected</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #090d16;
+            color: #e6edf3;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 36px 32px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+            text-align: center;
+        }
+        .icon { font-size: 40px; margin-bottom: 16px; }
+        h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; color: #58a6ff; }
+        p { font-size: 14px; color: #8b949e; margin-bottom: 24px; line-height: 1.5; }
+        .error {
+            background: rgba(248, 81, 73, 0.15);
+            border: 1px solid #f85149;
+            color: #ff7b72;
+            padding: 10px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 18px;
+            text-align: left;
+        }
+        .form-group { margin-bottom: 20px; text-align: left; }
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: #8b949e;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        input[type="password"], input[type="text"] {
+            width: 100%;
+            padding: 12px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #238636;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover { background: #2ea043; }
+        .footer { margin-top: 22px; font-size: 12px; color: #484f58; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔒</div>
+        <h1>KernelBench Access</h1>
+        <p>This server compiles and executes GPU kernels. Enter your secret token to continue.</p>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="/login{% if next_param %}?next={{ next_param }}{% endif %}">
+            <div class="form-group">
+                <label for="token">Secret Access Token</label>
+                <input type="password" id="token" name="token" placeholder="Paste access token..." autofocus required autocomplete="current-password">
+            </div>
+            <button type="submit">Unlock</button>
+        </form>
+        <div class="footer">Configured in .bench_token on host</div>
+    </div>
+</body>
+</html>"""
+
+
+@app.before_request
+def requireAuth():
+    if not BENCH_TOKEN:
+        return None
+
+    if request.path in ("/login", "/favicon.ico"):
+        return None
+
+    # 1. Header (CLI / API)
+    auth_header = request.headers.get("Authorization", "")
+    bearer_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    header_token = request.headers.get("X-Bench-Token", "").strip() or bearer_token
+    if header_token and checkToken(header_token):
+        return None
+
+    # 2. Cookie (Browser session)
+    cookie_token = request.cookies.get("bench_token", "").strip()
+    if cookie_token and checkToken(cookie_token):
+        return None
+
+    # 3. Query param (?token=... or ?key=...)
+    query_token = (request.args.get("token") or request.args.get("key") or "").strip()
+    if query_token and checkToken(query_token):
+        if request.method == "GET":
+            args = dict(request.args)
+            args.pop("token", None)
+            args.pop("key", None)
+            query_str = f"?{urlencode(args)}" if args else ""
+            clean_url = f"{request.path}{query_str}"
+            resp = redirect(clean_url or "/")
+            resp.set_cookie("bench_token", query_token, max_age=30 * 86400, httponly=True, samesite="Lax")
+            return resp
+        return None
+
+    # 4. Localhost bypass (only if explicitly enabled via BENCH_ALLOW_LOCAL_NOAUTH=1)
+    is_local = request.remote_addr in ("127.0.0.1", "::1") and not request.headers.get("CF-Connecting-IP") and not request.headers.get("CF-Ray")
+    if is_local and os.environ.get("BENCH_ALLOW_LOCAL_NOAUTH", "0") in ("1", "true", "yes"):
+        return None
+
+    # Unauthorized
+    is_api = request.path.startswith("/api/") or ("application/json" in request.headers.get("Accept", "") and "text/html" not in request.headers.get("Accept", ""))
+    if is_api or request.method in ("POST", "PATCH", "DELETE", "PUT"):
+        return jsonify({"error": "Unauthorized. Please provide a valid secret token via X-Bench-Token header, Bearer token, or ?token= query parameter."}), 401
+
+    next_param = request.full_path if request.query_string else request.path
+    return render_template_string(LOGIN_PAGE_HTML, next_param=next_param), 401
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    next_url = request.args.get("next", "/")
+    if not next_url.startswith("/"):
+        next_url = "/"
+
+    if request.method == "POST":
+        token_input = (request.form.get("token") or "").strip()
+        if checkToken(token_input):
+            resp = redirect(next_url)
+            resp.set_cookie("bench_token", token_input, max_age=30 * 86400, httponly=True, samesite="Lax")
+            return resp
+        error = "Invalid secret token. Please check your token and try again."
+
+    return render_template_string(LOGIN_PAGE_HTML, error=error, next_param=next_url)
+
+
+@app.get("/logout")
+def logout():
+    resp = redirect("/login")
+    resp.delete_cookie("bench_token")
+    return resp
+
 
 
 def sanitizeForJson(data):
@@ -1552,4 +1763,7 @@ def resolveSuggestionApi(suggestion_id: str):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    host = os.environ.get("BENCH_HOST", "127.0.0.1")
+    port = int(os.environ.get("BENCH_PORT", "8080"))
+    app.run(host=host, port=port, threaded=True)
+

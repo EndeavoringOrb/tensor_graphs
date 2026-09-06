@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -30,32 +31,44 @@ def safePrint(*args, **kwargs) -> None:
 class KernelBenchClient:
     """Client for any agentic harness to interface with the KernelBench server at localhost:8080."""
 
-    def __init__(self, base_url: str = BENCH_SERVER_URL):
+    def __init__(self, base_url: str = BENCH_SERVER_URL, token: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
+        self.token = token or os.environ.get("BENCH_SECRET_TOKEN")
+        if not self.token:
+            token_path = Path(__file__).resolve().parent.parent / ".bench_token"
+            if token_path.exists():
+                try:
+                    self.token = token_path.read_text(encoding="utf-8").strip()
+                except Exception:
+                    pass
+        self.session = requests.Session()
+        if self.token:
+            self.session.headers["X-Bench-Token"] = self.token
 
     def getAgentIndex(self, target_model: str = "gemma-3-270m", format: str = "json") -> Any:
         params = {"target_model": target_model}
         if format != "json":
             params["format"] = format
         headers = {"Accept": "application/json" if format == "json" else "text/markdown"}
-        res = requests.get(f"{self.base_url}/api/agent", params=params, headers=headers)
+        res = self.session.get(f"{self.base_url}/api/agent", params=params, headers=headers)
         res.raise_for_status()
         if format == "json":
             return res.json()
         return res.text
 
+
     def getStatus(self, target_model: str = "gemma-3-270m") -> Dict[str, Any]:
-        res = requests.get(f"{self.base_url}/api/status", params={"target_model": target_model})
+        res = self.session.get(f"{self.base_url}/api/status", params={"target_model": target_model})
         res.raise_for_status()
         return res.json()
 
     def getTools(self) -> List[Dict[str, Any]]:
-        res = requests.get(f"{self.base_url}/api/tools")
+        res = self.session.get(f"{self.base_url}/api/tools")
         res.raise_for_status()
         return res.json().get("tools", [])
 
     def getOpenApi(self) -> Dict[str, Any]:
-        res = requests.get(f"{self.base_url}/api/openapi.json")
+        res = self.session.get(f"{self.base_url}/api/openapi.json")
         res.raise_for_status()
         return res.json()
 
@@ -80,47 +93,47 @@ class KernelBenchClient:
             params["sort_order"] = sort_order
         if limit > 0:
             params["limit"] = limit
-        res = requests.get(f"{self.base_url}/api/analyze", params=params)
+        res = self.session.get(f"{self.base_url}/api/analyze", params=params)
         res.raise_for_status()
         return res.json()
 
     def getVersions(self) -> List[Dict[str, Any]]:
-        res = requests.get(f"{self.base_url}/api/versions")
+        res = self.session.get(f"{self.base_url}/api/versions")
         res.raise_for_status()
         return res.json().get("versions", [])
 
     def getVersionDetails(self, version_id: int) -> Dict[str, Any]:
-        res = requests.get(f"{self.base_url}/api/versions/{version_id}")
+        res = self.session.get(f"{self.base_url}/api/versions/{version_id}")
         res.raise_for_status()
         return res.json()
 
     def queryBenchmarkRecords(self, op: str = "", shape: str = "") -> List[Dict[str, Any]]:
-        res = requests.get(f"{self.base_url}/api/benchmarks/records", params={"op": op, "shape": shape})
+        res = self.session.get(f"{self.base_url}/api/benchmarks/records", params={"op": op, "shape": shape})
         res.raise_for_status()
         return res.json().get("records", [])
 
     def listKernelFiles(self) -> List[str]:
-        res = requests.get(f"{self.base_url}/api/kernels/list")
+        res = self.session.get(f"{self.base_url}/api/kernels/list")
         res.raise_for_status()
         return res.json().get("files", [])
 
     def readKernelSource(self, path: str) -> str:
-        res = requests.get(f"{self.base_url}/api/kernels/read_source", params={"path": path})
+        res = self.session.get(f"{self.base_url}/api/kernels/read_source", params={"path": path})
         res.raise_for_status()
         return res.json().get("content", "")
 
     def listCoreHeaders(self) -> List[str]:
-        res = requests.get(f"{self.base_url}/api/core/list")
+        res = self.session.get(f"{self.base_url}/api/core/list")
         res.raise_for_status()
         return res.json().get("files", [])
 
     def readCoreHeader(self, path: str) -> str:
-        res = requests.get(f"{self.base_url}/api/core/read_source", params={"path": path})
+        res = self.session.get(f"{self.base_url}/api/core/read_source", params={"path": path})
         res.raise_for_status()
         return res.json().get("content", "")
 
     def readModelSource(self, target_model: str = "gemma-3-270m") -> str:
-        res = requests.get(f"{self.base_url}/api/model/source", params={"target_model": target_model})
+        res = self.session.get(f"{self.base_url}/api/model/source", params={"target_model": target_model})
         res.raise_for_status()
         return res.json().get("content", "")
 
@@ -147,17 +160,17 @@ class KernelBenchClient:
             "tg": tg,
             "kernel_name": kernel_name,
         }
-        res = requests.post(f"{self.base_url}/api/iteration/submit", json=payload)
+        res = self.session.post(f"{self.base_url}/api/iteration/submit", json=payload)
         res.raise_for_status()
         return res.json()
 
     def getJobStatus(self, job_id: str) -> Dict[str, Any]:
-        res = requests.get(f"{self.base_url}/api/jobs/{job_id}")
+        res = self.session.get(f"{self.base_url}/api/jobs/{job_id}")
         res.raise_for_status()
         return res.json()
 
     def getJobLogs(self, job_id: str) -> Dict[str, Any]:
-        res = requests.get(f"{self.base_url}/api/jobs/{job_id}/logs")
+        res = self.session.get(f"{self.base_url}/api/jobs/{job_id}/logs")
         res.raise_for_status()
         return res.json()
 
@@ -188,7 +201,7 @@ class KernelBenchClient:
             "proposed_changes": proposed_changes,
             "category": category,
         }
-        res = requests.post(f"{self.base_url}/api/suggestions", json=payload)
+        res = self.session.post(f"{self.base_url}/api/suggestions", json=payload)
         res.raise_for_status()
         return res.json()
 
@@ -198,9 +211,10 @@ class KernelBenchClient:
             params["category"] = category
         if status:
             params["status"] = status
-        res = requests.get(f"{self.base_url}/api/suggestions", params=params)
+        res = self.session.get(f"{self.base_url}/api/suggestions", params=params)
         res.raise_for_status()
         return res.json().get("suggestions", [])
+
 
 
 class WorkerAgent(threading.Thread):
