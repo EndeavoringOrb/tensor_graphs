@@ -149,6 +149,21 @@ inline bool hasZeroStride(const std::vector<uint32_t> &shape, const std::vector<
     return false;
 }
 
+inline bool isCommutativeOp(OpType op, const std::string &op_name)
+{
+    if (op == OpType::ADD || op == OpType::MUL || op == OpType::MAX)
+        return true;
+    if (!op_name.empty())
+    {
+        if (op_name.find("Add") != std::string::npos || op_name.find("add") != std::string::npos ||
+            op_name.find("Mul") != std::string::npos || op_name.find("mul") != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline double getUniqueElements(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
 {
     if (shape.empty())
@@ -488,27 +503,43 @@ struct CostModel
                 }
 
                 // Layout and memory geometry distance
-                for (size_t i = 0; i < in_shapes.size() && i < r.inputShapes.size(); ++i)
-                {
-                    uint64_t tgt_in_stride = getInnermostStride(in_shapes[i], in_strides[i]);
-                    uint64_t ref_in_stride = getInnermostStride(r.inputShapes[i], r.inputStrides[i]);
+                auto calcInputPairDist = [&](size_t tgt_idx, size_t ref_idx) -> double {
+                    uint64_t tgt_in_stride = getInnermostStride(in_shapes[tgt_idx], in_strides[tgt_idx]);
+                    uint64_t ref_in_stride = getInnermostStride(r.inputShapes[ref_idx], r.inputStrides[ref_idx]);
+                    double d = 0.0;
                     bool tgt_in_contig = (tgt_in_stride == 1);
                     bool ref_in_contig = (ref_in_stride == 1);
                     if (tgt_in_contig != ref_in_contig)
                     {
-                        dist += 10.0;
+                        d += 10.0;
                     }
                     else if (!tgt_in_contig && !ref_in_contig)
                     {
-                        dist += 0.5 * std::abs(std::log(std::max(1.0, static_cast<double>(tgt_in_stride))) -
-                                               std::log(std::max(1.0, static_cast<double>(ref_in_stride))));
+                        d += 0.5 * std::abs(std::log(std::max(1.0, static_cast<double>(tgt_in_stride))) -
+                                            std::log(std::max(1.0, static_cast<double>(ref_in_stride))));
                     }
 
-                    bool tgt_in_zero = hasZeroStride(in_shapes[i], in_strides[i]);
-                    bool ref_in_zero = hasZeroStride(r.inputShapes[i], r.inputStrides[i]);
+                    bool tgt_in_zero = hasZeroStride(in_shapes[tgt_idx], in_strides[tgt_idx]);
+                    bool ref_in_zero = hasZeroStride(r.inputShapes[ref_idx], r.inputStrides[ref_idx]);
                     if (tgt_in_zero != ref_in_zero)
                     {
-                        dist += 5.0;
+                        d += 5.0;
+                    }
+                    return d;
+                };
+
+                bool is_comm = isCommutativeOp(opType, opName);
+                if (in_shapes.size() == 2 && r.inputShapes.size() == 2 && is_comm)
+                {
+                    double dist_direct = calcInputPairDist(0, 0) + calcInputPairDist(1, 1);
+                    double dist_swapped = calcInputPairDist(0, 1) + calcInputPairDist(1, 0);
+                    dist += std::min(dist_direct, dist_swapped);
+                }
+                else
+                {
+                    for (size_t i = 0; i < in_shapes.size() && i < r.inputShapes.size(); ++i)
+                    {
+                        dist += calcInputPairDist(i, i);
                     }
                 }
 
@@ -790,7 +821,7 @@ struct CostModel
                        const std::vector<uint64_t> &outStrides, DType outDType,
                        const std::vector<std::vector<uint32_t>> &inShapes,
                        const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
-                       const std::vector<std::vector<uint8_t>> &inConstants, bool exactRecordOnly = false)
+                       const std::vector<std::vector<uint8_t>> &inConstants = {}, bool exactRecordOnly = false)
     {
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
@@ -801,26 +832,6 @@ struct CostModel
             {
                 std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
             }
-            return std::numeric_limits<float>::infinity();
-        }
-
-        for (const auto &r : it->second)
-        {
-            if (r.inputShapes == inShapes && r.outputShape == outShape && r.inputStrides == inStrides &&
-                r.outputStrides == outStrides && r.inputDTypes == inDTypes && r.outputDType == outDType &&
-                r.inputConstants == inConstants)
-            {
-                return std::max(1e-6f, std::isnan(r.runTime) ? 1e-6f : r.runTime);
-            }
-        }
-
-        if (enableLogging || exactRecordOnly)
-        {
-            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
-        }
-
-        if (exactRecordOnly)
-        {
             return std::numeric_limits<float>::infinity();
         }
 
@@ -839,6 +850,64 @@ struct CostModel
             const auto *ref_entry = ReferenceGraphRegistry::get().getFactory(opName);
             if (ref_entry)
                 ref_factory = ref_entry->factory;
+        }
+
+        bool is_comm = isCommutativeOp(opType, opName);
+        auto areInputConstantsMatching = [](const std::vector<std::vector<uint8_t>> &a,
+                                            const std::vector<std::vector<uint8_t>> &b,
+                                            size_t a_idx, size_t b_idx) -> bool {
+            const auto &ca = (a_idx < a.size()) ? a[a_idx] : std::vector<uint8_t>{};
+            const auto &cb = (b_idx < b.size()) ? b[b_idx] : std::vector<uint8_t>{};
+            return ca == cb;
+        };
+
+        for (const auto &r : it->second)
+        {
+            if (r.outputShape != outShape || r.outputStrides != outStrides || r.outputDType != outDType)
+                continue;
+
+            bool match = false;
+            if (r.inputShapes == inShapes && r.inputStrides == inStrides &&
+                r.inputDTypes == inDTypes)
+            {
+                bool const_match = true;
+                for (size_t i = 0; i < inShapes.size(); ++i)
+                {
+                    if (!areInputConstantsMatching(r.inputConstants, inConstants, i, i))
+                    {
+                        const_match = false;
+                        break;
+                    }
+                }
+                if (const_match)
+                    match = true;
+            }
+            if (!match && is_comm && inShapes.size() == 2 && r.inputShapes.size() == 2)
+            {
+                if (r.inputShapes[0] == inShapes[1] && r.inputShapes[1] == inShapes[0] &&
+                    r.inputStrides[0] == inStrides[1] && r.inputStrides[1] == inStrides[0] &&
+                    r.inputDTypes[0] == inDTypes[1] && r.inputDTypes[1] == inDTypes[0] &&
+                    areInputConstantsMatching(r.inputConstants, inConstants, 0, 1) &&
+                    areInputConstantsMatching(r.inputConstants, inConstants, 1, 0))
+                {
+                    match = true;
+                }
+            }
+
+            if (match)
+            {
+                return std::max(1e-6f, std::isnan(r.runTime) ? 1e-6f : r.runTime);
+            }
+        }
+
+        if (enableLogging || exactRecordOnly)
+        {
+            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
+        }
+
+        if (exactRecordOnly)
+        {
+            return std::numeric_limits<float>::infinity();
         }
 
         WorkloadMetrics target_w;
