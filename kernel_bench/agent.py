@@ -134,7 +134,6 @@ class KernelBenchClient:
         target_model: str = "gemma-3-270m",
         pp: int = 512,
         tg: int = 128,
-        min_compile_time: float = 90.0,
         kernel_name: str = "",
     ) -> Dict[str, Any]:
         payload = {
@@ -146,7 +145,6 @@ class KernelBenchClient:
             "target_model": target_model,
             "pp": pp,
             "tg": tg,
-            "min_compile_time": min_compile_time,
             "kernel_name": kernel_name,
         }
         res = requests.post(f"{self.base_url}/api/iteration/submit", json=payload)

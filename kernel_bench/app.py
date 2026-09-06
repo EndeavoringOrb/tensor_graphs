@@ -1,5 +1,6 @@
 # File: kernel_bench/app.py
 import json
+import math
 import os
 import re
 import struct
@@ -17,9 +18,12 @@ from .jobs import (
     KERNELS_DIR,
     LLAMA_CPP_TARGETS,
     PROJECT_ROOT,
+    STATIC_MIN_COMPILE_TIME,
     VERSIONS_DIR,
     BinaryReader,
     createJob,
+    getActiveJobs,
+    getAllJobs,
     getAllVersions,
     getFallbackCause,
     getHwInfo,
@@ -43,6 +47,18 @@ app = Flask(__name__)
 startWorker()
 
 
+def sanitizeForJson(data):
+    if isinstance(data, float):
+        if math.isnan(data) or math.isinf(data):
+            return None
+        return data
+    if isinstance(data, dict):
+        return {k: sanitizeForJson(v) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [sanitizeForJson(v) for v in data]
+    return data
+
+
 def formatConstants(raw_bytes: bytes, dtype: int):
     if not raw_bytes:
         return ""
@@ -50,7 +66,8 @@ def formatConstants(raw_bytes: bytes, dtype: int):
     dt_str = dtypes[dtype] if isinstance(dtype, int) and dtype < len(dtypes) else str(dtype)
     if dt_str == "FLOAT32":
         count = len(raw_bytes) // 4
-        return list(struct.unpack(f"<{count}f", raw_bytes))
+        floats = struct.unpack(f"<{count}f", raw_bytes)
+        return [None if (math.isnan(x) or math.isinf(x)) else x for x in floats]
     elif dt_str == "INT32":
         count = len(raw_bytes) // 4
         return list(struct.unpack(f"<{count}i", raw_bytes))
@@ -219,6 +236,7 @@ def buildAgentIndexData(target_model: str = "gemma-3-270m") -> dict:
         {"method": "GET", "path": "/api/benchmarks/records", "description": "Query recorded benchmarks from records.bin (?op=...&shape=...)"},
         {"method": "GET", "path": "/api/benchmarks/calls", "description": "Query benchmark invocation calls from calls.bin"},
         {"method": "POST", "path": "/api/iteration/submit", "description": "Queue an optimization job (build -> test -> bench -> cache analysis)"},
+        {"method": "GET", "path": "/api/jobs", "description": "List all currently active and recent jobs"},
         {"method": "GET", "path": "/api/jobs/{job_id}", "description": "Check job status and current pipeline step"},
         {"method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Inspect job build, test, and benchmark logs"},
         {"method": "GET", "path": "/api/history", "description": "List history of all queued/executed jobs"},
@@ -634,7 +652,6 @@ def getAgentTools():
                             "target_model": {"type": "string", "default": "gemma-3-270m", "description": "Target model."},
                             "pp": {"type": "integer", "default": 512, "description": "Prompt processing sequence length."},
                             "tg": {"type": "integer", "default": 128, "description": "Text generation target token position."},
-                            "min_compile_time": {"type": "number", "default": 90.0, "description": "Search compile time budget in seconds (max 90.0)."},
                             "kernel_name": {"type": "string", "description": "Optional registered opName (e.g. 'CuBLAS_Dot_F32') to run fused kernel testing on shapes in calls.bin. Automatically extracted from source if omitted."}
                         },
                         "required": ["idea"],
@@ -1217,7 +1234,7 @@ def getBenchmarkRecords():
                     formatted_consts.append(formatConstants(data, dt))
             r["inputConstants"] = formatted_consts
 
-            records.append(r)
+            records.append(sanitizeForJson(r))
 
     return jsonify({"records": records, "total_records": len(records)})
 
@@ -1245,7 +1262,7 @@ def getBenchmarkCalls():
                     formatted_consts.append(formatConstants(data, dt))
             r["inputConstants"] = formatted_consts
 
-            calls.append(r)
+            calls.append(sanitizeForJson(r))
 
     return jsonify({"calls": calls, "total_calls": len(calls)})
 
@@ -1385,7 +1402,6 @@ def submitIteration():
     filename = data.get("filename", "")
     pp = int(data.get("pp", 512))
     tg = int(data.get("tg", 128))
-    min_compile_time = float(data.get("min_compile_time", 90.0))
     version = data.get("version")
 
     if not idea and not source and not opname:
@@ -1402,7 +1418,6 @@ def submitIteration():
         filename=filename,
         pp=pp,
         tg=tg,
-        min_compile_time=min_compile_time,
         version=version,
         kernel_name=kernel_name,
     )
@@ -1413,6 +1428,13 @@ def submitIteration():
         "status": "queued",
         "message": f"Queued iteration job {job_id} for Version {job['version']}",
     }), 202
+
+
+@app.get("/api/jobs")
+def getJobs():
+    active = getActiveJobs()
+    all_jobs = getAllJobs()
+    return jsonify({"active_jobs": active, "jobs": all_jobs, "count": len(all_jobs)})
 
 
 @app.get("/api/jobs/<job_id>")
@@ -1450,8 +1472,8 @@ def getJobLogs(job_id: str):
 
 @app.get("/api/history")
 def getHistory():
-    history = loadJobHistory()
-    return jsonify({"history": history, "count": len(history)})
+    all_jobs = getAllJobs()
+    return jsonify({"history": all_jobs, "count": len(all_jobs)})
 
 
 @app.post("/api/reports")
@@ -1461,8 +1483,10 @@ def addReport():
         return jsonify({"error": "Missing 'issue_description'"}), 400
 
     data["timestamp"] = datetime.now(timezone.utc).isoformat()
+    if "priority" not in data:
+        data["priority"] = "high"
     saveReport(data)
-    return jsonify({"status": "success", "message": "Issue recorded"})
+    return jsonify({"status": "success", "message": "Issue recorded into reports and suggestions"})
 
 
 @app.get("/api/reports")
@@ -1475,6 +1499,9 @@ def addSuggestion():
     data = request.get_json(force=True, silent=True)
     if not data or not data.get("title") or not data.get("description"):
         return jsonify({"error": "Missing required fields: 'title' and 'description'"}), 400
+
+    if "priority" not in data:
+        data["priority"] = "medium"
 
     suggestion_id = saveSuggestion(data)
     return jsonify({

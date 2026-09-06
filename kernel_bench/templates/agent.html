@@ -655,8 +655,7 @@ payload = {
     "idea": "Broadcast Multiply CUDA kernel to eliminate REF_MUL",
     "filename": "kernels/cuda/mul/NC_F32_ND.cu",
     "source": "/* your CUDA code with REGISTER_KERNEL */",
-    "backend": "cuda",
-    "min_compile_time": 90.0
+    "backend": "cuda"
 }
 job = requests.post(f"{BENCH_URL}/api/iteration/submit", json=payload).json()
 job_id = job["job_id"]

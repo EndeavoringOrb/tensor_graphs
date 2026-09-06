@@ -491,11 +491,7 @@
                     <label>Idea / Hypothesis (required)</label>
                     <input type="text" id="subIdea" placeholder="e.g. Add CUDA broadcast multiply kernel to eliminate REF_MUL fallback" required>
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
-                    <div class="form-group">
-                        <label>Target Filename (relative, optional)</label>
-                        <input type="text" id="subFilename" placeholder="e.g. kernels/cuda/mul/NC_F32_ND.cu">
-                    </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                     <div class="form-group">
                         <label>Backend</label>
                         <select id="subBackend">
@@ -504,11 +500,8 @@
                             <option value="cpu">CPU</option>
                         </select>
                     </div>
-                    <div class="form-group">
-                        <label>Min Compile Time (seconds)</label>
-                        <input type="number" id="subCompileTime" value="90" max="90" min="0" step="5">
-                    </div>
                 </div>
+                <div style="font-size: 11px; color: var(--text-secondary); margin-top: -6px; margin-bottom: 12px;">* File placement is managed automatically (<code>kernels/generated/N/kernel.cu</code>). Retained only upon demonstrated speedup. Compile time is static at 90s.</div>
                 <div class="form-group">
                     <label>C++ / CUDA Kernel Source Code (optional if re-benchmarking)</label>
                     <textarea id="subSource" placeholder="#ifdef TG_USE_CUDA&#10;#include &quot;core/kernels.hpp&quot;&#10;...&#10;REGISTER_KERNEL(...);&#10;#endif"></textarea>
@@ -521,8 +514,9 @@
     <!-- TAB 4: Active Jobs -->
     <div id="jobsTab" class="tab-panel">
         <div class="card">
-            <div class="card-header">
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
                 <span class="card-title">Active & Recent Jobs</span>
+                <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="fetchJobs()">🔄 Refresh</button>
             </div>
             <table>
                 <thead>
@@ -618,8 +612,7 @@ job = requests.post(f"{bench_url}/api/iteration/submit", json={
     "idea": "Non-contiguous CUDA Multiply Kernel",
     "filename": "kernels/cuda/mul/NC_F32_ND.cu",
     "source": "&lt;kernel code&gt;",
-    "backend": "cuda",
-    "min_compile_time": 90.0
+    "backend": "cuda"
 }).json()
 print("Job queued:", job["job_id"])
             </pre>
@@ -639,7 +632,9 @@ print("Job queued:", job["job_id"])
             <table>
                 <thead>
                     <tr>
+                        <th>ID</th>
                         <th>Title</th>
+                        <th>Priority</th>
                         <th>Category</th>
                         <th>Suggested Endpoint</th>
                         <th>Description / Rationale</th>
@@ -649,7 +644,7 @@ print("Job queued:", job["job_id"])
                     </tr>
                 </thead>
                 <tbody id="suggestionsTableBody">
-                    <tr><td colspan="7" style="text-align: center;">Loading suggestions...</td></tr>
+                    <tr><td colspan="9" style="text-align: center;">Loading suggestions...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -659,10 +654,19 @@ print("Job queued:", job["job_id"])
                 <span class="card-title">Submit API Improvement Suggestion</span>
             </div>
             <form id="submitSuggestionForm" onsubmit="handleSuggestionSubmit(event)">
-                <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px;">
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px;">
                     <div class="form-group">
                         <label>Title (required)</label>
                         <input type="text" id="sugTitle" placeholder="e.g. Add streaming logs endpoint for live kernel builds" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Priority</label>
+                        <select id="sugPriority">
+                            <option value="low">Low</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="high">High</option>
+                            <option value="critical">Critical</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label>Category</label>
@@ -671,6 +675,7 @@ print("Job queued:", job["job_id"])
                             <option value="schema_change">Schema Change</option>
                             <option value="performance">Performance & Profiling</option>
                             <option value="developer_experience">Developer / Agent Experience</option>
+                            <option value="report">Bug / Issue Report</option>
                             <option value="other">Other</option>
                         </select>
                     </div>
@@ -728,6 +733,7 @@ function switchTab(tabId, btn) {
     document.getElementById(tabId).classList.add('active');
     btn.classList.add('active');
     if (tabId === 'bottlenecksTab') fetchAnalysis();
+    if (tabId === 'jobsTab') fetchJobs();
     if (tabId === 'recordsTab') fetchRecords();
     if (tabId === 'suggestionsTab') fetchSuggestions();
 }
@@ -1076,10 +1082,8 @@ async function handleKernelSubmit(e) {
 
     const payload = {
         idea: document.getElementById('subIdea').value,
-        filename: document.getElementById('subFilename').value,
         backend: document.getElementById('subBackend').value,
-        source: document.getElementById('subSource').value,
-        min_compile_time: parseFloat(document.getElementById('subCompileTime').value || 90)
+        source: document.getElementById('subSource').value
     };
 
     try {
@@ -1112,23 +1116,41 @@ async function fetchJobs() {
         tbody.innerHTML = '';
         const list = data.history || [];
         if (list.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;">No job history yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;">No active or recent jobs found.</td></tr>';
             return;
         }
-        list.slice(0, 10).forEach(j => {
+        list.slice(0, 20).forEach(j => {
             const tr = document.createElement('tr');
+            let statusBadge = `<span class="badge badge-cuda">${j.status || 'unknown'}</span>`;
+            if (j.status === 'running') {
+                statusBadge = `<span class="badge badge-cuda" style="border: 1px solid var(--accent); box-shadow: 0 0 8px rgba(88,166,255,0.4);">⚡ running</span>`;
+            } else if (j.status === 'queued') {
+                statusBadge = `<span class="badge" style="background: var(--card-border); color: var(--text-primary);">⏳ queued</span>`;
+            } else if (j.status === 'completed') {
+                statusBadge = `<span class="badge badge-pass">✓ completed</span>`;
+            } else if (j.status === 'failed') {
+                statusBadge = `<span class="badge badge-fail">✗ failed</span>`;
+            }
+
+            const stepText = j.step ? `<code>${j.step}</code>` : '--';
+            const logBtn = (j.version !== undefined && j.version !== null)
+                ? `<button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewVersionLogs(${j.version})">Logs</button>`
+                : `<span style="font-size: 11px; color: var(--text-secondary);">--</span>`;
+
             tr.innerHTML = `
                 <td><code>${j.job_id}</code></td>
-                <td>v${j.version !== undefined ? j.version : '--'}</td>
+                <td>v${j.version !== undefined && j.version !== null ? j.version : '--'}</td>
                 <td>${j.idea || '--'}</td>
-                <td><span class="badge ${j.status === 'completed' ? 'badge-pass' : (j.status === 'failed' ? 'badge-fail' : 'badge-cuda')}">${j.status}</span></td>
-                <td>${j.step || '--'}</td>
-                <td><button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewVersionLogs(${j.version})">Logs</button></td>
+                <td>${statusBadge}</td>
+                <td>${stepText}</td>
+                <td>${logBtn}</td>
             `;
             tbody.appendChild(tr);
         });
     } catch (e) {
         console.error("Fetch jobs error:", e);
+        const tbody = document.getElementById('jobsTableBody');
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--accent-red);">Failed to load jobs: ${e}</td></tr>`;
     }
 }
 
@@ -1149,16 +1171,19 @@ async function fetchRecords() {
 
         recs.forEach(r => {
             const tr = document.createElement('tr');
+            const runTimeStr = (r.runTime != null && !isNaN(r.runTime)) ? Number(r.runTime).toFixed(4) : '--';
             tr.innerHTML = `
-                <td><code>${r.opName}</code></td>
-                <td>${JSON.stringify(r.outputShapes || r.outputShape)}</td>
-                <td>${JSON.stringify(r.inputShapes)}</td>
-                <td>${r.runTime ? r.runTime.toFixed(4) : '--'}</td>
+                <td><code>${r.opName || '--'}</code></td>
+                <td>${JSON.stringify(r.outputShapes || r.outputShape || [])}</td>
+                <td>${JSON.stringify(r.inputShapes || [])}</td>
+                <td>${runTimeStr}</td>
             `;
             tbody.appendChild(tr);
         });
     } catch (e) {
         console.error("Fetch records error:", e);
+        const tbody = document.getElementById('recordsTableBody');
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--accent-red);">Failed to load records: ${e}</td></tr>`;
     }
 }
 
@@ -1173,7 +1198,7 @@ async function fetchSuggestions() {
         document.getElementById('suggestionCountBadge').innerText = `${list.length} suggestion${list.length === 1 ? '' : 's'}`;
 
         if (list.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No suggestions submitted yet. Use the form below or POST /api/suggestions.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="9" style="text-align: center;">No suggestions submitted yet. Use the form below or POST /api/suggestions.</td></tr>';
             return;
         }
 
@@ -1183,8 +1208,19 @@ async function fetchSuggestions() {
             const actionHtml = s.status !== 'resolved'
                 ? `<button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="resolveSuggestion('${s.suggestion_id}')">Mark Resolved</button>`
                 : `<span style="font-size: 11px; color: var(--accent-green); font-weight: 600;">✓ Resolved</span>`;
+
+            let prioBadge = `<span class="badge badge-cuda">${s.priority || 'medium'}</span>`;
+            if (s.priority === 'critical') prioBadge = `<span class="badge badge-fail">critical</span>`;
+            else if (s.priority === 'high') prioBadge = `<span class="badge" style="background: rgba(210, 153, 34, 0.2); color: #e3b341; border: 1px solid rgba(210,153,34,0.4);">high</span>`;
+            else if (s.priority === 'low') prioBadge = `<span class="badge" style="background: var(--card-border); color: var(--text-secondary);">low</span>`;
+
             tr.innerHTML = `
+                <td style="white-space: nowrap;">
+                    <code style="font-size: 11px;">${s.suggestion_id}</code>
+                    <button class="btn btn-secondary" style="padding: 2px 6px; font-size: 10px; margin-left: 4px;" onclick="copySuggestionId('${s.suggestion_id}', this)" title="Copy suggestion ID">📋 Copy</button>
+                </td>
                 <td><strong>${s.title}</strong></td>
+                <td>${prioBadge}</td>
                 <td><span class="badge badge-cuda">${s.category || 'general'}</span></td>
                 <td><code>${s.suggested_endpoint || '--'}</code></td>
                 <td>
@@ -1199,6 +1235,20 @@ async function fetchSuggestions() {
         });
     } catch (e) {
         console.error("Fetch suggestions error:", e);
+    }
+}
+
+function copySuggestionId(id, btn) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(id).then(() => {
+            const original = btn.innerHTML;
+            btn.innerHTML = '✓ Copied';
+            setTimeout(() => { btn.innerHTML = original; }, 1500);
+        }).catch(() => {
+            prompt("Copy Suggestion ID:", id);
+        });
+    } else {
+        prompt("Copy Suggestion ID:", id);
     }
 }
 
@@ -1224,6 +1274,7 @@ async function handleSuggestionSubmit(e) {
 
     const payload = {
         title: document.getElementById('sugTitle').value,
+        priority: document.getElementById('sugPriority').value,
         category: document.getElementById('sugCategory').value,
         suggested_endpoint: document.getElementById('sugEndpoint').value,
         description: document.getElementById('sugDescription').value,
@@ -1256,6 +1307,12 @@ async function handleSuggestionSubmit(e) {
 // Initial poll
 fetchStatus();
 setInterval(fetchStatus, 10000);
+setInterval(() => {
+    const jobsTab = document.getElementById('jobsTab');
+    if (jobsTab && jobsTab.classList.contains('active')) {
+        fetchJobs();
+    }
+}, 3000);
 </script>
 </body>
 </html>

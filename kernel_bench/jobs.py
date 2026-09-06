@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -41,6 +42,8 @@ TIMEOUTS = {
     "analysis": 120,
 }
 
+STATIC_MIN_COMPILE_TIME = 90.0
+
 
 def extractRegisteredKernelNames(source_text: str) -> list:
     if not source_text:
@@ -77,6 +80,21 @@ def saveReport(report_data: dict) -> None:
     with report_lock, open(REPORTS_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(report_data) + "\n")
 
+    desc = report_data.get("issue_description", "")
+    title = report_data.get("title") or (f"Issue: {desc[:50]}..." if len(desc) > 50 else (desc or "Issue Report"))
+    sug = {
+        "title": title,
+        "category": "report",
+        "suggested_endpoint": report_data.get("suggested_endpoint", ""),
+        "description": desc,
+        "proposed_changes": report_data.get("proposed_changes", ""),
+        "agent_id": report_data.get("agent_id", "reporter"),
+        "priority": report_data.get("priority", "high"),
+        "timestamp": report_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "status": "open",
+    }
+    saveSuggestion(sug)
+
 
 def loadReports() -> list:
     reports = []
@@ -95,6 +113,8 @@ def saveSuggestion(suggestion_data: dict) -> str:
         suggestion_data["timestamp"] = datetime.now(timezone.utc).isoformat()
     if "status" not in suggestion_data:
         suggestion_data["status"] = "open"
+    if "priority" not in suggestion_data:
+        suggestion_data["priority"] = "medium"
     with suggestion_lock, open(SUGGESTIONS_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(suggestion_data) + "\n")
     return suggestion_id
@@ -106,7 +126,10 @@ def loadSuggestions() -> list:
         with suggestion_lock, open(SUGGESTIONS_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    suggestions.append(json.loads(line))
+                    item = json.loads(line)
+                    if "priority" not in item:
+                        item["priority"] = "medium"
+                    suggestions.append(item)
     return list(reversed(suggestions))
 
 
@@ -148,6 +171,30 @@ def loadJobHistory() -> list:
                 if line.strip():
                     history.append(json.loads(line))
     return history
+
+
+def getActiveJobs() -> list:
+    with worker_lock:
+        active = [
+            dict(j) for j in jobs.values()
+            if j.get("status") in ("queued", "running")
+        ]
+    for j in active:
+        if "source" in j:
+            del j["source"]
+    return active
+
+
+def getAllJobs() -> list:
+    active = getActiveJobs()
+    history = loadJobHistory()
+    seen = {j.get("job_id") for j in active}
+    combined = list(active)
+    for j in reversed(history):
+        if j.get("job_id") not in seen:
+            combined.append(j)
+            seen.add(j.get("job_id"))
+    return combined
 
 
 def getNextVersionId() -> int:
@@ -493,28 +540,22 @@ def runWorker():
         try:
             # Step 1: Write kernel source if supplied
             if job.get("source"):
-                rel_kernel_path = job.get("filename")
-                if rel_kernel_path:
-                    kernel_path = (PROJECT_ROOT / "tensor_graphs_cpp" / rel_kernel_path).resolve()
-                    if not str(kernel_path).startswith(str((PROJECT_ROOT / "tensor_graphs_cpp" / "kernels").resolve())):
-                        kernel_path = (KERNELS_DIR / rel_kernel_path).resolve()
-                else:
-                    kernel_path = Path(findNextSlot(job.get("backend", "cuda")))
+                backend = job.get("backend", "cuda").lower()
+                ext = ".cu" if backend in ("cuda", "cublas") else ".hpp"
+                gen_dir = KERNELS_DIR / "generated" / str(v_id)
+                gen_dir.mkdir(parents=True, exist_ok=True)
+                kernel_path = (gen_dir / f"kernel{ext}").resolve()
 
-                if kernel_path.exists():
-                    raise Exception(f"Refusing to overwrite existing kernel at {kernel_path}. Never modify existing kernels!")
-
-                kernel_path.parent.mkdir(parents=True, exist_ok=True)
                 kernel_path.write_text(job["source"], encoding="utf-8")
                 job["kernel_file"] = str(kernel_path)
                 job["agent_file_path"] = str(kernel_path.relative_to(KERNELS_DIR))
-                print(f"[JOB {job_id}] Created new kernel at {kernel_path}")
+                print(f"[JOB {job_id}] Staged candidate kernel at {kernel_path}")
 
             python_exe = getPythonExe()
             target_model = job.get("target_model", "gemma-3-270m")
             pp = job.get("pp", 512)
             tg = job.get("tg", 128)
-            min_compile_time = min(float(job.get("min_compile_time", 90.0)), 90.0)
+            min_compile_time = STATIC_MIN_COMPILE_TIME
 
             # Step 2: Build test, bench, and bench_model
             job["step"] = "build"
@@ -529,7 +570,7 @@ def runWorker():
             if build_res["exit_code"] != 0:
                 raise Exception(f"Build failed with exit code {build_res['exit_code']}.\nCheck {build_log}")
 
-            # Step 3: Clear dirty region caches
+            # Step 3: Clear dirty region caches before first compilation
             job["step"] = "clear_cache"
             print(f"[JOB {job_id}] Step 2/7: Clearing dirty region caches...")
             CACHE_DIR.mkdir(exist_ok=True)
@@ -582,8 +623,17 @@ def runWorker():
             job["step"] = "bench_model"
             print(f"[JOB {job_id}] Step 6/7: Running bench_model with new records...")
             bench_log = v_dir / "bench_model.log"
+            # Remove dirty region cache between compilations so bench_model replans fresh with new records
+            for cache_file in CACHE_DIR.glob("*.bin"):
+                cache_file.unlink(missing_ok=True)
+            bench_cmd = [
+                bench_model_bin,
+                "--min-compile-time", str(min_compile_time),
+                "--pp", str(pp),
+                "--tg", str(tg),
+            ]
             bench_final_res = runCmd(
-                [bench_model_bin, "--min-compile-time", str(min_compile_time), "--pp", str(pp), "--tg", str(tg)],
+                bench_cmd,
                 TIMEOUTS["bench_model"],
                 log_path=bench_log,
             )
@@ -591,7 +641,7 @@ def runWorker():
             if bench_final_res["exit_code"] != 0:
                 raise Exception(f"bench_model failed with exit code {bench_final_res['exit_code']}.\nCheck {bench_log}")
 
-            # Step 8: Analyze performance cache
+            # Step 8: Analyze performance cache before subsequent compilations delete it
             job["step"] = "cache_analysis"
             print(f"[JOB {job_id}] Step 7/7: Running cache analysis...")
             cache_analysis_log = v_dir / "cache_analysis.log"
@@ -607,6 +657,10 @@ def runWorker():
                     TIMEOUTS["analysis"],
                     log_path=cache_analysis_log,
                 )
+                try:
+                    shutil.copy2(cache_file_target, v_dir / cache_file_target.name)
+                except Exception:
+                    pass
             else:
                 cache_analysis_log.write_text(f"Cache file {cache_file_target} not generated.\n", encoding="utf-8")
 
@@ -631,6 +685,30 @@ def runWorker():
                     and tg_res.get("tps", 0) > target_info.get(f"tg{tg}", {}).get("tps", 0)
                 )
 
+            # Check for speedup across previous versions
+            prev_versions = getAllVersions()
+            best_prev_pp = max((v.get("metrics", {}).get(f"pp{pp}", {}).get("tps", 0.0) for v in prev_versions if v.get("version") != v_id), default=0.0)
+            best_prev_tg = max((v.get("metrics", {}).get(f"tg{tg}", {}).get("tps", 0.0) for v in prev_versions if v.get("version") != v_id), default=0.0)
+            curr_pp = pp_res.get("tps", 0.0)
+            curr_tg = tg_res.get("tps", 0.0)
+            has_speedup = (curr_pp > best_prev_pp * 1.001) or (curr_tg > best_prev_tg * 1.001) or target_beaten
+
+            job["speedup"] = has_speedup
+            if job.get("kernel_file") and os.path.exists(job["kernel_file"]):
+                if has_speedup:
+                    job["retained"] = True
+                    print(f"[JOB {job_id}] Kernel demonstrated speedup (pp: {curr_pp:.2f} vs {best_prev_pp:.2f}, tg: {curr_tg:.2f} vs {best_prev_tg:.2f})! Retained in {job['kernel_file']}.")
+                else:
+                    job["retained"] = False
+                    print(f"[JOB {job_id}] No speedup demonstrated. Cleaning up {job['kernel_file']} to avoid clutter.")
+                    try:
+                        os.remove(job["kernel_file"])
+                        parent = Path(job["kernel_file"]).parent
+                        if parent.exists() and not any(parent.iterdir()):
+                            parent.rmdir()
+                    except Exception:
+                        pass
+
             job["target_beaten"] = target_beaten
             job["status"] = "completed"
             job["step"] = "done"
@@ -642,12 +720,11 @@ def runWorker():
             print(f"[ERROR] Version {v_id} job {job_id} failed: {err}")
 
             if job.get("kernel_file") and os.path.exists(job["kernel_file"]):
-                failed_path = job["kernel_file"] + ".failed"
                 try:
-                    os.rename(job["kernel_file"], failed_path)
-                    job["kernel_file"] = failed_path
-                    if "agent_file_path" in job:
-                        job["agent_file_path"] += ".failed"
+                    os.remove(job["kernel_file"])
+                    parent = Path(job["kernel_file"]).parent
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
                 except Exception:
                     pass
 
@@ -670,9 +747,9 @@ def createJob(
     filename: str = "",
     pp: int = 512,
     tg: int = 128,
-    min_compile_time: float = 90.0,
     version: int = None,
     kernel_name: str = "",
+    min_compile_time: float = STATIC_MIN_COMPILE_TIME,
 ) -> str:
     job_id = uuid.uuid4().hex[:12]
     if not idea:
@@ -692,7 +769,7 @@ def createJob(
         "filename": filename,
         "pp": pp,
         "tg": tg,
-        "min_compile_time": min_compile_time,
+        "min_compile_time": STATIC_MIN_COMPILE_TIME,
         "started_at": None,
         "completed_at": None,
         "metrics": {},
