@@ -10,57 +10,11 @@
 #include "core/misc.hpp"
 #include "core/types.hpp"
 
+#include "core/reference_graph_registry.hpp"
+
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
 using KernelFunc = void (*)(const KernelContext &ctx);
-using ReferenceFactory = LogicalId (*)(const std::vector<LogicalId> &inputs, Graph &graph);
 using InferViewFunc = void (*)(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph);
-
-struct ReferenceGraphEntry
-{
-    uint32_t min_num_inputs;
-    uint32_t max_num_inputs;
-    ReferenceFactory factory;
-    std::vector<DType> dtypes;
-    std::vector<std::vector<uint32_t>> dummyShapes;
-};
-
-class ReferenceGraphRegistry
-{
-  public:
-    static ReferenceGraphRegistry &get()
-    {
-        static ReferenceGraphRegistry instance;
-        return instance;
-    }
-
-    void registerFactory(const std::string &name, uint32_t min_num_inputs, uint32_t max_num_inputs,
-                         ReferenceFactory factory, const std::vector<DType> &dtypes,
-                         const std::vector<std::vector<uint32_t>> &dummyShapes)
-    {
-        auto it = factories.find(name);
-        if (it != factories.end())
-        {
-            Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
-        }
-        factories[name] = {min_num_inputs, max_num_inputs, factory, dtypes, dummyShapes};
-    }
-
-    const ReferenceGraphEntry *getFactory(const std::string &name) const
-    {
-        auto it = factories.find(name);
-        if (it != factories.end())
-            return &it->second;
-        return nullptr;
-    }
-
-    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const
-    {
-        return factories;
-    }
-
-  private:
-    std::unordered_map<std::string, ReferenceGraphEntry> factories;
-};
 
 // Concrete physical hardware assignment for a kernel instance.
 struct HardwareBinding

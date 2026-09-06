@@ -2,6 +2,7 @@
 #include <array>
 #include <string>
 
+#include "core/reference_graph_registry.hpp"
 #include "core/ops/add.hpp"
 #include "core/ops/and.hpp"
 #include "core/ops/arange.hpp"
@@ -141,10 +142,33 @@ inline bool isConstant(OpType op, uint64_t inputIdx, uint64_t numInputs = 0)
     return false;
 }
 
+// Forward declaration of reference factory workload calculator
+inline WorkloadMetrics computeWorkloadFromRefFactory(
+    ReferenceFactory factory,
+    const std::vector<std::vector<uint32_t>> &in_shapes,
+    const std::vector<DType> &in_dtypes,
+    const std::vector<uint32_t> &out_shape,
+    DType out_dtype,
+    const std::vector<std::vector<uint8_t>> &in_constants = {});
+
 inline WorkloadMetrics computeWorkload(OpType op, const std::vector<std::vector<uint32_t>> &inShapes,
                                        const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
-                                       DType outDType, const std::string &opName = "")
+                                       DType outDType, const std::string &opName = "",
+                                       const std::vector<std::vector<uint8_t>> &inConstants = {},
+                                       ReferenceFactory refFactory = nullptr)
 {
+    if (refFactory)
+    {
+        return computeWorkloadFromRefFactory(refFactory, inShapes, inDTypes, outShape, outDType, inConstants);
+    }
+    if (op == OpType::FUSED && !opName.empty())
+    {
+        const auto *entry = ReferenceGraphRegistry::get().getFactory(opName);
+        if (entry && entry->factory)
+        {
+            return computeWorkloadFromRefFactory(entry->factory, inShapes, inDTypes, outShape, outDType, inConstants);
+        }
+    }
     const auto &traits = getOpTraits(op);
     if (traits.computeWorkload)
     {
@@ -152,3 +176,5 @@ inline WorkloadMetrics computeWorkload(OpType op, const std::vector<std::vector<
     }
     return op_common::defaultWorkload(inShapes, inDTypes, outShape, outDType, 0.0);
 }
+
+#include "core/shape_propagator.hpp"

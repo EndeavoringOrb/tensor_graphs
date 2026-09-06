@@ -18,6 +18,8 @@
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "core/ops/ops.hpp"
+#include "core/reference_graph_registry.hpp"
+#include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
 
@@ -121,6 +123,30 @@ inline double getInnerContigElements(const std::vector<uint32_t> &shape, const s
         }
     }
     return static_cast<double>(std::max<uint64_t>(1, contig));
+}
+
+inline uint64_t getInnermostStride(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+{
+    if (shape.empty() || strides.empty())
+        return 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
+    {
+        if (shape[i] > 1)
+        {
+            return (i < static_cast<int>(strides.size())) ? strides[i] : 1;
+        }
+    }
+    return 1;
+}
+
+inline bool hasZeroStride(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+{
+    for (size_t i = 0; i < shape.size() && i < strides.size(); ++i)
+    {
+        if (shape[i] > 1 && strides[i] == 0)
+            return true;
+    }
+    return false;
 }
 
 inline double getUniqueElements(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
@@ -270,127 +296,272 @@ struct CostModel
         std::vector<double> weights;
         std::vector<double> scale;
         bool valid = false;
+        std::vector<Record> records;
         Record singleRecord;
         bool hasSingleRecord = false;
         OpType opType = OpType::INPUT;
         std::string opName = "";
+        ReferenceFactory refFactory = nullptr;
 
-        float predict(const std::vector<double> &features, const WorkloadMetrics &targetW,
-                      const std::vector<std::vector<uint32_t>> &inShapes,
-                      const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
-                      const std::vector<uint32_t> &outShape, const std::vector<uint64_t> &outStrides,
-                      DType outDType) const
+        struct Candidate
         {
-            if (valid && weights.size() == features.size())
+            double dist;
+            double estTime;
+        };
+
+        float predict(const std::vector<double> &features, const WorkloadMetrics &target_w,
+                      const std::vector<std::vector<uint32_t>> &in_shapes,
+                      const std::vector<std::vector<uint64_t>> &in_strides, const std::vector<DType> &in_dtypes,
+                      const std::vector<uint32_t> &out_shape, const std::vector<uint64_t> &out_strides,
+                      DType out_dtype) const
+        {
+            const std::vector<Record> *recs_ptr = &records;
+            std::vector<Record> single_list;
+            if (recs_ptr->empty() && hasSingleRecord)
             {
-                double log_y = 0.0;
-                for (size_t i = 0; i < weights.size(); ++i)
-                {
-                    double val = features[i];
-                    if (scale[i] > 0.0)
-                        val /= scale[i];
-                    log_y += weights[i] * val;
-                }
-                log_y = std::clamp(log_y, -13.8, 20.0);
-                double y = std::exp(log_y);
-                if (std::isnan(y) || std::isinf(y))
-                    return 1e-6f;
-                return static_cast<float>(std::max(1e-6, y));
+                single_list.push_back(singleRecord);
+                recs_ptr = &single_list;
             }
 
-            if (hasSingleRecord)
+            if (recs_ptr->empty())
             {
-                WorkloadMetrics refW = computeWorkload(opType, singleRecord.inputShapes, singleRecord.inputDTypes,
-                                                       singleRecord.outputShape, singleRecord.outputDType, opName);
-                double refTime = std::max(1e-6, static_cast<double>(singleRecord.runTime));
-                double ratio = 1.0;
+                return 1e-6f;
+            }
 
-                bool isDot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
-                             (opName.find("dot") != std::string::npos) || (opName.find("linear") != std::string::npos);
+            double target_bytes = target_w.bytesRead + target_w.bytesWritten;
 
-                if (isDot)
+            bool is_dot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
+                          (opName.find("dot") != std::string::npos) || (opName.find("linear") != std::string::npos) ||
+                          (opName.find("conv") != std::string::npos) || (opName.find("Conv") != std::string::npos) ||
+                          (opName.find("gemm") != std::string::npos) || (opName.find("GEMM") != std::string::npos) ||
+                          (opName.find("matmul") != std::string::npos) || (opName.find("MatMul") != std::string::npos) ||
+                          (opName.find("Attention") != std::string::npos) || (opName.find("attention") != std::string::npos);
+
+            std::vector<Candidate> candidates;
+            candidates.reserve(recs_ptr->size());
+
+            uint64_t tgt_out_stride = getInnermostStride(out_shape, out_strides);
+            bool tgt_out_contig = (tgt_out_stride == 1);
+            uint32_t tgt_eff_rank = getEffectiveRank(out_shape);
+
+            for (const auto &r : *recs_ptr)
+            {
+                ReferenceFactory active_factory = refFactory;
+                if (!active_factory && KernelRegistry::get().hasKernel(r.kernelId))
                 {
-                    if (refW.flops > 0.0 && targetW.flops > 0.0)
+                    active_factory = KernelRegistry::get().getKernel(r.kernelId).refFactory;
+                }
+                if (!active_factory && !opName.empty())
+                {
+                    const auto *ref_entry = ReferenceGraphRegistry::get().getFactory(opName);
+                    if (ref_entry)
+                        active_factory = ref_entry->factory;
+                }
+
+                WorkloadMetrics ref_w;
+                if (active_factory)
+                {
+                    ref_w = computeWorkloadFromRefFactory(active_factory, r.inputShapes, r.inputDTypes,
+                                                          r.outputShape, r.outputDType, r.inputConstants);
+                }
+                else
+                {
+                    ref_w = computeWorkload(opType, r.inputShapes, r.inputDTypes,
+                                            r.outputShape, r.outputDType, opName, r.inputConstants);
+                }
+
+                double ref_time = std::max(1e-6, static_cast<double>(std::isnan(r.runTime) ? 1e-6f : r.runTime));
+                double ratio = 1.0;
+                double ref_bytes = ref_w.bytesRead + ref_w.bytesWritten;
+                bool has_flops = (ref_w.flops > 0.0 && target_w.flops > 0.0);
+
+                if (is_dot || has_flops)
+                {
+                    if (has_flops)
                     {
-                        ratio = targetW.flops / refW.flops;
+                        double flop_ratio = target_w.flops / ref_w.flops;
+                        double byte_ratio = (ref_bytes > 0.0) ? (target_bytes / ref_bytes) : 1.0;
+                        ratio = std::max(flop_ratio, byte_ratio);
                     }
                     else
                     {
-                        double refBytes = refW.bytesRead + refW.bytesWritten;
-                        double targetBytes = targetW.bytesRead + targetW.bytesWritten;
-                        ratio = (refBytes > 0.0) ? (targetBytes / refBytes) : 1.0;
+                        ratio = (ref_bytes > 0.0) ? (target_bytes / ref_bytes) : 1.0;
                     }
                 }
                 else if (opType == OpType::SUM || opType == OpType::MAX || opType == OpType::ARGMAX)
                 {
-                    double refInElems =
-                        singleRecord.inputShapes.empty() ? 1.0 : countElements(singleRecord.inputShapes[0]);
-                    double targetInElems = inShapes.empty() ? 1.0 : countElements(inShapes[0]);
-                    ratio = (refInElems > 0.0) ? (targetInElems / refInElems) : 1.0;
+                    double ref_in_elems = r.inputShapes.empty() ? 1.0 : countElements(r.inputShapes[0]);
+                    double target_in_elems = in_shapes.empty() ? 1.0 : countElements(in_shapes[0]);
+                    ratio = (ref_in_elems > 0.0) ? (target_in_elems / ref_in_elems) : 1.0;
                 }
                 else
                 {
-                    double refBytes = refW.bytesRead + refW.bytesWritten;
-                    double targetBytes = targetW.bytesRead + targetW.bytesWritten;
-                    if (refBytes > 0.0 && targetBytes > 0.0)
+                    if (ref_bytes > 0.0 && target_bytes > 0.0)
                     {
-                        ratio = targetBytes / refBytes;
+                        ratio = target_bytes / ref_bytes;
                     }
                     else
                     {
-                        double refOut = countElements(singleRecord.outputShape);
-                        double targetOut = countElements(outShape);
-                        ratio = (refOut > 0.0) ? (targetOut / refOut) : 1.0;
+                        double ref_out = countElements(r.outputShape);
+                        double target_out = countElements(out_shape);
+                        ratio = (ref_out > 0.0) ? (target_out / ref_out) : 1.0;
                     }
 
                     // Rank & indexing arithmetic penalty adjustment
-                    double refEffRank = getEffectiveRank(singleRecord.outputShape);
-                    double tgtEffRank = getEffectiveRank(outShape);
-                    if (refEffRank > 0 && tgtEffRank > 0 && refEffRank != tgtEffRank)
+                    double ref_eff_rank = getEffectiveRank(r.outputShape);
+                    if (ref_eff_rank > 0 && tgt_eff_rank > 0 && ref_eff_rank != tgt_eff_rank)
                     {
-                        ratio *= (0.4 + 0.6 * (tgtEffRank / refEffRank));
+                        ratio *= (0.4 + 0.6 * (static_cast<double>(tgt_eff_rank) / ref_eff_rank));
                     }
 
-                    // Stride penalty adjustment for copy/elementwise kernels
-                    if (!inShapes.empty() && !singleRecord.inputShapes.empty() && !inStrides.empty() &&
-                        !singleRecord.inputStrides.empty())
+                    // Stride and layout penalty adjustments for data movement / elementwise kernels
+                    uint64_t ref_out_stride = getInnermostStride(r.outputShape, r.outputStrides);
+                    bool ref_out_contig = (ref_out_stride == 1);
+
+                    bool any_tgt_strided = (!tgt_out_contig);
+                    bool any_ref_strided = (!ref_out_contig);
+                    double max_tgt_cache_waste = tgt_out_contig ? 1.0 : std::min(16.0, static_cast<double>(tgt_out_stride));
+                    double max_ref_cache_waste = ref_out_contig ? 1.0 : std::min(16.0, static_cast<double>(ref_out_stride));
+
+                    bool any_tgt_zero = false;
+                    bool any_ref_zero = false;
+
+                    for (size_t i = 0; i < in_shapes.size() && i < r.inputShapes.size(); ++i)
                     {
-                        double refInnerContig =
-                            getInnerContigElements(singleRecord.inputShapes[0], singleRecord.inputStrides[0]);
-                        double tgtInnerContig = getInnerContigElements(inShapes[0], inStrides[0]);
+                        uint64_t ref_in_stride = getInnermostStride(r.inputShapes[i], r.inputStrides[i]);
+                        uint64_t tgt_in_stride = getInnermostStride(in_shapes[i], in_strides[i]);
+                        if (ref_in_stride > 1)
+                        {
+                            any_ref_strided = true;
+                            max_ref_cache_waste = std::max(max_ref_cache_waste, std::min(16.0, static_cast<double>(ref_in_stride)));
+                        }
+                        if (tgt_in_stride > 1)
+                        {
+                            any_tgt_strided = true;
+                            max_tgt_cache_waste = std::max(max_tgt_cache_waste, std::min(16.0, static_cast<double>(tgt_in_stride)));
+                        }
+                        if (hasZeroStride(in_shapes[i], in_strides[i]))
+                            any_tgt_zero = true;
+                        if (hasZeroStride(r.inputShapes[i], r.inputStrides[i]))
+                            any_ref_zero = true;
+                    }
 
-                        bool refInnerZero = !singleRecord.inputStrides[0].empty() &&
-                                            singleRecord.inputStrides[0].back() == 0 &&
-                                            singleRecord.inputShapes[0].back() > 1;
-                        bool tgtInnerZero = !inStrides[0].empty() && inStrides[0].back() == 0 && inShapes[0].back() > 1;
+                    if (any_tgt_zero && !any_ref_zero)
+                    {
+                        ratio *= 0.5;
+                    }
+                    else if (!any_tgt_zero && any_ref_zero)
+                    {
+                        ratio *= 2.0;
+                    }
 
-                        if (tgtInnerZero && !refInnerZero)
+                    if (!any_ref_strided && any_tgt_strided)
+                    {
+                        double loop_overhead = 6.0;
+                        ratio *= (max_tgt_cache_waste * loop_overhead);
+                    }
+                    else if (any_ref_strided && !any_tgt_strided)
+                    {
+                        double loop_overhead = 6.0;
+                        ratio /= (max_ref_cache_waste * loop_overhead);
+                    }
+                    else if (any_ref_strided && any_tgt_strided)
+                    {
+                        if (max_ref_cache_waste > 0.0)
                         {
-                            ratio *= std::max(2.0, std::log2(std::max(2.0, (double)inShapes[0].back())));
-                        }
-                        else if (!tgtInnerZero && refInnerZero)
-                        {
-                            ratio /=
-                                std::max(2.0, std::log2(std::max(2.0, (double)singleRecord.inputShapes[0].back())));
-                        }
-                        else if (refInnerContig > 1.0 && tgtInnerContig <= 1.0)
-                        {
-                            ratio *= 4.0;
-                        }
-                        else if (refInnerContig <= 1.0 && tgtInnerContig > 1.0)
-                        {
-                            ratio /= 4.0;
+                            ratio *= (max_tgt_cache_waste / max_ref_cache_waste);
                         }
                     }
                 }
 
-                double y = refTime * ratio;
-                if (std::isnan(y) || std::isinf(y))
-                    return 1e-6f;
-                return static_cast<float>(std::max(1e-6, y));
+                double est_time = ref_time * ratio;
+
+                double dist = 0.0;
+                if (has_flops)
+                {
+                    dist += std::abs(std::log(std::max(1.0, target_w.flops)) - std::log(std::max(1.0, ref_w.flops)));
+                    dist += 0.2 * std::abs(std::log(std::max(1.0, target_bytes)) - std::log(std::max(1.0, ref_bytes)));
+                }
+                else
+                {
+                    dist += std::abs(std::log(std::max(1.0, target_bytes)) - std::log(std::max(1.0, ref_bytes)));
+                }
+
+                // Layout and memory geometry distance
+                for (size_t i = 0; i < in_shapes.size() && i < r.inputShapes.size(); ++i)
+                {
+                    uint64_t tgt_in_stride = getInnermostStride(in_shapes[i], in_strides[i]);
+                    uint64_t ref_in_stride = getInnermostStride(r.inputShapes[i], r.inputStrides[i]);
+                    bool tgt_in_contig = (tgt_in_stride == 1);
+                    bool ref_in_contig = (ref_in_stride == 1);
+                    if (tgt_in_contig != ref_in_contig)
+                    {
+                        dist += 10.0;
+                    }
+                    else if (!tgt_in_contig && !ref_in_contig)
+                    {
+                        dist += 0.5 * std::abs(std::log(std::max(1.0, static_cast<double>(tgt_in_stride))) -
+                                               std::log(std::max(1.0, static_cast<double>(ref_in_stride))));
+                    }
+
+                    bool tgt_in_zero = hasZeroStride(in_shapes[i], in_strides[i]);
+                    bool ref_in_zero = hasZeroStride(r.inputShapes[i], r.inputStrides[i]);
+                    if (tgt_in_zero != ref_in_zero)
+                    {
+                        dist += 5.0;
+                    }
+                }
+
+                uint64_t ref_out_stride = getInnermostStride(r.outputShape, r.outputStrides);
+                bool ref_out_contig = (ref_out_stride == 1);
+                if (tgt_out_contig != ref_out_contig)
+                {
+                    dist += 10.0;
+                }
+                else if (!tgt_out_contig && !ref_out_contig)
+                {
+                    dist += 0.5 * std::abs(std::log(std::max(1.0, static_cast<double>(tgt_out_stride))) -
+                                           std::log(std::max(1.0, static_cast<double>(ref_out_stride))));
+                }
+
+                uint32_t ref_eff_rank = getEffectiveRank(r.outputShape);
+                if (tgt_eff_rank != ref_eff_rank)
+                {
+                    dist += 0.2 * std::abs(static_cast<double>(tgt_eff_rank) - static_cast<double>(ref_eff_rank));
+                }
+
+                candidates.push_back({dist, est_time});
             }
 
-            return 1e-6f;
+            if (candidates.empty())
+            {
+                return 1e-6f;
+            }
+
+            std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) {
+                return a.dist < b.dist;
+            });
+
+            if (candidates[0].dist < 1e-4)
+            {
+                return static_cast<float>(std::max(1e-6, candidates[0].estTime));
+            }
+
+            size_t k = std::min<size_t>(candidates.size(), 3);
+            double total_weight = 0.0;
+            double total_weighted_time = 0.0;
+            for (size_t i = 0; i < k; ++i)
+            {
+                double d = candidates[i].dist;
+                double w = 1.0 / (d * d + 1e-4);
+                total_weight += w;
+                total_weighted_time += w * candidates[i].estTime;
+            }
+
+            double y = (total_weight > 0.0) ? (total_weighted_time / total_weight) : 1e-6;
+            if (std::isnan(y) || std::isinf(y))
+                return 1e-6f;
+            return static_cast<float>(std::max(1e-6, y));
         }
     };
 
@@ -559,82 +730,20 @@ struct CostModel
             const auto &entry = KernelRegistry::get().getKernel(mk.kernelId);
             model.opType = entry.opType;
             model.opName = entry.opName;
+            model.refFactory = entry.refFactory;
+        }
+        if (!model.refFactory && !model.opName.empty())
+        {
+            const auto *entry = ReferenceGraphRegistry::get().getFactory(model.opName);
+            if (entry)
+                model.refFactory = entry->factory;
         }
 
+        model.records = recs;
         if (!recs.empty())
         {
             model.singleRecord = recs[0];
             model.hasSingleRecord = true;
-        }
-
-        if (recs.size() < 2)
-        {
-            models[mk] = model;
-            return;
-        }
-
-        int K = static_cast<int>(recs.size());
-        auto sample_w = computeWorkload(model.opType, recs[0].inputShapes, recs[0].inputDTypes, recs[0].outputShape,
-                                        recs[0].outputDType, model.opName);
-        auto sample_feat = extractFeatures(sample_w, recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
-                                           recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
-        int D = static_cast<int>(sample_feat.size());
-
-        Matrix X(K, D);
-        Matrix Y(K, 1);
-
-        model.scale.assign(D, 1.0);
-
-        for (int i = 0; i < K; ++i)
-        {
-            auto w = computeWorkload(model.opType, recs[i].inputShapes, recs[i].inputDTypes, recs[i].outputShape,
-                                     recs[i].outputDType, model.opName);
-            auto feat = extractFeatures(w, recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
-                                        recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
-            for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
-            {
-                X(i, j) = feat[j];
-                model.scale[j] = std::max(model.scale[j], std::abs(feat[j]));
-            }
-            double target_time = std::max(1e-6, static_cast<double>(recs[i].runTime));
-            Y(i, 0) = std::log(target_time);
-        }
-
-        for (int i = 0; i < K; ++i)
-        {
-            for (int j = 0; j < D; ++j)
-            {
-                if (model.scale[j] > 0.0)
-                {
-                    X(i, j) /= model.scale[j];
-                }
-            }
-        }
-
-        Matrix Xt = transpose(X);
-        Matrix XtX = multiply(Xt, X);
-        Matrix XtY = multiply(Xt, Y);
-
-        double lambda = 1e-2;
-        for (int i = 0; i < D; ++i)
-        {
-            XtX(i, i) += lambda;
-        }
-
-        if (invert(XtX))
-        {
-            Matrix W = multiply(XtX, XtY);
-            model.weights.resize(D);
-            model.valid = true;
-            for (int i = 0; i < D; ++i)
-            {
-                if (std::isnan(W(i, 0)) || std::isinf(W(i, 0)))
-                {
-                    model.valid = false;
-                    break;
-                }
-                model.weights[i] = W(i, 0);
-            }
         }
 
         models[mk] = model;
@@ -717,33 +826,51 @@ struct CostModel
 
         OpType opType = OpType::INPUT;
         std::string opName = "";
+        ReferenceFactory ref_factory = nullptr;
         if (KernelRegistry::get().hasKernel(kernelId))
         {
             const auto &entry = KernelRegistry::get().getKernel(kernelId);
             opType = entry.opType;
             opName = entry.opName;
+            ref_factory = entry.refFactory;
+        }
+        if (!ref_factory && !opName.empty())
+        {
+            const auto *ref_entry = ReferenceGraphRegistry::get().getFactory(opName);
+            if (ref_entry)
+                ref_factory = ref_entry->factory;
         }
 
-        WorkloadMetrics targetW = computeWorkload(opType, inShapes, inDTypes, outShape, outDType, opName);
+        WorkloadMetrics target_w;
+        if (ref_factory)
+        {
+            target_w = computeWorkloadFromRefFactory(ref_factory, inShapes, inDTypes, outShape, outDType, inConstants);
+        }
+        else
+        {
+            target_w = computeWorkload(opType, inShapes, inDTypes, outShape, outDType, opName, inConstants);
+        }
 
         ModelKey mk = {kernelId, inShapes.size()};
-        auto modelIt = models.find(mk);
-        if (modelIt != models.end())
+        auto model_it = models.find(mk);
+        if (model_it != models.end())
         {
-            auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
-            float p = modelIt->second.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides,
-                                              outDType);
+            auto features = extractFeatures(target_w, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+            float p = model_it->second.predict(features, target_w, inShapes, inStrides, inDTypes, outShape, outStrides,
+                                               outDType);
             return std::isnan(p) ? 1e-6f : p;
         }
 
-        LinearModel fallbackModel;
-        fallbackModel.singleRecord = it->second[0];
-        fallbackModel.hasSingleRecord = true;
-        fallbackModel.opType = opType;
-        fallbackModel.opName = opName;
-        auto features = extractFeatures(targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+        LinearModel fallback_model;
+        fallback_model.records = it->second;
+        fallback_model.singleRecord = it->second[0];
+        fallback_model.hasSingleRecord = true;
+        fallback_model.opType = opType;
+        fallback_model.opName = opName;
+        fallback_model.refFactory = ref_factory;
+        auto features = extractFeatures(target_w, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
         float p =
-            fallbackModel.predict(features, targetW, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
+            fallback_model.predict(features, target_w, inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
         return std::isnan(p) ? 1e-6f : p;
     }
 };
