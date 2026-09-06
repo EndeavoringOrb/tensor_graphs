@@ -365,6 +365,9 @@
         <button class="tab-btn" onclick="switchTab('recordsTab', this)">Benchmark Records</button>
         <button class="tab-btn" onclick="switchTab('agentDocsTab', this)">Agent API Docs</button>
         <button class="tab-btn" onclick="switchTab('suggestionsTab', this)">API Suggestions</button>
+        <a href="/agent" target="_blank" class="tab-btn" style="text-decoration: none; color: var(--accent); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;">
+            🤖 Agent Home Page ↗
+        </a>
     </div>
 
     <!-- TAB 1: Versions History -->
@@ -570,6 +573,18 @@
         <div class="card">
             <div class="card-header">
                 <span class="card-title">Agentic Harness Integration Specification</span>
+            </div>
+            <div style="background: rgba(88, 166, 255, 0.1); border: 1px solid var(--accent); border-radius: 6px; padding: 14px 16px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                <div>
+                    <strong style="color: var(--accent); font-size: 14px;">🚀 Dedicated Agent Index &amp; Home Page:</strong>
+                    <div style="font-size: 13px; color: var(--text-primary); margin-top: 4px;">
+                        Point your agent directly to <code>http://localhost:8080/agent</code> (or <code>/api/agent</code> for JSON). It automatically sets the scene with mission context, live targets, strict rules, and full API discovery.
+                    </div>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <a href="/agent" class="btn btn-primary" target="_blank" style="text-decoration: none; font-size: 12px;">Open Agent Page ↗</a>
+                    <a href="/api/agent" class="btn btn-secondary" target="_blank" style="text-decoration: none; font-size: 12px;">Raw JSON ↗</a>
+                </div>
             </div>
             <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
                 Any AI agent (Claude, GPT-4, Gemini, LangChain, Cursor, custom sidecar) running on this machine can connect to <code>http://localhost:8080</code>.
@@ -837,7 +852,6 @@ function closeModalDirect() {
 }
 
 let currentAnalysisKernels = [];
-let opsChart = null;
 
 async function fetchAnalysis() {
     try {

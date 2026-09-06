@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KernelBench | Agent Home Page & Mission Control</title>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --surface-color: #161b22;
+            --surface-hover: #1c2128;
+            --border-color: #30363d;
+            --border-muted: #21262d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #bc8cff;
+            --accent-cyan: #39c5cf;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            padding: 24px;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .header-title h1 {
+            font-size: 26px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header-title p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 4px;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .btn {
+            background-color: var(--surface-color);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            padding: 8px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+        .btn:hover {
+            background-color: var(--surface-hover);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .btn-primary {
+            background-color: #238636;
+            border-color: rgba(240, 246, 252, 0.1);
+            color: #ffffff;
+        }
+        .btn-primary:hover {
+            background-color: #2ea043;
+            border-color: rgba(240, 246, 252, 0.1);
+            color: #ffffff;
+        }
+        .btn-accent {
+            background-color: rgba(88, 166, 255, 0.15);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .btn-accent:hover {
+            background-color: rgba(88, 166, 255, 0.25);
+        }
+
+        .badge {
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 8px;
+            border-radius: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .badge-cuda { background: rgba(88, 166, 255, 0.15); color: var(--accent); border: 1px solid var(--accent); }
+        .badge-pass { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); border: 1px solid var(--accent-green); }
+        .badge-fail { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); border: 1px solid var(--accent-red); }
+        .badge-warn { background: rgba(210, 153, 34, 0.15); color: var(--accent-orange); border: 1px solid var(--accent-orange); }
+        .badge-purple { background: rgba(188, 140, 255, 0.15); color: var(--accent-purple); border: 1px solid var(--accent-purple); }
+
+        /* Grid */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: var(--surface-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            border-bottom: 1px solid var(--border-muted);
+            padding-bottom: 10px;
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .metric-main {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+        }
+        .metric-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+        }
+
+        .progress-bar-bg {
+            background: var(--border-color);
+            height: 8px;
+            border-radius: 4px;
+            margin-top: 12px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.4s ease;
+        }
+
+        /* Rules list */
+        .rule-item {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+        }
+        .rule-num {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent);
+            border: 1px solid var(--accent);
+            font-weight: 700;
+            font-size: 14px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .rule-title {
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .rule-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        /* Workflow Step Cards */
+        .step-item {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 16px;
+            margin-bottom: 12px;
+            position: relative;
+        }
+        .step-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .step-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .step-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        /* Code blocks */
+        pre {
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 12px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            color: #79c0ff;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        code {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            background: rgba(110, 118, 129, 0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: var(--text-primary);
+        }
+
+        /* Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+        th, td {
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        th {
+            background-color: var(--bg-color);
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        tr:hover td {
+            background-color: var(--surface-hover);
+        }
+
+        /* Toast notification */
+        #toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: #238636;
+            color: white;
+            padding: 10px 18px;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            font-size: 13px;
+            font-weight: 600;
+            display: none;
+            z-index: 9999;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Tabs inside cards */
+        .sub-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 14px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+        }
+        .sub-tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            padding: 4px 10px;
+            border-radius: 4px;
+        }
+        .sub-tab-btn.active {
+            background: var(--surface-hover);
+            color: var(--accent);
+            border: 1px solid var(--border-color);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-title">
+                <h1>
+                    <span>🤖</span> KernelBench Agent Home Page & Index
+                    {% if data.state.target_beaten %}
+                        <span class="badge badge-pass">🎉 TARGET BEATEN!</span>
+                    {% else %}
+                        <span class="badge badge-warn">⚡ OPTIMIZATION IN PROGRESS</span>
+                    {% endif %}
+                </h1>
+                <p>Welcome, autonomous agent. This index page sets the operational scene, live targets, strict rules, and full API catalog.</p>
+            </div>
+            <div class="header-actions">
+                <button class="btn btn-primary" onclick="copySystemPrompt()">
+                    📋 Copy System Prompt
+                </button>
+                <button class="btn" onclick="copyInitialPrompt()">
+                    💬 Copy User Prompt
+                </button>
+                <a href="/api/agent" class="btn btn-accent" target="_blank">
+                    💾 Raw JSON (/api/agent)
+                </a>
+                <a href="/agent?format=md" class="btn" target="_blank">
+                    📄 Markdown View
+                </a>
+                <a href="/" class="btn">
+                    📊 Web Dashboard
+                </a>
+            </div>
+        </header>
+
+        <!-- Live Target & Metrics Grid -->
+        <div class="grid-3">
+            <!-- PP512 Target -->
+            <div class="card" style="margin-bottom: 0;">
+                <div class="card-header">
+                    <span class="card-title">Prompt Processing (pp512)</span>
+                    <span class="badge badge-cuda">Target: {{ data.targets.pp512.tps }} t/s</span>
+                </div>
+                <div class="metric-main">
+                    {{ "%.2f"|format(data.state.best_pp512_tps) }}
+                    <span style="font-size: 14px; font-weight: normal; color: var(--text-secondary);">tps</span>
+                </div>
+                <div class="metric-sub">
+                    <strong>{{ data.state.best_pp512_pct }}%</strong> of llama.cpp target achieved
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style="width: {{ [data.state.best_pp512_pct, 100]|min }}%; background: {% if data.state.best_pp512_pct >= 100 %}var(--accent-green){% else %}var(--accent){% endif %};"></div>
+                </div>
+            </div>
+
+            <!-- TG128 Target -->
+            <div class="card" style="margin-bottom: 0;">
+                <div class="card-header">
+                    <span class="card-title">Text Generation (tg128)</span>
+                    <span class="badge badge-cuda">Target: {{ data.targets.tg128.tps }} t/s</span>
+                </div>
+                <div class="metric-main">
+                    {{ "%.2f"|format(data.state.best_tg128_tps) }}
+                    <span style="font-size: 14px; font-weight: normal; color: var(--text-secondary);">tps</span>
+                </div>
+                <div class="metric-sub">
+                    <strong>{{ data.state.best_tg128_pct }}%</strong> of llama.cpp target achieved
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style="width: {{ [data.state.best_tg128_pct, 100]|min }}%; background: {% if data.state.best_tg128_pct >= 100 %}var(--accent-green){% else %}var(--accent-orange){% endif %};"></div>
+                </div>
+            </div>
+
+            <!-- Iterations & Hardware -->
+            <div class="card" style="margin-bottom: 0;">
+                <div class="card-header">
+                    <span class="card-title">Target Model & Hardware</span>
+                    <span class="badge badge-purple">{{ data.target_model }}</span>
+                </div>
+                <div class="metric-main" style="font-size: 24px;">
+                    Iteration {{ data.state.next_version_id }}
+                    <span style="font-size: 13px; font-weight: normal; color: var(--text-secondary);">(Total: {{ data.state.total_versions }})</span>
+                </div>
+                <div class="metric-sub" style="font-size: 12px; margin-top: 10px;">
+                    <strong>GPU:</strong> NVIDIA Quadro M4000 (1664 cores, 8GB)<br>
+                    <strong>CPU:</strong> Intel Xeon E5-1680 v3 (16 vCPUs)
+                </div>
+            </div>
+        </div>
+
+        <div style="height: 24px;"></div>
+
+        <!-- Immediate Bottleneck Spotlight -->
+        {% if data.primary_bottlenecks %}
+        <div class="card" style="border-left: 4px solid var(--accent-red);">
+            <div class="card-header">
+                <span class="card-title" style="color: var(--accent-red);">
+                    🔥 Priority 1 Bottleneck Spotlight: Eliminate CPU Fallbacks
+                </span>
+                <span class="badge badge-fail">{{ data.primary_bottlenecks|length }} Major Fallback Ops</span>
+            </div>
+            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+                The execution profile shows massive time wasted in CPU reference fallback kernels due to missing GPU strided/broadcast implementations. Replacing these with CUDA kernels eliminates CPU transfers and unlocks huge speedups:
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Operation</th>
+                        <th>File Path</th>
+                        <th>Runtime (ms)</th>
+                        <th>% Total Time</th>
+                        <th>Root Cause / Missing Feature</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fb in data.primary_bottlenecks %}
+                    <tr>
+                        <td><strong style="color: var(--accent-red);">{{ fb.op }}</strong></td>
+                        <td><code>{{ fb.path }}</code></td>
+                        <td>{{ fb.time_ms }} ms</td>
+                        <td><span class="badge badge-fail">{{ fb.percentage }}%</span></td>
+                        <td style="color: var(--text-secondary);">{{ fb.cause or "Non-contiguous / broadcast stride mismatch" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        <!-- Two Columns: Mission & Rules -->
+        <div class="grid-2">
+            <!-- Mission Briefing -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">🎯 Mission Briefing</span>
+                </div>
+                <p style="font-size: 14px; margin-bottom: 12px;">
+                    <strong>Tensor Graphs</strong> is a C++ and CUDA high-performance tensor graph runtime that performs e-graph term rewriting and kernel dispatch to execute deep neural networks.
+                </p>
+                <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+                    Your mission as an autonomous optimization agent is to beat the baseline <strong>llama.cpp</strong> performance on <code>{{ data.target_model }}</code>. You write CUDA C++ kernels, register them with the engine, submit iteration jobs, and review benchmark results until the performance target is surpassed.
+                </p>
+                <div style="background: var(--bg-color); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px; font-size: 13px;">
+                    <div><strong>Objective:</strong> pp512 > {{ data.targets.pp512.tps }} t/s &amp; tg128 > {{ data.targets.tg128.tps }} t/s</div>
+                    <div style="margin-top: 4px;"><strong>Target Beaten:</strong> <code>{{ "Yes" if data.state.target_beaten else "No" }}</code></div>
+                    <div style="margin-top: 4px;"><strong>Current Gap:</strong>
+                        pp512: {{ "%.2f"|format(data.targets.pp512.tps - data.state.best_pp512_tps) }} t/s remaining |
+                        tg128: {{ "%.2f"|format(data.targets.tg128.tps - data.state.best_tg128_tps) }} t/s remaining
+                    </div>
+                </div>
+            </div>
+
+            <!-- Strict Operating Guardrails -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">🛡️ Strict Operating Rules &amp; Guardrails</span>
+                </div>
+                {% for r in data.rules %}
+                <div class="rule-item">
+                    <div class="rule-num">{{ r.rule }}</div>
+                    <div>
+                        <div class="rule-title">
+                            {{ r.name }}
+                            {% if r.severity == 'CRITICAL' %}
+                                <span class="badge badge-fail">CRITICAL</span>
+                            {% elif r.severity == 'HIGH_PRIORITY' %}
+                                <span class="badge badge-warn">HIGH PRIORITY</span>
+                            {% elif r.severity == 'GOAL' %}
+                                <span class="badge badge-pass">GOAL</span>
+                            {% else %}
+                                <span class="badge badge-cuda">RULE</span>
+                            {% endif %}
+                        </div>
+                        <div class="rule-desc">{{ r.description }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- 7-Step Autonomous Optimization Loop -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">🔄 The 7-Step Autonomous Loop</span>
+                <span class="badge badge-cuda">Follow this lifecycle continuously</span>
+            </div>
+            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">
+                Execute these steps in sequence. When finished with step 7, loop back to step 1 until target throughput is achieved.
+            </p>
+
+            {% for step in data.autonomous_loop %}
+            <div class="step-item">
+                <div class="step-header">
+                    <div class="step-title">
+                        <span class="badge badge-cuda" style="font-size: 12px; padding: 2px 8px;">Step {{ step.step }}</span>
+                        {{ step.title }}
+                    </div>
+                    <div>
+                        <code>{{ step.endpoint }}</code>
+                        <span class="badge badge-purple" style="margin-left: 6px;">Tool: {{ step.tool }}</span>
+                    </div>
+                </div>
+                <div class="step-desc">{{ step.description }}</div>
+                <pre>{{ step.example }}</pre>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Complete API Directory -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📡 Complete API Directory</span>
+                <span class="badge badge-cuda">{{ data.api_endpoints|length }} Endpoints</span>
+            </div>
+            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+                All endpoints available on <code>http://localhost:8080</code>. Use these for programmatic querying and pipeline control.
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 80px;">Method</th>
+                        <th style="width: 280px;">Path</th>
+                        <th>Description</th>
+                        <th style="width: 140px;">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ep in data.api_endpoints %}
+                    <tr>
+                        <td>
+                            {% if ep.method == 'GET' %}
+                                <span class="badge badge-cuda">GET</span>
+                            {% elif ep.method == 'POST' %}
+                                <span class="badge badge-pass">POST</span>
+                            {% elif ep.method == 'PATCH' %}
+                                <span class="badge badge-warn">PATCH</span>
+                            {% endif %}
+                        </td>
+                        <td><code>{{ ep.path }}</code></td>
+                        <td>{{ ep.description }}</td>
+                        <td>
+                            {% if ep.method == 'GET' and '{' not in ep.path %}
+                                <a href="{{ ep.path }}" class="btn" style="padding: 2px 8px; font-size: 11px;" target="_blank">Try Endpoint ↗</a>
+                            {% else %}
+                                <span style="font-size: 12px; color: var(--text-muted);">API only</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Prompts & Starter Harness -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">🤖 Prompts &amp; Starter Client Code</span>
+            </div>
+            
+            <div class="sub-tabs">
+                <button class="sub-tab-btn active" onclick="switchSubTab('pSystem', this)">Agent System Prompt</button>
+                <button class="sub-tab-btn" onclick="switchSubTab('pUser', this)">Initial User Prompt</button>
+                <button class="sub-tab-btn" onclick="switchSubTab('pClient', this)">Python Harness Starter</button>
+                <button class="sub-tab-btn" onclick="switchSubTab('pCurl', this)">Curl Quickstart</button>
+            </div>
+
+            <!-- Subtab 1: System Prompt -->
+            <div id="pSystem" class="sub-panel">
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                    <button class="btn btn-accent" onclick="copySystemPrompt()">📋 Copy System Prompt</button>
+                </div>
+                <pre id="systemPromptText">{{ data.system_prompt }}</pre>
+            </div>
+
+            <!-- Subtab 2: User Prompt -->
+            <div id="pUser" class="sub-panel" style="display: none;">
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                    <button class="btn btn-accent" onclick="copyInitialPrompt()">📋 Copy User Prompt</button>
+                </div>
+                <pre id="userPromptText">{{ data.initial_user_prompt }}</pre>
+            </div>
+
+            <!-- Subtab 3: Python Starter -->
+            <div id="pClient" class="sub-panel" style="display: none;">
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                    <button class="btn btn-accent" onclick="copySnippet('pythonClientCode')">📋 Copy Python Script</button>
+                </div>
+                <pre id="pythonClientCode">import requests
+import time
+
+BENCH_URL = "http://localhost:8080"
+
+# 1. Connect to Agent Home Page & Index
+index = requests.get(f"{BENCH_URL}/api/agent").json()
+print("Mission:", index["mission"]["objective"])
+print("Current Best pp512:", index["state"]["best_pp512_tps"], "t/s")
+print("Current Best tg128:", index["state"]["best_tg128_tps"], "t/s")
+
+# 2. Inspect Bottlenecks
+bottlenecks = requests.get(f"{BENCH_URL}/api/analyze", params={"filter": "fallback"}).json()
+print("Top fallback:", bottlenecks.get("cpu_fallbacks", [{}])[0].get("op"))
+
+# 3. Submit Optimization Kernel
+payload = {
+    "idea": "Broadcast Multiply CUDA kernel to eliminate REF_MUL",
+    "filename": "kernels/cuda/mul/NC_F32_ND.cu",
+    "source": "/* your CUDA code with REGISTER_KERNEL */",
+    "backend": "cuda",
+    "min_compile_time": 90.0
+}
+job = requests.post(f"{BENCH_URL}/api/iteration/submit", json=payload).json()
+job_id = job["job_id"]
+print(f"Queued Job {job_id} for Version {job['version']}. Polling...")
+
+# 4. Poll until completed
+while True:
+    status = requests.get(f"{BENCH_URL}/api/jobs/{job_id}").json()
+    print("Step:", status.get("step"), "Status:", status.get("status"))
+    if status.get("status") in ("completed", "failed"):
+        print("Final result:", status.get("metrics"))
+        break
+    time.sleep(5)</pre>
+            </div>
+
+            <!-- Subtab 4: Curl Quickstart -->
+            <div id="pCurl" class="sub-panel" style="display: none;">
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                    <button class="btn btn-accent" onclick="copySnippet('curlSnippet')">📋 Copy Curl Commands</button>
+                </div>
+                <pre id="curlSnippet"># 1. Fetch Agent Index (JSON)
+curl -s http://localhost:8080/api/agent | jq .
+
+# 2. Fetch Agent Index (Markdown for LLMs)
+curl -s http://localhost:8080/agent?format=md
+
+# 3. Fetch CPU Fallback Bottlenecks
+curl -s "http://localhost:8080/api/analyze?filter=fallback" | jq .cpu_fallbacks
+
+# 4. Fetch Previous Iterations
+curl -s http://localhost:8080/api/versions | jq .
+
+# 5. Submit New Kernel Iteration
+curl -X POST http://localhost:8080/api/iteration/submit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idea": "Optimized CUDA Mul",
+    "filename": "kernels/cuda/mul/NC_F32_ND.cu",
+    "source": "#include <cuda_runtime.h> ...",
+    "backend": "cuda"
+  }'</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast"><span>✓</span> <span id="toastMsg">Copied to clipboard!</span></div>
+
+    <script>
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            document.getElementById('toastMsg').innerText = msg;
+            t.style.display = 'flex';
+            setTimeout(() => { t.style.display = 'none'; }, 2500);
+        }
+
+        function copySystemPrompt() {
+            const txt = document.getElementById('systemPromptText').innerText;
+            navigator.clipboard.writeText(txt).then(() => {
+                showToast("Agent System Prompt copied to clipboard!");
+            });
+        }
+
+        function copyInitialPrompt() {
+            const txt = document.getElementById('userPromptText').innerText;
+            navigator.clipboard.writeText(txt).then(() => {
+                showToast("Initial User Prompt copied to clipboard!");
+            });
+        }
+
+        function copySnippet(elementId) {
+            const txt = document.getElementById(elementId).innerText;
+            navigator.clipboard.writeText(txt).then(() => {
+                showToast("Code snippet copied to clipboard!");
+            });
+        }
+
+        function switchSubTab(tabId, btn) {
+            document.querySelectorAll('.sub-panel').forEach(p => p.style.display = 'none');
+            document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(tabId).style.display = 'block';
+            btn.classList.add('active');
+        }
+    </script>
+</body>
+</html>

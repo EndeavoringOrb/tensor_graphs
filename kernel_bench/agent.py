@@ -33,6 +33,17 @@ class KernelBenchClient:
     def __init__(self, base_url: str = BENCH_SERVER_URL):
         self.base_url = base_url.rstrip("/")
 
+    def getAgentIndex(self, target_model: str = "gemma-3-270m", format: str = "json") -> Any:
+        params = {"target_model": target_model}
+        if format != "json":
+            params["format"] = format
+        headers = {"Accept": "application/json" if format == "json" else "text/markdown"}
+        res = requests.get(f"{self.base_url}/api/agent", params=params, headers=headers)
+        res.raise_for_status()
+        if format == "json":
+            return res.json()
+        return res.text
+
     def getStatus(self, target_model: str = "gemma-3-270m") -> Dict[str, Any]:
         res = requests.get(f"{self.base_url}/api/status", params={"target_model": target_model})
         res.raise_for_status()
@@ -198,7 +209,12 @@ class WorkerAgent(threading.Thread):
     def executeTool(self, name: str, args: Dict[str, Any]) -> Any:
         safePrint(f"\n[Agent {self.agent_id} calling tool: {name}]")
         try:
-            if name == "get_system_status":
+            if name in ("get_agent_index", "get_agent_guidance"):
+                return self.client.getAgentIndex(
+                    target_model=args.get("target_model", self.target_model),
+                    format=args.get("format", "json"),
+                )
+            elif name == "get_system_status":
                 return self.client.getStatus(args.get("target_model", self.target_model))
             elif name == "get_bottleneck_analysis":
                 return self.client.getBottleneckAnalysis(
@@ -242,20 +258,38 @@ class WorkerAgent(threading.Thread):
             return {"error": str(e)}
 
     def run(self) -> None:
-        safePrint(f"[Agent {self.agent_id}] Started autonomous optimization loop...")
+        safePrint(f"[Agent {self.agent_id}] Connecting to KernelBench agent index...")
         tools = self.client.getTools()
 
-        system_prompt = (
-            f"You are an elite CUDA and C++ high-performance optimization AI agent.\n"
-            f"Target Model: {self.target_model}\n"
-            "Goal: Optimize Tensor Graphs kernels to beat llama.cpp for pp512 and tg128.\n"
-            "Rules:\n"
-            "1. NEVER modify existing kernel files; only add new files in tensor_graphs_cpp/kernels/.\n"
-            "2. Keep a running list of changes across versions/0, versions/1, versions/N.\n"
-            "3. Analyze bottlenecks via get_bottleneck_analysis. Eliminate CPU reference fallbacks (e.g. REF_MUL, REF_DIVIDE, REF_NEGATE) by providing CUDA kernels supporting non-contiguous/broadcast strides.\n"
-            "4. Check get_system_status to monitor progress against llama.cpp targets.\n"
-            "5. Iterate continuously until targets are beaten.\n"
-        )
+        try:
+            agent_data = self.client.getAgentIndex(self.target_model)
+            if isinstance(agent_data, dict) and agent_data.get("system_prompt"):
+                system_prompt = agent_data["system_prompt"]
+            else:
+                system_prompt = (
+                    f"You are an elite CUDA and C++ high-performance optimization AI agent.\n"
+                    f"Target Model: {self.target_model}\n"
+                    "Goal: Optimize Tensor Graphs kernels to beat llama.cpp for pp512 and tg128.\n"
+                    "Rules:\n"
+                    "1. NEVER modify existing kernel files; only add new files in tensor_graphs_cpp/kernels/.\n"
+                    "2. Keep a running list of changes across versions/0, versions/1, versions/N.\n"
+                    "3. Analyze bottlenecks via get_bottleneck_analysis. Eliminate CPU reference fallbacks (e.g. REF_MUL, REF_DIVIDE, REF_NEGATE) by providing CUDA kernels supporting non-contiguous/broadcast strides.\n"
+                    "4. Check get_system_status to monitor progress against llama.cpp targets.\n"
+                    "5. Iterate continuously until targets are beaten.\n"
+                )
+        except Exception as err:
+            safePrint(f"[Agent {self.agent_id}] Note: Could not fetch agent index ({err}), using default prompt.")
+            system_prompt = (
+                f"You are an elite CUDA and C++ high-performance optimization AI agent.\n"
+                f"Target Model: {self.target_model}\n"
+                "Goal: Optimize Tensor Graphs kernels to beat llama.cpp for pp512 and tg128.\n"
+                "Rules:\n"
+                "1. NEVER modify existing kernel files; only add new files in tensor_graphs_cpp/kernels/.\n"
+                "2. Keep a running list of changes across versions/0, versions/1, versions/N.\n"
+                "3. Analyze bottlenecks via get_bottleneck_analysis. Eliminate CPU reference fallbacks (e.g. REF_MUL, REF_DIVIDE, REF_NEGATE) by providing CUDA kernels supporting non-contiguous/broadcast strides.\n"
+                "4. Check get_system_status to monitor progress against llama.cpp targets.\n"
+                "5. Iterate continuously until targets are beaten.\n"
+            )
 
         messages = [
             {"role": "system", "content": system_prompt},

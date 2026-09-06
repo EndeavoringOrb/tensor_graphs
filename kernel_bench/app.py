@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from .jobs import (
     BENCHMARKS_DIR,
@@ -56,9 +56,382 @@ def formatConstants(raw_bytes: bytes, dtype: int):
     return list(raw_bytes)
 
 
+def buildAgentIndexData(target_model: str = "gemma-3-270m") -> dict:
+    versions = getAllVersions()
+    llama_targets = LLAMA_CPP_TARGETS.get(target_model, {})
+
+    best_pp = 0.0
+    best_tg = 0.0
+    latest_version = versions[-1] if versions else None
+
+    for v in versions:
+        metrics = v.get("metrics", {})
+        if "pp512" in metrics:
+            best_pp = max(best_pp, metrics["pp512"].get("tps", 0.0))
+        if "tg128" in metrics:
+            best_tg = max(best_tg, metrics["tg128"].get("tps", 0.0))
+
+    pp_target = llama_targets.get("pp512", {}).get("tps", 3439.99)
+    tg_target = llama_targets.get("tg128", {}).get("tps", 69.16)
+    target_beaten = (best_pp > pp_target) and (best_tg > tg_target)
+
+    top_fallbacks = []
+    top_ops = []
+    if latest_version:
+        top_fallbacks = latest_version.get("cpu_fallbacks", [])[:5]
+        top_ops = latest_version.get("top_ops", [])[:5]
+
+    hw_summary = "NVIDIA Quadro M4000 (1664 CUDA cores, 8GB VRAM) | Intel Xeon E5-1680 v3 (16 vCPUs)"
+
+    system_prompt = (
+        f"You are an elite CUDA and C++ high-performance optimization AI agent.\n"
+        f"Target Model: {target_model}\n"
+        f"Goal: Optimize Tensor Graphs kernels to beat llama.cpp for pp512 ({pp_target} t/s) and tg128 ({tg_target} t/s).\n"
+        f"Current Best: pp512={best_pp:.2f} t/s ({round((best_pp / pp_target) * 100, 2) if pp_target > 0 else 0}%), "
+        f"tg128={best_tg:.2f} t/s ({round((best_tg / tg_target) * 100, 2) if tg_target > 0 else 0}%).\n"
+        f"Target Beaten: {target_beaten}.\n\n"
+        "Operating Rules:\n"
+        "1. NEVER modify or overwrite existing kernel files; only add new files in tensor_graphs_cpp/kernels/.\n"
+        "2. Keep a running list of changes across versions/0, versions/1, versions/N using get_versions_history.\n"
+        "3. Analyze bottlenecks via get_bottleneck_analysis. Eliminate CPU reference fallbacks (e.g. REF_MUL, REF_DIVIDE, REF_NEGATE) by providing CUDA kernels supporting non-contiguous/broadcast strides.\n"
+        "4. Always register kernels using REGISTER_KERNEL or REGISTER_KERNEL_VIEW macros.\n"
+        "5. Check get_system_status to monitor progress against llama.cpp targets.\n"
+        "6. Iterate continuously until targets are beaten.\n"
+    )
+
+    initial_user_prompt = (
+        f"Begin optimizing Tensor Graphs for {target_model}. Step 1: Call get_system_status and get_bottleneck_analysis to review current progress and identify CPU fallback bottlenecks (such as REF_MUL). Step 2: Formulate an optimization idea, author your CUDA kernel, and submit via submit_iteration."
+    )
+
+    autonomous_loop = [
+        {
+            "step": 1,
+            "title": "Orientation & Benchmark Targets",
+            "description": "Call get_system_status or get_agent_index to read the required throughput targets (pp512 and tg128) and current best achieved speeds.",
+            "endpoint": "GET /api/status",
+            "tool": "get_system_status",
+            "example": "curl -s http://localhost:8080/api/status",
+        },
+        {
+            "step": 2,
+            "title": "Bottleneck & Fallback Analysis",
+            "description": "Call get_bottleneck_analysis with filter='fallback' or sort_by='time' to locate the slowest operations. CPU reference fallbacks (REF_*) trigger expensive CPU-GPU copies and are the highest ROI optimization opportunities.",
+            "endpoint": "GET /api/analyze?filter=fallback",
+            "tool": "get_bottleneck_analysis",
+            "example": "curl -s 'http://localhost:8080/api/analyze?filter=fallback'",
+        },
+        {
+            "step": 3,
+            "title": "Inspect Existing Kernels & Graph Definition",
+            "description": "Review existing kernel implementations and model computation graph to understand memory layouts, data types, and operation signatures.",
+            "endpoint": "GET /api/kernels/list, GET /api/kernels/read_source, GET /api/model/source",
+            "tool": "list_kernel_files, read_kernel_source, read_model_source",
+            "example": "curl -s 'http://localhost:8080/api/kernels/read_source?path=cpu/reference/mul/F32_ND.hpp'",
+        },
+        {
+            "step": 4,
+            "title": "Review Historical Iterations",
+            "description": "Query get_versions_history and get_version_details to review what previous iterations attempted, preventing duplicate mistakes or repeating failed compiler flags.",
+            "endpoint": "GET /api/versions, GET /api/versions/{version_id}",
+            "tool": "get_versions_history, get_version_details",
+            "example": "curl -s http://localhost:8080/api/versions",
+        },
+        {
+            "step": 5,
+            "title": "Author & Submit New Kernel",
+            "description": "Write high-performance CUDA kernel code in a new unique file under tensor_graphs_cpp/kernels/. Register the kernel with REGISTER_KERNEL. Submit via submit_iteration to automatically build, test, and benchmark.",
+            "endpoint": "POST /api/iteration/submit",
+            "tool": "submit_iteration",
+            "example": "curl -X POST http://localhost:8080/api/iteration/submit -H 'Content-Type: application/json' -d '{\"idea\": \"Strided Mul CUDA kernel\", \"filename\": \"kernels/cuda/mul/NC_F32_ND.cu\", \"source\": \"...\", \"backend\": \"cuda\"}'",
+        },
+        {
+            "step": 6,
+            "title": "Poll Job Status & Inspect Logs",
+            "description": "Poll get_job_status until completed or failed. If build or test fails, inspect compiler errors or test assertions using getJobLogs.",
+            "endpoint": "GET /api/jobs/{job_id}, GET /api/jobs/{job_id}/logs",
+            "tool": "get_job_status",
+            "example": "curl -s http://localhost:8080/api/jobs/{job_id}",
+        },
+        {
+            "step": 7,
+            "title": "Evaluate Progress & Iterate Autonomously",
+            "description": "Check if target_beaten is true. If not, analyze the new cache and bottlenecks, formulate your next hypothesis, and submit your next kernel.",
+            "endpoint": "GET /api/status",
+            "tool": "get_system_status",
+            "example": "curl -s http://localhost:8080/api/status",
+        },
+    ]
+
+    rules = [
+        {
+            "rule": 1,
+            "name": "NEVER Overwrite Existing Kernels",
+            "description": "Existing kernel files in tensor_graphs_cpp/kernels/ are immutable baselines. You must always create a new file with a distinct path (e.g. kernels/cuda/mul/NC_F32_ND.cu).",
+            "severity": "CRITICAL",
+        },
+        {
+            "rule": 2,
+            "name": "Eliminate CPU Reference Fallbacks First",
+            "description": "CPU reference ops (REF_MUL, REF_DIVIDE, REF_NEGATE, etc.) cause massive CPU-GPU synchronization and data copies. Supporting non-contiguous and broadcast strides in CUDA kernels provides the highest speedups.",
+            "severity": "HIGH_PRIORITY",
+        },
+        {
+            "rule": 3,
+            "name": "Register Every New Kernel",
+            "description": "Every kernel must be registered with REGISTER_KERNEL or REGISTER_KERNEL_VIEW so the e-graph optimizer can select and dispatch it.",
+            "severity": "CRITICAL",
+        },
+        {
+            "rule": 4,
+            "name": "Learn From Version History",
+            "description": "Always check prior versions before writing kernels. Do not repeat failed hypotheses or re-introduce broken compile patterns.",
+            "severity": "RECOMMENDED",
+        },
+        {
+            "rule": 5,
+            "name": "Iterate Autonomously Until Target Beaten",
+            "description": "Do not stop after a single run. Continue optimizing until target_beaten is true.",
+            "severity": "GOAL",
+        },
+        {
+            "rule": 6,
+            "name": "Report Harness Bugs & Suggest Improvements",
+            "description": "If you encounter environment failures outside your control, call POST /api/reports. If you need new API endpoints or tooling to assist you, call POST /api/suggestions.",
+            "severity": "INFO",
+        },
+    ]
+
+    api_endpoints = [
+        {"method": "GET", "path": "/agent", "description": "Agent Home Page & Index (HTML, Markdown, or JSON based on Accept header/format param)"},
+        {"method": "GET", "path": "/api/agent", "description": "Operational index and guidance for agents (JSON)"},
+        {"method": "GET", "path": "/api/status", "description": "Live system status, benchmark targets, and current best throughput"},
+        {"method": "GET", "path": "/api/tools", "description": "Function calling schemas for LLM agent harnesses"},
+        {"method": "GET", "path": "/api/openapi.json", "description": "Complete OpenAPI 3.0 specification"},
+        {"method": "GET", "path": "/api/analyze", "description": "Performance cache analysis, CPU fallbacks, kernel runtimes, search and filter"},
+        {"method": "GET", "path": "/api/versions", "description": "List all previous iteration versions and metrics"},
+        {"method": "GET", "path": "/api/versions/{version_id}", "description": "Full logs (idea.md, build.log, bench_model.log, cache_analysis.log)"},
+        {"method": "GET", "path": "/api/kernels/list", "description": "List all existing C++ and CUDA kernel source files"},
+        {"method": "GET", "path": "/api/kernels/read_source", "description": "Read source code of any kernel file (?path=...)"},
+        {"method": "GET", "path": "/api/model/source", "description": "Read C++ model graph definition (?target_model=...)"},
+        {"method": "GET", "path": "/api/benchmarks/records", "description": "Query recorded benchmarks from records.bin (?op=...&shape=...)"},
+        {"method": "GET", "path": "/api/benchmarks/calls", "description": "Query benchmark invocation calls from calls.bin"},
+        {"method": "POST", "path": "/api/iteration/submit", "description": "Queue an optimization job (build -> test -> bench -> cache analysis)"},
+        {"method": "GET", "path": "/api/jobs/{job_id}", "description": "Check job status and current pipeline step"},
+        {"method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Inspect job build, test, and benchmark logs"},
+        {"method": "GET", "path": "/api/history", "description": "List history of all queued/executed jobs"},
+        {"method": "POST", "path": "/api/reports", "description": "Report harness or environment issues"},
+        {"method": "GET", "path": "/api/reports", "description": "List reported issues"},
+        {"method": "POST", "path": "/api/suggestions", "description": "Submit a suggestion for API improvements or harness tools"},
+        {"method": "GET", "path": "/api/suggestions", "description": "List all suggestions (?category=...&status=...)"},
+        {"method": "POST", "path": "/api/suggestions/{id}/resolve", "description": "Mark a suggestion as resolved"},
+        {"method": "PATCH", "path": "/api/suggestions/{id}", "description": "Update suggestion status"}
+    ]
+
+    return {
+        "title": "KernelBench Agent Home Page & Index",
+        "subtitle": "Autonomous Optimization Entrypoint for Tensor Graphs",
+        "version": "2.0.0",
+        "target_model": target_model,
+        "targets": llama_targets,
+        "state": {
+            "best_pp512_tps": best_pp,
+            "best_pp512_pct": round((best_pp / pp_target) * 100, 2) if pp_target > 0 else 0,
+            "best_tg128_tps": best_tg,
+            "best_tg128_pct": round((best_tg / tg_target) * 100, 2) if tg_target > 0 else 0,
+            "target_beaten": target_beaten,
+            "total_versions": len(versions),
+            "latest_version": latest_version,
+            "next_version_id": getNextVersionId(),
+            "hwinfo_summary": hw_summary,
+        },
+        "mission": {
+            "objective": f"Surpass llama.cpp inference throughput targets for {target_model} (pp512: {pp_target} t/s, tg128: {tg_target} t/s).",
+            "context": "Tensor Graphs performs e-graph rewriting and kernel generation for high-performance deep learning. The harness measures token throughput on prompt processing (pp512) and token generation (tg128).",
+            "target_beaten": target_beaten,
+        },
+        "rules": rules,
+        "autonomous_loop": autonomous_loop,
+        "primary_bottlenecks": top_fallbacks,
+        "top_operations": top_ops,
+        "api_endpoints": api_endpoints,
+        "system_prompt": system_prompt,
+        "initial_user_prompt": initial_user_prompt,
+        "links": {
+            "home": "/",
+            "agent_page": "/agent",
+            "agent_api": "/api/agent",
+            "status": "/api/status",
+            "tools": "/api/tools",
+            "openapi": "/api/openapi.json",
+            "analyze": "/api/analyze",
+            "versions": "/api/versions",
+            "suggestions": "/api/suggestions",
+        },
+    }
+
+
+def formatAgentIndexMarkdown(data: dict) -> str:
+    target_model = data.get("target_model", "gemma-3-270m")
+    state = data.get("state", {})
+    targets = data.get("targets", {})
+    pp_target = targets.get("pp512", {}).get("tps", 3439.99)
+    tg_target = targets.get("tg128", {}).get("tps", 69.16)
+    best_pp = state.get("best_pp512_tps", 0.0)
+    best_tg = state.get("best_tg128_tps", 0.0)
+    pp_pct = state.get("best_pp512_pct", 0.0)
+    tg_pct = state.get("best_tg128_pct", 0.0)
+    target_beaten = state.get("target_beaten", False)
+
+    lines = [
+        "# 🤖 KernelBench: Agent Home Page & Operational Guidance Index",
+        "",
+        f"> **Mission**: Surpass llama.cpp inference throughput targets for `{target_model}`.",
+        f"> **Status**: {'🎉 TARGET BEATEN!' if target_beaten else '⚡ OPTIMIZATION IN PROGRESS'}",
+        "",
+        "---",
+        "",
+        "## 1. Live Targets & Current Best Metrics",
+        "",
+        "| Metric | llama.cpp Target | Current Best | % Achieved | Remaining Gap |",
+        "| :--- | :--- | :--- | :--- | :--- |",
+        f"| **Prompt Processing (pp512)** | `{pp_target} t/s` | `{best_pp:.2f} t/s` | `{pp_pct}%` | `{(pp_target - best_pp):.2f} t/s` |",
+        f"| **Text Generation (tg128)** | `{tg_target} t/s` | `{best_tg:.2f} t/s` | `{tg_pct}%` | `{(tg_target - best_tg):.2f} t/s` |",
+        "",
+        f"- **Completed Iterations**: {state.get('total_versions', 0)}",
+        f"- **Next Iteration ID**: Version {state.get('next_version_id', 0)}",
+        f"- **Hardware**: {state.get('hwinfo_summary', 'N/A')}",
+        "",
+        "---",
+        "",
+        "## 2. Priority 1 Bottlenecks (Eliminate CPU Fallbacks)",
+        "",
+        "CPU reference kernels (`REF_*`) execute on the host CPU and cause catastrophic synchronization and memory transfer delays. Providing CUDA kernels that handle non-contiguous and broadcast strides will eliminate these bottlenecks.",
+        "",
+    ]
+
+    fallbacks = data.get("primary_bottlenecks", [])
+    if fallbacks:
+        lines.append("| Operation | File Path | Time (ms) | % Total Time | Cause |")
+        lines.append("| :--- | :--- | :--- | :--- | :--- |")
+        for fb in fallbacks:
+            lines.append(f"| `{fb.get('op')}` | `{fb.get('path')}` | `{fb.get('time_ms')} ms` | `{fb.get('percentage')}%` | {fb.get('cause', 'Stride/broadcast mismatch')} |")
+        lines.append("")
+    else:
+        lines.append("No active fallbacks detected in current profile.\n")
+
+    lines.extend([
+        "---",
+        "",
+        "## 3. Strict Operating Rules (The Guardrails)",
+        "",
+    ])
+
+    for r in data.get("rules", []):
+        lines.append(f"{r['rule']}. **{r['name']}** [{r.get('severity', 'RULE')}]")
+        lines.append(f"   {r['description']}")
+        lines.append("")
+
+    lines.extend([
+        "---",
+        "",
+        "## 4. The 7-Step Autonomous Loop",
+        "",
+    ])
+
+    for s in data.get("autonomous_loop", []):
+        lines.append(f"### Step {s['step']}: {s['title']}")
+        lines.append(f"{s['description']}")
+        lines.append(f"- **Endpoint**: `{s['endpoint']}`")
+        lines.append(f"- **Tool**: `{s['tool']}`")
+        lines.append(f"```bash\n{s['example']}\n```")
+        lines.append("")
+
+    lines.extend([
+        "---",
+        "",
+        "## 5. Complete API Catalog",
+        "",
+        "| Method | Path | Description |",
+        "| :--- | :--- | :--- |",
+    ])
+
+    for ep in data.get("api_endpoints", []):
+        lines.append(f"| `{ep['method']}` | `{ep['path']}` | {ep['description']} |")
+
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 6. Recommended Agent System Prompt",
+        "",
+        "```text",
+        data.get("system_prompt", ""),
+        "```",
+        "",
+        "---",
+        "",
+        "## 7. Recommended Initial User Prompt",
+        "",
+        "```text",
+        data.get("initial_user_prompt", ""),
+        "```",
+    ])
+
+    return "\n".join(lines)
+
+
 @app.route("/")
 def index():
+    accept = request.headers.get("Accept", "")
+    fmt = request.args.get("format", "").lower()
+    is_agent = request.args.get("agent", "").lower() in ("1", "true", "yes")
+
+    if fmt == "json" or is_agent or ("application/json" in accept and "text/html" not in accept):
+        target_model = request.args.get("target_model", "gemma-3-270m")
+        return jsonify(buildAgentIndexData(target_model))
+    if fmt in ("md", "markdown", "text") or ("text/markdown" in accept and "text/html" not in accept):
+        target_model = request.args.get("target_model", "gemma-3-270m")
+        return Response(formatAgentIndexMarkdown(buildAgentIndexData(target_model)), mimetype="text/markdown; charset=utf-8")
+
     return render_template("index.html")
+
+
+@app.get("/agent")
+@app.get("/agent/")
+@app.get("/agent/index")
+def getAgentIndex():
+    target_model = request.args.get("target_model", "gemma-3-270m")
+    fmt = request.args.get("format", "").lower()
+    accept = request.headers.get("Accept", "")
+
+    data = buildAgentIndexData(target_model)
+
+    if fmt == "json" or ("application/json" in accept and "text/html" not in accept):
+        return jsonify(data)
+    if fmt in ("md", "markdown", "text") or ("text/markdown" in accept and "text/html" not in accept):
+        return Response(formatAgentIndexMarkdown(data), mimetype="text/markdown; charset=utf-8")
+    if fmt == "html" or "text/html" in accept:
+        return render_template("agent.html", data=data, markdown_text=formatAgentIndexMarkdown(data))
+
+    # Default to markdown response for CLI agents (e.g. curl with */*)
+    return Response(formatAgentIndexMarkdown(data), mimetype="text/markdown; charset=utf-8")
+
+
+@app.get("/api/agent")
+@app.get("/api/agent/index")
+@app.get("/api/home")
+def getAgentIndexApi():
+    target_model = request.args.get("target_model", "gemma-3-270m")
+    fmt = request.args.get("format", "").lower()
+    accept = request.headers.get("Accept", "")
+
+    data = buildAgentIndexData(target_model)
+
+    if fmt in ("md", "markdown", "text") or ("text/markdown" in accept and "application/json" not in accept):
+        return Response(formatAgentIndexMarkdown(data), mimetype="text/markdown; charset=utf-8")
+
+    return jsonify(data)
+
 
 
 @app.get("/api/status")
@@ -104,6 +477,19 @@ def getSystemStatus():
 def getAgentTools():
     return jsonify({
         "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_agent_index",
+                    "description": "Fetch the agent home page and comprehensive guidance, including mission objective, operating rules, target benchmarks, autonomous workflow instructions, and complete API directory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_model": {"type": "string", "default": "gemma-3-270m", "description": "Target model name."}
+                        }
+                    },
+                },
+            },
             {
                 "type": "function",
                 "function": {
@@ -288,6 +674,25 @@ def getOpenApiSpec():
         },
         "servers": [{"url": "http://localhost:8080"}],
         "paths": {
+            "/agent": {
+                "get": {
+                    "summary": "Agent home page and operational index (HTML, Markdown, or JSON)",
+                    "parameters": [
+                        {"name": "target_model", "in": "query", "schema": {"type": "string", "default": "gemma-3-270m"}},
+                        {"name": "format", "in": "query", "schema": {"type": "string", "enum": ["html", "json", "markdown"]}}
+                    ],
+                    "responses": {"200": {"description": "Agent index and operational guidance"}}
+                }
+            },
+            "/api/agent": {
+                "get": {
+                    "summary": "Agent operational index and guidance in JSON format",
+                    "parameters": [
+                        {"name": "target_model", "in": "query", "schema": {"type": "string", "default": "gemma-3-270m"}}
+                    ],
+                    "responses": {"200": {"description": "Structured JSON agent guidance"}}
+                }
+            },
             "/api/status": {
                 "get": {
                     "summary": "System status and target benchmarks",
