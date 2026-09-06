@@ -592,12 +592,15 @@ def runWorker():
 
             # Step 5: Test submitted kernel using fused kernel testing on calls.bin shapes
             kernel_names = []
-            if job.get("kernel_name"):
-                kernel_names = [job["kernel_name"]]
-            elif job.get("source"):
+            if job.get("source"):
                 kernel_names = extractRegisteredKernelNames(job["source"])
             elif job.get("kernel_file") and Path(job["kernel_file"]).exists():
                 kernel_names = extractRegisteredKernelNames(Path(job["kernel_file"]).read_text(encoding="utf-8", errors="ignore"))
+
+            if not kernel_names and job.get("kernel_name"):
+                kernel_names = [job["kernel_name"]]
+            elif not kernel_names and job.get("opname"):
+                kernel_names = [job["opname"]]
 
             if kernel_names:
                 job["step"] = "test_kernel"
@@ -613,11 +616,43 @@ def runWorker():
                         )
                 print(f"[JOB {job_id}] Kernel test passed successfully!")
 
-            # Step 6: Benchmark newly added calls using bench (with timeout)
+            # Step 6: Benchmark newly added calls using targeted bench (with timeout)
             job["step"] = "bench_kernels"
-            print(f"[JOB {job_id}] Step 5/7: Running bench to populate records.bin (timeout {TIMEOUTS['bench']}s)...")
-            bench_res = runCmd([bench_bin], TIMEOUTS["bench"])
-            job["steps"]["bench"] = bench_res
+            if kernel_names:
+                print(f"[JOB {job_id}] Step 5/7: Running targeted bench for kernel(s) {kernel_names} to populate records.bin (timeout {TIMEOUTS['bench']}s)...")
+                bench_stdout = []
+                bench_stderr = []
+                total_duration = 0.0
+                last_exit_code = 0
+                for kname in kernel_names:
+                    bench_res = runCmd([bench_bin, kname], TIMEOUTS["bench"])
+                    if bench_res.get("stdout"):
+                        bench_stdout.append(bench_res["stdout"])
+                    if bench_res.get("stderr"):
+                        bench_stderr.append(bench_res["stderr"])
+                    total_duration += bench_res.get("duration_ms", 0.0)
+                    if bench_res.get("timed_out"):
+                        job["steps"]["bench"] = bench_res
+                        raise Exception(f"Targeted benchmark timed out for kernel '{kname}'.")
+                    if bench_res["exit_code"] != 0:
+                        last_exit_code = bench_res["exit_code"]
+                        job["steps"]["bench"] = bench_res
+                        raise Exception(f"bench failed for kernel '{kname}' with exit code {last_exit_code}.")
+                job["steps"]["bench"] = {
+                    "exit_code": last_exit_code,
+                    "stdout": "\n".join(bench_stdout),
+                    "stderr": "\n".join(bench_stderr),
+                    "duration_ms": total_duration,
+                    "timed_out": False,
+                }
+            else:
+                print(f"[JOB {job_id}] Step 5/7: Running bench to populate records.bin (timeout {TIMEOUTS['bench']}s)...")
+                bench_res = runCmd([bench_bin], TIMEOUTS["bench"])
+                job["steps"]["bench"] = bench_res
+                if bench_res.get("timed_out"):
+                    raise Exception("bench timed out.")
+                if bench_res["exit_code"] != 0:
+                    raise Exception(f"bench failed with exit code {bench_res['exit_code']}.")
 
             # Step 7: Final bench_model run with new records
             job["step"] = "bench_model"
