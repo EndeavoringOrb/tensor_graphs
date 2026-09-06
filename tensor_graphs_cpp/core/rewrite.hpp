@@ -1919,12 +1919,12 @@ struct DotSplitRule : public Rule
         uint32_t K = aCls.shape[2];
         uint32_t N = bCls.shape[2];
 
-        if (N >= splitThreshold * 2)
+        if (N >= splitThreshold)
         {
             applyStrategyA(egraph, e_class_id, dotNode, aClass, bClass, aCls, bCls);
         }
 
-        if (K >= splitThreshold * 2)
+        if (K >= splitThreshold)
         {
             applyStrategyB(egraph, e_class_id, dotNode, aClass, bClass, aCls, bCls);
         }
