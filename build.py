@@ -50,7 +50,12 @@ def parseDepFile(dep_path: Path) -> list[Path]:
         deps = []
         for p in parts[1:]:
             p_clean = p.strip()
-            if not p_clean or p_clean.startswith("/usr/") or p_clean.startswith("/opt/"):
+            if (
+                not p_clean
+                or p_clean.endswith(":")
+                or p_clean.startswith("/usr/")
+                or p_clean.startswith("/opt/")
+            ):
                 continue
             dep_file = Path(p_clean)
             if dep_file.exists():
@@ -63,10 +68,11 @@ def parseDepFile(dep_path: Path) -> list[Path]:
 def isObjectUpToDate(
     obj_path: Path,
     src_path: Path,
-    dep_path: Path,
+    dep_path: Path | None,
     cmd_key: str,
     cache: dict,
     force: bool = False,
+    require_dep: bool = False,
 ) -> bool:
     """Checks if a compiled object file is up to date relative to its source and dependencies."""
     if force or not obj_path.exists():
@@ -75,14 +81,18 @@ def isObjectUpToDate(
     if not cached_entry or cached_entry.get("cmd_key") != cmd_key:
         return False
 
+    if require_dep and (dep_path is None or not dep_path.exists()):
+        return False
+
     obj_mtime = obj_path.stat().st_mtime
     if src_path.exists() and src_path.stat().st_mtime > obj_mtime:
         return False
 
-    deps = parseDepFile(dep_path)
-    for d in deps:
-        if d.exists() and d.stat().st_mtime > obj_mtime:
-            return False
+    if dep_path is not None:
+        deps = parseDepFile(dep_path)
+        for d in deps:
+            if d.exists() and d.stat().st_mtime > obj_mtime:
+                return False
 
     return True
 
@@ -1350,7 +1360,16 @@ class BuildOrchestrator:
             py_inc = self.toolchain.get_pybind11_flags()[0] if is_py else []
             cmd_key = f"{cxx_bin} {' '.join(cxx_flags)} {' '.join(py_inc)} {main_src}"
 
-            up_to_date = isObjectUpToDate(main_obj, main_src, dep_file, cmd_key, build_cache, self.config.force)
+            supports_deps = self.platform.compiler.kind in ("clang", "gcc")
+            up_to_date = isObjectUpToDate(
+                main_obj,
+                main_src,
+                dep_file,
+                cmd_key,
+                build_cache,
+                self.config.force,
+                require_dep=supports_deps,
+            )
             target_info[main_file] = {
                 "main_src": main_src,
                 "target_stem": target_stem,
@@ -1372,7 +1391,11 @@ class BuildOrchestrator:
         def compileTargetObj(target_file: str) -> tuple[str, bool, str]:
             info = target_info[target_file]
             console.print(f"\n[bold blue]Compiling {target_file}...[/bold blue]")
-            dep_flag = ["-MMD", "-MF", str(info["dep_file"])] if not self.platform.is_windows else []
+            dep_flag = (
+                ["-MMD", "-MF", str(info["dep_file"])]
+                if self.platform.compiler.kind in ("clang", "gcc")
+                else []
+            )
             cmd = (
                 [info["cxx_bin"]]
                 + info["cxx_flags"]
