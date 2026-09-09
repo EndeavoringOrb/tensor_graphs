@@ -1,7 +1,7 @@
 {
   "rules": {
     "dispatch": {
-      "InputDispatchDominationRule": false,
+      "InputDispatchDominationRule": true,
       "UnifiedMemoryExchangeableDispatchRule": false,
       "MemoryPressureDispatchRule": true,
       "DispatchCostPruningRule": true,
@@ -19,9 +19,6 @@
       "HMinBoundRule": true
     },
     "cache": {
-      "SingleUseSkipRule": true,
-      "TinyBufferSkipRule": true,
-      "StorageAnchoredSkipRule": true
     },
     "extract": {
       "InfiniteCostSkipRule": true,

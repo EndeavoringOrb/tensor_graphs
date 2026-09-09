@@ -410,21 +410,10 @@ int main(int argc, char *argv[])
     Session session(g, mem, logits_id, sessionSettings, &repo);
 
     // =========================================================================
-    // 3-Bucket Compilation Setup
+    // Bucket Compilation Setup
     // =========================================================================
 
-    // (1) Fully dirty bucket: loads storage weights, sequence length == max_seq_len
-    Bucket b1_full;
-    for (const auto &pair : g.nodes)
-    {
-        if (pair.second.opType == OpType::INPUT)
-        {
-            b1_full.inputDirtyRegions[pair.first] = {makeFull(pair.second.getShape())};
-        }
-    }
-    b1_full.outputNeededRegion = {makeFull(g.getNode(logits_id).getShape())};
-
-    // (2) pp bucket: input tokens dirty 0..pp, clean static weights
+    // (1) pp bucket: input tokens dirty 0..pp, clean static weights
     Bucket b2_pp;
     Region pp_in_reg;
     pp_in_reg.region = {{0, 1}, {0, pp}};
@@ -434,7 +423,7 @@ int main(int argc, char *argv[])
     pp_out_reg.region = {{0, 1}, {0, pp}, {0, vocab_size}};
     b2_pp.outputNeededRegion = {pp_out_reg};
 
-    // (3) tg bucket: input token tg (128) dirty, output token tg+1 (129) predicted
+    // (2) tg bucket: input token tg (128) dirty, output token tg+1 (129) predicted
     Bucket b3_tg;
     Region tg_in_reg;
     tg_in_reg.region = {{0, 1}, {tg, tg + 1}};
@@ -444,7 +433,6 @@ int main(int argc, char *argv[])
     tg_out_reg.region = {{0, 1}, {tg, tg + 1}, {0, vocab_size}};
     b3_tg.outputNeededRegion = {tg_out_reg};
 
-    session.addBucket(b1_full.inputDirtyRegions, b1_full.outputNeededRegion);
     session.addBucket(b2_pp.inputDirtyRegions, b2_pp.outputNeededRegion);
     session.addBucket(b3_tg.inputDirtyRegions, b3_tg.outputNeededRegion);
 
@@ -461,8 +449,8 @@ int main(int argc, char *argv[])
     std::vector<int32_t> input_tokens(max_seq_len, 2);
     session.writeInput(input_ids_id, input_tokens.data(), input_tokens.size() * sizeof(int32_t));
 
-    // Initial run of Bucket 1 to ensure all weights are resident in memory/VRAM
-    session.run(b1_full);
+    // Initial run of full bucket to ensure all weights are resident in memory/VRAM
+    session.run();
     sync_device_all();
 
     // =========================================================================

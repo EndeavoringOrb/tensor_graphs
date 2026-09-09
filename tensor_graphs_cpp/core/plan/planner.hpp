@@ -59,75 +59,6 @@ struct CacheContext
     int choice; // candidate choice (0 = uncached, m = cached in avail_mem_spaces[m-1])
 };
 
-// =============================================================================
-// CacheIterator pruning rules
-// =============================================================================
-
-class SingleUseSkipRule
-{
-  public:
-    TG_PRUNING_RULE(SingleUseSkipRule)
-    SingleUseSkipRule(bool en = true) : enabled(en)
-    {
-    }
-    bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (ctx.choice <= 0)
-            return false;
-        // A runtime input may have a single graph consumer but still backs every
-        // decode step.  Keeping it is what lets partial-path planning retain the
-        // clean token/KV prefix between buckets.
-        LogicalId id = ctx.candidate_nodes[ctx.k];
-        auto input_it = ctx.graph.input_data_types.find(id);
-        if (input_it != ctx.graph.input_data_types.end() && input_it->second == InputDataType::RUNTIME)
-            return false;
-        return ctx.num_users[ctx.k] <= 1;
-    }
-};
-
-class TinyBufferSkipRule
-{
-  public:
-    TG_PRUNING_RULE(TinyBufferSkipRule)
-    uint64_t min_cache_bytes = 4096;
-    TinyBufferSkipRule(bool en = true, uint64_t min_bytes = 4096) : enabled(en), min_cache_bytes(min_bytes)
-    {
-    }
-    bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (ctx.choice <= 0)
-            return false;
-        LogicalId id = ctx.candidate_nodes[ctx.k];
-        if (!ctx.graph.hasNode(id))
-            return false;
-        return static_cast<uint64_t>(ctx.graph.getNode(id).getSizeBytes()) < min_cache_bytes;
-    }
-};
-
-class StorageAnchoredSkipRule
-{
-  public:
-    TG_PRUNING_RULE(StorageAnchoredSkipRule)
-    StorageAnchoredSkipRule(bool en = true) : enabled(en)
-    {
-    }
-    bool check(int /*choice*/, size_t /*choice_idx*/, const CacheContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        if (ctx.choice <= 0)
-            return false;
-        LogicalId id = ctx.candidate_nodes[ctx.k];
-        auto it = ctx.graph.input_data_types.find(id);
-        if (it == ctx.graph.input_data_types.end())
-            return false;
-        return it->second == InputDataType::STORAGE;
-    }
-};
 
 // =============================================================================
 // CacheIterator<Rules...>
@@ -478,7 +409,7 @@ CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(
     return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate),
                                                  best_cost, timeout, std::forward<Rules>(rules)...);
 }
-using AllCacheRuleTypes = std::tuple<SingleUseSkipRule, TinyBufferSkipRule, StorageAnchoredSkipRule>;
+using AllCacheRuleTypes = std::tuple<>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::vector<LogicalId> &candidates,
