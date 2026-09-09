@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch
 
-ACTION_DIMS = {0: 6, 1: 8, 2: 8, 3: 6, 4: 5, 5: 8}
+ACTION_DIMS = {0: 6, 1: 9, 2: 10, 3: 6, 4: 5, 5: 8}
 
 
 # ==============================================================================

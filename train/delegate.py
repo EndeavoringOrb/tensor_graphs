@@ -165,8 +165,9 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         # Record action vector into active trajectory path
         if self.is_training:
             chosen_feat_np = action_feats_t[chosen_idx].cpu().numpy()
-            padded_act = np.zeros(8, dtype=np.float32)
-            dim = min(len(chosen_feat_np), 8)
+            max_act_dim = CostPredictorRNN.MAX_ACTION_DIM
+            padded_act = np.zeros(max_act_dim, dtype=np.float32)
+            dim = min(len(chosen_feat_np), max_act_dim)
             padded_act[:dim] = chosen_feat_np[:dim]
             self.active_path.append((phase_id, padded_act))
 
@@ -183,7 +184,7 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
         return self._order_items(choices, "cache", self._extract_cache_features)
 
     def order_enodes(self, enodes):
-        return self._order_items(enodes, "extract", self._extract_dispatch_features)
+        return self._order_items(enodes, "extract", self._extract_enode_features)
 
     def order_dispatch(self, ready_nodes):
         return self._order_items(
@@ -210,6 +211,29 @@ class CostPredictorDelegate(tensor_graphs.SearchDelegate):
                     f.mem_space.type if hasattr(f, "mem_space") else 0,
                     default=0.0,
                 ),
+                safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
+            ]
+            for f in items
+        ]
+        t = torch.tensor(feats, dtype=torch.float32)
+        return torch.nan_to_num(t, nan=0.0, posinf=30.0, neginf=0.0)
+
+    def _extract_enode_features(self, items):
+        feats = [
+            [
+                safe_log1p(f.cost),
+                safe_log1p(f.dp_cost),
+                safe_log1p(f.min_dp_cp_cost, 0.0),
+                safe_log1p(f.size),
+                safe_float(
+                    f.mem_space.type if hasattr(f, "mem_space") else 0,
+                    default=0.0,
+                ),
+                safe_float(
+                    len(f.engine_idxs) if hasattr(f, "engine_idxs") else 0, default=0.0
+                ),
+                safe_float(f.num_nodes, default=0.0),
+                safe_float(f.num_edges, default=0.0),
                 safe_log1p(f.mem_cap if hasattr(f, "mem_cap") else 0),
             ]
             for f in items

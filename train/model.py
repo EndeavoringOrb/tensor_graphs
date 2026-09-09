@@ -17,6 +17,7 @@ class CostPredictorRNN(nn.Module):
         4: 5,  # Malloc: [log_size, start, end, mem_type, log_mem_cap]
         5: 8,  # Frontier: [eclass_id, num_enodes, log_dp_cp, log_dp, log_size, dtype, mem_type, log_mem_cap]
     }
+    MAX_ACTION_DIM = max(ACTION_DIMS.values())
 
     def __init__(self, hidden_dim: int = 64):
         super().__init__()
@@ -105,8 +106,10 @@ class CostPredictorRNN(nn.Module):
         lengths = [int(t["length"]) for t in batch_trajectories]
         max_len = max(lengths)
 
+        max_act_dim = self.MAX_ACTION_DIM
+
         # 1. Pack padded numpy arrays on CPU
-        padded_actions = np.zeros((max_len, B, 8), dtype=np.float32)
+        padded_actions = np.zeros((max_len, B, max_act_dim), dtype=np.float32)
         padded_phases = np.zeros((max_len, B), dtype=np.int32)
         mask = np.zeros((max_len, B), dtype=bool)
 
@@ -118,7 +121,8 @@ class CostPredictorRNN(nn.Module):
             if acts.ndim == 1:
                 acts = acts.reshape(L, -1)
             act_dim = acts.shape[1]
-            padded_actions[:L, b_idx, : min(act_dim, 8)] = acts[:L, : min(act_dim, 8)]
+            copy_dim = min(act_dim, max_act_dim)
+            padded_actions[:L, b_idx, :copy_dim] = acts[:L, :copy_dim]
             padded_phases[:L, b_idx] = traj["phases"][:L]
             mask[:L, b_idx] = True
 
@@ -129,7 +133,7 @@ class CostPredictorRNN(nn.Module):
                 t_val = float(np.log1p(min(max(raw_c, 0.0), 1e20)))
             flat_targets_list.extend([t_val] * L)
 
-        act_t = torch.from_numpy(padded_actions).to(device)  # (max_len, B, 8)
+        act_t = torch.from_numpy(padded_actions).to(device)  # (max_len, B, max_act_dim)
         phases_t = torch.from_numpy(padded_phases).to(device)  # (max_len, B)
         mask_t = torch.from_numpy(mask).to(device)  # (max_len, B)
         targets_flat = torch.tensor(
@@ -137,7 +141,7 @@ class CostPredictorRNN(nn.Module):
         )
 
         # 2. Vectorized Action Encoding (6 MLP calls across the entire batch)
-        flat_act = act_t.reshape(max_len * B, 8)
+        flat_act = act_t.reshape(max_len * B, max_act_dim)
         flat_phases = phases_t.reshape(max_len * B)
         flat_mask = mask_t.reshape(max_len * B)
 
@@ -151,6 +155,13 @@ class CostPredictorRNN(nn.Module):
             ).squeeze(-1)
             if p_idx.numel() > 0:
                 p_feats = flat_act[p_idx, :dim]
+                if p_feats.shape[1] < dim:
+                    pad = torch.zeros(
+                        (p_feats.shape[0], dim - p_feats.shape[1]),
+                        dtype=p_feats.dtype,
+                        device=p_feats.device,
+                    )
+                    p_feats = torch.cat([p_feats, pad], dim=-1)
                 flat_emb[p_idx] = self.action_encoders[str(phase_id)](p_feats)
 
         seq_emb = flat_emb.reshape(max_len, B, self.hidden_dim)
