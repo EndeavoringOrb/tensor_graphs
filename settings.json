@@ -18,8 +18,7 @@
       "IdMaxSymmetryRule": true,
       "HMinBoundRule": true
     },
-    "cache": {
-    },
+    "cache": {},
     "extract": {
       "InfiniteCostSkipRule": true,
       "ExtractorCycleStepRule": true,

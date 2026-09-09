@@ -307,6 +307,7 @@ struct Settings
             {
                 for (const auto &[cat_key, cat_val] : root["rules"].items())
                 {
+                    category_defined[cat_key] = true;
                     if (cat_val.is_object())
                     {
                         for (const auto &[rule_key, rule_val] : cat_val.items())
@@ -314,7 +315,6 @@ struct Settings
                             if (rule_val.is_boolean())
                             {
                                 rules[cat_key][rule_key] = rule_val.get<bool>();
-                                category_defined[cat_key] = true;
                             }
                         }
                     }
