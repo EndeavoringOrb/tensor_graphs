@@ -25,7 +25,7 @@ class TrainConfig:
     run_dir: str = "runs"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
-    seq_len: int = 128  # LLM model sequence length (e.g. gemma-3-270m)
+    seq_len: int = 8  # LLM model sequence length (e.g. gemma-3-270m)
     num_simulations: int = 4
     level_simulations: list = dataclasses.field(default_factory=lambda: [1, 1, 1, 1])
     replay_buffer_size: int = 100_000
