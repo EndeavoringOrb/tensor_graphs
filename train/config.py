@@ -29,7 +29,7 @@ class TrainConfig:
     graph_source: str = "model"  # "model" or "random"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
-    seq_len: int = 128
+    seq_len: int = 8
     log_cost_calls: bool = False  # <--- Added
     bucket_weights: list[float] = dataclasses.field(default_factory=list)
 
