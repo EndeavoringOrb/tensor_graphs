@@ -556,7 +556,7 @@ struct Session
         Planner planner(costModel, settings);
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph temp_graph = graph;
-        planner.initBaseEGraph(rootId, temp_graph, topo, repo);
+        planner.initBaseEGraph(rootId, temp_graph, topo, repo, doSaturate);
 
         const std::vector<float> bucket_weights = normalizedBucketWeights(manualBuckets);
         std::unordered_map<LogicalId, MemSpace> best_cached_nodes;
@@ -651,6 +651,7 @@ struct Session
         // and rewrite space used for the final compiled graphs.
         for (uint32_t eval_count = 0; cache_iter.getNextCacheSelection(current_cache); ++eval_count)
         {
+            LOG(DEBUG) << "# cached nodes: " << current_cache.size();
             std::unordered_map<LogicalId, ParallelBuffer> preallocated;
             planner.preallocateLogicalBuffers(graph, current_cache, preallocated);
             std::vector<float> bucket_costs(manualBuckets.size(), TGConstants::INF);

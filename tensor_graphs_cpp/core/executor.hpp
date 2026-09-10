@@ -26,6 +26,7 @@ class Executor
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
 
+        // TODO: we should write constants for all buckets once in Session::compile
         for (const auto &pair : compiled.constantStaging)
         {
             EClassId eclass_id = pair.first;

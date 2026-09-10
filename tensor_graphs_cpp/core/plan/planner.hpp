@@ -1939,7 +1939,8 @@ struct Planner
     BaseEGraphState baseState;
     bool baseStateInitialized = false;
 
-    void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, TGStore *repo = nullptr)
+    void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, TGStore *repo = nullptr,
+                        bool doSaturate = true)
     {
         if (KernelRegistry::get().nKernels() == 0)
         {
@@ -2128,6 +2129,22 @@ struct Planner
         for (const auto &kv : baseState.nodeToEClass)
         {
             baseState.eclassToLogical[baseState.egraph.findConst(kv.second)] = kv.first;
+        }
+
+        if (doSaturate && settings.do_saturate)
+        {
+            saturate(baseState.egraph, {}, baseState.eclassToLogical, false, false, repo);
+
+            for (auto &kv : baseState.nodeToEClass)
+            {
+                kv.second = baseState.egraph.findConst(kv.second);
+            }
+            std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
+            for (const auto &kv : baseState.eclassToLogical)
+            {
+                updatedEClassToLogical[baseState.egraph.findConst(kv.first)] = kv.second;
+            }
+            baseState.eclassToLogical = std::move(updatedEClassToLogical);
         }
 
         baseStateInitialized = true;
@@ -2543,7 +2560,7 @@ struct Planner
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
-        initBaseEGraph(rootId, tempGraph, topo, repo);
+        initBaseEGraph(rootId, tempGraph, topo, repo, doSaturate);
 
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
