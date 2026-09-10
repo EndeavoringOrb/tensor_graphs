@@ -367,7 +367,7 @@ class LLMSession
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
-               uint32_t max_sequence_length = 128)
+               uint32_t max_sequence_length = 128, bool use_ortools = false)
     {
         max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
@@ -417,11 +417,13 @@ class LLMSession
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            actual_cache = "dirty_region_caches/" + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
+            std::string prefix = use_ortools ? "ortools_" : "";
+            actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
                                             min_compile_time, act_delegate, log_cost_calls);
+        session->settings.use_ortools = use_ortools;
 
         if (compile_decode_buckets)
         {
@@ -766,6 +768,88 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("__eq__", [](const LogicalId &self, const LogicalId &other) { return self == other; })
         .def("__repr__", [](const LogicalId &self) { return "LogicalId(" + std::to_string(self.value) + ")"; });
 
+    py::class_<BufferId>(m, "BufferId")
+        .def(py::init<>())
+        .def(py::init<uint32_t>())
+        .def_readwrite("value", &BufferId::value)
+        .def("__hash__", [](const BufferId &self) { return std::hash<BufferId>()(self); })
+        .def("__eq__", [](const BufferId &self, const BufferId &other) { return self == other; })
+        .def("__repr__", [](const BufferId &self) { return "BufferId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<EClassId>(m, "EClassId")
+        .def(py::init<>())
+        .def(py::init<uint32_t>())
+        .def_readwrite("value", &EClassId::value)
+        .def("__hash__", [](const EClassId &self) { return std::hash<EClassId>()(self); })
+        .def("__eq__", [](const EClassId &self, const EClassId &other) { return self == other; })
+        .def("__repr__", [](const EClassId &self) { return "EClassId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<ParallelBuffer>(m, "ParallelBuffer")
+        .def(py::init<>())
+        .def(py::init<BufferId, MemSpace, uint64_t, uint32_t, uint32_t, int64_t>(),
+             py::arg("id"), py::arg("mem_space"), py::arg("size"), py::arg("start"), py::arg("end"),
+             py::arg("offset") = -1)
+        .def_readwrite("id", &ParallelBuffer::id)
+        .def_readwrite("mem_space", &ParallelBuffer::mem_space)
+        .def_readwrite("size", &ParallelBuffer::size)
+        .def_readwrite("start", &ParallelBuffer::start)
+        .def_readwrite("end", &ParallelBuffer::end)
+        .def_readwrite("offset", &ParallelBuffer::offset)
+        .def("__repr__", [](const ParallelBuffer &b) {
+            return "ParallelBuffer(id=" + std::to_string(b.id.value) + ", size=" + std::to_string(b.size) +
+                   ", start=" + std::to_string(b.start) + ", end=" + std::to_string(b.end) +
+                   ", offset=" + std::to_string(b.offset) + ")";
+        });
+
+    py::class_<ExtractionResult>(m, "ExtractionResult")
+        .def(py::init<>())
+        .def_readwrite("selection_map", &ExtractionResult::selection_map)
+        .def_readwrite("order", &ExtractionResult::order)
+        .def_readwrite("buffers", &ExtractionResult::buffers)
+        .def_readwrite("eclass_to_buf", &ExtractionResult::eclass_to_buf)
+        .def_readwrite("cost", &ExtractionResult::cost)
+        .def_readwrite("eclass_to_cost", &ExtractionResult::eclass_to_cost);
+
+    py::class_<CompiledGraph>(m, "CompiledGraph")
+        .def(py::init<>())
+        .def_readwrite("bucket", &CompiledGraph::bucket)
+        .def_readwrite("nodeCosts", &CompiledGraph::nodeCosts)
+        .def_readwrite("eclass_to_logical", &CompiledGraph::eclass_to_logical)
+        .def_readwrite("logical_to_eclass", &CompiledGraph::logical_to_eclass)
+        .def("cost", &CompiledGraph::cost, py::arg("print_utilization") = false);
+
+    py::class_<Settings>(m, "Settings")
+        .def(py::init<>(&Settings::get_default))
+        .def_readwrite("use_ortools", &Settings::use_ortools)
+        .def_readwrite("disable_caching", &Settings::disable_caching)
+        .def_readwrite("only_plan", &Settings::only_plan)
+        .def_readwrite("min_compile_seconds", &Settings::min_compile_seconds)
+        .def_readwrite("num_threads", &Settings::num_threads)
+        .def_readwrite("bucket_weights", &Settings::bucket_weights);
+
+    py::class_<Session>(m, "Session")
+        .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
+                          bool disable_caching, bool use_ortools) {
+            Settings settings = Settings::get_default();
+            settings.use_ortools = use_ortools;
+            settings.disable_caching = disable_caching;
+            if (!cache_file.empty())
+                settings.cache_file = cache_file;
+            return std::make_unique<Session>(g, mem, root_id, settings);
+        }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
+            py::arg("disable_caching") = false, py::arg("use_ortools") = false)
+        .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
+                              const std::vector<Region> &outNeeded, float weight) {
+            s.addBucket(inDirty, outNeeded, weight);
+        }, py::arg("input_dirty_regions"), py::arg("output_needed_region"), py::arg("weight") = 1.0f)
+        .def("plan", &Session::plan, py::arg("do_saturate") = true)
+        .def("compile", &Session::compile, py::arg("do_saturate") = true)
+        .def("export_ortools_problem", &Session::exportOrtoolsProblem, py::arg("do_saturate") = true)
+        .def("ensure_cache_coverage_ortools", &Session::ensureCacheCoverageOrtools, py::arg("do_saturate") = true)
+        .def("get_compiled_graphs", &Session::getCachedGraphs)
+        .def("set_compiled_graphs", &Session::setCachedGraphs)
+        .def_readwrite("settings", &Session::settings);
+
     py::class_<TensorNode>(m, "TensorNode")
         .def_readonly("id", &TensorNode::id)
         .def_readonly("op_type", &TensorNode::opType)
@@ -924,11 +1008,12 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
-             py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128)
+             py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
+             py::arg("use_ortools") = false)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

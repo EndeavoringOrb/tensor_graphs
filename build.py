@@ -1039,6 +1039,8 @@ class Toolchain:
                 flags.extend(
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
                 )
+            elif not target_arm64:
+                flags.extend(["-target", "x86_64-pc-windows-msvc"])
 
             if self.config.debug:
                 flags.extend(["-g", "-O0", "-DTG_DEBUG"])
@@ -1087,6 +1089,8 @@ class Toolchain:
         link_flags = ["-shared"]
 
         if self.platform.is_windows:
+            if not self.platform.is_python_arm64:
+                link_flags.extend(["-target", "x86_64-pc-windows-msvc"])
             py_lib_dir_base = Path(sys.base_prefix) / "libs"
             py_lib_dir_prefix = Path(sys.prefix) / "libs"
             link_flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
@@ -1109,9 +1113,14 @@ class Toolchain:
 
         if self.config.use_opencl:
             if self.platform.opencl_lib_dir:
-                flags.append(f"-L{self.platform.opencl_lib_dir}")
-                if not self.platform.is_windows:
-                    flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
+                lib_dir = self.platform.opencl_lib_dir
+                if self.platform.is_windows and is_python_ext and not self.platform.is_python_arm64:
+                    x64_dir = Path(lib_dir) / "x64"
+                    if x64_dir.exists():
+                        lib_dir = str(x64_dir)
+                flags.append(f"-L{lib_dir}")
+            if not self.platform.is_windows:
+                flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
             flags.append("-lOpenCL")
 
             if self.platform.is_windows and self.config.profile:

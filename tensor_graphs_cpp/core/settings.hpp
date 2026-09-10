@@ -72,6 +72,7 @@ struct Settings
     bool only_plan = false;
     bool compile_decode_buckets = false;
     bool fold_weights = false;
+    bool use_ortools = false;
     // Optional raw weights in bucket insertion order. Session normalizes these
     // when scoring shared cache selections.
     std::vector<float> bucket_weights;
@@ -400,6 +401,7 @@ struct Settings
         parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
         parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
+        parser.add_flag({"--use-ortools"}, "Use Google OR-Tools CP-SAT model for optimization.");
         parser.add_option({"--repo-path"}, "Path to the tensor repository (benchmarks/repo_<name>).", "");
         parser.add_option({"--records"}, "Path to kernel benchmark records file.", records_path);
         parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
@@ -438,6 +440,9 @@ struct Settings
 
         if (parser.get_flag("--fold-weights"))
             fold_weights = true;
+
+        if (parser.get_flag("--use-ortools"))
+            use_ortools = true;
 
         std::string cli_repo_path = parser.get_option("--repo-path");
         if (!cli_repo_path.empty())
