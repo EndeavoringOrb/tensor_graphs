@@ -1,8 +1,10 @@
 #pragma once
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <string>
@@ -661,6 +663,8 @@ struct Session
             std::vector<float> bucket_costs(manualBuckets.size(), TGConstants::INF);
             std::vector<CompiledGraph> candidate_graphs(manualBuckets.size());
             std::atomic<bool> failed{false};
+            std::exception_ptr err_ptr = nullptr;
+            std::mutex err_mutex;
 
             ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
                 try
@@ -677,8 +681,16 @@ struct Session
                 catch (...)
                 {
                     failed.store(true, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(err_mutex);
+                    if (!err_ptr)
+                        err_ptr = std::current_exception();
                 }
             });
+
+            if (err_ptr)
+            {
+                std::rethrow_exception(err_ptr);
+            }
 
             if (!failed.load(std::memory_order_relaxed))
             {
