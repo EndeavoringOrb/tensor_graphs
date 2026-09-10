@@ -1688,6 +1688,41 @@ inline bool operator!=(const Bucket &a, const Bucket &b)
     return !(a == b);
 }
 
+inline std::string toString(const Bucket &bucket)
+{
+    std::stringstream ss;
+    ss << "Bucket(inputs={";
+    bool first_input = true;
+    for (const auto &pair : bucket.inputDirtyRegions)
+    {
+        if (!first_input)
+            ss << ", ";
+        first_input = false;
+        ss << pair.first << ": [";
+        for (size_t i = 0; i < pair.second.size(); ++i)
+        {
+            if (i > 0)
+                ss << ", ";
+            ss << encodeRegion(pair.second[i]);
+        }
+        ss << "]";
+    }
+    ss << "}, output=[";
+    for (size_t i = 0; i < bucket.outputNeededRegion.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << encodeRegion(bucket.outputNeededRegion[i]);
+    }
+    ss << "], weight=" << bucket.weight << ")";
+    return ss.str();
+}
+
+inline std::ostream &operator<<(std::ostream &os, const Bucket &bucket)
+{
+    return os << toString(bucket);
+}
+
 struct CompiledGraph
 {
     Bucket bucket;
@@ -1700,14 +1735,118 @@ struct CompiledGraph
     std::unordered_map<LogicalId, EClassId> logical_to_eclass;
     std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
-    float cost() const
+    float cost(bool print_utilization = false) const
     {
-        float sum = 0.0f;
-        for (const auto &pair : nodeCosts)
+        if (instructions.empty())
         {
-            sum += pair.second;
+            float sum = 0.0f;
+            for (const auto &pair : nodeCosts)
+            {
+                sum += pair.second;
+            }
+            return sum;
         }
-        return sum;
+
+        std::unordered_map<EClassId, float> birth_times;
+        std::unordered_map<Engine, float> engine_finish;
+        std::unordered_map<Engine, float> engine_active_time;
+        std::unordered_map<EClassId, std::vector<Engine>> eclass_engines;
+        std::unordered_map<uint32_t, std::vector<Engine>> buffer_writers;
+
+        for (const OpInstruction &inst : instructions)
+        {
+            float inst_cost = 0.0f;
+            auto cost_it = nodeCosts.find(inst.eclass_id);
+            if (cost_it != nodeCosts.end())
+            {
+                inst_cost = cost_it->second;
+            }
+
+            float children_finish = 0.0f;
+            for (size_t j = 0; j < inst.children.size(); ++j)
+            {
+                EClassId child = inst.children[j];
+                auto c_it = eclass_engines.find(child);
+                if (c_it != eclass_engines.end())
+                {
+                    for (const auto &engine : c_it->second)
+                    {
+                        auto it = engine_finish.find(engine);
+                        float child_finish = (it != engine_finish.end()) ? it->second : 0.0f;
+                        children_finish = std::max(children_finish, child_finish);
+                    }
+                }
+                else if (j < inst.inBuffers.size())
+                {
+                    uint32_t buf_id = inst.inBuffers[j].id.value;
+                    if (buf_id != UINT32_MAX)
+                    {
+                        auto bw_it = buffer_writers.find(buf_id);
+                        if (bw_it != buffer_writers.end())
+                        {
+                            for (const auto &engine : bw_it->second)
+                            {
+                                auto it = engine_finish.find(engine);
+                                float child_finish = (it != engine_finish.end()) ? it->second : 0.0f;
+                                children_finish = std::max(children_finish, child_finish);
+                            }
+                        }
+                    }
+                }
+            }
+
+            const std::vector<Engine> &engines = inst.engines.empty()
+                                                     ? std::vector<Engine>{Engine{0, EngineType::CPU}}
+                                                     : inst.engines;
+
+            float engine_free = 0.0f;
+            for (const auto &engine : engines)
+            {
+                auto it = engine_finish.find(engine);
+                if (it != engine_finish.end())
+                {
+                    engine_free = std::max(engine_free, it->second);
+                }
+            }
+
+            float birth = std::max(children_finish, engine_free);
+            birth_times[inst.eclass_id] = birth;
+
+            for (const auto &engine : engines)
+            {
+                engine_finish[engine] = birth + inst_cost;
+                engine_active_time[engine] += inst_cost;
+            }
+
+            eclass_engines[inst.eclass_id] = engines;
+            if (inst.outBuffer.id.value != UINT32_MAX)
+            {
+                buffer_writers[inst.outBuffer.id.value] = engines;
+            }
+        }
+
+        float total_cost = 0.0f;
+        for (const auto &kv : engine_finish)
+        {
+            total_cost = std::max(total_cost, kv.second);
+        }
+
+        if (print_utilization && total_cost > 0.0f)
+        {
+            std::cout << "Total Execution Cost: " << total_cost << " ms\n";
+            for (const auto &kv : engine_active_time)
+            {
+                Engine eng = kv.first;
+                float active_duration = kv.second;
+                float percentage = (active_duration / total_cost) * 100.0f;
+
+                std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): " << std::fixed
+                          << std::setprecision(2) << percentage << "% "
+                          << "(" << active_duration << " ms active)\n";
+            }
+        }
+
+        return total_cost;
     }
 
     bool has_logical_id(EClassId eclass_id) const

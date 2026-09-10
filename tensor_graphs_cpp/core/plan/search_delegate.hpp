@@ -192,6 +192,7 @@ class HeuristicSearchDelegate : public SearchDelegate
 
     bool has_valid_plan() const
     {
+        // return true; // TODO: remove this, this is just so we can test immediate cost seeking vs mem then cost seeking
         if (best_cost_ptr && *best_cost_ptr < TGConstants::INF)
             return true;
         return (best_cost_val < TGConstants::INF);

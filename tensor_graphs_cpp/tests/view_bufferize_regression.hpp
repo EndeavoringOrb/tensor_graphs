@@ -59,6 +59,12 @@ inline void testViewNotEmittedIntoInstructions()
 
     CompiledGraph compiled = planner.plan(out, graph, bucket, {}, true, false, nullptr);
 
+    if (std::abs(compiled.cost() - 3.0f) > 1e-4f)
+    {
+        Error::throw_err("[Regression Test Failed] compiled.cost() " + std::to_string(compiled.cost()) +
+                         " != expected 3.0f");
+    }
+
     // Verify 1: View operations must NOT be emitted into compiled.instructions
     for (const auto &inst : compiled.instructions)
     {
@@ -466,9 +472,132 @@ inline void testMemCapENodeDomination()
     }
 }
 
+inline void testCompiledGraphCost()
+{
+    std::cout << "  - running testCompiledGraphCost..." << std::endl;
+
+    // Test 1: Empty instructions fallback to nodeCosts sum
+    {
+        CompiledGraph g;
+        g.nodeCosts[EClassId{1}] = 3.5f;
+        g.nodeCosts[EClassId{2}] = 4.5f;
+        if (std::abs(g.cost() - 8.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] Empty instructions should sum nodeCosts!");
+        }
+    }
+
+    // Test 2: Sequential execution on single engine
+    {
+        CompiledGraph g;
+        Engine cpu{0, EngineType::CPU};
+
+        OpInstruction inst_1;
+        inst_1.eclass_id = EClassId{1};
+        inst_1.engines = {cpu};
+        inst_1.outBuffer.id = BufferId{10};
+
+        OpInstruction inst_2;
+        inst_2.eclass_id = EClassId{2};
+        inst_2.engines = {cpu};
+        inst_2.children = {EClassId{1}};
+        inst_2.inBuffers.push_back(inst_1.outBuffer);
+        inst_2.outBuffer.id = BufferId{20};
+
+        g.instructions = {inst_1, inst_2};
+        g.nodeCosts[EClassId{1}] = 10.0f;
+        g.nodeCosts[EClassId{2}] = 5.0f;
+
+        // inst_1 finishes at 10.0, inst_2 starts at 10.0 and finishes at 15.0
+        if (std::abs(g.cost() - 15.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] Sequential single engine makespan mismatch!");
+        }
+    }
+
+    // Test 3: Parallel execution across two engines
+    {
+        CompiledGraph g;
+        Engine cpu{0, EngineType::CPU};
+        Engine gpu{0, EngineType::CUDA_GPU};
+
+        // inst_1 on CPU takes 10.0ms
+        OpInstruction inst_1;
+        inst_1.eclass_id = EClassId{1};
+        inst_1.engines = {cpu};
+        inst_1.outBuffer.id = BufferId{10};
+
+        // inst_2 on GPU takes 6.0ms in parallel
+        OpInstruction inst_2;
+        inst_2.eclass_id = EClassId{2};
+        inst_2.engines = {gpu};
+        inst_2.outBuffer.id = BufferId{20};
+
+        // inst_3 on CPU takes 4.0ms, depends on both inst_1 and inst_2
+        OpInstruction inst_3;
+        inst_3.eclass_id = EClassId{3};
+        inst_3.engines = {cpu};
+        inst_3.children = {EClassId{1}, EClassId{2}};
+        inst_3.inBuffers = {inst_1.outBuffer, inst_2.outBuffer};
+        inst_3.outBuffer.id = BufferId{30};
+
+        g.instructions = {inst_1, inst_2, inst_3};
+        g.nodeCosts[EClassId{1}] = 10.0f;
+        g.nodeCosts[EClassId{2}] = 6.0f;
+        g.nodeCosts[EClassId{3}] = 4.0f;
+
+        // inst_1: birth=0, finish=10.0 on CPU
+        // inst_2: birth=0, finish=6.0 on GPU
+        // inst_3: children_finish=max(10.0, 6.0)=10.0, engine_free(CPU)=10.0 => birth=10.0, finish=14.0 on CPU
+        // Total makespan: max(14.0, 6.0) = 14.0ms
+        if (std::abs(g.cost() - 14.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] Parallel engine makespan mismatch!");
+        }
+    }
+
+    // Test 4: View dependency through buffer_writers
+    {
+        CompiledGraph g;
+        Engine gpu{0, EngineType::CUDA_GPU};
+        Engine cpu{0, EngineType::CPU};
+
+        // inst_1 on GPU produces Buffer 100
+        OpInstruction inst_1;
+        inst_1.eclass_id = EClassId{1};
+        inst_1.engines = {gpu};
+        inst_1.outBuffer.id = BufferId{100};
+
+        // EClass 2 is a VIEW of EClass 1 (not in instructions), sharing Buffer 100
+        // inst_3 on CPU consumes EClass 2, with inBuffers pointing to Buffer 100
+        OpInstruction inst_3;
+        inst_3.eclass_id = EClassId{3};
+        inst_3.engines = {cpu};
+        inst_3.children = {EClassId{2}};
+        ParallelBuffer view_in_buf;
+        view_in_buf.id = BufferId{100};
+        inst_3.inBuffers = {view_in_buf};
+        inst_3.outBuffer.id = BufferId{101};
+
+        g.instructions = {inst_1, inst_3};
+        g.nodeCosts[EClassId{1}] = 12.0f;
+        g.nodeCosts[EClassId{3}] = 8.0f;
+
+        // inst_1: birth=0, finish=12.0 on GPU
+        // inst_3: child 2 not in eclass_engines, but inBuffers[0] has Buffer 100 written by GPU
+        //        children_finish = 12.0, engine_free(CPU) = 0 => birth=12.0, finish=20.0 on CPU
+        // Total makespan: max(12.0, 20.0) = 20.0ms
+        if (std::abs(g.cost() - 20.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] View buffer dependency makespan mismatch!");
+        }
+    }
+}
+
 inline void runViewBufferizeRegressionTests()
 {
     std::cout << "view & bufferize regression tests" << std::endl << std::flush;
+    testCompiledGraphCost();
     testViewNotEmittedIntoInstructions();
     testInplaceAliasEraseOnNewBuffer();
     testBuildBuffersCoverageAndFallback();

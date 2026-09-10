@@ -357,8 +357,11 @@ struct Session
 
         // Compute exact peak allocation size required per MemSpace across all compiled graphs
         std::unordered_map<MemSpace, uint64_t> peakSizes;
+        LOG(INFO) << "Bucket execution times:";
         for (const CompiledGraph &g : cachedGraphs)
         {
+            LOG(INFO) << g.bucket << ": ";
+            g.cost(true);
             for (const auto &inst : g.instructions)
             {
                 if (inst.outBuffer.mem_space.type != HandleType::STORAGE && inst.outBuffer.offset >= 0)
@@ -393,6 +396,7 @@ struct Session
         memManager.init(peakSizes);
 
         // Write all constants directly to their allocated offsets in memory
+        // TODO: currently redundant with constant writing in Executor::run? we should try only write constants here
         std::unordered_set<LogicalId> written;
         for (const CompiledGraph &g : cachedGraphs)
         {

@@ -25,6 +25,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--pruning-state"}, "Run only pruning-rule push/pop state restoration tests.");
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
+    parser.add_flag({"--view-reg"}, "Run only view and bufferize regression tests.");
     parser.add_option({"--timeout"}, "Timeout in seconds for each pruning test run (default: 15.0).", "15.0");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
@@ -63,6 +64,12 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--cuda-sync"))
     {
         runCudaSyncRegressionTests();
+        return 0;
+    }
+
+    if (parser.get_flag("--view-reg"))
+    {
+        runViewBufferizeRegressionTests();
         return 0;
     }
 
