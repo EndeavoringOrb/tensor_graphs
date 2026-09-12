@@ -1,13 +1,13 @@
 """Joint cache, extraction, dispatch, bufferization and allocation with CP-SAT.
 
 All decisions belong to one model and one Solve call. Optional rectangles pack
-buffer lifetimes against byte offsets; optional kernel intervals reserve engines.
+buffer lifetimes against 4KB page offsets; optional kernel intervals reserve engines.
 Views and in-place choices propagate allocation lifetimes back to their owners.
 Only decoding (including sorting the solved schedule) happens after Solve.
 """
 
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from ortools.sat.python import cp_model
 
@@ -33,10 +33,8 @@ class OrtoolsSolver:
         self.cache_choices = {}
         self.bucket_models = []
         self.objective_terms = []
-        self.memory_terms = []
         self.caps = {}
-        # A finite arena bound avoids overflowing CP-SAT when native caps are
-        # UINT64_MAX. Allocating every possible buffer separately is sufficient.
+        # A finite arena bound avoids overflowing CP-SAT when native caps are UINT64_MAX.
         self.arena_bound = (
             self.alignment
             + sum(int(item["offset"]) + int(item["size"]) for item in self.preallocated)
@@ -68,14 +66,14 @@ class OrtoolsSolver:
             self.caps[key] = max(0, min(int(cap), self.arena_bound))
         return self.caps[key]
 
-    def newOffset(self, mem_space, name):
+    def memoryCapPages(self, mem_space):
+        return self.memoryCap(mem_space) // self.alignment
+
+    def newPageOffset(self, mem_space, name):
         if mem_space["type"] == 0:
-            return self.model.NewConstant(0)
-        cap = self.memoryCap(mem_space)
-        units = self.model.NewIntVar(0, cap // self.alignment, f"{name}_pages")
-        offset = self.model.NewIntVar(0, cap, f"{name}_offset")
-        self.model.Add(offset == units * self.alignment)
-        return offset
+            return None
+        cap_pages = self.memoryCapPages(mem_space)
+        return self.model.NewIntVar(0, cap_pages, f"{name}_page_offset")
 
     def duration(self, enode):
         cost = enode.get("cost")
@@ -98,10 +96,23 @@ class OrtoolsSolver:
     def createGlobalBuffers(self):
         by_logical = {}
         for item in self.preallocated:
+            raw_offset = int(item["offset"])
+            raw_page_offset = raw_offset // self.alignment
+            raw_size = int(item["size"])
             buf = dict(
-                item, id=int(item["buffer_id"]), present=self.model.NewConstant(1)
+                item,
+                id=int(item["buffer_id"]),
+                size=raw_size,
+                raw_offset=raw_offset,
+                raw_page_offset=raw_page_offset,
+                present=self.model.NewConstant(1),
             )
-            buf["offset"] = self.model.NewConstant(int(item["offset"]))
+            buf["page_offset"] = (
+                None
+                if item["mem_space"]["type"] == 0
+                else self.model.NewConstant(raw_page_offset)
+            )
+            buf["offset"] = buf["page_offset"]
             self.global_buffers.append(buf)
             by_logical[item["logical_id"]] = buf
 
@@ -123,13 +134,15 @@ class OrtoolsSolver:
                 if lid in by_logical:
                     buf = by_logical[lid]
                 else:
+                    page_offset = self.newPageOffset(mem_space, f"cache_{lid}_{key}")
                     buf = {
                         "id": self.newBufferId(),
                         "logical_id": lid,
                         "mem_space": mem_space,
                         "size": int(candidate["size_bytes"]),
                         "present": present,
-                        "offset": self.newOffset(mem_space, f"cache_{lid}_{key}"),
+                        "page_offset": page_offset,
+                        "offset": page_offset,
                     }
                     if "raw_size_bytes" in candidate:
                         buf["raw_size_bytes"] = candidate["raw_size_bytes"]
@@ -140,19 +153,27 @@ class OrtoolsSolver:
         self.preallocated_by_logical = by_logical
 
     def addRectangle(self, rectangles, buf, start, end, horizon, name):
-        if buf["mem_space"]["type"] == 0:
+        if buf["mem_space"]["type"] == 0 or buf.get("page_offset") is None:
             return
         model = self.model
-        present, size, offset = buf["present"], buf["size"], buf["offset"]
-        cap = self.memoryCap(buf["mem_space"])
-        model.Add(offset >= 0).OnlyEnforceIf(present)
-        model.Add(offset + size <= cap).OnlyEnforceIf(present)
+        present = buf["present"]
+        page_size = (
+            max(1, (buf["size"] + self.alignment - 1) // self.alignment)
+            if buf["size"] > 0
+            else 0
+        )
+        page_offset = buf["page_offset"]
+        cap_pages = self.memoryCapPages(buf["mem_space"])
+
+        model.Add(page_offset >= 0).OnlyEnforceIf(present)
+        model.Add(page_offset + page_size <= cap_pages).OnlyEnforceIf(present)
+
         lifetime = model.NewIntVar(0, horizon, f"{name}_lifetime")
         time_interval = model.NewOptionalIntervalVar(
             start, lifetime, end, present, f"{name}_live"
         )
         space_interval = model.NewOptionalIntervalVar(
-            offset, size, offset + size, present, f"{name}_bytes"
+            page_offset, page_size, page_offset + page_size, present, f"{name}_pages"
         )
         rectangles[memSpaceKey(buf["mem_space"])].append(
             (time_interval, space_interval)
@@ -161,7 +182,8 @@ class OrtoolsSolver:
     def aliasBuffer(self, node, child, present, is_view):
         model = self.model
         model.Add(node["owner"] == child["owner"]).OnlyEnforceIf(present)
-        model.Add(node["offset"] == child["offset"]).OnlyEnforceIf(present)
+        if node["page_offset"] is not None and child["page_offset"] is not None:
+            model.Add(node["page_offset"] == child["page_offset"]).OnlyEnforceIf(present)
         model.Add(node["protected"] == child["protected"]).OnlyEnforceIf(present)
         model.Add(child["release"] >= node["release"]).OnlyEnforceIf(present)
         if is_view:
@@ -171,7 +193,8 @@ class OrtoolsSolver:
     def bindGlobalBuffer(self, node, buf, present, horizon):
         model = self.model
         model.Add(node["owner"] == buf["id"]).OnlyEnforceIf(present)
-        model.Add(node["offset"] == buf["offset"]).OnlyEnforceIf(present)
+        if node["page_offset"] is not None and buf["page_offset"] is not None:
+            model.Add(node["page_offset"] == buf["page_offset"]).OnlyEnforceIf(present)
         model.Add(node["protected"] == 1).OnlyEnforceIf(present)
         model.Add(node["release"] == horizon).OnlyEnforceIf(present)
 
@@ -220,6 +243,7 @@ class OrtoolsSolver:
         max_owner = self.next_buffer_id + count
         for cid, cls in classes.items():
             name = f"b{b}_c{cid}"
+            page_offset = self.newPageOffset(cls["mem_space"], name)
             node = {
                 "cls": cls,
                 "id": self.newBufferId(),
@@ -229,7 +253,8 @@ class OrtoolsSolver:
                 "fresh": model.NewBoolVar(f"{name}_fresh"),
                 "protected": model.NewBoolVar(f"{name}_protected"),
                 "owner": model.NewIntVar(0, max_owner, f"{name}_owner"),
-                "offset": self.newOffset(cls["mem_space"], name),
+                "page_offset": page_offset,
+                "offset": page_offset,
                 "rank": model.NewIntVar(0, count - 1, f"{name}_rank"),
                 "start": model.NewIntVar(0, horizon - 1, f"{name}_start"),
                 "end": model.NewIntVar(0, horizon - 1, f"{name}_end"),
@@ -461,8 +486,308 @@ class OrtoolsSolver:
             raise ValueError(f"Invalid bucket weight {weight}")
         self.objective_terms.append(weight * makespan)
         self.bucket_models.append(
-            {"bucket": bucket, "nodes": nodes, "makespan": makespan, "horizon": horizon}
+            {
+                "bucket": bucket,
+                "nodes": nodes,
+                "makespan": makespan,
+                "horizon": horizon,
+            }
         )
+
+    def addSolutionHint(self):
+        """Constructs an initial feasible schedule + memory layout hint."""
+        hinted_vars = set()
+
+        def add_hint(var, val):
+            if var is None:
+                return
+            idx = getattr(var, "index", None)
+            if idx is None:
+                try:
+                    idx = var.Index()
+                except AttributeError:
+                    return
+            pos_idx = idx if idx >= 0 else -idx - 1
+            if pos_idx in hinted_vars:
+                return
+            hinted_vars.add(pos_idx)
+            self.model.AddHint(var, int(val))
+
+        for bucket_model in self.bucket_models:
+            bucket = bucket_model["bucket"]
+            nodes = bucket_model["nodes"]
+            horizon = bucket_model["horizon"]
+            makespan = bucket_model["makespan"]
+            classes = {cls["id"]: cls for cls in bucket["classes"]}
+            root_id = bucket["root_eclass_id"]
+            logicals = {
+                int(cid): int(lid)
+                for cid, lid in bucket.get("eclass_to_logical", {}).items()
+            }
+
+            best_enode = {}
+            cost = {}
+
+            # 1. Base inputs
+            for cid, cls in classes.items():
+                for enode in cls["enodes"]:
+                    if enode.get("is_input"):
+                        dur = self.duration(enode)
+                        if dur is not None:
+                            cost[cid] = 0
+                            best_enode[cid] = enode["enode_idx"]
+                            break
+
+            # 2. Iterative DAG discovery
+            for _ in range(40):
+                changed = False
+                for cid, cls in classes.items():
+                    lid = logicals.get(cid, -1)
+                    reserved = self.preallocated_by_logical.get(lid)
+                    for enode in cls["enodes"]:
+                        e_idx = enode["enode_idx"]
+                        if e_idx not in nodes[cid]["selections"]:
+                            continue
+                        if enode.get("is_cache") or enode.get("is_scatter"):
+                            continue
+                        if enode.get("mem_space", cls["mem_space"]) != cls["mem_space"]:
+                            continue
+                        dur = self.duration(enode)
+                        if dur is None:
+                            continue
+                        children = enode.get("children", [])
+                        if any(ch not in nodes for ch in children):
+                            continue
+                        # Views cannot initialize persistent buffers and must match memory space
+                        if enode.get("is_view"):
+                            if reserved is not None or not children:
+                                continue
+                            if nodes[children[0]]["mem_space"] != cls["mem_space"]:
+                                continue
+                        if all(ch in cost for ch in children):
+                            view_penalty = 1 if enode.get("is_view") else 0
+                            total_c = dur + sum(cost[ch] for ch in children) + view_penalty
+                            if cid not in cost or total_c < cost[cid]:
+                                cost[cid] = total_c
+                                best_enode[cid] = e_idx
+                                changed = True
+                if not changed:
+                    break
+
+            if root_id not in best_enode:
+                continue
+
+            # 3. Extract active subgraph from root
+            active_cids = set()
+            stack = [root_id]
+            while stack:
+                curr = stack.pop()
+                if curr in active_cids:
+                    continue
+                active_cids.add(curr)
+                e_idx = best_enode[curr]
+                enode = next(e for e in classes[curr]["enodes"] if e["enode_idx"] == e_idx)
+                for ch in enode.get("children", []):
+                    if ch in nodes and ch not in active_cids:
+                        stack.append(ch)
+
+            # 4. Kahn's algorithm for rank ordering (sources to sink)
+            in_degree = {cid: 0 for cid in active_cids}
+            parents_map = defaultdict(list)
+            for cid in active_cids:
+                e_idx = best_enode[cid]
+                enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
+                for ch in enode.get("children", []):
+                    if ch in active_cids:
+                        parents_map[ch].append(cid)
+                        in_degree[cid] += 1
+
+            q = deque([cid for cid, deg in in_degree.items() if deg == 0])
+            order = []
+            while q:
+                curr = q.popleft()
+                order.append(curr)
+                for p in parents_map[curr]:
+                    in_degree[p] -= 1
+                    if in_degree[p] == 0:
+                        q.append(p)
+
+            for cid in active_cids:
+                if cid not in order:
+                    order.append(cid)
+
+            ranks = {cid: idx for idx, cid in enumerate(order)}
+
+            # 5. Sequential non-overlapping execution schedule
+            curr_time = 1
+            start_time = {}
+            end_time = {}
+            for cid in order:
+                e_idx = best_enode[cid]
+                enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
+                if enode.get("is_input"):
+                    start_time[cid] = 0
+                    end_time[cid] = 0
+                elif enode.get("is_view"):
+                    # Views are instant metadata operations: duration is strictly 0
+                    children = [ch for ch in enode.get("children", []) if ch in active_cids]
+                    earliest = max([curr_time] + [end_time.get(ch, 0) for ch in children])
+                    start_time[cid] = earliest
+                    end_time[cid] = earliest
+                else:
+                    dur = self.duration(enode)
+                    if dur is None or dur <= 0:
+                        dur = 1
+                    children = [ch for ch in enode.get("children", []) if ch in active_cids]
+                    earliest = max([curr_time] + [end_time.get(ch, 0) for ch in children])
+                    start_time[cid] = earliest
+                    end_time[cid] = earliest + dur
+                    curr_time = end_time[cid]
+
+            # Compute release and read_end times
+            release_time = {}
+            read_end_time = {}
+            for cid in order:
+                e_idx = best_enode[cid]
+                enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
+                lid = logicals.get(cid, -1)
+                reserved = self.preallocated_by_logical.get(lid)
+                is_reserved = (
+                    reserved is not None and self.matchesBuffer(classes[cid], reserved)
+                )
+
+                # Root, inputs, and preallocated buffers are constrained to release == horizon
+                if cid == root_id or enode.get("is_input") or is_reserved:
+                    rel = horizon
+                else:
+                    consumer_ends = [end_time[p] for p in parents_map.get(cid, [])]
+                    rel = max([end_time[cid], start_time[cid] + 1] + consumer_ends)
+
+                release_time[cid] = rel
+                read_end_time[cid] = horizon if cid == root_id else rel
+
+            # Propagate release and read_end backwards through view chains
+            for cid in reversed(order):
+                e_idx = best_enode.get(cid)
+                if e_idx is not None:
+                    enode = next(
+                        e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx
+                    )
+                    if enode.get("is_view"):
+                        children = [
+                            ch for ch in enode.get("children", []) if ch in active_cids
+                        ]
+                        if children:
+                            base_cid = children[0]
+                            release_time[base_cid] = max(
+                                release_time[base_cid], release_time[cid]
+                            )
+                            read_end_time[base_cid] = max(
+                                read_end_time[base_cid], read_end_time[cid]
+                            )
+
+            # 6. Page-aligned offset assignment (disjoint offsets guarantee no 2D overlap)
+            # Initialize next_page from ALL global buffers to prevent overlapping NoOverlap2D
+            next_page = defaultdict(int)
+            for buf in self.global_buffers:
+                if buf["mem_space"]["type"] != 0:
+                    ms_key = memSpaceKey(buf["mem_space"])
+                    p_off = buf.get("raw_page_offset", 0)
+                    p_size = max(1, (buf["size"] + self.alignment - 1) // self.alignment)
+                    next_page[ms_key] = max(next_page[ms_key], p_off + p_size)
+
+            page_offsets = {}
+            is_fresh = {}
+            owners = {}
+            is_prot = {}
+
+            # Preallocated buffers
+            for cid in order:
+                node = nodes[cid]
+                cls = node["cls"]
+                lid = logicals.get(cid, -1)
+                reserved = self.preallocated_by_logical.get(lid)
+                if reserved is not None and self.matchesBuffer(cls, reserved):
+                    is_fresh[cid] = 0
+                    owners[cid] = reserved["id"]
+                    is_prot[cid] = 1
+                    page_offsets[cid] = reserved.get("raw_page_offset", 0)
+
+            # Dynamic & view buffers
+            for cid in order:
+                if cid in page_offsets:
+                    continue
+                node = nodes[cid]
+                cls = node["cls"]
+                e_idx = best_enode[cid]
+                enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
+                children = [ch for ch in enode.get("children", []) if ch in active_cids]
+
+                if enode.get("is_view") and children and children[0] in page_offsets:
+                    base_cid = children[0]
+                    is_fresh[cid] = 0
+                    owners[cid] = owners[base_cid]
+                    is_prot[cid] = is_prot.get(base_cid, 0)
+                    page_offsets[cid] = page_offsets[base_cid]
+                elif cls["mem_space"]["type"] == 0:
+                    page_offsets[cid] = 0
+                    is_fresh[cid] = 1
+                    owners[cid] = node["id"]
+                    is_prot[cid] = 1 if enode.get("is_input") else 0
+                else:
+                    ms_key = memSpaceKey(cls["mem_space"])
+                    p_size = max(
+                        1, (node["size"] + self.alignment - 1) // self.alignment
+                    )
+                    p_off = next_page[ms_key]
+                    next_page[ms_key] += p_size
+                    page_offsets[cid] = p_off
+                    is_fresh[cid] = 1
+                    owners[cid] = node["id"]
+                    is_prot[cid] = 1 if enode.get("is_input") else 0
+
+            # 7. Apply hints to CP-SAT
+            for cid in active_cids:
+                node = nodes[cid]
+                e_idx = best_enode[cid]
+
+                add_hint(node["active"], 1)
+                add_hint(node["fresh"], is_fresh[cid])
+                add_hint(node["owner"], owners[cid])
+                if node["page_offset"] is not None:
+                    add_hint(node["page_offset"], page_offsets[cid])
+                add_hint(node["protected"], is_prot.get(cid, 0))
+                add_hint(node["rank"], ranks[cid])
+                add_hint(node["start"], start_time[cid])
+                add_hint(node["end"], end_time[cid])
+                add_hint(node["release"], release_time[cid])
+                add_hint(node["read_end"], read_end_time[cid])
+                for s_idx, (sel_var, _) in node["selections"].items():
+                    add_hint(sel_var, 1 if s_idx == e_idx else 0)
+                for present_var, _ in node["aliases"]:
+                    add_hint(present_var, 0)
+
+            for cid, node in nodes.items():
+                if cid not in active_cids:
+                    add_hint(node["active"], 0)
+                    add_hint(node["fresh"], 0)
+                    add_hint(node["protected"], 0)
+                    add_hint(node["rank"], 0)
+                    add_hint(node["start"], 0)
+                    add_hint(node["end"], 0)
+                    add_hint(node["release"], 0)
+                    add_hint(node["read_end"], 0)
+                    for sel_var, _ in node["selections"].values():
+                        add_hint(sel_var, 0)
+                    for present_var, _ in node["aliases"]:
+                        add_hint(present_var, 0)
+
+            max_end = max([end_time.get(cid, 0) for cid in active_cids], default=0)
+            add_hint(makespan, max_end)
+
+        for choices in self.cache_choices.values():
+            for present, _ in choices:
+                add_hint(present, 0)
 
     def decodeSolution(self, solver, status):
         global_buffers = [
@@ -470,7 +795,11 @@ class OrtoolsSolver:
                 "id": buf["id"],
                 "mem_space": buf["mem_space"],
                 "size": buf["size"],
-                "offset": solver.Value(buf["offset"]),
+                "offset": (
+                    solver.Value(buf["page_offset"]) * self.alignment
+                    if buf["page_offset"] is not None
+                    else buf.get("raw_offset", 0)
+                ),
                 "start": 0,
                 "end": 2**32 - 1,
             }
@@ -515,7 +844,11 @@ class OrtoolsSolver:
                         "id": node["id"],
                         "mem_space": node["mem_space"],
                         "size": node["size"],
-                        "offset": solver.Value(node["offset"]),
+                        "offset": (
+                            solver.Value(node["page_offset"]) * self.alignment
+                            if node["page_offset"] is not None
+                            else 0
+                        ),
                         "start": position,
                         "end": position + 1,
                     }
@@ -559,22 +892,30 @@ class OrtoolsSolver:
         self.createGlobalBuffers()
         for bucket in self.buckets:
             self.createBucket(bucket)
-        self.model.Minimize(
-            sum(self.objective_terms)
-        )
+
+        # Primary optimization: minimize total execution latency
+        self.model.Minimize(sum(self.objective_terms))
+
+        # Seed the CP-SAT solver with an initial valid schedule & placement
+        self.addSolutionHint()
+
         error = self.model.Validate()
         if error:
             raise ValueError(f"Invalid OR-Tools full model: {error}")
+
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = max(
-            0.001,
-            float(
-                self.problem_data.get(
-                    "max_time_seconds",
-                    max(120.0, float(self.problem_data.get("min_compile_seconds", 0.0))),
-                )
-            ),
-        )
+        # solver.parameters.max_time_in_seconds = max(
+        #     0.001,
+        #     float(
+        #         self.problem_data.get(
+        #             "max_time_seconds",
+        #             max(
+        #                 120.0,
+        #                 float(self.problem_data.get("min_compile_seconds", 0.0)),
+        #             ),
+        #         )
+        #     ),
+        # )
         solver.parameters.num_workers = int(self.problem_data.get("num_workers", 12))
         solver.parameters.log_search_progress = bool(
             self.problem_data.get("print_progress", True)
