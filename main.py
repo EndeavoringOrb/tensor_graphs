@@ -90,6 +90,11 @@ def main():
         help="Use the OR-Tools global cache/extraction planner",
     )
     parser.add_argument(
+        "--use-ortools-full",
+        action="store_true",
+        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
+    )
+    parser.add_argument(
         "--cache-file",
         type=str,
         default="",
@@ -168,6 +173,7 @@ def main():
         log_cost_calls=args.log_cost_calls,
         max_sequence_length=args.seq_len,
         use_ortools=args.use_ortools,
+        use_ortools_full=args.use_ortools_full,
     )
 
     print(f"Loading tokenizer for {args.model}...")

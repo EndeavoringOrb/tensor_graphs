@@ -370,7 +370,7 @@ class LLMSession
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
-               uint32_t max_sequence_length = 128, bool use_ortools = false)
+               uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false)
     {
         max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
@@ -420,13 +420,14 @@ class LLMSession
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            std::string prefix = use_ortools ? "ortools_" : "";
+            std::string prefix = use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : "");
             actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
                                             min_compile_time, act_delegate, log_cost_calls);
         session->settings.use_ortools = use_ortools;
+        session->settings.use_ortools_full = use_ortools_full;
 
         if (compile_decode_buckets)
         {
@@ -824,6 +825,7 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<Settings>(m, "Settings")
         .def(py::init<>(&Settings::get_default))
         .def_readwrite("use_ortools", &Settings::use_ortools)
+        .def_readwrite("use_ortools_full", &Settings::use_ortools_full)
         .def_readwrite("disable_caching", &Settings::disable_caching)
         .def_readwrite("only_plan", &Settings::only_plan)
         .def_readwrite("min_compile_seconds", &Settings::min_compile_seconds)
@@ -832,15 +834,17 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<Session>(m, "Session")
         .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
-                          bool disable_caching, bool use_ortools) {
+                          bool disable_caching, bool use_ortools, bool use_ortools_full) {
             Settings settings = Settings::get_default();
             settings.use_ortools = use_ortools;
+            settings.use_ortools_full = use_ortools_full;
             settings.disable_caching = disable_caching;
             if (!cache_file.empty())
                 settings.cache_file = cache_file;
             return std::make_unique<Session>(g, mem, root_id, settings);
         }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
-            py::arg("disable_caching") = false, py::arg("use_ortools") = false)
+            py::arg("disable_caching") = false, py::arg("use_ortools") = false,
+            py::arg("use_ortools_full") = false)
         .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
                               const std::vector<Region> &outNeeded, float weight) {
             s.addBucket(inDirty, outNeeded, weight);
@@ -1011,12 +1015,12 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
              py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
-             py::arg("use_ortools") = false)
+             py::arg("use_ortools") = false, py::arg("use_ortools_full") = false)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

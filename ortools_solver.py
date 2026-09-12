@@ -31,6 +31,7 @@ class OrtoolsSolver:
 
         min_compile_sec = problem_data.get("min_compile_seconds", 0.0)
         self.timeout_sec = max(30.0, float(min_compile_sec))
+        self.print_progress = bool(problem_data.get("print_progress", True))
 
     def resolveViewAlias(
         self,
@@ -198,8 +199,9 @@ class OrtoolsSolver:
             extract_model.Minimize(sum(total_cost_terms))
 
         extract_solver = cp_model.CpSolver()
-        extract_solver.parameters.max_time_in_seconds = min(20.0, self.timeout_sec)
-        extract_solver.parameters.num_workers = 8
+        extract_solver.parameters.max_time_in_seconds = self.timeout_sec
+        extract_solver.parameters.num_workers = 12
+        extract_solver.parameters.log_search_progress = self.print_progress
         extract_status = extract_solver.Solve(extract_model)
 
         if extract_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -415,6 +417,10 @@ class OrtoolsSolver:
 
 
 def solveOrtools(problem_data: Dict[str, Any]) -> Dict[str, Any]:
+    if problem_data.get("use_ortools_full", False):
+        from ortools_full import OrtoolsSolver as FullOrtoolsSolver
+
+        return FullOrtoolsSolver(problem_data).solve()
     solver = OrtoolsSolver(problem_data)
     return solver.solve()
 

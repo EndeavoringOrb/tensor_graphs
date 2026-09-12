@@ -400,7 +400,7 @@ int main(int argc, char *argv[])
     if (cache_file.empty())
     {
         std::filesystem::create_directories("dirty_region_caches");
-        std::string prefix = settings.use_ortools ? "bench_ortools_" : "bench_";
+        std::string prefix = settings.use_ortools_full ? "bench_ortools_full_" : (settings.use_ortools ? "bench_ortools_" : "bench_");
         cache_file = "dirty_region_caches/" + prefix + model_name + "-pp" + std::to_string(pp) + "-tg" +
                      std::to_string(tg) + ".bin";
     }

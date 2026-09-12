@@ -693,6 +693,7 @@ struct Session
             state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
             state->bucket_eclass_to_logicals, state->bucket_enode_infos, state->candidates,
             state->candidate_clean_buckets, state->bucket_clean_eclasses, graph, state->preallocated_buffers, settings);
+        prob["full_bucket_idx"] = fullBucketIdx;
         return prob.dump();
     }
 
@@ -710,6 +711,57 @@ struct Session
         {
             Error::throw_err("[Session.applyOrtoolsSolution] Solution has " + std::to_string(extractions.size()) +
                              " buckets, expected " + std::to_string(manualBuckets.size()));
+        }
+
+        if (settings.use_ortools_full)
+        {
+            if (sol.value("solver", "") != "ortools_full")
+                Error::throw_err("[Session.applyOrtoolsSolution] Expected a full joint OR-Tools solution.");
+            // The joint solver owns extraction, dispatch, aliases and offsets.
+            // Do not prune or re-extract here: enode indices refer to the export.
+            std::vector<CompiledGraph> compiled_graphs;
+            for (size_t b = 0; b < manualBuckets.size(); ++b)
+            {
+                const auto &extraction = extractions[b];
+                if (extraction.order.size() != extraction.selection_map.size() ||
+                    !extraction.selection_map.count(state.bucket_root_eclass_ids[b]))
+                    Error::throw_err("[Session.applyOrtoolsSolution] Incomplete joint extraction.");
+                std::unordered_set<EClassId> visited;
+                std::unordered_map<BufferId, ParallelBuffer> buffers;
+                for (const auto &buf : extraction.buffers)
+                {
+                    if (!buffers.emplace(buf.id, buf).second || buf.offset < 0)
+                        Error::throw_err("[Session.applyOrtoolsSolution] Invalid joint buffer.");
+                    auto cap = settings.mem_caps.find(buf.mem_space);
+                    if (buf.mem_space.type != HandleType::STORAGE && cap != settings.mem_caps.end() &&
+                        (buf.size > cap->second || static_cast<uint64_t>(buf.offset) > cap->second - buf.size))
+                        Error::throw_err("[Session.applyOrtoolsSolution] Joint allocation exceeds memory cap.");
+                }
+                for (EClassId cid : extraction.order)
+                {
+                    const auto &cls = state.bucket_egraphs[b].getEClass(cid);
+                    auto selected = extraction.selection_map.find(cid);
+                    auto buffer = extraction.eclass_to_buf.find(cid);
+                    if (selected == extraction.selection_map.end() || selected->second >= cls.enodes.size() ||
+                        buffer == extraction.eclass_to_buf.end() || !buffers.count(buffer->second) || visited.count(cid))
+                        Error::throw_err("[Session.applyOrtoolsSolution] Invalid joint selection or buffer mapping.");
+                    const auto &enode = state.bucket_egraphs[b].getENode(cls.enodes[selected->second]);
+                    for (EClassId child : enode.getChildren())
+                        if (!visited.count(state.bucket_egraphs[b].findConst(child)))
+                            Error::throw_err("[Session.applyOrtoolsSolution] Joint dispatch is not topological.");
+                    visited.insert(cid);
+                }
+                CompiledGraph cg = state.planner.buildCompiledGraph(
+                    rootId, graph, state.bucket_egraphs[b], state.planner.baseState.nodeToEClass,
+                    extraction, selected_cached, state.bucket_eclass_to_logicals[b], state.bucket_enode_infos[b]);
+                cg.bucket = manualBuckets[b];
+                compiled_graphs.push_back(std::move(cg));
+            }
+            cachedGraphs = std::move(compiled_graphs);
+            selectedCachedNodes = std::move(selected_cached);
+            cachedBucketWeights = normalizedBucketWeights(manualBuckets);
+            persistCache();
+            return;
         }
 
         // OR-Tools selects the global cache set and supplies a feasible
@@ -778,10 +830,12 @@ struct Session
             state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
             state->bucket_eclass_to_logicals, state->bucket_enode_infos, state->candidates,
             state->candidate_clean_buckets, state->bucket_clean_eclasses, graph, state->preallocated_buffers, settings);
+        prob["full_bucket_idx"] = fullBucketIdx;
 
         std::filesystem::create_directories("benchmarks");
-        std::string prob_path = "benchmarks/ortools_problem.json";
-        std::string sol_path = "benchmarks/ortools_solution.json";
+        std::string prefix = settings.use_ortools_full ? "benchmarks/ortools_full_" : "benchmarks/ortools_";
+        std::string prob_path = prefix + "problem.json";
+        std::string sol_path = prefix + "solution.json";
 
         {
             std::ofstream f(prob_path);
@@ -823,7 +877,7 @@ struct Session
 
     void ensureCacheCoverage(bool doSaturate)
     {
-        if (settings.use_ortools)
+        if (settings.use_ortools || settings.use_ortools_full)
         {
             ensureCacheCoverageOrtools(doSaturate);
             return;

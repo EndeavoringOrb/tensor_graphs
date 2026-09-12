@@ -50,12 +50,15 @@ inline json serializeProblem(
 {
     json root_json;
     root_json["min_compile_seconds"] = settings.min_compile_seconds;
+    root_json["use_ortools_full"] = settings.use_ortools_full;
 
     // Mem caps
     json mem_caps_json = json::object();
     for (const auto &kv : settings.mem_caps)
     {
-        std::string key = toString(kv.first.type) + std::to_string(kv.first.idx);
+        std::string key = settings.use_ortools_full
+                              ? std::to_string(static_cast<int>(kv.first.type)) + ":" + std::to_string(kv.first.idx)
+                              : toString(kv.first.type) + std::to_string(kv.first.idx);
         mem_caps_json[key] = kv.second;
     }
     root_json["mem_caps"] = mem_caps_json;
@@ -72,7 +75,27 @@ inline json serializeProblem(
         json c_obj;
         c_obj["logical_id"] = cid.value;
         c_obj["size_bytes"] = size_bytes;
+        c_obj["raw_size_bytes"] = node.getSizeBytes();
         c_obj["mem_space"] = memSpaceToJson(MemSpace{1, HandleType::CPP}); // Default CPU
+        if (settings.use_ortools_full)
+        {
+            // A cache can live in any space with a full-sized representation.
+            std::unordered_set<MemSpace> spaces;
+            for (size_t b = 0; b < bucket_egraphs.size(); ++b)
+                for (const auto &entry : bucket_eclass_to_logicals[b])
+                    if (entry.second == cid)
+                    {
+                        const auto &cls = bucket_egraphs[b].getEClass(bucket_egraphs[b].findConst(entry.first));
+                        if (cls.mem_space.type != HandleType::STORAGE &&
+                            ((getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL) == size_bytes)
+                            spaces.insert(cls.mem_space);
+                    }
+            std::vector<MemSpace> sorted_spaces(spaces.begin(), spaces.end());
+            std::sort(sorted_spaces.begin(), sorted_spaces.end());
+            c_obj["mem_spaces"] = json::array();
+            for (const auto &ms : sorted_spaces)
+                c_obj["mem_spaces"].push_back(memSpaceToJson(ms));
+        }
         c_obj["clean_buckets"] = candidate_clean_buckets[i];
         candidates_json.push_back(c_obj);
     }
@@ -87,6 +110,7 @@ inline json serializeProblem(
         p_obj["buffer_id"] = kv.second.id.value;
         p_obj["offset"] = kv.second.offset;
         p_obj["size"] = kv.second.size;
+        p_obj["raw_size_bytes"] = graph.getNode(kv.first).getSizeBytes();
         p_obj["mem_space"] = memSpaceToJson(kv.second.mem_space);
         preallocated_json.push_back(p_obj);
     }
@@ -130,6 +154,7 @@ inline json serializeProblem(
             cls_json["mem_space"] = memSpaceToJson(cls.mem_space);
             uint64_t size_bytes = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
             cls_json["size_bytes"] = size_bytes;
+            cls_json["raw_size_bytes"] = getSizeBytes(cls.shape, cls.dtype);
 
             json enodes_json = json::array();
             for (size_t e_idx = 0; e_idx < cls.enodes.size(); ++e_idx)
@@ -146,6 +171,12 @@ inline json serializeProblem(
                 enode_json["is_view"] = info.is_view;
                 enode_json["cost"] = info.cost;
                 enode_json["mem_space"] = memSpaceToJson(enode.getMemSpace());
+                enode_json["engines"] = json::array();
+                for (const auto &engine : enode.getEngines())
+                    enode_json["engines"].push_back(json{{"idx", engine.idx}, {"type", static_cast<int>(engine.type)}});
+                enode_json["safe_inplace_idxs"] = json::array();
+                if (enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
+                    enode_json["safe_inplace_idxs"] = KernelRegistry::get().getKernel(enode.getKernelId()).safe_inplace_idxs;
 
                 std::vector<uint32_t> canon_children;
                 for (EClassId child : enode.getChildren())

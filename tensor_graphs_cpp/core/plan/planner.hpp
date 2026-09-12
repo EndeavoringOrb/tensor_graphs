@@ -2726,6 +2726,10 @@ struct Planner
                 for (ENodeId enodeId : result.egraph.getEClass(id).enodes)
                 {
                     const ENode &enode = result.egraph.getENode(enodeId);
+                    // Input freshness is seeded from this bucket above. An
+                    // empty child list must not make a dirty input clean.
+                    if (enode.getOpType() == OpType::INPUT)
+                        continue;
                     bool allChildrenClean = true;
                     for (EClassId child : enode.getChildren())
                     {
