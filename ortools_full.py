@@ -1,4 +1,5 @@
 import math
+import heapq
 from collections import defaultdict
 
 from ortools.sat.python import cp_model
@@ -107,7 +108,6 @@ class OrtoolsSolver:
             return None
         cap = self.memoryCap(mem_space)
         if cap < size:
-            # Will be tightly bounded to 0, later disabled via `present == 0` constraint in addRectangle
             return self.model.NewIntVar(0, 0, f"{name}_page_offset")
         max_pages = (cap - size) // self.alignment
         return self.model.NewIntVar(0, max_pages, f"{name}_page_offset")
@@ -248,9 +248,6 @@ class OrtoolsSolver:
 
     def aliasBuffer(self, node, child, present, is_view):
         model = self.model
-        model.Add(node["owner"] == child["owner"]).OnlyEnforceIf(present)
-        if node["page_offset"] is not None and child["page_offset"] is not None:
-            model.Add(node["page_offset"] == child["page_offset"]).OnlyEnforceIf(present)
         model.Add(node["protected"] == child["protected"]).OnlyEnforceIf(present)
         model.Add(child["release"] >= node["release"]).OnlyEnforceIf(present)
         if is_view:
@@ -258,9 +255,6 @@ class OrtoolsSolver:
 
     def bindGlobalBuffer(self, node, buf, present, horizon):
         model = self.model
-        model.Add(node["owner"] == buf["id"]).OnlyEnforceIf(present)
-        if node["page_offset"] is not None and buf["page_offset"] is not None:
-            model.Add(node["page_offset"] == buf["page_offset"]).OnlyEnforceIf(present)
         model.Add(node["protected"] == 1).OnlyEnforceIf(present)
         model.Add(node["release"] == horizon).OnlyEnforceIf(present)
 
@@ -304,7 +298,7 @@ class OrtoolsSolver:
         cache_nodes = defaultdict(list)
         global_users = defaultdict(list)
         nodes = {}
-        max_owner = self.next_buffer_id + count - 1
+
         for cid, cls in classes.items():
             name = f"b{b}_c{cid}"
             size = self.allocationSize(cls)
@@ -317,9 +311,7 @@ class OrtoolsSolver:
                 "active": model.NewBoolVar(f"{name}_active"),
                 "fresh": model.NewBoolVar(f"{name}_fresh"),
                 "protected": model.NewBoolVar(f"{name}_protected"),
-                "owner": model.NewIntVar(0, max_owner, f"{name}_owner"),
                 "page_offset": page_offset,
-                "rank": model.NewIntVar(0, count - 1, f"{name}_rank"),
                 "start": model.NewIntVar(0, horizon - 1, f"{name}_start"),
                 "end": model.NewIntVar(0, horizon - 1, f"{name}_end"),
                 "release": model.NewIntVar(0, horizon, f"{name}_release"),
@@ -327,18 +319,20 @@ class OrtoolsSolver:
                 "selections": {},
                 "inplace_choices": [],
                 "cached": 0,
+                "sources": [],
             }
             node["present"] = node["fresh"]
             nodes[cid] = node
             
-            model.Add(node["owner"] == node["id"]).OnlyEnforceIf(node["fresh"])
+            node["sources"].append((node["fresh"], node["id"], False))
+
             model.Add(node["release"] >= node["start"] + 1).OnlyEnforceIf(
                 node["active"]
             )
             model.Add(node["release"] >= node["end"])
             model.Add(node["read_end"] >= node["end"])
             model.Add(node["release"] >= node["read_end"])
-            for field in ("start", "end", "rank", "read_end", "release"):
+            for field in ("start", "end", "read_end", "release"):
                 model.Add(node[field] == 0).OnlyEnforceIf(~node["active"])
             self.addRectangle(
                 rectangles, node, node["start"], node["release"], horizon, name
@@ -366,11 +360,14 @@ class OrtoolsSolver:
             reserved = self.preallocated_by_base_id.get(base_eclass_id)
             if reserved is not None and not self.matchesBuffer(cls, reserved):
                 reserved = None
+                
             if reserved is not None:
                 self.bindGlobalBuffer(node, reserved, active, horizon)
                 global_users[reserved["id"]].append(active)
+                node["sources"].append((active, reserved["id"], False))
             elif cache_matches:
                 global_users[cache_choice[1]["id"]].append(cached)
+                node["sources"].append((cached, cache_choice[1]["id"], False))
 
             choices = []
             seen_enode_indices = set()
@@ -423,7 +420,6 @@ class OrtoolsSolver:
                     child = nodes[child_id]
                     consumers[child_id].append(selected)
                     model.AddImplication(selected, child["active"])
-                    model.Add(child["rank"] < node["rank"]).OnlyEnforceIf(selected)
                     model.Add(child["end"] <= node["start"]).OnlyEnforceIf(selected)
                     model.Add(child["release"] >= node["end"]).OnlyEnforceIf(selected)
 
@@ -449,10 +445,11 @@ class OrtoolsSolver:
                     child = nodes[children[0]]
                     self.aliasBuffer(node, child, selected, is_view=True)
                     choices.append(selected)
+                    node["sources"].append((selected, children[0], True))
+                    
                     if reserved is not None:
                         model.Add(selected == 0)
-                    if type(cached) is not int:
-                        model.AddAtMostOne([selected, cached])
+                        
                     for child_id in set(children):
                         model.Add(
                             nodes[child_id]["read_end"] >= node["end"]
@@ -491,11 +488,11 @@ class OrtoolsSolver:
                         )
                         self.aliasBuffer(node, child, inplace, is_view=False)
                         node["inplace_choices"].append((inplace, child_id))
+                        node["sources"].append((inplace, child_id, True))
+                        
                         inplace_by_child[child_id] = inplace
                         inplace_users[child_id].append(inplace)
                         choices.append(inplace)
-                        if type(cached) is not int:
-                            model.AddAtMostOne([inplace, cached])
                             
                     if inplace_by_child:
                         if len(inplace_by_child) > 1:
@@ -510,6 +507,7 @@ class OrtoolsSolver:
                     model.Add(
                         nodes[child_id]["read_end"] >= node["end"]
                     ).OnlyEnforceIf(read_conditions)
+                    
                 if enode.get("is_input"):
                     if children:
                         model.Add(selected == 0)
@@ -522,6 +520,7 @@ class OrtoolsSolver:
                     )
 
             model.AddExactlyOne([item[0] for item in node["selections"].values()] + [~active])
+            
             if reserved is not None:
                 model.Add(node["fresh"] == 0)
             else:
@@ -538,6 +537,7 @@ class OrtoolsSolver:
         for users in inplace_users.values():
             if len(users) > 1:
                 model.AddAtMostOne(users)
+                
         for node in nodes.values():
             for present, child_id in node["inplace_choices"]:
                 for selected, enode in nodes[child_id]["selections"].values():
@@ -613,32 +613,67 @@ class OrtoolsSolver:
             if solver.Value(present)
         ]
         extractions = []
+        
         for bucket_model in self.bucket_models:
             nodes = bucket_model["nodes"]
-            order = sorted(
-                (cid for cid, node in nodes.items() if solver.Value(node["active"])),
-                key=lambda cid: (
-                    solver.Value(nodes[cid]["start"]),
-                    solver.Value(nodes[cid]["rank"]),
-                    cid,
-                ),
-            )
-            selection, costs, owners, schedule = {}, {}, {}, {}
+            active_cids = set(cid for cid, node in nodes.items() if solver.Value(node["active"]))
+            
+            selections = {}
+            for cid in active_cids:
+                node = nodes[cid]
+                for present, enode in node["selections"].values():
+                    if solver.Value(present):
+                        selections[cid] = enode
+                        break
+
+            # Reconstruct topological sequence based exactly on solver timestamps
+            adj = {cid: [] for cid in active_cids}
+            in_degree = {cid: 0 for cid in active_cids}
+            for cid in active_cids:
+                for child_id in set(selections[cid].get("children", [])):
+                    if child_id in active_cids:
+                        adj[child_id].append(cid)
+                        in_degree[cid] += 1
+            
+            queue = []
+            for cid in active_cids:
+                if in_degree[cid] == 0:
+                    heapq.heappush(queue, (solver.Value(nodes[cid]["start"]), cid))
+            
+            order = []
+            while queue:
+                _, cid = heapq.heappop(queue)
+                order.append(cid)
+                for consumer in adj[cid]:
+                    in_degree[consumer] -= 1
+                    if in_degree[consumer] == 0:
+                        heapq.heappush(queue, (solver.Value(nodes[consumer]["start"]), consumer))
+
+            # Lazily unroll equivalent memory owners
+            owners = {}
+            for cid in order:
+                node = nodes[cid]
+                owner_val = None
+                for present, src, is_node in node["sources"]:
+                    if (type(present) is int and present) or (type(present) is not int and solver.Value(present)):
+                        owner_val = owners[str(src)] if is_node else src
+                        break
+                if owner_val is None:
+                    owner_val = node["id"]
+                owners[str(cid)] = owner_val
+
+            selection, costs, schedule = {}, {}, {}
             buffers = {buf["id"]: dict(buf) for buf in global_buffers}
             for position, cid in enumerate(order):
                 node = nodes[cid]
-                selected = next(
-                    enode
-                    for present, enode in node["selections"].values()
-                    if solver.Value(present)
-                )
+                selected = selections[cid]
                 selection[str(cid)] = selected["enode_idx"]
                 costs[str(cid)] = float(selected["cost"])
-                owners[str(cid)] = solver.Value(node["owner"])
                 schedule[str(cid)] = {
                     "start": solver.Value(node["start"]),
                     "end": solver.Value(node["end"]),
                 }
+                
                 if solver.Value(node["fresh"]):
                     buffers[node["id"]] = {
                         "id": node["id"],
@@ -654,16 +689,18 @@ class OrtoolsSolver:
                     }
                     if selected.get("is_input"):
                         buffers[node["id"]].update(start=0, end=self.persistent_end)
+                        
             for position, cid in enumerate(order):
-                node = nodes[cid]
-                selected = node["selections"][selection[str(cid)]][1]
+                selected = selections[cid]
                 for used_id in [cid] + selected.get("children", []):
                     buf = buffers[owners[str(used_id)]]
                     buf["end"] = max(buf["end"], position + 1)
+                    
             root = bucket_model["bucket"]["root_eclass_id"]
             buffers[owners[str(root)]]["end"] = max(
                 buffers[owners[str(root)]]["end"], len(order) + 1
             )
+            
             extractions.append(
                 {
                     "cost": solver.Value(bucket_model["makespan"]) / self.time_scale,
@@ -675,6 +712,7 @@ class OrtoolsSolver:
                     "schedule": schedule,
                 }
             )
+            
         return {
             "solver": "ortools_full",
             "status": solver.StatusName(status),
