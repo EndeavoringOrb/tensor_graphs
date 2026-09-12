@@ -267,7 +267,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             else if (n.opType == OpType::SCATTER)
             {
                 std::vector<int32_t> starts, ends, steps;
-                int srcIdx = traceToInputIdx(n.child_ids[0]); // Target tensor
+                int srcIdx = traceToInputIdx(n.child_ids[0]); // Updates tensor
                 if (srcIdx >= 0)
                 {
                     for (auto s : kernel.dummyShapes[srcIdx])
@@ -283,9 +283,18 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                     ends = {2147483647};
                     steps = {1};
                 }
-                checkParam(2, starts);
-                checkParam(3, ends);
-                checkParam(4, steps);
+                checkParam(1, starts);
+                checkParam(2, ends);
+                checkParam(3, steps);
+                std::vector<int32_t> outputShape;
+                if (!kernel.dummyShapes.empty())
+                {
+                    for (auto s : kernel.dummyShapes[0])
+                        outputShape.push_back(static_cast<int32_t>(s));
+                }
+                if (outputShape.empty())
+                    outputShape = {1};
+                checkParam(4, outputShape);
             }
             else if (n.opType == OpType::SUM || n.opType == OpType::MAX)
             {

@@ -40,32 +40,25 @@ namespace ScatterCUDA {
 
 inline bool matchScatterF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
     if (output.dtype != DType::FLOAT32) return false;
-    if (inputs[0].getShape().size() != inputs[1].getShape().size() || inputs[0].getShape().size() != output.getShape().size()) return false;
-    uint32_t rank = static_cast<uint32_t>(inputs[0].getShape().size());
+    if (inputs[0].getShape().size() != output.getShape().size()) return false;
+    uint32_t rank = static_cast<uint32_t>(output.getShape().size());
     if (rank > ScatterCUDA::MAX_RANK) return false;
+    if (inputs[1].getShape().size() != 1 || inputs[1].getShape()[0] != rank) return false;
+    if (inputs[2].getShape().size() != 1 || inputs[2].getShape()[0] != rank) return false;
+    if (inputs[3].getShape().size() != 1 || inputs[3].getShape()[0] != rank) return false;
     if (!isContiguous(output)) return false;
     return true;
 }
 
 inline void runScatterF32_CUDA_ND(const KernelContext &ctx) {
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
-    const float *target = static_cast<const float *>(ctx.inputs[0]);
-    const float *updates = static_cast<const float *>(ctx.inputs[1]);
-    const int32_t *starts = static_cast<const int32_t *>(ctx.inputs[2]);
-    const int32_t *steps = static_cast<const int32_t *>(ctx.inputs[4]);
+    const float *updates = static_cast<const float *>(ctx.inputs[0]);
+    const int32_t *starts = static_cast<const int32_t *>(ctx.inputs[1]);
+    const int32_t *steps = static_cast<const int32_t *>(ctx.inputs[3]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
 
     const auto &out_shape = ctx.outViews[0].getShape();
-    const auto &upd_shape = ctx.inViews[1].getShape();
-    uint64_t n_target = countElements(out_shape);
-
-    if (target != Out && n_target > 0) {
-        cudaError_t copyErr = cudaMemcpyAsync(Out, target, n_target * sizeof(float), cudaMemcpyDeviceToDevice, stream);
-        if (copyErr != cudaSuccess) {
-            Error::throw_err("cudaMemcpyAsync failed in Scatter_F32_CUDA_ND: " + std::string(cudaGetErrorString(copyErr)));
-        }
-    }
-
+    const auto &upd_shape = ctx.inViews[0].getShape();
     uint64_t n_updates = countElements(upd_shape);
     if (n_updates == 0) return;
 
@@ -75,8 +68,8 @@ inline void runScatterF32_CUDA_ND(const KernelContext &ctx) {
         p.upd_shape[d] = upd_shape[d];
         p.out_shape[d] = out_shape[d];
         p.out_strides[d] = ctx.outViews[0].strides[d];
-        p.starts[d] = (d < ctx.inViews[2].getShape()[0]) ? starts[d] : 0;
-        p.steps[d] = (d < ctx.inViews[4].getShape()[0]) ? steps[d] : 1;
+        p.starts[d] = (d < ctx.inViews[1].getShape()[0]) ? starts[d] : 0;
+        p.steps[d] = (d < ctx.inViews[3].getShape()[0]) ? steps[d] : 1;
     }
 
     int blockSize = 256;
@@ -95,6 +88,6 @@ inline LogicalId refFactoryScatterF32_ND_CUDA(const std::vector<LogicalId> &inpu
     return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
 }
 
-REGISTER_KERNEL("Scatter_F32_ND_CUDA", 5, 5, matchScatterF32_CUDA_ND, runScatterF32_CUDA_ND, refFactoryScatterF32_ND_CUDA,{0}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Scatter_F32_ND_CUDA", 5, 5, matchScatterF32_CUDA_ND, runScatterF32_CUDA_ND, refFactoryScatterF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {2}, {2}, {2}, {2}}, {false, false, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

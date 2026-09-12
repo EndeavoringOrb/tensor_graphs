@@ -116,19 +116,18 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        LogicalId target = makeFloatInput(graph, {8});
         LogicalId updates = makeFloatInput(graph, {4});
         LogicalId starts = makeIntConst(graph, {2});
         LogicalId ends = makeIntConst(graph, {6});
         LogicalId steps = makeIntConst(graph, {1});
-        LogicalId scatterId = graph.scatter(target, updates, starts, ends, steps);
+        LogicalId shape = makeIntConst(graph, {8});
+        LogicalId scatterId = graph.scatter(updates, starts, ends, steps, shape);
         prop.inferShapeRecursive(scatterId, graph);
         auto forward =
-            prop.forward(graph.getNode(scatterId), graph, {{makeRegion({{0, 2}})}, {makeRegion({{1, 3}})}, {}, {}, {}});
-        assertRegionListEquals(forward, {makeRegion({{0, 2}}), makeRegion({{3, 5}})}, "SCATTER forward");
+            prop.forward(graph.getNode(scatterId), graph, {{makeRegion({{1, 3}})}, {}, {}, {}, {}});
+        assertRegionListEquals(forward, {makeRegion({{3, 5}})}, "SCATTER forward");
         auto backward = prop.backward(graph.getNode(scatterId), graph, {makeRegion({{3, 5}})});
-        assertRegionListEquals(backward[0], {makeRegion({{3, 5}})}, "SCATTER backward target");
-        assertRegionListEquals(backward[1], {makeRegion({{1, 3}})}, "SCATTER backward updates");
+        assertRegionListEquals(backward[0], {makeRegion({{1, 3}})}, "SCATTER backward updates");
     }
     {
         Graph graph;

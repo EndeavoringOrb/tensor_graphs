@@ -816,7 +816,19 @@ struct Session
         Planner planner(costModel, settings);
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph temp_graph = graph;
-        planner.initBaseEGraph(rootId, temp_graph, topo, repo, doSaturate);
+        planner.initBaseEGraph(rootId, temp_graph, topo, repo, false);
+
+        // Saturate the full bucket once.  All other buckets inherit this
+        // rewrite space and only add their bucket-specific partial paths.
+        const SaturationResult full_state =
+            planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], {}, doSaturate, repo);
+
+        std::vector<SaturationResult> bucket_states(manualBuckets.size());
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
+            Planner bucket_planner(costModel, settings);
+            bucket_states[bucket_idx] = bucket_planner.saturateBucket(
+                rootId, graph, manualBuckets[bucket_idx], {}, false, repo, &full_state);
+        });
 
         const std::vector<float> bucket_weights = normalizedBucketWeights(manualBuckets);
         std::unordered_map<LogicalId, MemSpace> best_cached_nodes;
@@ -904,16 +916,28 @@ struct Session
         auto cache_iter = makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, search_delegate, settings,
                                                       &best_cost, &timeout_checker);
         std::unordered_map<LogicalId, MemSpace> current_cache;
+        std::unordered_map<LogicalId, EClassId> logical_to_full_eclass;
+        for (const auto &kv : full_state.nodeToEClass)
+            logical_to_full_eclass[kv.first] = full_state.egraph.findConst(kv.second);
+        std::unordered_map<EClassId, MemSpace> current_cache_eclasses;
         const auto search_start = std::chrono::high_resolution_clock::now();
 
-        // Cache selection and bucket planning are one search: each selection
-        // is evaluated by planning all buckets in parallel, with the same repo
-        // and rewrite space used for the final compiled graphs.
-        for (uint32_t eval_count = 0; cache_iter.getNextCacheSelection(current_cache); ++eval_count)
+        // Cache selection and extraction are one search.  Saturation is
+        // independent of the selection and is therefore never repeated here.
+        for (uint32_t eval_count = 0;
+             cache_iter.getNextCacheSelection(current_cache_eclasses, logical_to_full_eclass); ++eval_count)
         {
-            LOG(DEBUG) << "# cached nodes: " << current_cache.size();
+            current_cache.clear();
+            for (const auto &kv : current_cache_eclasses)
+            {
+                auto logicalIt = full_state.eclassToLogical.find(kv.first);
+                if (logicalIt != full_state.eclassToLogical.end())
+                    current_cache[logicalIt->second] = kv.second;
+            }
+            LOG(DEBUG) << "# cached nodes: " << current_cache_eclasses.size();
             std::unordered_map<LogicalId, ParallelBuffer> preallocated;
-            planner.preallocateLogicalBuffers(graph, current_cache, preallocated);
+            planner.preallocateLogicalBuffers(graph, full_state.egraph, current_cache_eclasses,
+                                              full_state.eclassToLogical, preallocated);
             std::vector<float> bucket_costs(manualBuckets.size(), TGConstants::INF);
             std::vector<CompiledGraph> candidate_graphs(manualBuckets.size());
             std::atomic<bool> failed{false};
@@ -924,10 +948,58 @@ struct Session
                 try
                 {
                     Planner thread_planner(costModel, settings);
-                    thread_planner.baseState = planner.baseState;
-                    thread_planner.baseStateInitialized = true;
-                    CompiledGraph candidate = thread_planner.plan(rootId, graph, manualBuckets[bucket_idx], current_cache,
-                                                                 doSaturate, true, repo, preallocated, minCompileSeconds, search_delegate);
+                    SaturationResult bucket_state = bucket_states[bucket_idx];
+
+                    // Materialize cache alternatives after saturation.  Their
+                    // validity is decided by the extractor's eclass rules.
+                    Engine cpu = Engine{0, EngineType::CPU};
+                    for (const auto &logical_pair : bucket_state.eclassToLogical)
+                    {
+                        auto cacheIt = current_cache.find(logical_pair.second);
+                        if (cacheIt == current_cache.end())
+                            continue;
+                        EClassId eclassId = bucket_state.egraph.findConst(logical_pair.first);
+                        if (bucket_state.cleanEClasses.count(eclassId) == 0)
+                            continue;
+                        const EClass cls = bucket_state.egraph.getEClass(eclassId);
+                        bool hasCache = false;
+                        for (ENodeId enodeId : cls.enodes)
+                        {
+                            const ENode &enode = bucket_state.egraph.getENode(enodeId);
+                            if (enode.getOpType() == OpType::CACHE && enode.getMemSpace() == cacheIt->second)
+                            {
+                                hasCache = true;
+                                break;
+                            }
+                        }
+                        if (!hasCache)
+                        {
+                            bucket_state.egraph.addENode(
+                                eclassId,
+                                ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
+                                      cacheIt->second, {cpu}, toString(logical_pair.second)));
+                        }
+                    }
+
+                    auto enode_infos = thread_planner.computeENodeInfos(
+                        bucket_state.egraph, bucket_state.eclassToLogical, current_cache, /*strictCache=*/false);
+                    thread_planner.pruneEGraph(bucket_state.egraph, enode_infos);
+
+                    std::unordered_set<EClassId> cached_eclasses;
+                    for (const auto &logical_pair : bucket_state.eclassToLogical)
+                    {
+                        if (current_cache.count(logical_pair.second))
+                            cached_eclasses.insert(bucket_state.egraph.findConst(logical_pair.first));
+                    }
+
+                    ExtractionResult extraction = thread_planner.extractBest(
+                        rootId, graph, bucket_state.egraph, bucket_state.nodeToEClass, current_cache,
+                        bucket_state.eclassToLogical, preallocated, minCompileSeconds == 0.0f, false,
+                        minCompileSeconds, search_delegate, enode_infos, &cached_eclasses,
+                        &bucket_state.cleanEClasses);
+                    CompiledGraph candidate = thread_planner.buildCompiledGraph(
+                        rootId, graph, bucket_state.egraph, bucket_state.nodeToEClass, extraction, current_cache,
+                        bucket_state.eclassToLogical, enode_infos);
                     bucket_costs[bucket_idx] = candidate.cost();
                     candidate.bucket = manualBuckets[bucket_idx];
                     candidate_graphs[bucket_idx] = std::move(candidate);

@@ -332,32 +332,33 @@ struct Graph
         return node.id;
     }
 
+    // Scatter updates an existing output buffer.  The output shape is an
+    // explicit INT32 tensor because there is no longer a target tensor input.
     LogicalId scatter(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3, LogicalId id4,
                       SourceLocation loc = SourceLocation::current())
     {
+        if (getNode(id1).dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(getNode(id1).dtype);
+            Error::throw_err(ss.str());
+        }
         if (getNode(id2).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(getNode(id2).dtype);
+            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(getNode(id2).dtype);
             Error::throw_err(ss.str());
         }
         if (getNode(id3).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(getNode(id3).dtype);
+            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(getNode(id3).dtype);
             Error::throw_err(ss.str());
         }
         if (getNode(id4).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(getNode(id4).dtype);
-            Error::throw_err(ss.str());
-        }
-        if (getNode(id0).dtype != getNode(id1).dtype)
-        {
-            std::stringstream ss;
-            ss << "[Graph.scatter] DType mismatch between target (" << toString(getNode(id0).dtype) << ") and updates ("
-               << toString(getNode(id1).dtype) << ")";
+            ss << "[Graph.scatter] Expected INT32 for shape, got: " << toString(getNode(id4).dtype);
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;

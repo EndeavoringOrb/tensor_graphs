@@ -1469,6 +1469,8 @@ struct ExtractContext
     const std::vector<EClassId> *to_process = nullptr;
     const float *best_cost = nullptr;
     const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr;
+    const std::unordered_set<EClassId> *cached_eclasses = nullptr;
+    const std::unordered_set<EClassId> *clean_eclasses = nullptr;
 };
 
 // =============================================================================
@@ -2131,6 +2133,54 @@ class InfiniteCostSkipRule
     }
 };
 
+// Cache nodes are materialized alternatives in the saturated e-graph.  Their
+// validity is a property of the cache selection and bucket, not saturation.
+class CachedENodeValidityRule
+{
+  public:
+    TG_PRUNING_RULE(CachedENodeValidityRule)
+    CachedENodeValidityRule(bool en = true) : enabled(en)
+    {
+    }
+
+    bool check(ENodeId candidate, size_t /*candidate_idx*/, const ExtractContext &ctx) const
+    {
+        if (!enabled || !ctx.cached_eclasses || !ctx.clean_eclasses)
+            return false;
+
+        const EClassId current = ctx.egraph.findConst(ctx.current);
+        const ENode &enode = ctx.egraph.getENode(candidate);
+        if (enode.getOpType() == OpType::CACHE)
+            return ctx.cached_eclasses->count(current) == 0 || ctx.clean_eclasses->count(current) == 0;
+        if (enode.getOpType() == OpType::SCATTER)
+            return ctx.cached_eclasses->count(current) == 0;
+        return false;
+    }
+};
+
+// A saturated/fused alternative must not hide a selected cached e-class.  If
+// it did, that cached buffer would not be refreshed for this bucket.
+class MissingCachedEClassRule
+{
+  public:
+    TG_PRUNING_RULE(MissingCachedEClassRule)
+    MissingCachedEClassRule(bool en = true) : enabled(en)
+    {
+    }
+
+    bool validate_leaf(const ExtractContext &ctx) const
+    {
+        if (!enabled || !ctx.cached_eclasses)
+            return true;
+        for (EClassId cached : *ctx.cached_eclasses)
+        {
+            if (ctx.selection_map.find(ctx.egraph.findConst(cached)) == ctx.selection_map.end())
+                return false;
+        }
+        return true;
+    }
+};
+
 // =============================================================================
 // Extractor Pruning Rule: Dynamic Incremental Cycle Detection (Pearce-Kelly)
 // =============================================================================
@@ -2479,6 +2529,8 @@ template <typename... Rules> struct Extractor
     const float *best_cost = nullptr;
     TimeoutChecker *timeout = nullptr;
     const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr;
+    const std::unordered_set<EClassId> *cached_eclasses = nullptr;
+    const std::unordered_set<EClassId> *clean_eclasses = nullptr;
 
     std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
@@ -2531,8 +2583,18 @@ template <typename... Rules> struct Extractor
         {
             delegate->set_best_cost_ptr(best_cost);
         }
-        ExtractContext ctx{egraph, enodeInfos,  selection_map, path,    EClassId{UINT32_MAX},
-                           0,      &to_process, best_cost,     mem_caps};
+        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX},
+                           0, &to_process, best_cost, mem_caps, cached_eclasses, clean_eclasses};
+        rules.init(ctx);
+    }
+
+    void setCacheConstraints(const std::unordered_set<EClassId> *cached,
+                             const std::unordered_set<EClassId> *clean)
+    {
+        cached_eclasses = cached;
+        clean_eclasses = clean;
+        ExtractContext ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX},
+                           0, &to_process, best_cost, mem_caps, cached_eclasses, clean_eclasses};
         rules.init(ctx);
     }
 
@@ -2711,7 +2773,8 @@ template <typename... Rules> struct Extractor
                 ENodeId enode_id = enodes[chosen_sel];
 
                 ExtractContext pctx{egraph,     enodeInfos,  selection_map, path,    current,
-                                    chosen_sel, &to_process, best_cost,     mem_caps};
+                                    chosen_sel, &to_process, best_cost,     mem_caps,
+                                    cached_eclasses, clean_eclasses};
                 if (rules.is_pruned(enode_id, static_cast<size_t>(chosen_sel), pctx))
                 {
                     continue;
@@ -2777,7 +2840,9 @@ template <typename... Rules> struct Extractor
                 }
             }
         }
-        return true;
+        ExtractContext leaf_ctx{egraph, enodeInfos, selection_map, path, EClassId{UINT32_MAX},
+                                0, &to_process, best_cost, mem_caps, cached_eclasses, clean_eclasses};
+        return rules.validate_leaf(leaf_ctx);
     }
 
     void ascend()
@@ -2797,7 +2862,8 @@ template <typename... Rules> struct Extractor
             ENodeId popped_enode = enodes[chosen_sel];
 
             ExtractContext pop_ctx{egraph,     enodeInfos,  selection_map, path,    current,
-                                   chosen_sel, &to_process, best_cost,     mem_caps};
+                                   chosen_sel, &to_process, best_cost,     mem_caps,
+                                   cached_eclasses, clean_eclasses};
             rules.on_pop(popped_enode, pop_ctx);
             selection_map.erase(current);
 
@@ -2881,7 +2947,8 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
 }
 
 using AllExtractRuleTypes =
-    std::tuple<InfiniteCostSkipRule, ExtractorCycleStepRule, ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
+    std::tuple<InfiniteCostSkipRule, CachedENodeValidityRule, MissingCachedEClassRule, ExtractorCycleStepRule,
+               ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,
@@ -2889,12 +2956,16 @@ inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root
                                              std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
                                              const float *best_cost = nullptr,
                                              const std::unordered_map<MemSpace, uint64_t> *mem_caps = nullptr,
-                                             TimeoutChecker *timeout = nullptr)
+                                             TimeoutChecker *timeout = nullptr,
+                                             const std::unordered_set<EClassId> *cached_eclasses = nullptr,
+                                             const std::unordered_set<EClassId> *clean_eclasses = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
-            return makeExtractorWithDelegate(egraph, root_eclass_id, enodeInfos, std::move(delegate), best_cost,
-                                             mem_caps, timeout, rs...);
+            auto extractor = makeExtractorWithDelegate(egraph, root_eclass_id, enodeInfos, std::move(delegate),
+                                                       best_cost, mem_caps, timeout, rs...);
+            extractor.setCacheConstraints(cached_eclasses, clean_eclasses);
+            return extractor;
         },
         prune::instantiate_from_bools<AllExtractRuleTypes>(bool_flags));
 }

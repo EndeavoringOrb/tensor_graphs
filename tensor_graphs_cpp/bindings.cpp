@@ -881,8 +881,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("permute", [](Graph &self, LogicalId a, LogicalId dims) { return self.permute(a, dims); })
         .def("slice", [](Graph &self, LogicalId a, LogicalId st, LogicalId en,
                          LogicalId step) { return self.slice(a, st, en, step); })
-        .def("scatter", [](Graph &self, LogicalId t, LogicalId u, LogicalId st, LogicalId en,
-                           LogicalId step) { return self.scatter(t, u, st, en, step); })
+        .def("scatter", [](Graph &self, LogicalId u, LogicalId st, LogicalId en, LogicalId step,
+                           LogicalId shape) { return self.scatter(u, st, en, step, shape); })
         .def("concat",
              [](Graph &self, const std::vector<LogicalId> &ids, uint32_t axis) { return self.concat(ids, axis); })
         .def("cast", [](Graph &self, LogicalId a, DType dtype) { return self.cast(a, dtype); })

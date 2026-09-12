@@ -1219,7 +1219,8 @@ struct InfinityDomination : public Rule
             EClassId addId = addOpToEGraph(egraph, OpType::ADD, {child0, child1}, sliceShape, sliceContigStrides,
                                            outClass.dtype, outClass.mem_space);
 
-            currentTarget = addOpToEGraph(egraph, OpType::SCATTER, {currentTarget, addId, startsId, endsId, stepsId},
+            EClassId shapeId = egraph.addIntConst(std::vector<int32_t>(outClass.shape.begin(), outClass.shape.end()));
+            currentTarget = addOpToEGraph(egraph, OpType::SCATTER, {addId, startsId, endsId, stepsId, shapeId},
                                           outClass.shape, outClass.strides, outClass.dtype, outClass.mem_space);
         }
 
@@ -1449,11 +1450,11 @@ struct SlicePushDownElementwise : public Rule
                 EClassId opEClass = addOpToEGraph(egraph, op, newChildren, sliceShape, sliceContigStrides,
                                                   sliceNode.getDType(), sliceNode.getMemSpace());
 
-                EClassId op_cache = createCacheInputNode(egraph, srcClass, ctx.eclassToLogical);
-
                 const EClass srcEClass = egraph.getEClass(srcClass);
+                EClassId shapeId =
+                    egraph.addIntConst(std::vector<int32_t>(srcEClass.shape.begin(), srcEClass.shape.end()));
                 EClassId scatterClass =
-                    addOpToEGraph(egraph, OpType::SCATTER, {op_cache, opEClass, startsId, endsId, stepsId},
+                    addOpToEGraph(egraph, OpType::SCATTER, {opEClass, startsId, endsId, stepsId, shapeId},
                                   srcEClass.shape, srcEClass.strides, opNode.getDType(), opNode.getMemSpace());
 
                 egraph.merge(srcClass, scatterClass);
@@ -1716,11 +1717,11 @@ struct SlicePushDownDot : public Rule
                 EClassId dotEClass = addOpToEGraph(egraph, OpType::DOT, {aSliced, bSliced}, sliceShape,
                                                    sliceContigStrides, sliceNode.getDType(), sliceNode.getMemSpace());
 
-                EClassId op_cache = createCacheInputNode(egraph, srcClass, ctx.eclassToLogical);
-
                 const EClass srcEClass = egraph.getEClass(srcClass);
+                EClassId shapeId =
+                    egraph.addIntConst(std::vector<int32_t>(srcEClass.shape.begin(), srcEClass.shape.end()));
                 EClassId scatterClass =
-                    addOpToEGraph(egraph, OpType::SCATTER, {op_cache, dotEClass, startsId, endsId, stepsId},
+                    addOpToEGraph(egraph, OpType::SCATTER, {dotEClass, startsId, endsId, stepsId, shapeId},
                                   srcEClass.shape, srcEClass.strides, dotNode.getDType(), dotNode.getMemSpace());
 
                 egraph.merge(srcClass, scatterClass);

@@ -21,6 +21,8 @@
     "cache": {},
     "extract": {
       "InfiniteCostSkipRule": true,
+      "CachedENodeValidityRule": true,
+      "MissingCachedEClassRule": true,
       "ExtractorCycleStepRule": true,
       "ExtractorJacksonCarlierRule": true,
       "ExtractorDynamicMinCutRule": false

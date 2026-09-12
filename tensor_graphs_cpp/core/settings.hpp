@@ -706,6 +706,8 @@ struct Settings
             {"malloc", "IdMaxSymmetryRule"},
             {"malloc", "HMinBoundRule"},
             {"extract", "InfiniteCostSkipRule"},
+            {"extract", "CachedENodeValidityRule"},
+            {"extract", "MissingCachedEClassRule"},
             {"extract", "ExtractorCycleStepRule"},
             {"extract", "ExtractorJacksonCarlierRule"},
             {"extract", "ExtractorDynamicMinCutRule"},
