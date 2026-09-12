@@ -26,6 +26,7 @@ class OrtoolsSolver:
         self.buckets = problem_data.get("buckets", [])
         self.candidates = problem_data.get("candidates", [])
         self.preallocated = problem_data.get("preallocated_buffers", [])
+        self.mem_caps = problem_data.get("mem_caps", {})
         self.next_buffer_id = (
             max((int(item["buffer_id"]) for item in self.preallocated), default=-1) + 1
         )
@@ -34,6 +35,19 @@ class OrtoolsSolver:
         self.bucket_models = []
         self.objective_terms = []
         self.caps = {}
+
+        self.preallocated_lids = {
+            item["logical_id"] for item in self.preallocated
+        }
+        self.preallocated_extents = {}
+        for item in self.preallocated:
+            ms = item["mem_space"]
+            ms_key = memSpaceKey(ms)
+            extent = int(item["offset"]) + int(item["size"])
+            self.preallocated_extents[ms_key] = max(
+                self.preallocated_extents.get(ms_key, 0), extent
+            )
+
         # A finite arena bound avoids overflowing CP-SAT when native caps are UINT64_MAX.
         self.arena_bound = (
             self.alignment
@@ -56,12 +70,11 @@ class OrtoolsSolver:
     def memoryCap(self, mem_space):
         key = memSpaceKey(mem_space)
         if key not in self.caps:
-            caps = self.problem_data.get("mem_caps", {})
             names = ("STORAGE", "CPP", "OPENCL", "CUDA")
             legacy_key = f"{mem_space['type']}{mem_space['idx']}"
             named_key = f"{names[mem_space['type']]}{mem_space['idx']}"
-            cap = caps.get(
-                key, caps.get(legacy_key, caps.get(named_key, self.arena_bound))
+            cap = self.mem_caps.get(
+                key, self.mem_caps.get(legacy_key, self.mem_caps.get(named_key, self.arena_bound))
             )
             self.caps[key] = max(0, min(int(cap), self.arena_bound))
         return self.caps[key]
@@ -154,7 +167,7 @@ class OrtoolsSolver:
 
     def addRectangle(self, rectangles, buf, start, end, horizon, name):
         if buf["mem_space"]["type"] == 0 or buf.get("page_offset") is None:
-            return
+            return None
         model = self.model
         present = buf["present"]
         page_size = (
@@ -178,6 +191,7 @@ class OrtoolsSolver:
         rectangles[memSpaceKey(buf["mem_space"])].append(
             (time_interval, space_interval)
         )
+        return lifetime
 
     def aliasBuffer(self, node, child, present, is_view):
         model = self.model
@@ -187,7 +201,6 @@ class OrtoolsSolver:
         model.Add(node["protected"] == child["protected"]).OnlyEnforceIf(present)
         model.Add(child["release"] >= node["release"]).OnlyEnforceIf(present)
         if is_view:
-            # All aliases of the old value must finish reading before overwrite.
             model.Add(child["read_end"] >= node["read_end"]).OnlyEnforceIf(present)
 
     def bindGlobalBuffer(self, node, buf, present, horizon):
@@ -274,19 +287,21 @@ class OrtoolsSolver:
             model.Add(node["read_end"] >= node["end"])
             for field in ("start", "end", "rank", "read_end", "release"):
                 model.Add(node[field] == 0).OnlyEnforceIf(node["active"].Not())
-            self.addRectangle(
+            node["lifetime"] = self.addRectangle(
                 rectangles, node, node["start"], node["release"], horizon, name
             )
 
+        global_lifetimes = []
         for buf in self.global_buffers:
-            self.addRectangle(
+            lt = self.addRectangle(
                 rectangles, buf, 0, horizon, horizon, f"b{b}_global{buf['id']}"
             )
+            if lt is not None:
+                global_lifetimes.append(lt)
 
         for cid, node in nodes.items():
             cls, active = node["cls"], node["active"]
             lid = logicals.get(cid, -1)
-            # Only a full-sized class in the selected space owns a logical cache.
             cache_matches = [
                 (present, buf)
                 for present, buf in self.cache_choices.get(lid, [])
@@ -366,7 +381,6 @@ class OrtoolsSolver:
                     self.aliasBuffer(node, child, selected, is_view=True)
                     node["aliases"].append((selected, children[0]))
                     choices.append(selected)
-                    # A view cannot initialize its own persistent allocation.
                     if reserved is not None:
                         model.Add(selected == 0)
                     for present, _ in cache_matches:
@@ -412,8 +426,6 @@ class OrtoolsSolver:
                         <= selected
                     )
                 for child_id in set(children):
-                    # In-place kernels read their overwritten input at the start;
-                    # every other reader must finish before that overwrite starts.
                     model.Add(nodes[child_id]["read_end"] >= node["end"]).OnlyEnforceIf(
                         [selected] + [v.Not() for v in inplace_by_child[child_id]]
                     )
@@ -441,9 +453,6 @@ class OrtoolsSolver:
                 model.Add(node["release"] == horizon)
                 model.Add(node["read_end"] == horizon)
 
-        # Disallow overwriting a view's base via a view input: inferView can add
-        # offsets/strides, which a dense output kernel cannot inherit. This pass
-        # runs after every class's alternatives have been constructed.
         for node in nodes.values():
             for present, child_id in node["aliases"]:
                 if any(
@@ -473,14 +482,36 @@ class OrtoolsSolver:
                     if logicals.get(cid) == lid and self.matchesBuffer(node["cls"], buf)
                 ]
                 model.Add(present <= sum(matches))
+
+        makespan = model.NewIntVar(0, horizon, f"b{b}_makespan")
+        model.AddMaxEquality(makespan, [node["end"] for node in nodes.values()])
+
         for intervals in engines.values():
             model.AddNoOverlap(intervals)
+
+        # Explicit lower-bound cut per engine
+        for engine_key in engines.keys():
+            engine_work = []
+            for cid, node in nodes.items():
+                for e_idx, (selected, enode) in node["selections"].items():
+                    dur = durations.get((cid, e_idx))
+                    if not dur or dur <= 0:
+                        continue
+                    engine_list = enode.get("engines") or [
+                        {"type": 2, "idx": node["cls"]["mem_space"]["idx"]}
+                        if node["cls"]["mem_space"]["type"] == 3
+                        else {"type": 0, "idx": 0}
+                    ]
+                    if any(memSpaceKey(eng) == engine_key for eng in engine_list):
+                        engine_work.append(dur * selected)
+            if engine_work:
+                model.Add(makespan >= sum(engine_work))
+
         for items in rectangles.values():
             model.AddNoOverlap2D(
                 [item[0] for item in items], [item[1] for item in items]
             )
-        makespan = model.NewIntVar(0, horizon, f"b{b}_makespan")
-        model.AddMaxEquality(makespan, [node["end"] for node in nodes.values()])
+
         weight = float(bucket.get("weight", 1.0))
         if not math.isfinite(weight) or weight < 0:
             raise ValueError(f"Invalid bucket weight {weight}")
@@ -491,11 +522,205 @@ class OrtoolsSolver:
                 "nodes": nodes,
                 "makespan": makespan,
                 "horizon": horizon,
+                "global_lifetimes": global_lifetimes,
             }
         )
 
+    def runQuickExtraction(self):
+        """Solves an acyclic 0-1 extraction IP in <0.2s to seed the joint model."""
+        extract_model = cp_model.CpModel()
+        is_cached = {}
+        for cand in self.candidates:
+            lid = cand["logical_id"]
+            is_cached[lid] = extract_model.NewBoolVar(f"q_cached_{lid}")
+
+        cand_by_ms = {}
+        for cand in self.candidates:
+            ms = cand["mem_space"]
+            ms_key = memSpaceKey(ms)
+            cand_by_ms.setdefault(ms_key, []).append(cand)
+
+        for ms_key, cands_in_ms in cand_by_ms.items():
+            sample_ms = cands_in_ms[0]["mem_space"]
+            total_cap = self.memoryCap(sample_ms)
+            cap = max(
+                0,
+                total_cap - self.preallocated_extents.get(ms_key, 0),
+            )
+            cache_terms = [
+                cand["size_bytes"] * is_cached[cand["logical_id"]]
+                for cand in cands_in_ms
+                if cand["logical_id"] not in self.preallocated_lids
+            ]
+            if cache_terms:
+                extract_model.Add(sum(cache_terms) <= cap)
+
+        bucket_active = {}
+        bucket_x = {}
+        total_cost_terms = []
+
+        full_b = self.problem_data.get("full_bucket_idx", self.buckets[0]["bucket_idx"] if self.buckets else 0)
+
+        for b_dict in self.buckets:
+            b = b_dict["bucket_idx"]
+            b_weight = float(b_dict.get("weight", 1.0))
+            root_id = b_dict["root_eclass_id"]
+            classes_list = b_dict["classes"]
+            classes_by_id = {cls["id"]: cls for cls in classes_list}
+            count = len(classes_list)
+            clean_eclasses = set(b_dict.get("clean_eclasses", []))
+            eclass_to_logical = {
+                int(k): int(v) for k, v in b_dict.get("eclass_to_logical", {}).items()
+            }
+            eclass_cache_lids = {}
+            for cid, lid in eclass_to_logical.items():
+                if lid in is_cached:
+                    eclass_cache_lids.setdefault(cid, []).append(lid)
+
+            consumers = {}
+            for cls in classes_list:
+                cid = cls["id"]
+                for enode in cls["enodes"]:
+                    e_idx = enode["enode_idx"]
+                    for ch in enode.get("children", []):
+                        consumers.setdefault(ch, []).append((cid, e_idx))
+
+            # Topological rank variables to strictly guarantee acyclicity
+            rank_vars = {}
+            for cls in classes_list:
+                cid = cls["id"]
+                rank_vars[cid] = extract_model.NewIntVar(0, count - 1, f"q_rank_{b}_{cid}")
+                bucket_active[(b, cid)] = extract_model.NewBoolVar(f"q_act_{b}_{cid}")
+                for enode in cls["enodes"]:
+                    e_idx = enode["enode_idx"]
+                    bucket_x[(b, cid, e_idx)] = extract_model.NewBoolVar(
+                        f"q_x_{b}_{cid}_{e_idx}"
+                    )
+
+            for cls in classes_list:
+                cid = cls["id"]
+                act_var = bucket_active[(b, cid)]
+                enode_vars = []
+                lid_cls = eclass_to_logical.get(cid, -1)
+                reserved = self.preallocated_by_logical.get(lid_cls)
+                if reserved is not None and not self.matchesBuffer(cls, reserved):
+                    reserved = None
+
+                for enode in cls["enodes"]:
+                    e_idx = enode["enode_idx"]
+                    x_var = bucket_x[(b, cid, e_idx)]
+                    enode_vars.append(x_var)
+
+                    dur = self.duration(enode)
+                    children = enode.get("children", [])
+                    if (
+                        dur is None
+                        or any(ch not in classes_by_id for ch in children)
+                        or enode.get("mem_space", cls["mem_space"]) != cls["mem_space"]
+                    ):
+                        extract_model.Add(x_var == 0)
+                        continue
+
+                    # Strict acyclicity constraint: every child must have smaller rank
+                    for ch in children:
+                        extract_model.Add(rank_vars[ch] < rank_vars[cid]).OnlyEnforceIf(x_var)
+
+                    cost = float(enode.get("cost", 0.0))
+                    is_cache = enode.get("is_cache", False)
+                    is_input = enode.get("is_input", False)
+                    is_scatter = enode.get("is_scatter", False)
+                    is_view = enode.get("is_view", False)
+                    lid = enode.get("logical_id", -1)
+
+                    if 0 < cost < 1e8:
+                        scaled_cost = int(round(cost * b_weight * 1000.0))
+                        total_cost_terms.append(scaled_cost * x_var)
+
+                    if is_view:
+                        if (
+                            not children
+                            or classes_by_id[children[0]]["mem_space"] != cls["mem_space"]
+                            or reserved is not None
+                        ):
+                            extract_model.Add(x_var == 0)
+                            continue
+                        for ch in children:
+                            extract_model.Add(bucket_active[(b, ch)] >= x_var)
+                    elif is_cache:
+                        can_read = (cid in clean_eclasses) and (b != full_b)
+                        if not can_read or lid not in is_cached or not eclass_cache_lids.get(cid):
+                            extract_model.Add(x_var == 0)
+                        else:
+                            extract_model.Add(x_var <= is_cached[lid])
+                    elif is_scatter:
+                        for ch in children:
+                            extract_model.Add(bucket_active[(b, ch)] >= x_var)
+                        cache_vars = [is_cached[l] for l in eclass_cache_lids.get(cid, [])]
+                        if cache_vars:
+                            extract_model.Add(x_var <= sum(cache_vars))
+                        else:
+                            extract_model.Add(x_var == 0)
+                    elif not is_input:
+                        for ch in children:
+                            extract_model.Add(bucket_active[(b, ch)] >= x_var)
+
+                extract_model.Add(sum(enode_vars) == act_var)
+
+                if cid == root_id:
+                    extract_model.Add(act_var == 1)
+                else:
+                    p_terms = [
+                        bucket_x[(b, p, e)] for p, e in consumers.get(cid, [])
+                    ]
+                    if p_terms:
+                        extract_model.Add(act_var <= sum(p_terms))
+                    else:
+                        extract_model.Add(act_var == 0)
+
+            for cand in self.candidates:
+                lid = cand["logical_id"]
+                for cid, mapped_lid in eclass_to_logical.items():
+                    if mapped_lid == lid:
+                        extract_model.Add(bucket_active[(b, cid)] >= is_cached[lid])
+
+        # Penalize unnecessary caching when it provides no cross-bucket benefit
+        for cand in self.candidates:
+            total_cost_terms.append(1 * is_cached[cand["logical_id"]])
+
+        if total_cost_terms:
+            extract_model.Minimize(sum(total_cost_terms))
+
+        quick_solver = cp_model.CpSolver()
+        quick_solver.parameters.max_time_in_seconds = 10.0
+        quick_solver.parameters.num_workers = min(12, max(1, len(self.buckets) * 2))
+        status = quick_solver.Solve(extract_model)
+
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+
+        selected_cache = {
+            cand["logical_id"]
+            for cand in self.candidates
+            if quick_solver.Value(is_cached[cand["logical_id"]]) == 1
+        }
+        selections_by_bucket = {}
+        for b_dict in self.buckets:
+            b = b_dict["bucket_idx"]
+            b_sel = {}
+            for cls in b_dict["classes"]:
+                cid = cls["id"]
+                if quick_solver.Value(bucket_active[(b, cid)]) == 1:
+                    for enode in cls["enodes"]:
+                        e_idx = enode["enode_idx"]
+                        if quick_solver.Value(bucket_x[(b, cid, e_idx)]) == 1:
+                            b_sel[cid] = e_idx
+                            break
+            selections_by_bucket[b] = b_sel
+
+        return selected_cache, selections_by_bucket
+
     def addSolutionHint(self):
-        """Constructs an initial feasible schedule + memory layout hint."""
+        """Builds a complete, valid initial hint using the quick extraction solve."""
         hinted_vars = set()
 
         def add_hint(var, val):
@@ -513,85 +738,88 @@ class OrtoolsSolver:
             hinted_vars.add(pos_idx)
             self.model.AddHint(var, int(val))
 
+        quick_result = self.runQuickExtraction()
+        if quick_result is None:
+            return
+
+        selected_cache, selections_by_bucket = quick_result
+
+        logicals_map = {}
         for bucket_model in self.bucket_models:
             bucket = bucket_model["bucket"]
+            logicals_map[bucket["bucket_idx"]] = {
+                int(cid): int(lid)
+                for cid, lid in bucket.get("eclass_to_logical", {}).items()
+            }
+
+        # Track placed intervals in (start_time, release_time, page_offset, page_size)
+        placed_intervals = defaultdict(list)
+        for b_model in self.bucket_models:
+            h = b_model["horizon"]
+            for buf in self.global_buffers:
+                if buf["mem_space"]["type"] != 0:
+                    ms_key = memSpaceKey(buf["mem_space"])
+                    p_off = buf.get("raw_page_offset", 0)
+                    p_size = max(1, (buf["size"] + self.alignment - 1) // self.alignment)
+                    placed_intervals[ms_key].append((0, h, p_off, p_size))
+
+        # 1. Hint cache selections and global buffer page offsets
+        for lid, choices in self.cache_choices.items():
+            chosen_already = False
+            for present, buf in choices:
+                ms = buf["mem_space"]
+                ms_key = memSpaceKey(ms)
+                has_active_match = False
+                if lid in selected_cache:
+                    for b_model in self.bucket_models:
+                        b = b_model["bucket"]["bucket_idx"]
+                        b_active = selections_by_bucket.get(b, {})
+                        for cid in b_active.keys():
+                            node = b_model["nodes"][cid]
+                            if logicals_map[b].get(cid) == lid and self.matchesBuffer(node["cls"], buf):
+                                has_active_match = True
+                                break
+                        if has_active_match:
+                            break
+
+                val = 1 if (has_active_match and not chosen_already) else 0
+                if val:
+                    chosen_already = True
+                add_hint(present, val)
+
+                if buf.get("page_offset") is not None and "raw_page_offset" not in buf:
+                    p_size = max(1, (buf["size"] + self.alignment - 1) // self.alignment)
+                    overlapping = [p for p in placed_intervals[ms_key]]
+                    forbidden = sorted([(p[2], p[2] + p[3]) for p in overlapping], key=lambda x: x[0])
+                    c_off = 0
+                    for f_start, f_end in forbidden:
+                        if c_off + p_size <= f_start:
+                            break
+                        if c_off < f_end:
+                            c_off = f_end
+                    buf["raw_page_offset"] = c_off
+                    placed_intervals[ms_key].append((0, 2**40, c_off, p_size))
+                    add_hint(buf["page_offset"], c_off)
+                elif buf.get("page_offset") is not None:
+                    add_hint(buf["page_offset"], buf.get("raw_page_offset", 0))
+
+        # 2. Hint per-bucket schedule, lifetimes, and non-overlapping 2D layout
+        for bucket_model in self.bucket_models:
+            bucket = bucket_model["bucket"]
+            b = bucket["bucket_idx"]
             nodes = bucket_model["nodes"]
             horizon = bucket_model["horizon"]
             makespan = bucket_model["makespan"]
             classes = {cls["id"]: cls for cls in bucket["classes"]}
             root_id = bucket["root_eclass_id"]
-            logicals = {
-                int(cid): int(lid)
-                for cid, lid in bucket.get("eclass_to_logical", {}).items()
-            }
+            logicals = logicals_map[b]
 
-            best_enode = {}
-            cost = {}
-
-            # 1. Base inputs
-            for cid, cls in classes.items():
-                for enode in cls["enodes"]:
-                    if enode.get("is_input"):
-                        dur = self.duration(enode)
-                        if dur is not None:
-                            cost[cid] = 0
-                            best_enode[cid] = enode["enode_idx"]
-                            break
-
-            # 2. Iterative DAG discovery
-            for _ in range(40):
-                changed = False
-                for cid, cls in classes.items():
-                    lid = logicals.get(cid, -1)
-                    reserved = self.preallocated_by_logical.get(lid)
-                    for enode in cls["enodes"]:
-                        e_idx = enode["enode_idx"]
-                        if e_idx not in nodes[cid]["selections"]:
-                            continue
-                        if enode.get("is_cache") or enode.get("is_scatter"):
-                            continue
-                        if enode.get("mem_space", cls["mem_space"]) != cls["mem_space"]:
-                            continue
-                        dur = self.duration(enode)
-                        if dur is None:
-                            continue
-                        children = enode.get("children", [])
-                        if any(ch not in nodes for ch in children):
-                            continue
-                        # Views cannot initialize persistent buffers and must match memory space
-                        if enode.get("is_view"):
-                            if reserved is not None or not children:
-                                continue
-                            if nodes[children[0]]["mem_space"] != cls["mem_space"]:
-                                continue
-                        if all(ch in cost for ch in children):
-                            view_penalty = 1 if enode.get("is_view") else 0
-                            total_c = dur + sum(cost[ch] for ch in children) + view_penalty
-                            if cid not in cost or total_c < cost[cid]:
-                                cost[cid] = total_c
-                                best_enode[cid] = e_idx
-                                changed = True
-                if not changed:
-                    break
-
+            best_enode = selections_by_bucket.get(b, {})
             if root_id not in best_enode:
                 continue
 
-            # 3. Extract active subgraph from root
-            active_cids = set()
-            stack = [root_id]
-            while stack:
-                curr = stack.pop()
-                if curr in active_cids:
-                    continue
-                active_cids.add(curr)
-                e_idx = best_enode[curr]
-                enode = next(e for e in classes[curr]["enodes"] if e["enode_idx"] == e_idx)
-                for ch in enode.get("children", []):
-                    if ch in nodes and ch not in active_cids:
-                        stack.append(ch)
+            active_cids = set(best_enode.keys())
 
-            # 4. Kahn's algorithm for rank ordering (sources to sink)
             in_degree = {cid: 0 for cid in active_cids}
             parents_map = defaultdict(list)
             for cid in active_cids:
@@ -618,33 +846,41 @@ class OrtoolsSolver:
 
             ranks = {cid: idx for idx, cid in enumerate(order)}
 
-            # 5. Sequential non-overlapping execution schedule
-            curr_time = 1
+            curr_engine_time = defaultdict(lambda: 1)
             start_time = {}
             end_time = {}
+
             for cid in order:
                 e_idx = best_enode[cid]
                 enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
+                children = [ch for ch in enode.get("children", []) if ch in active_cids]
+                parent_end = max([0] + [end_time.get(ch, 0) for ch in children])
+
                 if enode.get("is_input"):
                     start_time[cid] = 0
                     end_time[cid] = 0
                 elif enode.get("is_view"):
-                    # Views are instant metadata operations: duration is strictly 0
-                    children = [ch for ch in enode.get("children", []) if ch in active_cids]
-                    earliest = max([curr_time] + [end_time.get(ch, 0) for ch in children])
-                    start_time[cid] = earliest
-                    end_time[cid] = earliest
+                    start_time[cid] = parent_end
+                    end_time[cid] = parent_end
                 else:
                     dur = self.duration(enode)
                     if dur is None or dur <= 0:
                         dur = 1
-                    children = [ch for ch in enode.get("children", []) if ch in active_cids]
-                    earliest = max([curr_time] + [end_time.get(ch, 0) for ch in children])
-                    start_time[cid] = earliest
-                    end_time[cid] = earliest + dur
-                    curr_time = end_time[cid]
+                    engine_list = enode.get("engines") or [
+                        {"type": 2, "idx": classes[cid]["mem_space"]["idx"]}
+                        if classes[cid]["mem_space"]["type"] == 3
+                        else {"type": 0, "idx": 0}
+                    ]
+                    engine_keys = [memSpaceKey(eng) for eng in engine_list]
+                    engine_ready = max([curr_engine_time[ek] for ek in engine_keys], default=1)
 
-            # Compute release and read_end times
+                    st = max(parent_end, engine_ready)
+                    et = st + dur
+                    start_time[cid] = st
+                    end_time[cid] = et
+                    for ek in engine_keys:
+                        curr_engine_time[ek] = et
+
             release_time = {}
             read_end_time = {}
             for cid in order:
@@ -655,9 +891,12 @@ class OrtoolsSolver:
                 is_reserved = (
                     reserved is not None and self.matchesBuffer(classes[cid], reserved)
                 )
+                is_cached_node = (
+                    lid in selected_cache
+                    and any(self.matchesBuffer(classes[cid], c_buf) for _, c_buf in self.cache_choices.get(lid, []))
+                )
 
-                # Root, inputs, and preallocated buffers are constrained to release == horizon
-                if cid == root_id or enode.get("is_input") or is_reserved:
+                if cid == root_id or enode.get("is_input") or is_reserved or is_cached_node:
                     rel = horizon
                 else:
                     consumer_ends = [end_time[p] for p in parents_map.get(cid, [])]
@@ -666,7 +905,6 @@ class OrtoolsSolver:
                 release_time[cid] = rel
                 read_end_time[cid] = horizon if cid == root_id else rel
 
-            # Propagate release and read_end backwards through view chains
             for cid in reversed(order):
                 e_idx = best_enode.get(cid)
                 if e_idx is not None:
@@ -686,16 +924,6 @@ class OrtoolsSolver:
                                 read_end_time[base_cid], read_end_time[cid]
                             )
 
-            # 6. Page-aligned offset assignment (disjoint offsets guarantee no 2D overlap)
-            # Initialize next_page from ALL global buffers to prevent overlapping NoOverlap2D
-            next_page = defaultdict(int)
-            for buf in self.global_buffers:
-                if buf["mem_space"]["type"] != 0:
-                    ms_key = memSpaceKey(buf["mem_space"])
-                    p_off = buf.get("raw_page_offset", 0)
-                    p_size = max(1, (buf["size"] + self.alignment - 1) // self.alignment)
-                    next_page[ms_key] = max(next_page[ms_key], p_off + p_size)
-
             page_offsets = {}
             is_fresh = {}
             owners = {}
@@ -713,12 +941,27 @@ class OrtoolsSolver:
                     is_prot[cid] = 1
                     page_offsets[cid] = reserved.get("raw_page_offset", 0)
 
-            # Dynamic & view buffers
+            # Cached candidates
             for cid in order:
                 if cid in page_offsets:
                     continue
                 node = nodes[cid]
                 cls = node["cls"]
+                lid = logicals.get(cid, -1)
+                if lid in selected_cache:
+                    for _, c_buf in self.cache_choices.get(lid, []):
+                        if self.matchesBuffer(cls, c_buf):
+                            is_fresh[cid] = 0
+                            owners[cid] = c_buf["id"]
+                            is_prot[cid] = 1
+                            page_offsets[cid] = c_buf.get("raw_page_offset", 0)
+                            break
+
+            # Views inherit owner, page_offset, and protected from base
+            for cid in order:
+                if cid in page_offsets:
+                    continue
+                node = nodes[cid]
                 e_idx = best_enode[cid]
                 enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
                 children = [ch for ch in enode.get("children", []) if ch in active_cids]
@@ -729,24 +972,46 @@ class OrtoolsSolver:
                     owners[cid] = owners[base_cid]
                     is_prot[cid] = is_prot.get(base_cid, 0)
                     page_offsets[cid] = page_offsets[base_cid]
-                elif cls["mem_space"]["type"] == 0:
+
+            # Dynamic fresh buffers: first-fit time-interval coloring
+            for cid in order:
+                if cid in page_offsets:
+                    continue
+                node = nodes[cid]
+                cls = node["cls"]
+                e_idx = best_enode[cid]
+                enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
+
+                if cls["mem_space"]["type"] == 0:
                     page_offsets[cid] = 0
                     is_fresh[cid] = 1
                     owners[cid] = node["id"]
                     is_prot[cid] = 1 if enode.get("is_input") else 0
                 else:
                     ms_key = memSpaceKey(cls["mem_space"])
-                    p_size = max(
-                        1, (node["size"] + self.alignment - 1) // self.alignment
-                    )
-                    p_off = next_page[ms_key]
-                    next_page[ms_key] += p_size
-                    page_offsets[cid] = p_off
+                    p_size = max(1, (node["size"] + self.alignment - 1) // self.alignment)
+                    st = start_time[cid]
+                    rel = release_time[cid]
+
+                    overlapping = [
+                        p for p in placed_intervals[ms_key]
+                        if max(p[0], st) < min(p[1], rel)
+                    ]
+                    forbidden = sorted([(p[2], p[2] + p[3]) for p in overlapping], key=lambda x: x[0])
+                    cand_off = 0
+                    for f_start, f_end in forbidden:
+                        if cand_off + p_size <= f_start:
+                            break
+                        if cand_off < f_end:
+                            cand_off = f_end
+
+                    page_offsets[cid] = cand_off
+                    placed_intervals[ms_key].append((st, rel, cand_off, p_size))
                     is_fresh[cid] = 1
                     owners[cid] = node["id"]
                     is_prot[cid] = 1 if enode.get("is_input") else 0
 
-            # 7. Apply hints to CP-SAT
+            # Hint active variables
             for cid in active_cids:
                 node = nodes[cid]
                 e_idx = best_enode[cid]
@@ -762,21 +1027,34 @@ class OrtoolsSolver:
                 add_hint(node["end"], end_time[cid])
                 add_hint(node["release"], release_time[cid])
                 add_hint(node["read_end"], read_end_time[cid])
-                for s_idx, (sel_var, _) in node["selections"].items():
-                    add_hint(sel_var, 1 if s_idx == e_idx else 0)
-                for present_var, _ in node["aliases"]:
-                    add_hint(present_var, 0)
+                if node.get("lifetime") is not None:
+                    add_hint(node["lifetime"], release_time[cid] - start_time[cid])
 
+                selection_vars = set()
+                for s_idx, (sel_var, _) in node["selections"].items():
+                    selection_vars.add(sel_var)
+                    add_hint(sel_var, 1 if s_idx == e_idx else 0)
+
+                for present_var, _ in node["aliases"]:
+                    if present_var not in selection_vars:
+                        add_hint(present_var, 0)
+
+            # Hint inactive variables so the hint is complete
             for cid, node in nodes.items():
                 if cid not in active_cids:
                     add_hint(node["active"], 0)
                     add_hint(node["fresh"], 0)
                     add_hint(node["protected"], 0)
+                    add_hint(node["owner"], node["id"])
+                    if node["page_offset"] is not None:
+                        add_hint(node["page_offset"], 0)
                     add_hint(node["rank"], 0)
                     add_hint(node["start"], 0)
                     add_hint(node["end"], 0)
                     add_hint(node["release"], 0)
                     add_hint(node["read_end"], 0)
+                    if node.get("lifetime") is not None:
+                        add_hint(node["lifetime"], 0)
                     for sel_var, _ in node["selections"].values():
                         add_hint(sel_var, 0)
                     for present_var, _ in node["aliases"]:
@@ -785,9 +1063,8 @@ class OrtoolsSolver:
             max_end = max([end_time.get(cid, 0) for cid in active_cids], default=0)
             add_hint(makespan, max_end)
 
-        for choices in self.cache_choices.values():
-            for present, _ in choices:
-                add_hint(present, 0)
+            for lt in bucket_model.get("global_lifetimes", []):
+                add_hint(lt, horizon)
 
     def decodeSolution(self, solver, status):
         global_buffers = [
@@ -896,7 +1173,7 @@ class OrtoolsSolver:
         # Primary optimization: minimize total execution latency
         self.model.Minimize(sum(self.objective_terms))
 
-        # Seed the CP-SAT solver with an initial valid schedule & placement
+        # Seed CP-SAT with an optimal extraction + topological schedule & placement hint
         self.addSolutionHint()
 
         error = self.model.Validate()
