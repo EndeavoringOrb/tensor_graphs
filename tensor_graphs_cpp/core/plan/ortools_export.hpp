@@ -75,11 +75,6 @@ inline json serializeProblem(
         c_obj["size_bytes"] = size_bytes;
         c_obj["raw_size_bytes"] = raw_size_bytes;
         c_obj["mem_space"] = memSpaceToJson(candidates[i].mem_space);
-        if (settings.use_ortools_full)
-        {
-            c_obj["mem_spaces"] = json::array();
-            c_obj["mem_spaces"].push_back(memSpaceToJson(candidates[i].mem_space));
-        }
         c_obj["clean_buckets"] = candidate_clean_buckets[i];
         candidates_json.push_back(c_obj);
     }
