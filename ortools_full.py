@@ -1,11 +1,3 @@
-"""Joint cache, extraction, dispatch, bufferization and allocation with CP-SAT.
-
-All decisions belong to one model and one Solve call. Optional rectangles pack
-buffer lifetimes against 4KB page offsets; optional kernel intervals reserve engines.
-Views and in-place choices propagate allocation lifetimes back to their owners.
-Only decoding (including sorting the solved schedule) happens after Solve.
-"""
-
 import math
 from collections import defaultdict
 
@@ -40,9 +32,6 @@ class OrtoolsSolver:
         self.model = cp_model.CpModel()
         self.buckets = problem_data["buckets"]
         self.caching_enabled = not problem_data["disable_caching"]
-        # In cache-disabled mode, omit the candidate data entirely. This keeps
-        # cache placement and cache-choice expressions out of the CP-SAT model,
-        # rather than merely forcing them to zero after creating them.
         self.candidates = problem_data["candidates"] if self.caching_enabled else []
         self.preallocated = problem_data["preallocated_buffers"]
         self.mem_caps = problem_data["mem_caps"]
@@ -59,8 +48,6 @@ class OrtoolsSolver:
         self.model_built = False
         self.full_bucket_idx = problem_data["full_bucket_idx"]
 
-        # Reserve enough pages to place every allocation without reuse. Summing
-        # unrounded sizes underestimates this bound for small tensors.
         preallocated_extent = 0
         for item in self.preallocated:
             size = self.alignedSize(item["size"])
@@ -72,7 +59,6 @@ class OrtoolsSolver:
                     raise ValueError("Preallocated arena offsets must be 4096-byte aligned")
                 preallocated_extent = max(preallocated_extent, offset + size)
 
-        # A finite arena bound avoids overflowing CP-SAT when native caps are UINT64_MAX.
         self.arena_bound = (
             self.alignment
             + preallocated_extent
@@ -116,14 +102,15 @@ class OrtoolsSolver:
             self.caps[key] = min(cap, self.arena_bound)
         return self.caps[key]
 
-    def memoryCapPages(self, mem_space):
-        return self.memoryCap(mem_space) // self.alignment
-
-    def newPageOffset(self, mem_space, name):
+    def newPageOffset(self, mem_space, size, name):
         if mem_space["type"] == 0:
             return None
-        cap_pages = self.memoryCapPages(mem_space)
-        return self.model.NewIntVar(0, cap_pages, f"{name}_page_offset")
+        cap = self.memoryCap(mem_space)
+        if cap < size:
+            # Will be tightly bounded to 0, later disabled via `present == 0` constraint in addRectangle
+            return self.model.NewIntVar(0, 0, f"{name}_page_offset")
+        max_pages = (cap - size) // self.alignment
+        return self.model.NewIntVar(0, max_pages, f"{name}_page_offset")
 
     def duration(self, enode):
         try:
@@ -132,17 +119,14 @@ class OrtoolsSolver:
             return None
         if not math.isfinite(cost) or cost < 0:
             return None
-        # buildCompiledGraph omits these metadata operations from execution.
         if any(enode.get(flag) for flag in ("is_input", "is_cache", "is_view")):
             return 0
         scaled_cost = cost * self.time_scale
         if not math.isfinite(scaled_cost) or scaled_cost >= self.integer_limit:
             raise ValueError("Kernel cost exceeds the integer time range")
-        # Executable kernels need a positive interval even if their estimate is 0.
         return max(1, math.ceil(scaled_cost))
 
     def engineKeys(self, enode, mem_space):
-        # TODO: Verify exported engines against native kernel matching.
         engines = enode.get("engines") or [
             {"type": 2, "idx": mem_space["idx"]}
             if mem_space["type"] == 3
@@ -220,12 +204,13 @@ class OrtoolsSolver:
             if base_eclass_id in by_base_id:
                 buf = by_base_id[base_eclass_id]
             else:
-                page_offset = self.newPageOffset(mem_space, f"cache_{base_eclass_id}_{key}")
+                size = self.allocationSize(candidate)
+                page_offset = self.newPageOffset(mem_space, size, f"cache_{base_eclass_id}_{key}")
                 buf = {
                     "id": self.newBufferId(),
                     "base_eclass_id": base_eclass_id,
                     "mem_space": mem_space,
-                    "size": self.allocationSize(candidate),
+                    "size": size,
                     "present": present,
                     "page_offset": page_offset,
                 }
@@ -237,21 +222,20 @@ class OrtoolsSolver:
 
     def addRectangle(self, rectangles, buf, start, end, horizon, name):
         if buf["mem_space"]["type"] == 0 or buf.get("page_offset") is None:
-            return None
+            return
         model = self.model
         present = buf["present"]
         page_size = self.alignedSize(buf["size"]) // self.alignment
         page_offset = buf["page_offset"]
 
-        model.Add(
-            page_offset * self.alignment + buf["size"] <= self.memoryCap(buf["mem_space"])
-        ).OnlyEnforceIf(present)
-        # NoOverlap2D gives degenerate rectangles special semantics. Empty
-        # allocations have no physical extent and should not enter the packing.
+        if self.memoryCap(buf["mem_space"]) < buf["size"]:
+            model.Add(present == 0)
+            return
+
         if page_size == 0:
             return
 
-        lifetime = model.NewIntVar(0, horizon, f"{name}_lifetime")
+        lifetime = end - start if type(start) is int and type(end) is int else model.NewIntVar(0, horizon, f"{name}_lifetime")
         time_interval = model.NewOptionalIntervalVar(
             start, lifetime, end, present, f"{name}_live"
         )
@@ -323,11 +307,12 @@ class OrtoolsSolver:
         max_owner = self.next_buffer_id + count - 1
         for cid, cls in classes.items():
             name = f"b{b}_c{cid}"
-            page_offset = self.newPageOffset(cls["mem_space"], name)
+            size = self.allocationSize(cls)
+            page_offset = self.newPageOffset(cls["mem_space"], size, name)
             node = {
                 "cls": cls,
                 "id": self.newBufferId(),
-                "size": self.allocationSize(cls),
+                "size": size,
                 "mem_space": cls["mem_space"],
                 "active": model.NewBoolVar(f"{name}_active"),
                 "fresh": model.NewBoolVar(f"{name}_fresh"),
@@ -345,7 +330,7 @@ class OrtoolsSolver:
             }
             node["present"] = node["fresh"]
             nodes[cid] = node
-            model.Add(node["fresh"] <= node["active"])
+            
             model.Add(node["owner"] == node["id"]).OnlyEnforceIf(node["fresh"])
             model.Add(node["release"] >= node["start"] + 1).OnlyEnforceIf(
                 node["active"]
@@ -354,7 +339,7 @@ class OrtoolsSolver:
             model.Add(node["read_end"] >= node["end"])
             model.Add(node["release"] >= node["read_end"])
             for field in ("start", "end", "rank", "read_end", "release"):
-                model.Add(node[field] == 0).OnlyEnforceIf(node["active"].Not())
+                model.Add(node[field] == 0).OnlyEnforceIf(~node["active"])
             self.addRectangle(
                 rectangles, node, node["start"], node["release"], horizon, name
             )
@@ -375,7 +360,7 @@ class OrtoolsSolver:
                 cached, buf = cache_choice
                 node["cached"] = cached
                 cache_nodes[base_eclass_id].append(node)
-                model.Add(active >= cached)
+                model.AddImplication(cached, active)
                 self.bindGlobalBuffer(node, buf, cached, horizon)
             cached = node["cached"]
             reserved = self.preallocated_by_base_id.get(base_eclass_id)
@@ -397,9 +382,6 @@ class OrtoolsSolver:
                 if not self.caching_enabled and (
                     enode.get("is_cache") or enode.get("is_scatter")
                 ):
-                    # Do not add cache-path variables or constraints at all.
-                    # The enode remains in the input for stable diagnostics,
-                    # while the model sees only executable alternatives.
                     continue
                 selected = model.NewBoolVar(f"b{b}_c{cid}_e{e_idx}")
                 node["selections"][e_idx] = (selected, enode)
@@ -415,7 +397,6 @@ class OrtoolsSolver:
                     model.Add(selected == 0)
                 if enode.get("is_cache"):
                     candidate = self.candidates_by_base_id.get(base_eclass_id, {})
-                    # TODO: Export cache versions for prior-state reads in dirty paths.
                     can_read = (
                         cid in clean
                         and b != self.full_bucket_idx
@@ -425,23 +406,23 @@ class OrtoolsSolver:
                         )
                         and enode.get("base_eclass_id", base_eclass_id) == base_eclass_id
                     )
-                    model.Add(selected <= cached if can_read else selected == 0)
+                    if can_read and type(cached) is not int:
+                        model.AddImplication(selected, cached)
+                    else:
+                        model.Add(selected == 0)
                     if children:
                         model.Add(selected == 0)
                 if enode.get("is_scatter"):
-                    # A partial update needs initialized contents in untouched
-                    # regions, so it cannot initialize a full-bucket cache.
-                    model.Add(
-                        selected <= cached
-                        if b != self.full_bucket_idx
-                        else selected == 0
-                    )
+                    if b != self.full_bucket_idx and type(cached) is not int:
+                        model.AddImplication(selected, cached)
+                    else:
+                        model.Add(selected == 0)
                     if not children:
                         model.Add(selected == 0)
                 for child_id in set(children):
                     child = nodes[child_id]
                     consumers[child_id].append(selected)
-                    model.Add(child["active"] >= selected)
+                    model.AddImplication(selected, child["active"])
                     model.Add(child["rank"] < node["rank"]).OnlyEnforceIf(selected)
                     model.Add(child["end"] <= node["start"]).OnlyEnforceIf(selected)
                     model.Add(child["release"] >= node["end"]).OnlyEnforceIf(selected)
@@ -466,14 +447,12 @@ class OrtoolsSolver:
                         model.Add(selected == 0)
                         continue
                     child = nodes[children[0]]
-                    # A broadcast view may be logically larger than its backing
-                    # allocation. Native inferView supplies strides and offsets.
-                    # TODO: Export view byte spans to check backing-buffer bounds.
                     self.aliasBuffer(node, child, selected, is_view=True)
                     choices.append(selected)
                     if reserved is not None:
                         model.Add(selected == 0)
-                    model.Add(selected + cached <= 1)
+                    if type(cached) is not int:
+                        model.AddAtMostOne([selected, cached])
                     for child_id in set(children):
                         model.Add(
                             nodes[child_id]["read_end"] >= node["end"]
@@ -492,8 +471,6 @@ class OrtoolsSolver:
                         {children[idx] for idx in safe_idxs if 0 <= idx < len(children)}
                     ):
                         child = nodes[child_id]
-                        # All occurrences of a repeated operand must permit
-                        # aliasing; otherwise an unsafe argument is overwritten.
                         if any(
                             idx not in safe_idxs
                             for idx, operand in enumerate(children)
@@ -507,7 +484,7 @@ class OrtoolsSolver:
                         inplace = model.NewBoolVar(
                             f"b{b}_c{cid}_e{e_idx}_inplace{child_id}"
                         )
-                        model.Add(inplace <= selected)
+                        model.AddImplication(inplace, selected)
                         model.Add(child["protected"] == 0).OnlyEnforceIf(inplace)
                         model.Add(child["read_end"] <= node["start"]).OnlyEnforceIf(
                             inplace
@@ -517,12 +494,19 @@ class OrtoolsSolver:
                         inplace_by_child[child_id] = inplace
                         inplace_users[child_id].append(inplace)
                         choices.append(inplace)
-                        model.Add(inplace + cached <= 1)
-                    model.Add(sum(inplace_by_child.values()) <= selected)
+                        if type(cached) is not int:
+                            model.AddAtMostOne([inplace, cached])
+                            
+                    if inplace_by_child:
+                        if len(inplace_by_child) > 1:
+                            model.AddAtMostOne(list(inplace_by_child.values()))
+                        for inplace in inplace_by_child.values():
+                            model.AddImplication(inplace, selected)
+                            
                 for child_id in set(children):
                     read_conditions = [selected]
                     if child_id in inplace_by_child:
-                        read_conditions.append(inplace_by_child[child_id].Not())
+                        read_conditions.append(~inplace_by_child[child_id])
                     model.Add(
                         nodes[child_id]["read_end"] >= node["end"]
                     ).OnlyEnforceIf(read_conditions)
@@ -537,39 +521,49 @@ class OrtoolsSolver:
                         [selected, node["fresh"]]
                     )
 
-            model.Add(sum(item[0] for item in node["selections"].values()) == active)
+            model.AddExactlyOne([item[0] for item in node["selections"].values()] + [~active])
             if reserved is not None:
                 model.Add(node["fresh"] == 0)
             else:
-                model.Add(node["fresh"] + sum(choices) + cached == active)
+                terms = [node["fresh"], ~active] + choices
+                if type(cached) is not int:
+                    terms.append(cached)
+                model.AddExactlyOne(terms)
+                
             if cid == bucket["root_eclass_id"]:
                 model.Add(active == 1)
                 model.Add(node["release"] == horizon)
                 model.Add(node["read_end"] == horizon)
 
-        # Two destructive consumers cannot both reuse the same tensor version,
-        # even when their executions are serialized and their engines differ.
         for users in inplace_users.values():
-            model.Add(sum(users) <= 1)
+            if len(users) > 1:
+                model.AddAtMostOne(users)
         for node in nodes.values():
             for present, child_id in node["inplace_choices"]:
                 for selected, enode in nodes[child_id]["selections"].values():
                     if enode.get("is_view"):
-                        # TODO: Export view layouts before allowing in-place writes.
-                        model.Add(present + selected <= 1)
+                        model.AddAtMostOne([present, selected])
 
         for cid, node in nodes.items():
             if cid != bucket["root_eclass_id"]:
-                model.Add(node["active"] <= sum(consumers[cid]) + node["cached"])
+                or_terms = consumers[cid][:]
+                if type(node["cached"]) is not int:
+                    or_terms.append(node["cached"])
+                if not or_terms:
+                    model.Add(node["active"] == 0)
+                else:
+                    model.AddBoolOr(or_terms).OnlyEnforceIf(node["active"])
+                    
         for base_eclass_id, (present, _) in self.cache_choices.items():
             matches = cache_nodes[base_eclass_id]
-            model.Add(present <= sum(node["active"] for node in matches))
-        # Canonical native classes have distinct base identities. Do not let an
-        # ambiguous export introduce independent producers of one global buffer.
-        # TODO: Model versioned global bindings before allowing multiple producers.
+            if not matches:
+                model.Add(present == 0)
+            else:
+                model.AddBoolOr([node["active"] for node in matches]).OnlyEnforceIf(present)
+                
         for users in global_users.values():
             if len(users) > 1:
-                model.Add(sum(users) <= 1)
+                model.AddAtMostOne(users)
 
         makespan = model.NewIntVar(0, horizon, f"b{b}_makespan")
         model.AddMaxEquality(makespan, [node["end"] for node in nodes.values()])
@@ -621,9 +615,6 @@ class OrtoolsSolver:
         extractions = []
         for bucket_model in self.bucket_models:
             nodes = bucket_model["nodes"]
-            # Native execution consumes this order and synchronizes memory
-            # hazards, but does not consume the numeric schedule below.
-            # TODO: Match modeled timing to native dispatch and synchronization.
             order = sorted(
                 (cid for cid, node in nodes.items() if solver.Value(node["active"])),
                 key=lambda cid: (
@@ -704,7 +695,6 @@ class OrtoolsSolver:
             self.createGlobalBuffers()
             for bucket in self.buckets:
                 self.createBucket(bucket)
-            # Weights apply to the whole bucket, including cache maintenance.
             self.model.Minimize(sum(self.objective_terms))
             self.model_built = True
 
@@ -713,8 +703,6 @@ class OrtoolsSolver:
             raise ValueError(f"Invalid OR-Tools full model: {error}")
 
         solver = cp_model.CpSolver()
-        # Leave the solve unbounded unless the caller supplies a time limit.
-        # min_compile_seconds is a native search budget, not a maximum timeout.
         max_time_seconds = self.problem_data.get("max_time_seconds")
         if max_time_seconds is not None:
             max_time_seconds = float(max_time_seconds)
