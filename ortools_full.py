@@ -157,10 +157,6 @@ class OrtoolsSolver:
         rectangles[memSpaceKey(buf["mem_space"])].append(
             (time_interval, space_interval)
         )
-        extent = model.NewIntVar(0, cap, f"{name}_extent")
-        model.Add(extent == offset + size).OnlyEnforceIf(present)
-        model.Add(extent == 0).OnlyEnforceIf(present.Not())
-        self.memory_terms.append(extent)
 
     def aliasBuffer(self, node, child, present, is_view):
         model = self.model
@@ -563,16 +559,8 @@ class OrtoolsSolver:
         self.createGlobalBuffers()
         for bucket in self.buckets:
             self.createBucket(bucket)
-        # Bounded secondary preference for smaller arenas and fewer caches.
-        secondary_bound = max(
-            1, len(self.memory_terms) * self.arena_bound + len(self.candidates)
-        )
-        cache_terms = [
-            present for choices in self.cache_choices.values() for present, _ in choices
-        ]
         self.model.Minimize(
             sum(self.objective_terms)
-            + (sum(self.memory_terms) + sum(cache_terms)) * (1e-4 / secondary_bound)
         )
         error = self.model.Validate()
         if error:
