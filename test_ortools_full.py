@@ -39,6 +39,7 @@ def makeClass(cid, enodes, pages=1, mem_space=None):
         "base_eclass_id": cid,
         "enodes": enodes,
         "size_bytes": pages * PAGE,
+        "raw_size_bytes": pages * PAGE,
         "mem_space": mem_space or CPU,
     }
 
@@ -46,6 +47,7 @@ def makeClass(cid, enodes, pages=1, mem_space=None):
 def makeProblem(classes, root, pages=10):
     return {
         "use_ortools_full": True,
+        "disable_caching": False,
         "print_progress": False,
         "max_time_seconds": 10,
         "num_workers": 1,
@@ -177,7 +179,12 @@ class FullSolverTests(unittest.TestCase):
             pages=5,
         )
         problem["candidates"] = [
-            {"base_eclass_id": 1, "mem_space": CPU, "size_bytes": PAGE}
+            {
+                "base_eclass_id": 1,
+                "mem_space": CPU,
+                "size_bytes": PAGE,
+                "raw_size_bytes": PAGE,
+            }
         ]
         problem["buckets"][0]["eclass_to_logical"] = {"1": 10}
         second = copy.deepcopy(problem["buckets"][0])
@@ -199,9 +206,9 @@ class FullSolverTests(unittest.TestCase):
         problem["candidates"] = [
             {
                 "base_eclass_id": 2,
-                "mem_space": CPU,
-                "mem_spaces": [CPU, GPU],
+                "mem_space": GPU,
                 "size_bytes": PAGE,
+                "raw_size_bytes": PAGE,
             }
         ]
         problem["buckets"][0]["eclass_to_logical"] = {"2": 20}
@@ -393,7 +400,12 @@ class FullSolverTests(unittest.TestCase):
             }
         ]
         problem["candidates"] = [
-            {"base_eclass_id": 2, "mem_space": CPU, "size_bytes": PAGE}
+            {
+                "base_eclass_id": 2,
+                "mem_space": CPU,
+                "size_bytes": PAGE,
+                "raw_size_bytes": PAGE,
+            }
         ]
         problem["buckets"][0]["eclass_to_logical"] = {"1": 10, "2": 20}
         problem["buckets"][0]["clean_eclasses"] = [

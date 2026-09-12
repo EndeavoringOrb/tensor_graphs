@@ -51,6 +51,7 @@ inline json serializeProblem(
     json root_json;
     root_json["min_compile_seconds"] = settings.min_compile_seconds;
     root_json["use_ortools_full"] = settings.use_ortools_full;
+    root_json["disable_caching"] = settings.disable_caching;
 
     // Mem caps
     json mem_caps_json = json::object();
@@ -65,18 +66,23 @@ inline json serializeProblem(
 
     // Candidates
     json candidates_json = json::array();
-    for (size_t i = 0; i < candidates.size(); ++i)
+    // A cache-disabled session must not leak cache candidates into the model
+    // input. This is also a guard against stale candidate state in callers.
+    if (!settings.disable_caching)
     {
-        BaseEClassId cid = candidates[i].base_eclass_id;
-        uint64_t raw_size_bytes = candidates[i].size_bytes;
-        uint64_t size_bytes = (raw_size_bytes + 4095) & ~4095ULL;
-        json c_obj;
-        c_obj["base_eclass_id"] = cid.value;
-        c_obj["size_bytes"] = size_bytes;
-        c_obj["raw_size_bytes"] = raw_size_bytes;
-        c_obj["mem_space"] = memSpaceToJson(candidates[i].mem_space);
-        c_obj["clean_buckets"] = candidate_clean_buckets[i];
-        candidates_json.push_back(c_obj);
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            BaseEClassId cid = candidates[i].base_eclass_id;
+            uint64_t raw_size_bytes = candidates[i].size_bytes;
+            uint64_t size_bytes = (raw_size_bytes + 4095) & ~4095ULL;
+            json c_obj;
+            c_obj["base_eclass_id"] = cid.value;
+            c_obj["size_bytes"] = size_bytes;
+            c_obj["raw_size_bytes"] = raw_size_bytes;
+            c_obj["mem_space"] = memSpaceToJson(candidates[i].mem_space);
+            c_obj["clean_buckets"] = candidate_clean_buckets[i];
+            candidates_json.push_back(c_obj);
+        }
     }
     root_json["candidates"] = candidates_json;
 
@@ -89,7 +95,6 @@ inline json serializeProblem(
         p_obj["buffer_id"] = kv.second.id.value;
         p_obj["offset"] = kv.second.offset;
         p_obj["size"] = kv.second.size;
-        p_obj["raw_size_bytes"] = kv.second.size;
         p_obj["mem_space"] = memSpaceToJson(kv.second.mem_space);
         preallocated_json.push_back(p_obj);
     }

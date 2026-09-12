@@ -38,10 +38,14 @@ class OrtoolsSolver:
     def __init__(self, problem_data):
         self.problem_data = problem_data
         self.model = cp_model.CpModel()
-        self.buckets = problem_data.get("buckets", [])
-        self.candidates = problem_data.get("candidates", [])
-        self.preallocated = problem_data.get("preallocated_buffers", [])
-        self.mem_caps = problem_data.get("mem_caps", {})
+        self.buckets = problem_data["buckets"]
+        self.caching_enabled = not problem_data["disable_caching"]
+        # In cache-disabled mode, omit the candidate data entirely. This keeps
+        # cache placement and cache-choice expressions out of the CP-SAT model,
+        # rather than merely forcing them to zero after creating them.
+        self.candidates = problem_data["candidates"] if self.caching_enabled else []
+        self.preallocated = problem_data["preallocated_buffers"]
+        self.mem_caps = problem_data["mem_caps"]
         self.next_buffer_id = (
             max((int(item["buffer_id"]) for item in self.preallocated), default=-1) + 1
         )
@@ -53,9 +57,7 @@ class OrtoolsSolver:
         self.preallocated_by_base_id = {}
         self.candidates_by_base_id = {}
         self.model_built = False
-        self.full_bucket_idx = problem_data.get(
-            "full_bucket_idx", self.buckets[0]["bucket_idx"] if self.buckets else None
-        )
+        self.full_bucket_idx = problem_data["full_bucket_idx"]
 
         # Reserve enough pages to place every allocation without reuse. Summing
         # unrounded sizes underestimates this bound for small tensors.
@@ -92,7 +94,7 @@ class OrtoolsSolver:
 
     def allocationSize(self, item):
         size = int(item["size_bytes"])
-        raw_size = int(item.get("raw_size_bytes", size))
+        raw_size = int(item["raw_size_bytes"])
         if raw_size < 0 or raw_size > size:
             raise ValueError("Raw tensor size must fit its allocation")
         return size if item["mem_space"]["type"] == 0 else self.alignedSize(size)
@@ -107,14 +109,7 @@ class OrtoolsSolver:
     def memoryCap(self, mem_space):
         key = memSpaceKey(mem_space)
         if key not in self.caps:
-            names = ("STORAGE", "CPP", "OPENCL", "CUDA")
-            # Accept older numeric and named exports as well as type:idx keys.
-            legacy_key = f"{mem_space['type']}{mem_space['idx']}"
-            named_key = f"{names[mem_space['type']]}{mem_space['idx']}"
-            cap = self.mem_caps.get(
-                key,
-                self.mem_caps.get(legacy_key, self.mem_caps.get(named_key, self.arena_bound)),
-            )
+            cap = self.mem_caps.get(key, self.arena_bound)
             cap = int(cap)
             if cap < 0:
                 raise ValueError(f"Negative memory cap for {key}")
@@ -166,22 +161,13 @@ class OrtoolsSolver:
         if self.allocationSize(cls) != buffer_size:
             return False
         if "buffer_id" in buf:
-            # The native exporter labels the padded reservation size as raw.
-            # It is capacity, not the logical size of the preallocated tensor.
-            # TODO: Export true input sizes to distinguish partial tensors.
-            return int(cls.get("raw_size_bytes", cls["size_bytes"])) <= buf["size"]
-        return (
-            "raw_size_bytes" not in cls
-            or "raw_size_bytes" not in buf
-            or int(cls["raw_size_bytes"]) == int(buf["raw_size_bytes"])
-        )
+            return True
+        return int(cls["raw_size_bytes"]) == int(buf["raw_size_bytes"])
 
     def matchesCache(self, cls, base_eclass_id, buf):
         candidate = self.candidates_by_base_id[base_eclass_id]
         return self.matchesBuffer(cls, buf) and (
-            "raw_size_bytes" not in cls
-            or "raw_size_bytes" not in candidate
-            or int(cls["raw_size_bytes"]) == int(candidate["raw_size_bytes"])
+            int(cls["raw_size_bytes"]) == int(candidate["raw_size_bytes"])
         )
 
     def createGlobalBuffers(self):
@@ -212,6 +198,10 @@ class OrtoolsSolver:
             )
             self.global_buffers.append(buf)
             by_base_id[item["base_eclass_id"]] = buf
+
+        if not self.caching_enabled:
+            self.preallocated_by_base_id = by_base_id
+            return
 
         for candidate in self.candidates:
             base_eclass_id = candidate["base_eclass_id"]
@@ -398,10 +388,19 @@ class OrtoolsSolver:
                 global_users[cache_choice[1]["id"]].append(cached)
 
             choices = []
+            seen_enode_indices = set()
             for enode in cls["enodes"]:
                 e_idx = enode["enode_idx"]
-                if e_idx in node["selections"]:
+                if e_idx in seen_enode_indices:
                     raise ValueError(f"Duplicate enode index {e_idx} in class {cid}")
+                seen_enode_indices.add(e_idx)
+                if not self.caching_enabled and (
+                    enode.get("is_cache") or enode.get("is_scatter")
+                ):
+                    # Do not add cache-path variables or constraints at all.
+                    # The enode remains in the input for stable diagnostics,
+                    # while the model sees only executable alternatives.
+                    continue
                 selected = model.NewBoolVar(f"b{b}_c{cid}_e{e_idx}")
                 node["selections"][e_idx] = (selected, enode)
                 duration = durations[cid, e_idx]
@@ -501,9 +500,9 @@ class OrtoolsSolver:
                             if operand == child_id
                         ):
                             continue
-                        if child["mem_space"] != cls["mem_space"] or cls.get(
-                            "raw_size_bytes", node["size"]
-                        ) > child["cls"].get("raw_size_bytes", child["size"]):
+                        if child["mem_space"] != cls["mem_space"] or cls[
+                            "raw_size_bytes"
+                        ] > child["cls"]["raw_size_bytes"]:
                             continue
                         inplace = model.NewBoolVar(
                             f"b{b}_c{cid}_e{e_idx}_inplace{child_id}"
