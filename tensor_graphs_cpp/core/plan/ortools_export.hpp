@@ -43,6 +43,7 @@ inline json serializeProblem(
     const std::vector<std::vector<ENodeInfo>> &bucket_enode_infos,
     const std::vector<LogicalId> &candidates,
     const std::vector<std::vector<uint32_t>> &candidate_clean_buckets,
+    const std::vector<std::unordered_set<EClassId>> &bucket_clean_eclasses,
     const Graph &graph,
     const std::unordered_map<LogicalId, ParallelBuffer> &preallocated_buffers,
     const Settings &settings)
@@ -99,6 +100,10 @@ inline json serializeProblem(
         b_obj["bucket_idx"] = b;
         b_obj["weight"] = buckets[b].weight;
         b_obj["root_eclass_id"] = bucket_root_eclass_ids[b].value;
+        json clean_eclasses_json = json::array();
+        for (EClassId clean_id : bucket_clean_eclasses[b])
+            clean_eclasses_json.push_back(clean_id.value);
+        b_obj["clean_eclasses"] = std::move(clean_eclasses_json);
 
         const EGraph &egraph = bucket_egraphs[b];
         const auto &eclass_to_logical = bucket_eclass_to_logicals[b];
@@ -151,8 +156,10 @@ inline json serializeProblem(
 
                 bool is_cache = (enode.getOpType() == OpType::CACHE);
                 bool is_input = (enode.getOpType() == OpType::INPUT);
+                bool is_scatter = (enode.getOpType() == OpType::SCATTER);
                 enode_json["is_cache"] = is_cache;
                 enode_json["is_input"] = is_input;
+                enode_json["is_scatter"] = is_scatter;
 
                 int64_t lid = -1;
                 if (is_cache || is_input)

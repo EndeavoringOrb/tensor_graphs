@@ -88,6 +88,17 @@ def main():
         help="Disable dirty region session caching",
     )
     parser.add_argument(
+        "--use-ortools",
+        action="store_true",
+        help="Use the OR-Tools global cache/extraction planner",
+    )
+    parser.add_argument(
+        "--cache-file",
+        type=str,
+        default="",
+        help="Optional compiled-session cache path (use a new path to force a fresh plan)",
+    )
+    parser.add_argument(
         "--log-cost-calls",
         action="store_true",
         default=True,
@@ -152,10 +163,12 @@ def main():
         delegate,
         min_compile_time=args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
+        cache_file=args.cache_file,
         disable_caching=args.disable_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
         max_sequence_length=args.seq_len,
+        use_ortools=args.use_ortools,
     )
 
     print(f"Loading tokenizer for {args.model}...")

@@ -40,6 +40,8 @@ inline const char *get_exception_code_name(DWORD code)
         return "EXCEPTION_INT_DIVIDE_BY_ZERO (0xc0000094)";
     case EXCEPTION_FLT_DIVIDE_BY_ZERO:
         return "EXCEPTION_FLT_DIVIDE_BY_ZERO (0xc000008e)";
+    case EXCEPTION_FLT_UNDERFLOW:
+        return "EXCEPTION_FLT_UNDERFLOW (0xc0000091)";
     default:
         return "UNKNOWN_FATAL_EXCEPTION";
     }
@@ -126,7 +128,8 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
         code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
         code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
-        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO)
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_FLT_UNDERFLOW)
     {
         return EXCEPTION_CONTINUE_SEARCH;
     }

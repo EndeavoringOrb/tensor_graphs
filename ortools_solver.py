@@ -17,6 +17,17 @@ class OrtoolsSolver:
         self.buckets = problem_data.get("buckets", [])
         self.mem_caps = problem_data.get("mem_caps", {})
         self.preallocated_buffers = problem_data.get("preallocated_buffers", [])
+        self.preallocated_lids = {
+            item["logical_id"] for item in self.preallocated_buffers
+        }
+        self.preallocated_extents: Dict[str, int] = {}
+        for item in self.preallocated_buffers:
+            ms = item["mem_space"]
+            ms_key = f"{ms['type']}{ms['idx']}"
+            extent = int(item["offset"]) + int(item["size"])
+            self.preallocated_extents[ms_key] = max(
+                self.preallocated_extents.get(ms_key, 0), extent
+            )
 
         min_compile_sec = problem_data.get("min_compile_seconds", 0.0)
         self.timeout_sec = max(30.0, float(min_compile_sec))
@@ -60,23 +71,24 @@ class OrtoolsSolver:
             ms_key = f"{ms['type']}{ms['idx']}"
             cand_by_ms.setdefault(ms_key, []).append(cand)
 
-        cache_offsets: Dict[int, int] = {}
         for ms_key, cands_in_ms in cand_by_ms.items():
-            cap = self.mem_caps.get(ms_key, 2**40)
-            if len(cands_in_ms) > 1:
-                c_ints = []
-                for cand in cands_in_ms:
-                    lid = cand["logical_id"]
-                    sz = cand["size_bytes"]
-                    max_u = max(0, cap - sz) // 4096
-                    off_u = extract_model.NewIntVar(0, max_u, f"c_off_u_{lid}")
-                    off_var = extract_model.NewIntVar(0, max(0, cap - sz), f"c_off_{lid}")
-                    extract_model.Add(off_var == off_u * 4096)
-                    c_int = extract_model.NewOptionalIntervalVar(
-                        off_var, sz, off_var + sz, is_cached[lid], f"c_int_{lid}"
-                    )
-                    c_ints.append(c_int)
-                extract_model.AddNoOverlap(c_ints)
+            cap = max(
+                0,
+                self.mem_caps.get(ms_key, 2**40)
+                - self.preallocated_extents.get(ms_key, 0),
+            )
+            # Cache buffers are persistent across buckets, so they are not
+            # interval-colored by extraction order.  Their only global
+            # placement constraint is total reserved bytes in each memory
+            # space.  Native finalization assigns the actual offsets together
+            # with the input and intermediate buffers.
+            cache_terms = [
+                cand["size_bytes"] * is_cached[cand["logical_id"]]
+                for cand in cands_in_ms
+                if cand["logical_id"] not in self.preallocated_lids
+            ]
+            if cache_terms:
+                extract_model.Add(sum(cache_terms) <= cap)
 
         # Per-bucket extraction variables and constraints
         bucket_active: Dict[Tuple[int, int], Any] = {}
@@ -88,6 +100,14 @@ class OrtoolsSolver:
             b_weight = float(b_dict.get("weight", 1.0))
             root_id = b_dict["root_eclass_id"]
             classes_list = b_dict["classes"]
+            clean_eclasses: Set[int] = set(b_dict.get("clean_eclasses", []))
+            eclass_to_logical: Dict[int, int] = {
+                int(k): int(v) for k, v in b_dict.get("eclass_to_logical", {}).items()
+            }
+            eclass_cache_lids: Dict[int, List[int]] = {}
+            for cid, lid in eclass_to_logical.items():
+                if lid in is_cached:
+                    eclass_cache_lids.setdefault(cid, []).append(lid)
 
             # Map eclasses to enodes consuming them
             consumers: Dict[int, List[Tuple[int, int]]] = {}
@@ -119,6 +139,7 @@ class OrtoolsSolver:
                     cost = float(enode["cost"])
                     is_cache = enode.get("is_cache", False)
                     is_input = enode.get("is_input", False)
+                    is_scatter = enode.get("is_scatter", False)
                     lid = enode.get("logical_id", -1)
 
                     x_var = bucket_x[(b, cid, e_idx)]
@@ -128,14 +149,28 @@ class OrtoolsSolver:
                         scaled_cost = int(round(cost * b_weight * 1000.0))
                         total_cost_terms.append(scaled_cost * x_var)
 
-                    if not (is_input or is_cache):
+                    if is_cache:
+                        # A cache alternative is legal only for a selected
+                        # candidate and only when this eclass is clean in the
+                        # current bucket.
+                        if cid not in clean_eclasses or lid not in is_cached:
+                            extract_model.Add(x_var == 0)
+                        else:
+                            extract_model.Add(x_var <= is_cached[lid])
+                    elif is_scatter:
+                        # Scatter updates a cached backing eclass.  Requiring
+                        # the eclass to be selected as cached prevents a
+                        # fused path from silently bypassing the cache.
                         for ch in enode["children"]:
                             extract_model.Add(bucket_active[(b, ch)] >= x_var)
-                    elif is_cache:
-                        if lid in is_cached:
-                            extract_model.Add(x_var <= is_cached[lid])
+                        cache_vars = [is_cached[lid] for lid in eclass_cache_lids.get(cid, [])]
+                        if cache_vars:
+                            extract_model.Add(x_var <= sum(cache_vars))
                         else:
                             extract_model.Add(x_var == 0)
+                    elif not is_input:
+                        for ch in enode["children"]:
+                            extract_model.Add(bucket_active[(b, ch)] >= x_var)
 
                 extract_model.Add(sum(enode_vars) == act_var)
 
@@ -149,6 +184,15 @@ class OrtoolsSolver:
                         extract_model.Add(act_var <= sum(p_terms))
                     else:
                         extract_model.Add(act_var == 0)
+
+            # If a logical node is selected for caching, every eclass carrying
+            # that logical identity must be present in the extraction. This is
+            # the CP-SAT equivalent of MissingCachedEClassRule.
+            for cand in self.candidates:
+                lid = cand["logical_id"]
+                for cid, mapped_lid in eclass_to_logical.items():
+                    if mapped_lid == lid:
+                        extract_model.Add(bucket_active[(b, cid)] >= is_cached[lid])
 
         if total_cost_terms:
             extract_model.Minimize(sum(total_cost_terms))

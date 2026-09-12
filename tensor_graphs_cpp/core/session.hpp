@@ -553,6 +553,9 @@ struct Session
     {
         Planner planner;
         std::vector<Bucket> buckets;
+        SaturationResult full_state;
+        std::vector<SaturationResult> bucket_states;
+        std::vector<std::unordered_set<EClassId>> bucket_clean_eclasses;
         std::vector<EGraph> bucket_egraphs;
         std::vector<EClassId> bucket_root_eclass_ids;
         std::vector<std::unordered_map<EClassId, LogicalId>> bucket_eclass_to_logicals;
@@ -571,80 +574,86 @@ struct Session
     {
         auto state = std::make_unique<OrtoolsPreparedState>(costModel, settings);
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-        Graph temp_graph = graph;
-        state->planner.initBaseEGraph(rootId, temp_graph, topo, repo, doSaturate);
-
         state->buckets = manualBuckets;
 
-        // Determine preallocated buffers for inputs
-        state->planner.preallocateLogicalBuffers(graph, {}, state->preallocated_buffers);
+        Planner &planner = state->planner;
+        Graph temp_graph = graph;
+        planner.initBaseEGraph(rootId, temp_graph, topo, repo, false);
+        state->full_state = planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], {}, doSaturate, repo);
 
-        // Candidates for caching
-        std::unordered_map<LogicalId, std::vector<uint32_t>> candidate_clean_map;
+        state->bucket_states.resize(manualBuckets.size());
+        state->bucket_states[fullBucketIdx] = state->full_state;
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
+            if (bucket_idx == fullBucketIdx)
+                return;
+            Planner bucket_planner(costModel, settings);
+            state->bucket_states[bucket_idx] = bucket_planner.saturateBucket(
+                rootId, graph, manualBuckets[bucket_idx], {}, false, repo, &state->full_state);
+        });
+
+        // Candidate cleanliness is derived from the same eclass DP used by the
+        // normal cache search. Runtime inputs remain candidates even when a
+        // bucket dirties them, because partial paths use their cached backing.
         if (!disableCaching)
         {
-            for (uint32_t b_idx = 0; b_idx < manualBuckets.size(); ++b_idx)
-            {
-                const Bucket &bucket = manualBuckets[b_idx];
-                std::unordered_map<LogicalId, bool> logical_dirty;
-                for (LogicalId node_id : topo)
-                {
-                    bool is_dirty = bucket.inputDirtyRegions.count(node_id) &&
-                                   !bucket.inputDirtyRegions.at(node_id).empty();
-                    if (!is_dirty)
-                    {
-                        for (LogicalId parent_id : graph.getNode(node_id).child_ids)
-                        {
-                            if (logical_dirty[parent_id])
-                            {
-                                is_dirty = true;
-                                break;
-                            }
-                        }
-                    }
-                    logical_dirty[node_id] = is_dirty;
-                    if (!is_dirty)
-                    {
-                        candidate_clean_map[node_id].push_back(b_idx);
-                    }
-                }
-            }
-
             for (LogicalId node_id : topo)
             {
                 const TensorNode &node = graph.getNode(node_id);
                 const bool runtime_input = node.opType == OpType::INPUT &&
                                            graph.getInputDataType(node_id) == InputDataType::RUNTIME;
-                if (node.getSizeBytes() > 0 && (runtime_input || candidate_clean_map.count(node_id)))
+                const bool clean_in_any_bucket = std::any_of(
+                    state->bucket_states.begin(), state->bucket_states.end(), [&](const SaturationResult &bucket_state) {
+                        auto eclass_it = bucket_state.nodeToEClass.find(node_id);
+                        return eclass_it != bucket_state.nodeToEClass.end() &&
+                               bucket_state.cleanEClasses.count(bucket_state.egraph.findConst(eclass_it->second));
+                    });
+                if (node.getSizeBytes() == 0 || (!runtime_input && !clean_in_any_bucket))
+                    continue;
+
+                state->candidates.push_back(node_id);
+                std::vector<uint32_t> clean_buckets;
+                for (uint32_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
                 {
-                    state->candidates.push_back(node_id);
-                    state->candidate_clean_buckets.push_back(
-                        candidate_clean_map.count(node_id) ? candidate_clean_map[node_id] : std::vector<uint32_t>{});
+                    auto eclass_it = state->bucket_states[bucket_idx].nodeToEClass.find(node_id);
+                    if (eclass_it != state->bucket_states[bucket_idx].nodeToEClass.end() &&
+                        state->bucket_states[bucket_idx].cleanEClasses.count(
+                            state->bucket_states[bucket_idx].egraph.findConst(eclass_it->second)))
+                        clean_buckets.push_back(bucket_idx);
                 }
+                state->candidate_clean_buckets.push_back(std::move(clean_buckets));
             }
         }
 
+        // The solver needs input reservations before it chooses a cache set.
+        // Resolve those through eclass ids, matching the normal path.
+        planner.preallocateLogicalBuffers(graph, state->full_state.egraph, {},
+                                          state->full_state.eclassToLogical, state->preallocated_buffers);
+
         Engine cpu = Engine{0, EngineType::CPU};
-
-        for (uint32_t b_idx = 0; b_idx < manualBuckets.size(); ++b_idx)
+        state->bucket_egraphs.reserve(state->bucket_states.size());
+        state->bucket_root_eclass_ids.reserve(state->bucket_states.size());
+        state->bucket_eclass_to_logicals.reserve(state->bucket_states.size());
+        state->bucket_enode_infos.reserve(state->bucket_states.size());
+        state->bucket_clean_eclasses.reserve(state->bucket_states.size());
+        for (size_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
         {
-            const Bucket &bucket = manualBuckets[b_idx];
-            EGraph egraph = state->planner.baseState.egraph;
-            auto eclassToLogical = state->planner.baseState.eclassToLogical;
-
-            // Inject CACHE enodes for candidates that are clean in this bucket
-            for (size_t c_idx = 0; c_idx < state->candidates.size(); ++c_idx)
+            SaturationResult bucket_state = std::move(state->bucket_states[bucket_idx]);
+            for (const LogicalId candidate : state->candidates)
             {
-                LogicalId cand_id = state->candidates[c_idx];
-                const auto &clean_b = state->candidate_clean_buckets[c_idx];
-                bool is_clean = std::find(clean_b.begin(), clean_b.end(), b_idx) != clean_b.end();
-                if (is_clean && state->planner.baseState.nodeToEClass.count(cand_id))
+                for (const auto &logical_pair : bucket_state.eclassToLogical)
                 {
-                    EClassId canon_id = egraph.find(state->planner.baseState.nodeToEClass.at(cand_id));
+                    if (logical_pair.second != candidate)
+                        continue;
+                    EClassId eclass_id = bucket_state.egraph.findConst(logical_pair.first);
+                    if (bucket_state.cleanEClasses.count(eclass_id) == 0)
+                        continue;
+
+                    const EClass &cls = bucket_state.egraph.getEClass(eclass_id);
                     bool has_cache = false;
-                    for (ENodeId eid : egraph.getEClass(canon_id).enodes)
+                    for (ENodeId enode_id : cls.enodes)
                     {
-                        if (egraph.getENode(eid).getOpType() == OpType::CACHE)
+                        const ENode &enode = bucket_state.egraph.getENode(enode_id);
+                        if (enode.getOpType() == OpType::CACHE)
                         {
                             has_cache = true;
                             break;
@@ -652,48 +661,25 @@ struct Session
                     }
                     if (!has_cache)
                     {
-                        const auto &cls = egraph.getEClass(canon_id);
-                        ENode cache_node = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
-                                                cls.mem_space, {cpu}, toString(cand_id));
-                        egraph.addENode(canon_id, cache_node);
+                        bucket_state.egraph.addENode(
+                            eclass_id, ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
+                                              cls.mem_space, {cpu}, toString(candidate)));
                     }
                 }
             }
 
-            std::unordered_set<EClassId> protected_classes;
-            for (LogicalId cand_id : state->candidates)
-            {
-                if (state->planner.baseState.nodeToEClass.count(cand_id))
-                {
-                    protected_classes.insert(egraph.find(state->planner.baseState.nodeToEClass.at(cand_id)));
-                }
-            }
+            std::unordered_map<EClassId, LogicalId> canonical_logicals;
+            for (const auto &logical_pair : bucket_state.eclassToLogical)
+                canonical_logicals[bucket_state.egraph.findConst(logical_pair.first)] = logical_pair.second;
+            bucket_state.eclassToLogical = std::move(canonical_logicals);
 
-            state->planner.injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, {},
-                                                  state->planner.baseState.nodeToEClass, eclassToLogical);
-            state->planner.injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, {},
-                                                   state->planner.baseState.nodeToEClass, eclassToLogical);
-
-            if (doSaturate && settings.do_saturate)
-            {
-                state->planner.saturate(egraph, protected_classes, eclassToLogical, true, false, repo);
-            }
-
-            std::unordered_map<EClassId, LogicalId> updated_eclass_to_logical;
-            for (const auto &kv : eclassToLogical)
-            {
-                updated_eclass_to_logical[egraph.find(kv.first)] = kv.second;
-            }
-            eclassToLogical = std::move(updated_eclass_to_logical);
-
-            auto enode_infos = state->planner.computeENodeInfos(egraph, eclassToLogical, {}, false);
-            state->planner.pruneEGraph(egraph, enode_infos);
-
-            EClassId root_eclass_id = egraph.findConst(state->planner.baseState.nodeToEClass.at(rootId));
-
-            state->bucket_egraphs.push_back(std::move(egraph));
-            state->bucket_root_eclass_ids.push_back(root_eclass_id);
-            state->bucket_eclass_to_logicals.push_back(std::move(eclassToLogical));
+            auto enode_infos = planner.computeENodeInfos(bucket_state.egraph, bucket_state.eclassToLogical, {}, false);
+            planner.pruneEGraph(bucket_state.egraph, enode_infos);
+            state->bucket_clean_eclasses.push_back(std::move(bucket_state.cleanEClasses));
+            state->bucket_root_eclass_ids.push_back(
+                bucket_state.egraph.findConst(bucket_state.nodeToEClass.at(rootId)));
+            state->bucket_egraphs.push_back(std::move(bucket_state.egraph));
+            state->bucket_eclass_to_logicals.push_back(std::move(bucket_state.eclassToLogical));
             state->bucket_enode_infos.push_back(std::move(enode_infos));
         }
 
@@ -706,7 +692,7 @@ struct Session
         nlohmann::json prob = ortools_export::serializeProblem(
             state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
             state->bucket_eclass_to_logicals, state->bucket_enode_infos, state->candidates,
-            state->candidate_clean_buckets, graph, state->preallocated_buffers, settings);
+            state->candidate_clean_buckets, state->bucket_clean_eclasses, graph, state->preallocated_buffers, settings);
         return prob.dump();
     }
 
@@ -726,6 +712,25 @@ struct Session
                              " buckets, expected " + std::to_string(manualBuckets.size()));
         }
 
+        // OR-Tools selects the global cache set and supplies a feasible
+        // extraction witness.  Rebuild the executable graphs through the
+        // native planner so cache buffers, view aliases, and lifetimes use
+        // the same implementation as the normal path.  In particular,
+        // intermediate cached nodes must receive persistent buffers; using
+        // the solver's local bufferization here would make a cache look valid
+        // while allowing its storage to overlap a later intermediate.
+        std::unordered_map<EClassId, MemSpace> selected_cached_eclasses;
+        for (const auto &kv : selected_cached)
+        {
+            auto node_it = state.full_state.nodeToEClass.find(kv.first);
+            if (node_it != state.full_state.nodeToEClass.end())
+                selected_cached_eclasses[state.full_state.egraph.findConst(node_it->second)] = kv.second;
+        }
+
+        std::unordered_map<LogicalId, ParallelBuffer> preallocated;
+        state.planner.preallocateLogicalBuffers(graph, state.full_state.egraph, selected_cached_eclasses,
+                                                state.full_state.eclassToLogical, preallocated);
+
         cachedGraphs.clear();
         for (size_t b = 0; b < manualBuckets.size(); ++b)
         {
@@ -733,9 +738,28 @@ struct Session
             thread_planner.baseState = state.planner.baseState;
             thread_planner.baseStateInitialized = true;
 
+            auto &bucket_egraph = state.bucket_egraphs[b];
+            auto &eclass_to_logical = state.bucket_eclass_to_logicals[b];
+            auto &clean_eclasses = state.bucket_clean_eclasses[b];
+
+            auto enode_infos = thread_planner.computeENodeInfos(
+                bucket_egraph, eclass_to_logical, selected_cached, /*strictCache=*/false);
+            thread_planner.pruneEGraph(bucket_egraph, enode_infos);
+
+            std::unordered_set<EClassId> cached_eclasses;
+            for (const auto &logical_pair : eclass_to_logical)
+            {
+                if (selected_cached.count(logical_pair.second))
+                    cached_eclasses.insert(bucket_egraph.findConst(logical_pair.first));
+            }
+
+            ExtractionResult extraction = thread_planner.extractBest(
+                rootId, graph, bucket_egraph, state.planner.baseState.nodeToEClass, selected_cached,
+                eclass_to_logical, preallocated, minCompileSeconds == 0.0f, false, minCompileSeconds,
+                nullptr, enode_infos, &cached_eclasses, &clean_eclasses);
             CompiledGraph cg = thread_planner.buildCompiledGraph(
-                rootId, graph, state.bucket_egraphs[b], state.planner.baseState.nodeToEClass,
-                extractions[b], selected_cached, state.bucket_eclass_to_logicals[b], state.bucket_enode_infos[b]);
+                rootId, graph, bucket_egraph, state.planner.baseState.nodeToEClass, extraction, selected_cached,
+                eclass_to_logical, enode_infos);
             cg.bucket = manualBuckets[b];
             cachedGraphs.push_back(std::move(cg));
         }
@@ -753,7 +777,7 @@ struct Session
         nlohmann::json prob = ortools_export::serializeProblem(
             state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
             state->bucket_eclass_to_logicals, state->bucket_enode_infos, state->candidates,
-            state->candidate_clean_buckets, graph, state->preallocated_buffers, settings);
+            state->candidate_clean_buckets, state->bucket_clean_eclasses, graph, state->preallocated_buffers, settings);
 
         std::filesystem::create_directories("benchmarks");
         std::string prob_path = "benchmarks/ortools_problem.json";
@@ -864,32 +888,15 @@ struct Session
                 }
             }
 
-            bool has_partial_runtime_input_bucket = false;
-            for (const Bucket &bucket : manualBuckets)
-            {
-                for (const auto &dirty_input : bucket.inputDirtyRegions)
-                {
-                    if (!graph.hasNode(dirty_input.first) || graph.getNode(dirty_input.first).opType != OpType::INPUT)
-                        continue;
-                    const auto &shape = graph.getNode(dirty_input.first).getShape();
-                    for (const Region &region : dirty_input.second)
-                    {
-                        bool is_full = region.region.size() == shape.size();
-                        for (size_t dim = 0; is_full && dim < shape.size(); ++dim)
-                            is_full = region.region[dim].start == 0 && region.region[dim].stop == shape[dim];
-                        has_partial_runtime_input_bucket = has_partial_runtime_input_bucket || !is_full;
-                    }
-                }
-            }
             for (LogicalId node_id : topo)
             {
                 const TensorNode &node = graph.getNode(node_id);
                 const bool runtime_input = node.opType == OpType::INPUT &&
                                            graph.getInputDataType(node_id) == InputDataType::RUNTIME;
-                // Decode searches should retain only their runtime input state.
-                // Allowing every clean intermediate into the first heuristic
-                // candidate turns one decode choice into a huge all-buffer plan.
-                if (node.getSizeBytes() > 0 && (runtime_input || (!has_partial_runtime_input_bucket && clean_in_any_bucket[node_id])))
+                // Any clean, non-empty logical node can be selected for a
+                // persistent cache, including intermediate nodes needed by a
+                // KV-cache-style plan.
+                if (node.getSizeBytes() > 0 && (runtime_input || clean_in_any_bucket[node_id]))
                     candidates.push_back(node_id);
             }
             std::stable_sort(candidates.begin(), candidates.end(), [&](LogicalId a, LogicalId b) {
