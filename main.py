@@ -3,9 +3,6 @@ import argparse
 from pathlib import Path
 
 import tensor_graphs
-from safetensors.torch import load_file
-
-from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
 from utils.decode import load_tokenizer
 
 
@@ -121,10 +118,12 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    cfg = TrainConfig()
-
     run_dir_path = Path(args.run_dir) if args.run_dir else None
     if run_dir_path:
+        from safetensors.torch import load_file
+        from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
+
+        cfg = TrainConfig()
         config_file = run_dir_path / "config.json"
         if config_file.exists():
             try:

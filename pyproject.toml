@@ -15,7 +15,6 @@ dependencies = [
     "tqdm",
     "tokenizers",
     "huggingface-hub",
-    "torch",
     "safetensors",
     "hf_xet",
     "transformers>=4.57.6",
@@ -28,7 +27,14 @@ dependencies = [
     "matplotlib>=3.9.4",
     "httpx>=0.28.1",
     "requests>=2.32.5",
+]
+
+[project.optional-dependencies]
+ortools = [
     "ortools>=9.15.6755",
+]
+ml = [
+    "torch",
 ]
 
 [tool.setuptools.packages.find]

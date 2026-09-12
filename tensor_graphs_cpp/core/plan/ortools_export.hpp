@@ -269,7 +269,16 @@ inline bool deserializeSolution(
 
 inline std::string findPythonExecutable()
 {
+    if (const char *ortools_python = std::getenv("TENSOR_GRAPHS_ORTOOLS_PYTHON");
+        ortools_python != nullptr && *ortools_python != '\0')
+    {
+        return std::filesystem::path(ortools_python).make_preferred().string();
+    }
+
     const std::vector<std::string> candidates = {
+        ".venvx64\\Scripts\\python.exe",
+        ".venvx64/Scripts/python.exe",
+        ".venvx64/bin/python",
         ".venv\\Scripts\\python.exe",
         ".venv/Scripts/python.exe",
         ".venv/bin/python",

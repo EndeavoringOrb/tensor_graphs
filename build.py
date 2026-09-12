@@ -296,7 +296,6 @@ class PlatformInfo:
     os_name: str
     machine: str
     is_arm64: bool
-    is_python_arm64: bool
     is_windows: bool
     vcvars_path: str
     cuda_path: str
@@ -314,10 +313,12 @@ class PlatformInfo:
         os_name = os.name
         machine = platform.machine().lower()
         is_windows = os_name == "nt"
-        is_arm64 = machine in ("aarch64", "arm64")
-
-        python_plat = sysconfig.get_platform().lower()
-        is_python_arm64 = "arm64" in python_plat or "aarch64" in python_plat
+        native_machine = (
+            os.environ.get("PROCESSOR_ARCHITEW6432")
+            or os.environ.get("PROCESSOR_ARCHITECTURE")
+            or machine
+        ).lower()
+        is_arm64 = native_machine in ("aarch64", "arm64")
 
         vcvars_path = find_vcvarsall()
         compiler = CompilerInfo.detect()
@@ -431,7 +432,6 @@ class PlatformInfo:
             os_name=os_name,
             machine=machine,
             is_arm64=is_arm64,
-            is_python_arm64=is_python_arm64,
             is_windows=is_windows,
             vcvars_path=vcvars_path,
             cuda_path=cuda_path,
@@ -805,8 +805,9 @@ class KernelLinter:
 
 
 class CodeGenerator:
-    def __init__(self, config: BuildConfig):
+    def __init__(self, config: BuildConfig, platform_info: PlatformInfo):
         self.config = config
+        self.platform = platform_info
 
     @staticmethod
     def get_file_hash(filepath: Path) -> str:
@@ -946,7 +947,10 @@ class CodeGenerator:
     def generate_build_context(self) -> None:
         GENERATED_DIR.mkdir(parents=True, exist_ok=True)
         ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
-        cmd_str = f"{platform.machine()}"
+        if self.platform.is_windows:
+            cmd_str = "ARM64" if self.platform.is_arm64 else "AMD64"
+        else:
+            cmd_str = "aarch64" if self.platform.is_arm64 else platform.machine()
         ctx_hash = hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()
 
         content = (
@@ -1012,7 +1016,7 @@ class Toolchain:
     def get_nvcc_binary(self) -> str:
         return "nvcc"
 
-    def get_cxx_flags(self, is_python_ext: bool = False) -> list[str]:
+    def get_cxx_flags(self) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
             "-std=c++17",
@@ -1027,9 +1031,7 @@ class Toolchain:
             if self.platform.opencl_inc_dir:
                 flags.append(f"-I{self.platform.opencl_inc_dir}")
 
-        target_arm64 = (
-            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
-        )
+        target_arm64 = self.platform.is_arm64
 
         if self.config.profile:
             flags.append("-DTG_PROFILE")
@@ -1089,7 +1091,7 @@ class Toolchain:
         link_flags = ["-shared"]
 
         if self.platform.is_windows:
-            if not self.platform.is_python_arm64:
+            if not self.platform.is_arm64:
                 link_flags.extend(["-target", "x86_64-pc-windows-msvc"])
             py_lib_dir_base = Path(sys.base_prefix) / "libs"
             py_lib_dir_prefix = Path(sys.prefix) / "libs"
@@ -1101,7 +1103,7 @@ class Toolchain:
 
         return [f for f in inc_flags if f], [f for f in link_flags if f], ext_suffix
 
-    def get_ld_flags(self, is_python_ext: bool = False) -> list[str]:
+    def get_ld_flags(self) -> list[str]:
         flags = []
         if self.config.use_cuda:
             if self.platform.cuda_lib_dir:
@@ -1114,10 +1116,6 @@ class Toolchain:
         if self.config.use_opencl:
             if self.platform.opencl_lib_dir:
                 lib_dir = self.platform.opencl_lib_dir
-                if self.platform.is_windows and is_python_ext and not self.platform.is_python_arm64:
-                    x64_dir = Path(lib_dir) / "x64"
-                    if x64_dir.exists():
-                        lib_dir = str(x64_dir)
                 flags.append(f"-L{lib_dir}")
             if not self.platform.is_windows:
                 flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
@@ -1129,11 +1127,11 @@ class Toolchain:
         if self.platform.is_windows:
             flags.append("-ldbghelp")
 
-        if not is_python_ext and not self.config.use_cuda:
+        if not self.config.use_cuda:
             flags.extend(["-static"])
         return flags
 
-    def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
+    def get_nvcc_flags(self) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
             "-std=c++17",
@@ -1155,9 +1153,7 @@ class Toolchain:
         else:
             flags.append("-O3")
 
-        target_arm64 = (
-            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
-        )
+        target_arm64 = self.platform.is_arm64
 
         if self.config.use_cuda:
             flags.append("-DTG_USE_CUDA")
@@ -1169,9 +1165,7 @@ class Toolchain:
 
         return flags
 
-    def run_cmd(
-        self, cmd: list[str], is_python_ext: bool = False
-    ) -> subprocess.CompletedProcess:
+    def run_cmd(self, cmd: list[str]) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
 
         if (
@@ -1180,11 +1174,7 @@ class Toolchain:
             and self.platform.vcvars_path
             and Path(self.platform.vcvars_path).exists()
         ):
-            target_arm64 = (
-                self.platform.is_python_arm64
-                if is_python_ext
-                else self.platform.is_arm64
-            )
+            target_arm64 = self.platform.is_arm64
             arch = "arm64" if (target_arm64 and not self.config.use_cuda) else "amd64"
             full_command = f'"{self.platform.vcvars_path}" {arch} && {cmd_str}'
         else:
@@ -1223,7 +1213,7 @@ class BuildOrchestrator:
         self.config = config
         self.toolchain = Toolchain(config, self.platform)
         self.linter = KernelLinter()
-        self.code_gen = CodeGenerator(config)
+        self.code_gen = CodeGenerator(config, self.platform)
 
     def clean(self) -> None:
         console.print("[bold yellow]Cleaning build artifacts and cache...[/bold yellow]")
@@ -1365,7 +1355,7 @@ class BuildOrchestrator:
             main_obj = GENERATED_DIR / f"{target_stem}{obj_ext}"
             dep_file = GENERATED_DIR / f"{target_stem}.d"
             cxx_bin = self.toolchain.get_cxx_binary()
-            cxx_flags = self.toolchain.get_cxx_flags(is_python_ext=is_py)
+            cxx_flags = self.toolchain.get_cxx_flags()
             py_inc = self.toolchain.get_pybind11_flags()[0] if is_py else []
             cmd_key = f"{cxx_bin} {' '.join(cxx_flags)} {' '.join(py_inc)} {main_src}"
 
@@ -1412,7 +1402,7 @@ class BuildOrchestrator:
                 + dep_flag
                 + ["-c", str(info["main_src"]), "-o", str(info["main_obj"])]
             )
-            res = self.toolchain.run_cmd(cmd, is_python_ext=info["is_py"])
+            res = self.toolchain.run_cmd(cmd)
             return target_file, True, res.stdout
 
         if targets_to_compile:
@@ -1447,7 +1437,7 @@ class BuildOrchestrator:
                 _, py_link_flags, ext_suffix = self.toolchain.get_pybind11_flags()
                 out_path = Path(f"tensor_graphs{ext_suffix}")
                 dep_objs = [main_obj] + [Path(co) for co in cuda_objs]
-                ld_flags = py_link_flags + self.toolchain.get_ld_flags(is_python_ext=True)
+                ld_flags = py_link_flags + self.toolchain.get_ld_flags()
                 link_key = f"{info['cxx_bin']} {' '.join(ld_flags)} {' '.join(str(o) for o in dep_objs)}"
 
                 bin_up_to_date = isBinaryUpToDate(out_path, dep_objs, link_key, build_cache, self.config.force)
@@ -1462,7 +1452,7 @@ class BuildOrchestrator:
                         + ["-o", str(out_path)]
                         + ld_flags
                     )
-                    res = self.toolchain.run_cmd(cmd, is_python_ext=True)
+                    res = self.toolchain.run_cmd(cmd)
                     self._render_success_panel(res.stdout)
                     build_cache[str(out_path.resolve())] = {
                         "link_key": link_key,
