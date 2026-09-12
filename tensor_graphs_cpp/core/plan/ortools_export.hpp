@@ -41,11 +41,11 @@ inline json serializeProblem(
     const std::vector<EClassId> &bucket_root_eclass_ids,
     const std::vector<std::unordered_map<EClassId, LogicalId>> &bucket_eclass_to_logicals,
     const std::vector<std::vector<ENodeInfo>> &bucket_enode_infos,
-    const std::vector<LogicalId> &candidates,
+    const std::vector<CacheCandidate> &candidates,
     const std::vector<std::vector<uint32_t>> &candidate_clean_buckets,
     const std::vector<std::unordered_set<EClassId>> &bucket_clean_eclasses,
     const Graph &graph,
-    const std::unordered_map<LogicalId, ParallelBuffer> &preallocated_buffers,
+    const std::unordered_map<BaseEClassId, ParallelBuffer> &preallocated_buffers,
     const Settings &settings)
 {
     json root_json;
@@ -67,34 +67,18 @@ inline json serializeProblem(
     json candidates_json = json::array();
     for (size_t i = 0; i < candidates.size(); ++i)
     {
-        LogicalId cid = candidates[i];
-        if (!graph.hasNode(cid))
-            continue;
-        const TensorNode &node = graph.getNode(cid);
-        uint64_t size_bytes = (node.getSizeBytes() + 4095) & ~4095ULL;
+        BaseEClassId cid = candidates[i].base_eclass_id;
+        uint64_t raw_size_bytes = candidates[i].size_bytes;
+        uint64_t size_bytes = (raw_size_bytes + 4095) & ~4095ULL;
         json c_obj;
-        c_obj["logical_id"] = cid.value;
+        c_obj["base_eclass_id"] = cid.value;
         c_obj["size_bytes"] = size_bytes;
-        c_obj["raw_size_bytes"] = node.getSizeBytes();
-        c_obj["mem_space"] = memSpaceToJson(MemSpace{1, HandleType::CPP}); // Default CPU
+        c_obj["raw_size_bytes"] = raw_size_bytes;
+        c_obj["mem_space"] = memSpaceToJson(candidates[i].mem_space);
         if (settings.use_ortools_full)
         {
-            // A cache can live in any space with a full-sized representation.
-            std::unordered_set<MemSpace> spaces;
-            for (size_t b = 0; b < bucket_egraphs.size(); ++b)
-                for (const auto &entry : bucket_eclass_to_logicals[b])
-                    if (entry.second == cid)
-                    {
-                        const auto &cls = bucket_egraphs[b].getEClass(bucket_egraphs[b].findConst(entry.first));
-                        if (cls.mem_space.type != HandleType::STORAGE &&
-                            ((getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL) == size_bytes)
-                            spaces.insert(cls.mem_space);
-                    }
-            std::vector<MemSpace> sorted_spaces(spaces.begin(), spaces.end());
-            std::sort(sorted_spaces.begin(), sorted_spaces.end());
             c_obj["mem_spaces"] = json::array();
-            for (const auto &ms : sorted_spaces)
-                c_obj["mem_spaces"].push_back(memSpaceToJson(ms));
+            c_obj["mem_spaces"].push_back(memSpaceToJson(candidates[i].mem_space));
         }
         c_obj["clean_buckets"] = candidate_clean_buckets[i];
         candidates_json.push_back(c_obj);
@@ -106,11 +90,11 @@ inline json serializeProblem(
     for (const auto &kv : preallocated_buffers)
     {
         json p_obj;
-        p_obj["logical_id"] = kv.first.value;
+        p_obj["base_eclass_id"] = kv.first.value;
         p_obj["buffer_id"] = kv.second.id.value;
         p_obj["offset"] = kv.second.offset;
         p_obj["size"] = kv.second.size;
-        p_obj["raw_size_bytes"] = graph.getNode(kv.first).getSizeBytes();
+        p_obj["raw_size_bytes"] = kv.second.size;
         p_obj["mem_space"] = memSpaceToJson(kv.second.mem_space);
         preallocated_json.push_back(p_obj);
     }
@@ -149,6 +133,7 @@ inline json serializeProblem(
 
             json cls_json;
             cls_json["id"] = cls.id.value;
+            cls_json["base_eclass_id"] = cls.base_eclass_id.value;
             cls_json["shape"] = cls.shape;
             cls_json["dtype"] = static_cast<int>(cls.dtype);
             cls_json["mem_space"] = memSpaceToJson(cls.mem_space);
@@ -193,12 +178,16 @@ inline json serializeProblem(
                 enode_json["is_scatter"] = is_scatter;
 
                 int64_t lid = -1;
-                if (is_cache || is_input)
+                if (is_cache)
+                {
+                    enode_json["base_eclass_id"] = cls.base_eclass_id.value;
+                }
+                else if (is_input)
                 {
                     if (eclass_to_logical.count(cls.id))
                         lid = static_cast<int64_t>(eclass_to_logical.at(cls.id).value);
+                    enode_json["logical_id"] = lid;
                 }
-                enode_json["logical_id"] = lid;
 
                 enodes_json.push_back(enode_json);
             }
@@ -215,7 +204,7 @@ inline json serializeProblem(
 
 inline bool deserializeSolution(
     const json &sol_json,
-    std::unordered_map<LogicalId, MemSpace> &out_cached_nodes,
+    std::unordered_set<BaseEClassId> &out_cached_nodes,
     std::vector<ExtractionResult> &out_extractions)
 {
     out_cached_nodes.clear();
@@ -231,9 +220,7 @@ inline bool deserializeSolution(
     {
         for (const auto &item : sol_json["cached_nodes"])
         {
-            LogicalId lid{item.value("logical_id", 0u)};
-            MemSpace ms = memSpaceFromJson(item.value("mem_space", json::object()));
-            out_cached_nodes[lid] = ms;
+            out_cached_nodes.insert(BaseEClassId{item.at("base_eclass_id").get<uint32_t>()});
         }
     }
 

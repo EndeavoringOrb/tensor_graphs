@@ -322,6 +322,41 @@ struct EClassId
     }
 };
 
+struct BaseEClassId
+{
+    uint32_t value = UINT32_MAX;
+
+    constexpr BaseEClassId() = default;
+    constexpr explicit BaseEClassId(uint32_t val) : value(val)
+    {
+    }
+
+    bool operator==(const BaseEClassId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const BaseEClassId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const BaseEClassId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const BaseEClassId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const BaseEClassId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const BaseEClassId &o) const
+    {
+        return value >= o.value;
+    }
+};
+
 struct ENodeId
 {
     uint32_t value = UINT32_MAX;
@@ -509,6 +544,14 @@ template <> struct hash<LogicalId>
 template <> struct hash<EClassId>
 {
     std::uint64_t operator()(const EClassId &id) const noexcept
+    {
+        return std::hash<uint32_t>()(id.value);
+    }
+};
+
+template <> struct hash<BaseEClassId>
+{
+    std::uint64_t operator()(const BaseEClassId &id) const noexcept
     {
         return std::hash<uint32_t>()(id.value);
     }
@@ -921,6 +964,14 @@ inline void tg_deserialize(BinaryReader &br, EClassId &val)
 {
     br.read(val.value);
 }
+inline void tg_serialize(BinaryWriter &bw, const BaseEClassId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, BaseEClassId &val)
+{
+    br.read(val.value);
+}
 inline void tg_serialize(BinaryWriter &bw, const MemSpace &val)
 {
     bw.write(val.idx);
@@ -1310,6 +1361,11 @@ inline std::string toString(EClassId id)
     return "EClassId(" + std::to_string(id.value) + ")";
 }
 
+inline std::string toString(BaseEClassId id)
+{
+    return "BaseEClassId(" + std::to_string(id.value) + ")";
+}
+
 inline std::string toString(ENodeId id)
 {
     return "ENodeId(" + std::to_string(id.value) + ")";
@@ -1329,6 +1385,10 @@ inline std::ostream &operator<<(std::ostream &os, KernelId id)
     return os << toString(id);
 }
 inline std::ostream &operator<<(std::ostream &os, EClassId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, BaseEClassId id)
 {
     return os << toString(id);
 }

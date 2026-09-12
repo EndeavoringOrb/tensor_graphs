@@ -118,6 +118,7 @@ struct ENode
 struct EClass
 {
     EClassId id;
+    BaseEClassId base_eclass_id;
     std::vector<ENodeId> enodes;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
@@ -339,6 +340,16 @@ struct EGraph
         }
 #endif
 
+        const BaseEClassId baseA = classes[ra.value].base_eclass_id;
+        const BaseEClassId baseB = classes[rb.value].base_eclass_id;
+        if (baseA != BaseEClassId{} && baseB != BaseEClassId{})
+        {
+            Error::throw_err("EClass merge would merge two base eclasses: " + toString(ra) + " and " +
+                             toString(rb));
+        }
+        if (baseA == BaseEClassId{})
+            classes[ra.value].base_eclass_id = baseB;
+
         parent[rb.value] = ra;
         ufSize[ra.value] += ufSize[rb.value];
 
@@ -459,6 +470,25 @@ struct EGraph
     const EClass &getEClass(EClassId id) const
     {
         return classes[findConst(id).value];
+    }
+
+    void populateBaseEClassIds()
+    {
+        for (EClass &cls : classes)
+        {
+            if (findConst(cls.id) == cls.id)
+                cls.base_eclass_id = BaseEClassId{cls.id.value};
+        }
+    }
+
+    EClassId findEClassByBaseId(BaseEClassId base_id) const
+    {
+        for (const EClass &cls : classes)
+        {
+            if (findConst(cls.id) == cls.id && cls.base_eclass_id == base_id)
+                return cls.id;
+        }
+        return EClassId{};
     }
 
     EClassId getENodeEClass(ENodeId enodeId) const

@@ -695,16 +695,20 @@ template <typename... RuleTypes> struct CacheBench
             mock.build(g, root);
 
             std::vector<LogicalId> topo = topologicalSort({root}, g);
-            std::vector<LogicalId> candidates;
-            for (LogicalId id : topo)
-                if (g.getNode(id).getSizeBytes() > 0)
-                    candidates.push_back(id);
-
-            std::vector<MemSpace> avail_mem_spaces = {MemSpace{1, HandleType::CPP}};
-
             Planner planner(mock.costModel, mock.settings);
             planner.initBaseEGraph(root, g, topo, nullptr);
+            planner.baseState.egraph.populateBaseEClassIds();
             populateDummyRecords(mock.costModel, planner.baseState.egraph);
+
+            std::vector<CacheCandidate> candidates;
+            for (LogicalId id : topo)
+            {
+                if (g.getNode(id).getSizeBytes() == 0)
+                    continue;
+                const EClass &cls = planner.baseState.egraph.getEClass(planner.baseState.nodeToEClass.at(id));
+                candidates.push_back({cls.base_eclass_id, getSizeBytes(cls.shape, cls.dtype), cls.dtype,
+                                      cls.mem_space, 0});
+            }
 
             Bucket bucket;
             for (LogicalId id : topo)
@@ -714,11 +718,11 @@ template <typename... RuleTypes> struct CacheBench
 
             auto iter_rule = std::apply(
                 [&](auto &&...rs) {
-                    return makeCacheIterator(g, candidates, avail_mem_spaces, nullptr, nullptr, rs...);
+                    return makeCacheIterator(candidates, mock.settings.mem_caps, nullptr, nullptr, rs...);
                 },
                 rules_tuple);
 
-            std::unordered_map<LogicalId, MemSpace> cache_rule;
+            std::unordered_set<BaseEClassId> cache_rule;
             float min_cost_rule = TGConstants::INF;
             while (iter_rule.getNextCacheSelection(cache_rule))
             {
@@ -730,10 +734,8 @@ template <typename... RuleTypes> struct CacheBench
                 }
                 try
                 {
-                    std::unordered_map<LogicalId, ParallelBuffer> preallocated;
-                    planner.preallocateLogicalBuffers(g, cache_rule, preallocated);
                     CompiledGraph plan_res = planner.plan(root, g, bucket, cache_rule, /*doSaturate=*/false,
-                                                          /*strictCache=*/true, nullptr, preallocated, 0.0f, nullptr);
+                                                          /*strictCache=*/true, nullptr, 0.0f, nullptr);
                     min_cost_rule = std::min(min_cost_rule, plan_res.cost());
                 }
                 catch (...)
@@ -741,8 +743,8 @@ template <typename... RuleTypes> struct CacheBench
                 }
             }
 
-            auto iter_base = makeCacheIterator(g, candidates, avail_mem_spaces);
-            std::unordered_map<LogicalId, MemSpace> cache_base;
+            auto iter_base = makeCacheIterator(candidates);
+            std::unordered_set<BaseEClassId> cache_base;
             float min_cost_base = TGConstants::INF;
             while (iter_base.getNextCacheSelection(cache_base))
             {
@@ -754,10 +756,8 @@ template <typename... RuleTypes> struct CacheBench
                 }
                 try
                 {
-                    std::unordered_map<LogicalId, ParallelBuffer> preallocated;
-                    planner.preallocateLogicalBuffers(g, cache_base, preallocated);
                     CompiledGraph plan_res = planner.plan(root, g, bucket, cache_base, /*doSaturate=*/false,
-                                                          /*strictCache=*/true, nullptr, preallocated, 0.0f, nullptr);
+                                                          /*strictCache=*/true, nullptr, 0.0f, nullptr);
                     min_cost_base = std::min(min_cost_base, plan_res.cost());
                 }
                 catch (...)
@@ -777,11 +777,11 @@ template <typename... RuleTypes> struct CacheBench
                 }
             }
 
-            auto make_base_it = [&]() { return makeCacheIterator(g, candidates, avail_mem_spaces); };
+            auto make_base_it = [&]() { return makeCacheIterator(candidates); };
             auto yield_base = [&](auto &it) {
                 if (check_timeout())
                     return false;
-                std::unordered_map<LogicalId, MemSpace> c;
+                std::unordered_set<BaseEClassId> c;
                 return it.getNextCacheSelection(c);
             };
             auto base_res = runTrial("Base", make_base_it, yield_base, 2, 5, timeout_seconds, check_timeout);
@@ -796,14 +796,14 @@ template <typename... RuleTypes> struct CacheBench
             auto make_rule_it = [&]() {
                 return std::apply(
                     [&](auto &&...rs) {
-                        return makeCacheIterator(g, candidates, avail_mem_spaces, nullptr, nullptr, rs...);
+                        return makeCacheIterator(candidates, mock.settings.mem_caps, nullptr, nullptr, rs...);
                     },
                     rules_tuple);
             };
             auto yield_rule = [&](auto &it) {
                 if (check_timeout())
                     return false;
-                std::unordered_map<LogicalId, MemSpace> c;
+                std::unordered_set<BaseEClassId> c;
                 return it.getNextCacheSelection(c);
             };
             auto rule_trial_res = runTrial(r.rule_name, make_rule_it, yield_rule, 2, 5, timeout_seconds, check_timeout);
@@ -1064,8 +1064,7 @@ template <typename... RuleTypes> struct ENodeDominationBench
             });
 
             std::unordered_map<EClassId, LogicalId> emptyMap;
-            std::unordered_map<LogicalId, MemSpace> emptyCached;
-            ENodeDominationContext ctx{mock.egraph, mock.enodeInfos, emptyMap, emptyCached, mock.settings.mem_caps};
+            ENodeDominationContext ctx{mock.egraph, mock.enodeInfos, emptyMap, mock.settings.mem_caps};
 
             std::vector<ENodeInfo> filtered_infos = mock.enodeInfos;
             for (uint32_t i = 0; i < mock.egraph.getENodes().size(); ++i)

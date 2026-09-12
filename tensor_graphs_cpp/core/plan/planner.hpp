@@ -47,16 +47,44 @@ struct ExtractionResult
 // =============================================================================
 // CacheContext -- view into CacheIterator state at check() time
 // =============================================================================
+struct CacheCandidate
+{
+    BaseEClassId base_eclass_id;
+    uint64_t size_bytes;
+    DType dtype;
+    MemSpace mem_space;
+    uint32_t num_users;
+};
+
+inline std::unordered_map<MemSpace, uint64_t>
+precomputeReducedMemCaps(const std::unordered_map<MemSpace, uint64_t> &mem_caps,
+                         const std::unordered_map<BaseEClassId, ParallelBuffer> &preallocated)
+{
+    std::unordered_map<MemSpace, uint64_t> reduced_caps = mem_caps;
+    std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
+    for (const auto &kv : preallocated)
+    {
+        uint64_t extent = static_cast<uint64_t>(kv.second.offset) + kv.second.size;
+        reserved_per_ms[kv.second.mem_space] = std::max(reserved_per_ms[kv.second.mem_space], extent);
+    }
+    for (const auto &kv : reserved_per_ms)
+    {
+        auto cap_it = reduced_caps.find(kv.first);
+        if (cap_it == reduced_caps.end())
+            continue;
+        cap_it->second = kv.second >= cap_it->second ? 0 : cap_it->second - kv.second;
+    }
+    return reduced_caps;
+}
+
 struct CacheContext
 {
-    const Graph &graph;
-    const std::vector<LogicalId> &candidate_nodes;
-    const std::vector<MemSpace> &avail_mem_spaces;
+    const std::vector<CacheCandidate> &candidates;
     const std::vector<uint32_t> &num_users;
     const std::vector<std::vector<int>> &valid_choices;
-    const std::unordered_map<LogicalId, MemSpace> &current_cache_selection;
+    const std::unordered_set<BaseEClassId> &current_cache_selection;
     uint32_t k; // index into candidate_nodes
-    int choice; // candidate choice (0 = uncached, m = cached in avail_mem_spaces[m-1])
+    int choice; // candidate choice (0 = uncached, 1 = cached)
 };
 
 
@@ -67,9 +95,7 @@ template <typename... Rules> struct CacheIterator
 {
     prune::PruningRuleSet<Rules...> rules;
 
-    const Graph &graph;
-    std::vector<LogicalId> candidate_nodes;
-    std::vector<MemSpace> avail_mem_spaces;
+    std::vector<CacheCandidate> candidates;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
     std::shared_ptr<SearchDelegate> delegate;
     const float *best_cost = nullptr;
@@ -82,15 +108,13 @@ template <typename... Rules> struct CacheIterator
     bool is_done = false;
     bool first_yield = true;
     std::vector<std::vector<int>> tried_choices;
-    std::unordered_map<LogicalId, MemSpace> current_cache_selection;
+    std::unordered_set<BaseEClassId> current_cache_selection;
 
     template <typename... Rs>
-    CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
-                  const std::vector<MemSpace> &_avail_mem_spaces,
+    CacheIterator(const std::vector<CacheCandidate> &_candidates,
                   const std::unordered_map<MemSpace, uint64_t> &_mem_caps, std::shared_ptr<SearchDelegate> _delegate,
                   const float *_best_cost = nullptr, TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), graph(_graph), candidate_nodes(_candidates),
-          avail_mem_spaces(_avail_mem_spaces), mem_caps(_mem_caps), delegate(std::move(_delegate)),
+        : rules(std::forward<Rs>(_rules)...), candidates(_candidates), mem_caps(_mem_caps), delegate(std::move(_delegate)),
           best_cost(_best_cost), timeout(_timeout)
     {
         if (delegate && best_cost)
@@ -98,8 +122,7 @@ template <typename... Rules> struct CacheIterator
             delegate->set_best_cost_ptr(best_cost);
         }
         init();
-        CacheContext ctx{graph, candidate_nodes, avail_mem_spaces, num_users, valid_choices, current_cache_selection, 0,
-                         0};
+        CacheContext ctx{candidates, num_users, valid_choices, current_cache_selection, 0, 0};
         rules.init(ctx);
     }
 
@@ -110,33 +133,20 @@ template <typename... Rules> struct CacheIterator
 
     void init()
     {
-        uint32_t N = static_cast<uint32_t>(candidate_nodes.size());
+        uint32_t N = static_cast<uint32_t>(candidates.size());
         tried_choices.resize(N);
         valid_choices.resize(N);
         num_users.assign(N, 0);
 
-        std::unordered_map<LogicalId, uint32_t> user_counts;
-        for (const auto &pair : graph.nodes)
-        {
-            for (LogicalId child_id : pair.second.child_ids)
-            {
-                user_counts[child_id]++;
-            }
-        }
-
         for (uint32_t i = 0; i < N; ++i)
         {
-            LogicalId id = candidate_nodes[i];
-            num_users[i] = user_counts[id];
+            num_users[i] = candidates[i].num_users;
 
             // Choice 0: Not cached
             valid_choices[i].push_back(0);
 
-            // Choice 1..M: Cached in avail_mem_spaces[choice - 1]
-            for (size_t m = 0; m < avail_mem_spaces.size(); ++m)
-            {
-                valid_choices[i].push_back(static_cast<int>(m + 1));
-            }
+            // Choice 1: Cached in the e-class's memory space.
+            valid_choices[i].push_back(1);
         }
 
         if (delegate && N > 0)
@@ -144,36 +154,14 @@ template <typename... Rules> struct CacheIterator
             std::vector<float> node_features;
             std::vector<uint32_t> edge_src;
             std::vector<uint32_t> edge_dst;
-            std::unordered_map<LogicalId, uint32_t> id_to_idx;
-
             for (uint32_t i = 0; i < N; ++i)
             {
-                LogicalId id = candidate_nodes[i];
-                id_to_idx[id] = i;
-                const TensorNode &node = graph.getNode(id);
-
-                node_features.push_back(static_cast<float>(node.getSizeBytes()));
-                node_features.push_back(static_cast<float>(node.opType));
-                node_features.push_back(static_cast<float>(node.dtype));
-                bool is_storage =
-                    (graph.input_data_types.count(id) && graph.input_data_types.at(id) == InputDataType::STORAGE);
-                node_features.push_back(is_storage ? 1.0f : 0.0f);
+                const CacheCandidate &candidate = candidates[i];
+                node_features.push_back(static_cast<float>(candidate.size_bytes));
+                node_features.push_back(static_cast<float>(OpType::INPUT));
+                node_features.push_back(static_cast<float>(candidate.dtype));
+                node_features.push_back(candidate.mem_space.type == HandleType::STORAGE ? 1.0f : 0.0f);
                 node_features.push_back(static_cast<float>(num_users[i]));
-            }
-
-            for (uint32_t i = 0; i < N; ++i)
-            {
-                LogicalId id = candidate_nodes[i];
-                const TensorNode &node = graph.getNode(id);
-                for (LogicalId pid : node.child_ids)
-                {
-                    auto p_it = id_to_idx.find(pid);
-                    if (p_it != id_to_idx.end())
-                    {
-                        edge_src.push_back(p_it->second);
-                        edge_dst.push_back(i);
-                    }
-                }
             }
 
             delegate->init_cache_graph(node_features, edge_src, edge_dst);
@@ -191,7 +179,7 @@ template <typename... Rules> struct CacheIterator
                 continue;
             }
 
-            LogicalId id = candidate_nodes[k];
+            BaseEClassId id = candidates[k].base_eclass_id;
             current_cache_selection.erase(id);
 
             if (tried_choices[k].size() < valid_choices[k].size())
@@ -209,12 +197,12 @@ template <typename... Rules> struct CacheIterator
         return false;
     }
 
-    bool getNextCacheSelection(std::unordered_map<LogicalId, MemSpace> &out_cached_nodes)
+    bool getNextCacheSelection(std::unordered_set<BaseEClassId> &out_cached_nodes)
     {
         if (is_done)
             return false;
 
-        uint32_t N = static_cast<uint32_t>(candidate_nodes.size());
+        uint32_t N = static_cast<uint32_t>(candidates.size());
         if (N == 0)
         {
             if (first_yield)
@@ -257,8 +245,7 @@ template <typename... Rules> struct CacheIterator
                 continue;
             }
 
-            LogicalId id = candidate_nodes[k];
-            const TensorNode &node = graph.getNode(id);
+            BaseEClassId id = candidates[k].base_eclass_id;
 
             std::vector<int> unexplored;
             unexplored.reserve(valid_choices[k].size());
@@ -293,7 +280,7 @@ template <typename... Rules> struct CacheIterator
                 std::vector<ActionFeatureCache> features;
                 features.reserve(unexplored.size());
 
-                uint64_t node_size = node.getSizeBytes();
+                uint64_t node_size = candidates[k].size_bytes;
 
                 for (int choice : unexplored)
                 {
@@ -311,7 +298,7 @@ template <typename... Rules> struct CacheIterator
                     else
                     {
                         f.is_cached = 1.0f;
-                        f.mem_space = avail_mem_spaces[choice - 1];
+                        f.mem_space = candidates[k].mem_space;
                         auto cap_it = mem_caps.find(f.mem_space);
                         f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
                     }
@@ -332,8 +319,8 @@ template <typename... Rules> struct CacheIterator
                 int choice = unexplored[rel_idx];
                 tried_choices[k].push_back(choice);
 
-                CacheContext ctx{graph,         candidate_nodes,         avail_mem_spaces,         num_users,
-                                 valid_choices, current_cache_selection, static_cast<uint32_t>(k), choice};
+                CacheContext ctx{candidates, num_users, valid_choices, current_cache_selection,
+                                 static_cast<uint32_t>(k), choice};
                 if (rules.is_pruned(choice, static_cast<size_t>(rel_idx), ctx))
                 {
                     continue;
@@ -341,7 +328,7 @@ template <typename... Rules> struct CacheIterator
 
                 if (choice > 0)
                 {
-                    current_cache_selection[id] = avail_mem_spaces[choice - 1];
+                    current_cache_selection.insert(id);
                 }
                 else
                 {
@@ -377,91 +364,67 @@ template <typename... Rules> struct CacheIterator
         return false;
     }
 
-    // Planning uses canonical e-class ids.  Keep the legacy logical-id
-    // iterator above for persisted cache files, but expose selections in the
-    // identity used by the saturated e-graph.
-    bool getNextCacheSelection(std::unordered_map<EClassId, MemSpace> &out_cached_eclasses,
-                               const std::unordered_map<LogicalId, EClassId> &logicalToEClass)
-    {
-        std::unordered_map<LogicalId, MemSpace> logical_selection;
-        if (!getNextCacheSelection(logical_selection))
-            return false;
-
-        out_cached_eclasses.clear();
-        for (const auto &kv : logical_selection)
-        {
-            auto it = logicalToEClass.find(kv.first);
-            if (it != logicalToEClass.end())
-                out_cached_eclasses[it->second] = kv.second;
-        }
-        return true;
-    }
 };
 
 template <typename... Rules>
-CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                                        const std::vector<MemSpace> &avail_mem_spaces,
+CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const std::vector<CacheCandidate> &candidates,
                                                         const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                                         const float *best_cost = nullptr,
                                                         TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, nullptr, best_cost,
+    return CacheIterator<std::decay_t<Rules>...>(candidates, mem_caps, nullptr, best_cost,
                                                  timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
-CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                                        const std::vector<MemSpace> &avail_mem_spaces,
+CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const std::vector<CacheCandidate> &candidates,
                                                         const float *best_cost = nullptr,
                                                         TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
     static const std::unordered_map<MemSpace, uint64_t> empty_caps;
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, empty_caps, nullptr, best_cost,
+    return CacheIterator<std::decay_t<Rules>...>(candidates, empty_caps, nullptr, best_cost,
                                                  timeout, std::forward<Rules>(rules)...);
 }
 
 template <typename... Rules>
 CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(
-    const Graph &graph, const std::vector<LogicalId> &candidates, const std::vector<MemSpace> &avail_mem_spaces,
+    const std::vector<CacheCandidate> &candidates,
     const std::unordered_map<MemSpace, uint64_t> &mem_caps, std::shared_ptr<SearchDelegate> delegate,
     const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr, Rules &&...rules)
 {
-    return CacheIterator<std::decay_t<Rules>...>(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate),
+    return CacheIterator<std::decay_t<Rules>...>(candidates, mem_caps, std::move(delegate),
                                                  best_cost, timeout, std::forward<Rules>(rules)...);
 }
 using AllCacheRuleTypes = std::tuple<>;
 
 template <typename BoolTuple>
-inline auto makeConfiguredCacheIteratorFromBools(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                                 const std::vector<MemSpace> &avail_mem_spaces,
+inline auto makeConfiguredCacheIteratorFromBools(const std::vector<CacheCandidate> &candidates,
                                                  const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                                                  std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
                                                  const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     return std::apply(
         [&](auto &&...rs) {
-            return makeCacheIteratorWithDelegate(graph, candidates, avail_mem_spaces, mem_caps, std::move(delegate),
+            return makeCacheIteratorWithDelegate(candidates, mem_caps, std::move(delegate),
                                                  best_cost, timeout, rs...);
         },
         prune::instantiate_from_bools<AllCacheRuleTypes>(bool_flags));
 }
 
-inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                        const std::vector<MemSpace> &avail_mem_spaces,
+inline auto makeConfiguredCacheIterator(const std::vector<CacheCandidate> &candidates,
                                         std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
                                         const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
     settings.validate_rules("cache");
     auto bool_flags = prune::extract_enabled_states<AllCacheRuleTypes>("cache", settings);
-    return makeConfiguredCacheIteratorFromBools(graph, candidates, avail_mem_spaces, settings.mem_caps,
+    return makeConfiguredCacheIteratorFromBools(candidates, settings.mem_caps,
                                                 std::move(delegate), bool_flags, best_cost, timeout);
 }
 
-inline auto makeConfiguredCacheIterator(const Graph &graph, const std::vector<LogicalId> &candidates,
-                                        const std::vector<MemSpace> &avail_mem_spaces, const Settings &settings,
+inline auto makeConfiguredCacheIterator(const std::vector<CacheCandidate> &candidates, const Settings &settings,
                                         const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
 {
-    return makeConfiguredCacheIterator(graph, candidates, avail_mem_spaces, nullptr, settings, best_cost, timeout);
+    return makeConfiguredCacheIterator(candidates, nullptr, settings, best_cost, timeout);
 }
 
 struct ENodeDominationContext
@@ -469,7 +432,6 @@ struct ENodeDominationContext
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
     const std::unordered_map<EClassId, LogicalId> &eclassToLogical;
-    const std::unordered_map<LogicalId, MemSpace> &cachedNodes;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 };
 
@@ -673,10 +635,9 @@ struct Planner
     const Settings &settings;
 
     void applyDominationRules(const EGraph &egraph, std::vector<ENodeInfo> &enodeInfos,
-                              const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
-                              const std::unordered_map<LogicalId, MemSpace> &cachedNodes)
+                              const std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
-        ENodeDominationContext ctx{egraph, enodeInfos, eclassToLogical, cachedNodes, settings.mem_caps};
+        ENodeDominationContext ctx{egraph, enodeInfos, eclassToLogical, settings.mem_caps};
 
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
         {
@@ -691,14 +652,16 @@ struct Planner
         }
     }
 
-    void preallocateLogicalBuffers(const Graph &graph, const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-                                   std::unordered_map<LogicalId, ParallelBuffer> &out) const
+    void preallocate(const Graph &graph, const EGraph &egraph,
+                     const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+                     const std::unordered_set<BaseEClassId> &cachedNodes,
+                     std::unordered_map<BaseEClassId, ParallelBuffer> &out) const
     {
         out.clear();
 
         struct PreAllocEntry
         {
-            LogicalId logicalId;
+            BaseEClassId baseEClassId;
             MemSpace memSpace;
             std::vector<uint32_t> shape;
             DType dtype;
@@ -708,42 +671,43 @@ struct Planner
         MemSpace storage = MemSpace{0, HandleType::STORAGE};
         MemSpace ram = MemSpace{1, HandleType::CPP};
 
+        auto add_input = [&](const TensorNode &node, LogicalId logicalId) {
+            auto nodeIt = nodeToEClass.find(logicalId);
+            if (nodeIt == nodeToEClass.end())
+                return;
+            const EClass &cls = egraph.getEClass(nodeIt->second);
+            if (cls.base_eclass_id == BaseEClassId{} || cls.mem_space == storage)
+                return;
+            entries.push_back({cls.base_eclass_id, ram, node.getShape(), node.dtype});
+        };
+
         for (const auto &pair : graph.nodes)
         {
             const TensorNode &node = pair.second;
-            if (node.opType != OpType::INPUT)
+            if (node.opType != OpType::INPUT || !graph.input_data_types.count(node.id))
                 continue;
-
-            auto idtIt = graph.input_data_types.find(node.id);
-            if (idtIt != graph.input_data_types.end() && idtIt->second == InputDataType::STORAGE)
-                continue;
-
-            entries.push_back({node.id, ram, node.getShape(), node.dtype});
+            if (graph.input_data_types.at(node.id) == InputDataType::CONSTANT ||
+                graph.input_data_types.at(node.id) == InputDataType::RUNTIME)
+                add_input(node, node.id);
         }
 
-        for (const auto &kv : cachedNodes)
+        for (BaseEClassId baseEClassId : cachedNodes)
         {
-            LogicalId logicalId = kv.first;
-            MemSpace ms = kv.second;
-            if (!graph.hasNode(logicalId))
+            EClassId eclassId = egraph.findEClassByBaseId(baseEClassId);
+            if (eclassId == EClassId{})
                 continue;
-            const TensorNode &node = graph.getNode(logicalId);
-            bool alreadyAdded = false;
-            for (const auto &e : entries)
-            {
-                if (e.logicalId == logicalId)
-                {
-                    alreadyAdded = true;
-                    break;
-                }
-            }
-            if (alreadyAdded)
+            const EClass &cls = egraph.getEClass(eclassId);
+            if (cls.mem_space == storage)
                 continue;
-            entries.push_back({logicalId, ms, node.getShape(), node.dtype});
+            entries.push_back({baseEClassId, cls.mem_space, cls.shape, cls.dtype});
         }
 
         std::sort(entries.begin(), entries.end(),
-                  [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.logicalId < b.logicalId; });
+                  [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.baseEClassId < b.baseEClassId; });
+        entries.erase(std::unique(entries.begin(), entries.end(), [](const PreAllocEntry &a, const PreAllocEntry &b) {
+                          return a.baseEClassId == b.baseEClassId;
+                      }),
+                      entries.end());
 
         std::unordered_map<MemSpace, uint64_t> cursor;
         BufferId nextId{0};
@@ -767,23 +731,8 @@ struct Planner
             buf.start = 0;
             buf.end = std::numeric_limits<uint32_t>::max();
             buf.offset = static_cast<int64_t>(offset);
-            out[e.logicalId] = std::move(buf);
+            out[e.baseEClassId] = std::move(buf);
         }
-    }
-
-    void preallocateLogicalBuffers(const Graph &graph, const EGraph &egraph,
-                                   const std::unordered_map<EClassId, MemSpace> &cachedEClasses,
-                                   const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
-                                   std::unordered_map<LogicalId, ParallelBuffer> &out) const
-    {
-        std::unordered_map<LogicalId, MemSpace> cachedNodes;
-        for (const auto &kv : cachedEClasses)
-        {
-            auto logicalIt = eclassToLogical.find(egraph.findConst(kv.first));
-            if (logicalIt != eclassToLogical.end())
-                cachedNodes[logicalIt->second] = kv.second;
-        }
-        preallocateLogicalBuffers(graph, cachedNodes, out);
     }
 
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
@@ -973,7 +922,7 @@ struct Planner
 
     std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph,
                                              const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
-                                             const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                             const std::unordered_set<BaseEClassId> &cachedNodes,
                                              bool strictCache)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
@@ -999,13 +948,10 @@ struct Planner
                 {
                     EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
                     EClassId canonId = egraph.findConst(e_class_id);
-                    LogicalId logicalId =
-                        eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : LogicalId{UINT32_MAX};
-                    if (logicalId == LogicalId{UINT32_MAX} || cachedNodes.find(logicalId) == cachedNodes.end())
-                    {
+                    const EClass &cls = egraph.getEClass(canonId);
+                    if (cls.base_eclass_id == BaseEClassId{} || cachedNodes.count(cls.base_eclass_id) == 0)
                         info.cost = TGConstants::INF;
-                    }
-                    else if (enode.getMemSpace() != cachedNodes.at(logicalId))
+                    else if (enode.getMemSpace() != cls.mem_space)
                     {
                         info.cost = TGConstants::INF;
                     }
@@ -1143,7 +1089,7 @@ struct Planner
             timer.tick();
         }
 
-        applyDominationRules(egraph, enodeInfos, eclassToLogical, cachedNodes);
+        applyDominationRules(egraph, enodeInfos, eclassToLogical);
 
         // DP pass for subtree cost approximation (workload sum, critical path, & Sethi-Ullman memory)
         std::vector<float> eclass_dp_cost(egraph.getClasses().size(), TGConstants::INF);
@@ -1427,9 +1373,8 @@ struct Planner
 
     ExtractionResult extractBest(const LogicalId rootId, const Graph &graph, const EGraph &egraph,
                                  const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
-                                 const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                 const std::unordered_set<BaseEClassId> &cachedNodes,
                                  const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
-                                 const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers,
                                  bool stopOnFirstValid = true, bool strictCache = false, float minCompileSeconds = 0.0f,
                                  std::shared_ptr<SearchDelegate> delegate = nullptr,
                                  const std::vector<ENodeInfo> &enodeInfos = {},
@@ -1492,30 +1437,18 @@ struct Planner
             delegate->init_egraph(node_features, edge_src, edge_dst);
         }
 
-        std::unordered_map<MemSpace, uint64_t> reduced_caps;
+        std::unordered_map<BaseEClassId, ParallelBuffer> preallocatedBuffers;
+        preallocate(graph, egraph, nodeToEClass, cachedNodes, preallocatedBuffers);
+
+        const std::unordered_map<MemSpace, uint64_t> reduced_caps =
+            precomputeReducedMemCaps(settings.mem_caps, preallocatedBuffers);
+
         std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
-        for (const auto &kv : settings.mem_caps)
-        {
-            reduced_caps[kv.first] = kv.second;
-        }
         for (const auto &kv : preallocatedBuffers)
         {
-            uint64_t extent = kv.second.offset + kv.second.size;
-            reserved_per_ms[kv.second.mem_space] = std::max(reserved_per_ms[kv.second.mem_space], extent);
-        }
-        for (const auto &kv : reserved_per_ms)
-        {
-            if (reduced_caps.count(kv.first))
-            {
-                if (kv.second >= reduced_caps[kv.first])
-                {
-                    reduced_caps[kv.first] = 0;
-                }
-                else
-                {
-                    reduced_caps[kv.first] -= kv.second;
-                }
-            }
+            const ParallelBuffer &buffer = kv.second;
+            auto &reserved = reserved_per_ms[buffer.mem_space];
+            reserved = std::max(reserved, buffer.offset + buffer.size);
         }
 
         float best_cost = TGConstants::INF;
@@ -1606,7 +1539,8 @@ struct Planner
                         if (node.getOpType() != OpType::INPUT && node.getOpType() != OpType::CACHE)
                             continue;
 
-                        auto preIt = preallocatedBuffers.find(logicalIt->second);
+                        const BaseEClassId baseEClassId = egraph.getEClass(eclass).base_eclass_id;
+                        auto preIt = preallocatedBuffers.find(baseEClassId);
                         if (preIt == preallocatedBuffers.end())
                             continue;
 
@@ -1734,7 +1668,6 @@ struct Planner
     CompiledGraph buildCompiledGraph(LogicalId rootId, const Graph &graph, const EGraph &egraph,
                                      const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                      const ExtractionResult &extraction,
-                                     const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                      const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                                      const std::vector<ENodeInfo> &enodeInfos)
     {
@@ -2180,6 +2113,7 @@ struct Planner
         if (doSaturate && settings.do_saturate)
         {
             saturate(baseState.egraph, {}, baseState.eclassToLogical, false, false, repo);
+            baseState.egraph.populateBaseEClassIds();
 
             for (auto &kv : baseState.nodeToEClass)
             {
@@ -2197,7 +2131,7 @@ struct Planner
     }
 
     bool injectPartialPath(EGraph &egraph, const Graph &graph, LogicalId logicalId, const std::vector<Region> &regions,
-                           const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                           const std::unordered_set<BaseEClassId> &cachedNodes,
                            const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                            std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool strictCache = false)
     {
@@ -2232,16 +2166,13 @@ struct Planner
         MemSpace ram = MemSpace{1, HandleType::CPP};
         Engine cpu = Engine{0, EngineType::CPU};
 
-        MemSpace target_mem_space = ram;
-        auto it = cachedNodes.find(logicalId);
-        if (it != cachedNodes.end())
-        {
-            target_mem_space = it->second;
-        }
-        else if (strictCache)
+        const BaseEClassId baseEClassId = egraph.getEClass(E_L).base_eclass_id;
+        if (strictCache &&
+            (baseEClassId == BaseEClassId{} || cachedNodes.count(baseEClassId) == 0))
         {
             return false;
         }
+        MemSpace target_mem_space = cachedNodes.count(baseEClassId) ? egraph.getEClass(E_L).mem_space : ram;
 
         const EClass lClass = egraph.getEClass(E_L);
 
@@ -2545,7 +2476,7 @@ struct Planner
 
     bool injectInputPartialPaths(EGraph &egraph, const Graph &graph,
                                  const std::unordered_map<LogicalId, std::vector<Region>> &dirtyOutputRegions,
-                                 const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                 const std::unordered_set<BaseEClassId> &cachedNodes,
                                  const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                  std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
@@ -2577,7 +2508,7 @@ struct Planner
 
     bool injectOutputPartialPaths(EGraph &egraph, const Graph &graph, LogicalId rootId,
                                   const std::vector<Region> &outputNeeded,
-                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                  const std::unordered_set<BaseEClassId> &cachedNodes,
                                   const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                   std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
@@ -2601,12 +2532,13 @@ struct Planner
     }
 
     SaturationResult saturateBucket(const LogicalId rootId, const Graph &graph, const Bucket &bucket,
-                                    const std::unordered_map<LogicalId, MemSpace> &cachedNodes = {},
+                                    const std::unordered_set<BaseEClassId> &cachedNodes = {},
                                     bool doSaturate = true, TGStore *repo = nullptr,
                                     const SaturationResult *startingState = nullptr)
     {
         SaturationResult result;
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
+        bool base_state_has_base_ids = false;
 
         if (startingState)
         {
@@ -2621,6 +2553,15 @@ struct Planner
             result.egraph = baseState.egraph;
             result.nodeToEClass = baseState.nodeToEClass;
             result.eclassToLogical = baseState.eclassToLogical;
+        }
+
+        for (const EClass &cls : result.egraph.getClasses())
+        {
+            if (result.egraph.findConst(cls.id) == cls.id && cls.base_eclass_id != BaseEClassId{})
+            {
+                base_state_has_base_ids = true;
+                break;
+            }
         }
 
         std::unordered_map<LogicalId, bool> logicalDirty;
@@ -2642,20 +2583,18 @@ struct Planner
         }
 
         Engine cpu = Engine{0, EngineType::CPU};
-        for (const auto &kv : cachedNodes)
+        for (BaseEClassId baseEClassId : cachedNodes)
         {
-            LogicalId logicalId = kv.first;
-            auto nodeIt = result.nodeToEClass.find(logicalId);
-            if (nodeIt == result.nodeToEClass.end() || logicalDirty[logicalId])
+            EClassId eclassId = result.egraph.findEClassByBaseId(baseEClassId);
+            if (eclassId == EClassId{})
                 continue;
 
-            EClassId eclassId = result.egraph.findConst(nodeIt->second);
             const EClass &cls = result.egraph.getEClass(eclassId);
             bool hasCache = false;
             for (ENodeId enodeId : cls.enodes)
             {
                 if (result.egraph.getENode(enodeId).getOpType() == OpType::CACHE &&
-                    result.egraph.getENode(enodeId).getMemSpace() == kv.second)
+                    result.egraph.getENode(enodeId).getMemSpace() == cls.mem_space)
                 {
                     hasCache = true;
                     break;
@@ -2663,26 +2602,27 @@ struct Planner
             }
             if (!hasCache)
             {
-                ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, kv.second,
-                                {cpu}, toString(logicalId));
+                ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space,
+                                {cpu}, std::to_string(baseEClassId.value));
                 result.egraph.addENode(eclassId, cacheNode);
             }
         }
 
         std::unordered_set<EClassId> protectedEClasses;
-        for (const auto &kv : cachedNodes)
+        for (BaseEClassId baseEClassId : cachedNodes)
         {
-            auto it = result.nodeToEClass.find(kv.first);
-            if (it != result.nodeToEClass.end())
-                protectedEClasses.insert(result.egraph.findConst(it->second));
+            EClassId eclassId = result.egraph.findEClassByBaseId(baseEClassId);
+            if (eclassId != EClassId{})
+                protectedEClasses.insert(eclassId);
         }
 
-        injectInputPartialPaths(result.egraph, graph, bucket.inputDirtyRegions, cachedNodes, result.nodeToEClass,
-                                result.eclassToLogical);
-        injectOutputPartialPaths(result.egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes,
-                                 result.nodeToEClass, result.eclassToLogical);
+        const bool dirtyInjected =
+            injectInputPartialPaths(result.egraph, graph, bucket.inputDirtyRegions, cachedNodes, result.nodeToEClass,
+                                    result.eclassToLogical);
+        const bool neededInjected = injectOutputPartialPaths(result.egraph, graph, rootId, bucket.outputNeededRegion,
+                                                             cachedNodes, result.nodeToEClass, result.eclassToLogical);
 
-        if (doSaturate && settings.do_saturate)
+        if (doSaturate && settings.do_saturate && (!base_state_has_base_ids || dirtyInjected || neededInjected))
             saturate(result.egraph, protectedEClasses, result.eclassToLogical, true, false, repo);
 
         std::unordered_map<EClassId, LogicalId> canonicalLogical;
@@ -2752,117 +2692,32 @@ struct Planner
         }
         for (auto &kv : result.nodeToEClass)
             kv.second = result.egraph.findConst(kv.second);
+        if (!startingState && !base_state_has_base_ids)
+            result.egraph.populateBaseEClassIds();
         return result;
     }
 
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
-                       const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
+                       const std::unordered_set<BaseEClassId> &cachedNodes, bool doSaturate = true,
                        bool strictCache = false, TGStore *repo = nullptr,
-                       const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {},
                        float minCompileSeconds = 0.0f, std::shared_ptr<SearchDelegate> delegate = nullptr)
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
-        initBaseEGraph(rootId, tempGraph, topo, repo, doSaturate);
+        initBaseEGraph(rootId, tempGraph, topo, repo, false);
 
-        EGraph egraph = baseState.egraph;
-        auto eclassToLogical = baseState.eclassToLogical;
-
-        std::unordered_map<LogicalId, bool> logicalDirty;
-        for (LogicalId nodeId : topo)
-        {
-            if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
-            {
-                logicalDirty[nodeId] = true;
-            }
-            else
-            {
-                bool isDirty = false;
-                for (LogicalId pid : graph.getNode(nodeId).child_ids)
-                {
-                    if (logicalDirty[pid])
-                    {
-                        isDirty = true;
-                        break;
-                    }
-                }
-                logicalDirty[nodeId] = isDirty;
-            }
-        }
-
-        Engine cpu = Engine{0, EngineType::CPU};
-        for (const auto &cls : egraph.getClasses())
-        {
-            EClassId canonId = egraph.find(cls.id);
-            if (canonId != cls.id)
-                continue;
-            if (strictCache)
-            {
-                if (eclassToLogical.count(canonId) == 0)
-                    continue;
-                if (cachedNodes.count(eclassToLogical.at(canonId)) == 0)
-                    continue;
-            }
-            for (int i = 0; i < cls.enodes.size(); i++)
-            {
-                if (egraph.getENode(cls.enodes[i]).getOpType() == OpType::CACHE)
-                {
-                    continue;
-                }
-            }
-
-            LogicalId logicalId;
-            auto it = eclassToLogical.find(canonId);
-            if (it != eclassToLogical.end())
-            {
-                logicalId = it->second;
-            }
-
-            if (logicalId != LogicalId{UINT32_MAX} && !logicalDirty[logicalId])
-            {
-                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
-                                        cls.mem_space, {cpu}, toString(logicalId));
-                egraph.addENode(canonId, cacheNode);
-            }
-        }
-
-        std::unordered_set<EClassId> protectedEClasses;
-        for (const auto &kv : cachedNodes)
-        {
-            LogicalId logicalId = kv.first;
-            if (baseState.nodeToEClass.count(logicalId))
-            {
-                protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
-            }
-        }
-
-        bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes,
-                                                     baseState.nodeToEClass, eclassToLogical);
-
-        bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes,
-                                                       baseState.nodeToEClass, eclassToLogical);
-
-        if (doSaturate)
-        {
-            saturate(egraph, protectedEClasses, eclassToLogical, true, false, repo);
-        }
-
-        bool injected = dirtyInjected || neededInjected;
-
-        std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
-        for (const auto &kv : eclassToLogical)
-        {
-            updatedEClassToLogical[egraph.find(kv.first)] = kv.second;
-        }
-        eclassToLogical = std::move(updatedEClassToLogical);
+        const SaturationResult full_state = saturateBucket(rootId, graph, Bucket{}, {}, doSaturate, repo);
+        SaturationResult bucket_state =
+            saturateBucket(rootId, graph, bucket, cachedNodes, doSaturate, repo, &full_state);
+        EGraph egraph = std::move(bucket_state.egraph);
+        auto eclassToLogical = std::move(bucket_state.eclassToLogical);
 
         const std::vector<ENodeInfo> enodeInfos = computeENodeInfos(egraph, eclassToLogical, cachedNodes, strictCache);
         pruneEGraph(egraph, enodeInfos);
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
-                                      preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds,
-                                      delegate, enodeInfos);
-        return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
-                                  eclassToLogical, enodeInfos);
+        auto extraction = extractBest(rootId, graph, egraph, bucket_state.nodeToEClass, cachedNodes, eclassToLogical,
+                                      minCompileSeconds == 0.0f, strictCache, minCompileSeconds, delegate, enodeInfos);
+        return buildCompiledGraph(rootId, graph, egraph, bucket_state.nodeToEClass, extraction, eclassToLogical,
+                                  enodeInfos);
     }
 };

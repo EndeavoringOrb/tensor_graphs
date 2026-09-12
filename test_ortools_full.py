@@ -28,8 +28,15 @@ def makeNode(index=0, children=(), cost=1.0, **kwargs):
 
 
 def makeClass(cid, enodes, pages=1, mem_space=None):
+    enodes = [
+        dict(enode, base_eclass_id=cid)
+        if enode.get("is_cache")
+        else enode
+        for enode in enodes
+    ]
     return {
         "id": cid,
+        "base_eclass_id": cid,
         "enodes": enodes,
         "size_bytes": pages * PAGE,
         "mem_space": mem_space or CPU,
@@ -170,7 +177,7 @@ class FullSolverTests(unittest.TestCase):
             pages=5,
         )
         problem["candidates"] = [
-            {"logical_id": 10, "mem_space": CPU, "size_bytes": PAGE}
+            {"base_eclass_id": 1, "mem_space": CPU, "size_bytes": PAGE}
         ]
         problem["buckets"][0]["eclass_to_logical"] = {"1": 10}
         second = copy.deepcopy(problem["buckets"][0])
@@ -191,7 +198,7 @@ class FullSolverTests(unittest.TestCase):
         problem["mem_caps"]["3:0"] = 3 * PAGE
         problem["candidates"] = [
             {
-                "logical_id": 20,
+                "base_eclass_id": 2,
                 "mem_space": CPU,
                 "mem_spaces": [CPU, GPU],
                 "size_bytes": PAGE,
@@ -211,7 +218,7 @@ class FullSolverTests(unittest.TestCase):
         solution = self.solveProblem(problem)
         self.checkSolution(problem, solution)
         self.assertEqual(
-            solution["cached_nodes"], [{"logical_id": 20, "mem_space": GPU}]
+            solution["cached_nodes"], [{"base_eclass_id": 2, "mem_space": GPU}]
         )
         first, second = solution["extractions"]
         self.assertEqual(second["selection_map"]["2"], 2)
@@ -378,7 +385,7 @@ class FullSolverTests(unittest.TestCase):
         )
         problem["preallocated_buffers"] = [
             {
-                "logical_id": 10,
+                "base_eclass_id": 1,
                 "buffer_id": 71,
                 "mem_space": CPU,
                 "size": PAGE,
@@ -386,7 +393,7 @@ class FullSolverTests(unittest.TestCase):
             }
         ]
         problem["candidates"] = [
-            {"logical_id": 20, "mem_space": CPU, "size_bytes": PAGE}
+            {"base_eclass_id": 2, "mem_space": CPU, "size_bytes": PAGE}
         ]
         problem["buckets"][0]["eclass_to_logical"] = {"1": 10, "2": 20}
         problem["buckets"][0]["clean_eclasses"] = [
@@ -398,7 +405,7 @@ class FullSolverTests(unittest.TestCase):
         solution = self.solveProblem(problem)
         self.checkSolution(problem, solution)
         self.assertEqual(
-            solution["cached_nodes"], [{"logical_id": 20, "mem_space": CPU}]
+            solution["cached_nodes"], [{"base_eclass_id": 2, "mem_space": CPU}]
         )
         first, second = solution["extractions"]
         self.assertEqual(first["selection_map"]["2"], 0)
@@ -414,7 +421,7 @@ class FullSolverTests(unittest.TestCase):
         problem = makeProblem([makeClass(1, [makeNode()], pages=2)], 1, pages=2)
         problem["preallocated_buffers"] = [
             {
-                "logical_id": 10,
+                "base_eclass_id": 1,
                 "buffer_id": 71,
                 "mem_space": CPU,
                 "size": PAGE,

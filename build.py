@@ -1165,7 +1165,7 @@ class Toolchain:
 
         return flags
 
-    def run_cmd(self, cmd: list[str]) -> subprocess.CompletedProcess:
+    def run_cmd(self, cmd: list[str], label: str) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
 
         if (
@@ -1189,7 +1189,7 @@ class Toolchain:
             console.print(
                 Panel(
                     f"{result.stdout}\n\n[red]{result.stderr}[/red]",
-                    title="[bold red]COMPILER ERROR[/bold red]",
+                    title=f"[bold red]COMPILER ERROR — {label}[/bold red]",
                     border_style="red",
                 )
             )
@@ -1198,7 +1198,7 @@ class Toolchain:
             console.print(
                 Panel(
                     f"{result.stdout}[yellow]{result.stderr}[/yellow]",
-                    title="[bold yellow]BUILD WARNINGS[/bold yellow]",
+                    title=f"[bold yellow]BUILD WARNINGS — {label}[/bold yellow]",
                     border_style="yellow",
                 )
             )
@@ -1234,7 +1234,7 @@ class BuildOrchestrator:
         for p in Path(".").glob("tensor_graphs.*"):
             if p.is_file() and p.suffix in (".so", ".pyd", ".dylib"):
                 p.unlink(missing_ok=True)
-        self._render_success_panel("Clean completed successfully.")
+        self._render_success_panel("Clean completed successfully.", "clean")
 
     def run(self) -> None:
         if self.config.clean:
@@ -1290,8 +1290,8 @@ class BuildOrchestrator:
                     + dep_flag
                     + ["-c", str(cuda_stable_src), "-o", str(cuda_stable_obj)]
                 )
-                res = self.toolchain.run_cmd(cmd)
-                self._render_success_panel(res.stdout)
+                res = self.toolchain.run_cmd(cmd, f"compile {cuda_stable_src.name}")
+                self._render_success_panel(res.stdout, f"compile {cuda_stable_src.name}")
                 cuda_objs_recompiled = True
                 build_cache[str(cuda_stable_obj.resolve())] = {
                     "cmd_key": cmd_key_stable,
@@ -1317,8 +1317,8 @@ class BuildOrchestrator:
                         + dep_flag
                         + ["-c", str(cuda_gen_src), "-o", str(cuda_gen_obj)]
                     )
-                    res = self.toolchain.run_cmd(cmd)
-                    self._render_success_panel(res.stdout)
+                    res = self.toolchain.run_cmd(cmd, f"compile {cuda_gen_src.name}")
+                    self._render_success_panel(res.stdout, f"compile {cuda_gen_src.name}")
                     cuda_objs_recompiled = True
                     build_cache[str(cuda_gen_obj.resolve())] = {
                         "cmd_key": cmd_key_gen,
@@ -1402,7 +1402,7 @@ class BuildOrchestrator:
                 + dep_flag
                 + ["-c", str(info["main_src"]), "-o", str(info["main_obj"])]
             )
-            res = self.toolchain.run_cmd(cmd)
+            res = self.toolchain.run_cmd(cmd, f"compile {target_file}")
             return target_file, True, res.stdout
 
         if targets_to_compile:
@@ -1417,7 +1417,7 @@ class BuildOrchestrator:
                             "cmd_key": target_info[tf]["cmd_key"],
                             "built_at": time.time(),
                         }
-                        self._render_success_panel(out)
+                        self._render_success_panel(out, f"compile {tf}")
             else:
                 for tf in targets_to_compile:
                     tf, ok, out = compileTargetObj(tf)
@@ -1425,7 +1425,7 @@ class BuildOrchestrator:
                         "cmd_key": target_info[tf]["cmd_key"],
                         "built_at": time.time(),
                     }
-                    self._render_success_panel(out)
+                    self._render_success_panel(out, f"compile {tf}")
 
         for main_file in self.config.targets:
             info = target_info[main_file]
@@ -1452,8 +1452,8 @@ class BuildOrchestrator:
                         + ["-o", str(out_path)]
                         + ld_flags
                     )
-                    res = self.toolchain.run_cmd(cmd)
-                    self._render_success_panel(res.stdout)
+                    res = self.toolchain.run_cmd(cmd, f"link {out_path.name}")
+                    self._render_success_panel(res.stdout, f"link {out_path.name}")
                     build_cache[str(out_path.resolve())] = {
                         "link_key": link_key,
                         "built_at": time.time(),
@@ -1480,8 +1480,8 @@ class BuildOrchestrator:
                 if self.platform.is_windows and self.config.debug:
                     link_cmd.append("-g")
 
-                res = self.toolchain.run_cmd(link_cmd)
-                self._render_success_panel(res.stdout)
+                res = self.toolchain.run_cmd(link_cmd, f"link {out_path.name}")
+                self._render_success_panel(res.stdout, f"link {out_path.name}")
                 build_cache[str(out_path.resolve())] = {
                     "link_key": link_key,
                     "built_at": time.time(),
@@ -1490,12 +1490,12 @@ class BuildOrchestrator:
         saveBuildCache(build_cache)
 
     @staticmethod
-    def _render_success_panel(stdout: str) -> None:
+    def _render_success_panel(stdout: str, label: str) -> None:
         content = stdout.strip() if stdout.strip() else "No output"
         console.print(
             Panel(
                 f"[green]{content}[/green]",
-                title="[bold green]BUILD SUCCESS[/bold green]",
+                title=f"[bold green]BUILD SUCCESS — {label}[/bold green]",
                 border_style="green",
             )
         )

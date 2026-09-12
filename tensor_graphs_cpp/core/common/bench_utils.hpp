@@ -711,7 +711,7 @@ struct CacheFile
 {
     uint32_t version = 0;
     LogicalId rootId;
-    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::unordered_set<BaseEClassId> selectedCachedNodes;
     std::vector<float> bucketWeights;
     std::vector<CompiledGraph> compiledGraphs;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constants;

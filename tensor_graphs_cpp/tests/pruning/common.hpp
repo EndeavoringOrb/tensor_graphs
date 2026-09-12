@@ -249,7 +249,7 @@ struct MockCtx
             egraph_hook(egraph, nodeToEClass);
         }
 
-        std::unordered_map<LogicalId, MemSpace> cachedNodes;
+        std::unordered_set<BaseEClassId> cachedNodes;
         auto enodeInfos = planner.computeENodeInfos(egraph, eclassToLogical, cachedNodes, strictCache);
 
         this->egraph = std::move(egraph);

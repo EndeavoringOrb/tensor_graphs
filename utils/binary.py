@@ -145,6 +145,12 @@ class BinaryReader:
             return None
         return {read_key(): read_val() for _ in range(size)}
 
+    def read_set(self, read_value):
+        size = self.read_u32()
+        if size is None:
+            return None
+        return [read_value() for _ in range(size)]
+
     def read_mem_space(self):
         idx = self.read_u32()
         if idx is None:
@@ -450,15 +456,7 @@ def loadCacheFile(path, string_enums=False, lazy=False):
                 if t == 0:  # Metadata
                     version = br.read_u32()
                     root_id = br.read_u32()
-                    selected_cached_nodes = br.read_map(
-                        br.read_u32,
-                        lambda: {
-                            "idx": br.read_u32(),
-                            "type": (
-                                br.read_backend() if string_enums else br.read_u32()
-                            ),
-                        },
-                    )
+                    selected_cached_nodes = br.read_set(br.read_u32)
                     bucket_weights = []
                     if version is not None and version >= 4:
                         bucket_weights = br.read_vector(br.read_float) or []

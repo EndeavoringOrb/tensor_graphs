@@ -36,8 +36,8 @@ class OrtoolsSolver:
         self.objective_terms = []
         self.caps = {}
 
-        self.preallocated_lids = {
-            item["logical_id"] for item in self.preallocated
+        self.preallocated_base_ids = {
+            item["base_eclass_id"] for item in self.preallocated
         }
         self.preallocated_extents = {}
         for item in self.preallocated:
@@ -107,7 +107,7 @@ class OrtoolsSolver:
         )
 
     def createGlobalBuffers(self):
-        by_logical = {}
+        by_base_id = {}
         for item in self.preallocated:
             raw_offset = int(item["offset"])
             raw_page_offset = raw_offset // self.alignment
@@ -127,12 +127,12 @@ class OrtoolsSolver:
             )
             buf["offset"] = buf["page_offset"]
             self.global_buffers.append(buf)
-            by_logical[item["logical_id"]] = buf
+            by_base_id[item["base_eclass_id"]] = buf
 
         for candidate in self.candidates:
-            lid = candidate["logical_id"]
-            if lid in self.cache_choices:
-                raise ValueError(f"Duplicate cache candidate {lid}")
+            base_eclass_id = candidate["base_eclass_id"]
+            if base_eclass_id in self.cache_choices:
+                raise ValueError(f"Duplicate cache candidate {base_eclass_id}")
             choices = []
             spaces = candidate.get("mem_spaces", [candidate["mem_space"]])
             seen = set()
@@ -141,16 +141,16 @@ class OrtoolsSolver:
                 if key in seen or mem_space["type"] == 0:
                     continue
                 seen.add(key)
-                if lid in by_logical and by_logical[lid]["mem_space"] != mem_space:
+                if base_eclass_id in by_base_id and by_base_id[base_eclass_id]["mem_space"] != mem_space:
                     continue
-                present = self.model.NewBoolVar(f"cache_{lid}_{key}")
-                if lid in by_logical:
-                    buf = by_logical[lid]
+                present = self.model.NewBoolVar(f"cache_{base_eclass_id}_{key}")
+                if base_eclass_id in by_base_id:
+                    buf = by_base_id[base_eclass_id]
                 else:
-                    page_offset = self.newPageOffset(mem_space, f"cache_{lid}_{key}")
+                    page_offset = self.newPageOffset(mem_space, f"cache_{base_eclass_id}_{key}")
                     buf = {
                         "id": self.newBufferId(),
-                        "logical_id": lid,
+                        "base_eclass_id": base_eclass_id,
                         "mem_space": mem_space,
                         "size": int(candidate["size_bytes"]),
                         "present": present,
@@ -162,8 +162,8 @@ class OrtoolsSolver:
                     self.global_buffers.append(buf)
                 choices.append((present, buf))
             self.model.Add(sum(choice[0] for choice in choices) <= 1)
-            self.cache_choices[lid] = choices
-        self.preallocated_by_logical = by_logical
+            self.cache_choices[base_eclass_id] = choices
+        self.preallocated_by_base_id = by_base_id
 
     def addRectangle(self, rectangles, buf, start, end, horizon, name):
         if buf["mem_space"]["type"] == 0 or buf.get("page_offset") is None:
@@ -242,9 +242,9 @@ class OrtoolsSolver:
         )
         if horizon >= 2**60:
             raise ValueError("OR-Tools full problem exceeds the integer time range")
-        logicals = {
-            int(cid): int(lid)
-            for cid, lid in bucket.get("eclass_to_logical", {}).items()
+        base_ids = {
+            cls["id"]: cls["base_eclass_id"]
+            for cls in classes.values()
         }
         clean = set(bucket.get("clean_eclasses", []))
         rectangles, engines, consumers = (
@@ -301,13 +301,13 @@ class OrtoolsSolver:
 
         for cid, node in nodes.items():
             cls, active = node["cls"], node["active"]
-            lid = logicals.get(cid, -1)
+            lid = base_ids[cid]
             cache_matches = [
                 (present, buf)
                 for present, buf in self.cache_choices.get(lid, [])
                 if self.matchesBuffer(cls, buf)
             ]
-            reserved = self.preallocated_by_logical.get(lid)
+            reserved = self.preallocated_by_base_id.get(lid)
             if reserved is not None and not self.matchesBuffer(cls, reserved):
                 reserved = None
             for present, buf in cache_matches:
@@ -469,7 +469,7 @@ class OrtoolsSolver:
                 cache_roots = [
                     present
                     for present, buf in self.cache_choices.get(
-                        logicals.get(cid, -1), []
+                        base_ids[cid], []
                     )
                     if self.matchesBuffer(node["cls"], buf)
                 ]
@@ -479,7 +479,7 @@ class OrtoolsSolver:
                 matches = [
                     node["active"]
                     for cid, node in nodes.items()
-                    if logicals.get(cid) == lid and self.matchesBuffer(node["cls"], buf)
+                    if base_ids[cid] == lid and self.matchesBuffer(node["cls"], buf)
                 ]
                 model.Add(present <= sum(matches))
 
@@ -531,8 +531,8 @@ class OrtoolsSolver:
         extract_model = cp_model.CpModel()
         is_cached = {}
         for cand in self.candidates:
-            lid = cand["logical_id"]
-            is_cached[lid] = extract_model.NewBoolVar(f"q_cached_{lid}")
+            base_eclass_id = cand["base_eclass_id"]
+            is_cached[base_eclass_id] = extract_model.NewBoolVar(f"q_cached_{base_eclass_id}")
 
         cand_by_ms = {}
         for cand in self.candidates:
@@ -548,9 +548,9 @@ class OrtoolsSolver:
                 total_cap - self.preallocated_extents.get(ms_key, 0),
             )
             cache_terms = [
-                cand["size_bytes"] * is_cached[cand["logical_id"]]
+                cand["size_bytes"] * is_cached[cand["base_eclass_id"]]
                 for cand in cands_in_ms
-                if cand["logical_id"] not in self.preallocated_lids
+                if cand["base_eclass_id"] not in self.preallocated_base_ids
             ]
             if cache_terms:
                 extract_model.Add(sum(cache_terms) <= cap)
@@ -569,11 +569,13 @@ class OrtoolsSolver:
             classes_by_id = {cls["id"]: cls for cls in classes_list}
             count = len(classes_list)
             clean_eclasses = set(b_dict.get("clean_eclasses", []))
-            eclass_to_logical = {
-                int(k): int(v) for k, v in b_dict.get("eclass_to_logical", {}).items()
+            base_ids = {
+                cls["id"]: cls["base_eclass_id"]
+                for cls in classes_by_id.values()
             }
             eclass_cache_lids = {}
-            for cid, lid in eclass_to_logical.items():
+            for cid, base_id in base_ids.items():
+                lid = base_id
                 if lid in is_cached:
                     eclass_cache_lids.setdefault(cid, []).append(lid)
 
@@ -601,8 +603,8 @@ class OrtoolsSolver:
                 cid = cls["id"]
                 act_var = bucket_active[(b, cid)]
                 enode_vars = []
-                lid_cls = eclass_to_logical.get(cid, -1)
-                reserved = self.preallocated_by_logical.get(lid_cls)
+                lid_cls = base_ids[cid]
+                reserved = self.preallocated_by_base_id.get(lid_cls)
                 if reserved is not None and not self.matchesBuffer(cls, reserved):
                     reserved = None
 
@@ -630,7 +632,7 @@ class OrtoolsSolver:
                     is_input = enode.get("is_input", False)
                     is_scatter = enode.get("is_scatter", False)
                     is_view = enode.get("is_view", False)
-                    lid = enode.get("logical_id", -1)
+                    base_eclass_id = enode.get("base_eclass_id", -1)
 
                     if 0 < cost < 1e8:
                         scaled_cost = int(round(cost * b_weight * 1000.0))
@@ -648,10 +650,10 @@ class OrtoolsSolver:
                             extract_model.Add(bucket_active[(b, ch)] >= x_var)
                     elif is_cache:
                         can_read = (cid in clean_eclasses) and (b != full_b)
-                        if not can_read or lid not in is_cached or not eclass_cache_lids.get(cid):
+                        if not can_read or base_eclass_id not in is_cached or not eclass_cache_lids.get(cid):
                             extract_model.Add(x_var == 0)
                         else:
-                            extract_model.Add(x_var <= is_cached[lid])
+                            extract_model.Add(x_var <= is_cached[base_eclass_id])
                     elif is_scatter:
                         for ch in children:
                             extract_model.Add(bucket_active[(b, ch)] >= x_var)
@@ -678,14 +680,14 @@ class OrtoolsSolver:
                         extract_model.Add(act_var == 0)
 
             for cand in self.candidates:
-                lid = cand["logical_id"]
-                for cid, mapped_lid in eclass_to_logical.items():
-                    if mapped_lid == lid:
-                        extract_model.Add(bucket_active[(b, cid)] >= is_cached[lid])
+                base_eclass_id = cand["base_eclass_id"]
+                for cid, mapped_base_id in base_ids.items():
+                    if mapped_base_id == base_eclass_id:
+                        extract_model.Add(bucket_active[(b, cid)] >= is_cached[base_eclass_id])
 
         # Penalize unnecessary caching when it provides no cross-bucket benefit
         for cand in self.candidates:
-            total_cost_terms.append(1 * is_cached[cand["logical_id"]])
+            total_cost_terms.append(1 * is_cached[cand["base_eclass_id"]])
 
         if total_cost_terms:
             extract_model.Minimize(sum(total_cost_terms))
@@ -699,9 +701,9 @@ class OrtoolsSolver:
             return None
 
         selected_cache = {
-            cand["logical_id"]
+            cand["base_eclass_id"]
             for cand in self.candidates
-            if quick_solver.Value(is_cached[cand["logical_id"]]) == 1
+            if quick_solver.Value(is_cached[cand["base_eclass_id"]]) == 1
         }
         selections_by_bucket = {}
         for b_dict in self.buckets:
@@ -744,14 +746,6 @@ class OrtoolsSolver:
 
         selected_cache, selections_by_bucket = quick_result
 
-        logicals_map = {}
-        for bucket_model in self.bucket_models:
-            bucket = bucket_model["bucket"]
-            logicals_map[bucket["bucket_idx"]] = {
-                int(cid): int(lid)
-                for cid, lid in bucket.get("eclass_to_logical", {}).items()
-            }
-
         # Track placed intervals in (start_time, release_time, page_offset, page_size)
         placed_intervals = defaultdict(list)
         for b_model in self.bucket_models:
@@ -776,7 +770,7 @@ class OrtoolsSolver:
                         b_active = selections_by_bucket.get(b, {})
                         for cid in b_active.keys():
                             node = b_model["nodes"][cid]
-                            if logicals_map[b].get(cid) == lid and self.matchesBuffer(node["cls"], buf):
+                            if node["cls"]["base_eclass_id"] == lid and self.matchesBuffer(node["cls"], buf):
                                 has_active_match = True
                                 break
                         if has_active_match:
@@ -812,7 +806,10 @@ class OrtoolsSolver:
             makespan = bucket_model["makespan"]
             classes = {cls["id"]: cls for cls in bucket["classes"]}
             root_id = bucket["root_eclass_id"]
-            logicals = logicals_map[b]
+            base_ids = {
+                cls["id"]: cls["base_eclass_id"]
+                for cls in classes.values()
+            }
 
             best_enode = selections_by_bucket.get(b, {})
             if root_id not in best_enode:
@@ -886,8 +883,8 @@ class OrtoolsSolver:
             for cid in order:
                 e_idx = best_enode[cid]
                 enode = next(e for e in classes[cid]["enodes"] if e["enode_idx"] == e_idx)
-                lid = logicals.get(cid, -1)
-                reserved = self.preallocated_by_logical.get(lid)
+                lid = base_ids[cid]
+                reserved = self.preallocated_by_base_id.get(lid)
                 is_reserved = (
                     reserved is not None and self.matchesBuffer(classes[cid], reserved)
                 )
@@ -933,8 +930,8 @@ class OrtoolsSolver:
             for cid in order:
                 node = nodes[cid]
                 cls = node["cls"]
-                lid = logicals.get(cid, -1)
-                reserved = self.preallocated_by_logical.get(lid)
+                lid = base_ids[cid]
+                reserved = self.preallocated_by_base_id.get(lid)
                 if reserved is not None and self.matchesBuffer(cls, reserved):
                     is_fresh[cid] = 0
                     owners[cid] = reserved["id"]
@@ -947,7 +944,7 @@ class OrtoolsSolver:
                     continue
                 node = nodes[cid]
                 cls = node["cls"]
-                lid = logicals.get(cid, -1)
+                lid = base_ids[cid]
                 if lid in selected_cache:
                     for _, c_buf in self.cache_choices.get(lid, []):
                         if self.matchesBuffer(cls, c_buf):
@@ -1084,7 +1081,7 @@ class OrtoolsSolver:
             if solver.Value(buf["present"])
         ]
         cached_nodes = [
-            {"logical_id": lid, "mem_space": buf["mem_space"]}
+            {"base_eclass_id": lid, "mem_space": buf["mem_space"]}
             for lid, choices in self.cache_choices.items()
             for present, buf in choices
             if solver.Value(present)

@@ -17,8 +17,8 @@ class OrtoolsSolver:
         self.buckets = problem_data.get("buckets", [])
         self.mem_caps = problem_data.get("mem_caps", {})
         self.preallocated_buffers = problem_data.get("preallocated_buffers", [])
-        self.preallocated_lids = {
-            item["logical_id"] for item in self.preallocated_buffers
+        self.preallocated_base_ids = {
+            item["base_eclass_id"] for item in self.preallocated_buffers
         }
         self.preallocated_extents: Dict[str, int] = {}
         for item in self.preallocated_buffers:
@@ -62,8 +62,8 @@ class OrtoolsSolver:
         # Cache candidate variables
         is_cached: Dict[int, Any] = {}
         for cand in self.candidates:
-            lid = cand["logical_id"]
-            is_cached[lid] = extract_model.NewBoolVar(f"cached_{lid}")
+            base_eclass_id = cand["base_eclass_id"]
+            is_cached[base_eclass_id] = extract_model.NewBoolVar(f"cached_{base_eclass_id}")
 
         # Enforce memory capacity for cache candidates per MemSpace
         cand_by_ms: Dict[str, List[Dict[str, Any]]] = {}
@@ -84,9 +84,9 @@ class OrtoolsSolver:
             # space.  Native finalization assigns the actual offsets together
             # with the input and intermediate buffers.
             cache_terms = [
-                cand["size_bytes"] * is_cached[cand["logical_id"]]
+                cand["size_bytes"] * is_cached[cand["base_eclass_id"]]
                 for cand in cands_in_ms
-                if cand["logical_id"] not in self.preallocated_lids
+                if cand["base_eclass_id"] not in self.preallocated_base_ids
             ]
             if cache_terms:
                 extract_model.Add(sum(cache_terms) <= cap)
@@ -106,9 +106,11 @@ class OrtoolsSolver:
                 int(k): int(v) for k, v in b_dict.get("eclass_to_logical", {}).items()
             }
             eclass_cache_lids: Dict[int, List[int]] = {}
-            for cid, lid in eclass_to_logical.items():
-                if lid in is_cached:
-                    eclass_cache_lids.setdefault(cid, []).append(lid)
+            for cls in classes_list:
+                cid = cls["id"]
+                base_eclass_id = cls["base_eclass_id"]
+                if base_eclass_id in is_cached:
+                    eclass_cache_lids.setdefault(cid, []).append(base_eclass_id)
 
             # Map eclasses to enodes consuming them
             consumers: Dict[int, List[Tuple[int, int]]] = {}
@@ -141,7 +143,7 @@ class OrtoolsSolver:
                     is_cache = enode.get("is_cache", False)
                     is_input = enode.get("is_input", False)
                     is_scatter = enode.get("is_scatter", False)
-                    lid = enode.get("logical_id", -1)
+                    base_eclass_id = enode.get("base_eclass_id", -1)
 
                     x_var = bucket_x[(b, cid, e_idx)]
                     enode_vars.append(x_var)
@@ -154,10 +156,10 @@ class OrtoolsSolver:
                         # A cache alternative is legal only for a selected
                         # candidate and only when this eclass is clean in the
                         # current bucket.
-                        if cid not in clean_eclasses or lid not in is_cached:
+                        if cid not in clean_eclasses or base_eclass_id not in is_cached:
                             extract_model.Add(x_var == 0)
                         else:
-                            extract_model.Add(x_var <= is_cached[lid])
+                            extract_model.Add(x_var <= is_cached[base_eclass_id])
                     elif is_scatter:
                         # Scatter updates a cached backing eclass.  Requiring
                         # the eclass to be selected as cached prevents a
@@ -190,10 +192,12 @@ class OrtoolsSolver:
             # that logical identity must be present in the extraction. This is
             # the CP-SAT equivalent of MissingCachedEClassRule.
             for cand in self.candidates:
-                lid = cand["logical_id"]
-                for cid, mapped_lid in eclass_to_logical.items():
-                    if mapped_lid == lid:
-                        extract_model.Add(bucket_active[(b, cid)] >= is_cached[lid])
+                base_eclass_id = cand["base_eclass_id"]
+                for cls in classes_list:
+                    cid = cls["id"]
+                    cls_base_eclass_id = cls["base_eclass_id"]
+                    if cls_base_eclass_id == base_eclass_id:
+                        extract_model.Add(bucket_active[(b, cid)] >= is_cached[base_eclass_id])
 
         if total_cost_terms:
             extract_model.Minimize(sum(total_cost_terms))
@@ -213,15 +217,15 @@ class OrtoolsSolver:
         # Collect cached nodes
         cached_nodes_res = []
         for cand in self.candidates:
-            lid = cand["logical_id"]
-            if extract_solver.Value(is_cached[lid]) == 1:
+            base_eclass_id = cand["base_eclass_id"]
+            if extract_solver.Value(is_cached[base_eclass_id]) == 1:
                 cached_nodes_res.append(
-                    {"logical_id": lid, "mem_space": cand["mem_space"]}
+                    {"base_eclass_id": base_eclass_id, "mem_space": cand["mem_space"]}
                 )
 
-        # Build preallocated lookup: logical_id -> dict
-        prealloc_by_lid: Dict[int, Dict[str, Any]] = {
-            item["logical_id"]: item for item in self.preallocated_buffers
+        # Build preallocated lookup: base eclass id -> dict
+        prealloc_by_base_id: Dict[int, Dict[str, Any]] = {
+            item["base_eclass_id"]: item for item in self.preallocated_buffers
         }
 
         extractions_res = []
@@ -299,9 +303,9 @@ class OrtoolsSolver:
                 base = eclass_to_base[cid]
                 if base not in buffers_by_base:
                     # Check if preallocated
-                    lid = eclass_to_logical.get(base, -1)
-                    if lid != -1 and lid in prealloc_by_lid:
-                        p_info = prealloc_by_lid[lid]
+                    base_eclass_id = classes_by_id[base]["base_eclass_id"]
+                    if base_eclass_id in prealloc_by_base_id:
+                        p_info = prealloc_by_base_id[base_eclass_id]
                         buf_id = p_info.get("buffer_id", next_buf_id)
                         offset = p_info["offset"]
                         size = p_info["size"]

@@ -433,8 +433,7 @@ inline void testMemCapENodeDomination()
     });
 
     std::unordered_map<EClassId, LogicalId> emptyMap;
-    std::unordered_map<LogicalId, MemSpace> emptyCached;
-    ENodeDominationContext ctx{mock.egraph, mock.enodeInfos, emptyMap, emptyCached, mock.settings.mem_caps};
+    ENodeDominationContext ctx{mock.egraph, mock.enodeInfos, emptyMap, mock.settings.mem_caps};
 
     MemCapENodeDominationRule rule(true);
 
