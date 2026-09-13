@@ -93,6 +93,11 @@ def main():
         help="Disable dirty region session caching",
     )
     parser.add_argument(
+        "--use-ortools-full",
+        action="store_true",
+        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
+    )
+    parser.add_argument(
         "--log-cost-calls",
         action="store_true",
         default=True,
@@ -212,6 +217,7 @@ def main():
         disable_caching=args.disable_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
+        use_ortools_full=args.use_ortools_full,
         max_time_seconds=args.max_time_seconds or 0.0,
     )
 

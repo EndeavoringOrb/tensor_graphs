@@ -560,7 +560,7 @@ class Krea2Session
                  uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
                  std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                  const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
-                 bool log_cost_calls = true, double max_time_seconds = 0.0)
+                 bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0)
         : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
     {
         if (threads > 0)
@@ -633,6 +633,7 @@ class Krea2Session
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
                                             min_compile_time, act_delegate, log_cost_calls);
+        session->settings.use_ortools_full = use_ortools_full;
         session->settings.max_time_seconds = max_time_seconds;
         session->compile(true);
     }
@@ -1030,12 +1031,13 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
                       uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t,
-                      bool, double>(),
+                      bool, bool, double>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
              py::arg("mu") = 1.15f, py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
              py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
-             py::arg("log_cost_calls") = true, py::arg("max_time_seconds") = 0.0)
+             py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
+             py::arg("max_time_seconds") = 0.0)
         .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"));
 }
