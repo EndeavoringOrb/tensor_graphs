@@ -103,6 +103,9 @@ class OrtoolsSolver:
             self.caps[key] = min(cap, self.arena_bound)
         return self.caps[key]
 
+    def memoryCapPages(self, mem_space):
+        return self.memoryCap(mem_space) // self.alignment
+
     def newPageOffset(self, mem_space, size, name):
         if mem_space["type"] == 0:
             return None
@@ -216,8 +219,19 @@ class OrtoolsSolver:
                 }
                 if "raw_size_bytes" in candidate:
                     buf["raw_size_bytes"] = candidate["raw_size_bytes"]
+                
+                # Zero-bind unused spatial variables globally
+                if page_offset is not None and type(page_offset) is not int:
+                    self.model.Add(page_offset == 0).OnlyEnforceIf(present.Not())
+                
                 self.global_buffers.append(buf)
             self.cache_choices[base_eclass_id] = (present, buf)
+            
+            # Global hint to suppress cache utilization initially
+            self.model.AddHint(present, 0)
+            if buf.get("page_offset") is not None and type(buf["page_offset"]) is not int:
+                self.model.AddHint(buf["page_offset"], 0)
+            
         self.preallocated_by_base_id = by_base_id
 
     def addRectangle(self, rectangles, buf, start, end, horizon, name):
@@ -235,7 +249,13 @@ class OrtoolsSolver:
         if page_size == 0:
             return
 
-        lifetime = end - start if type(start) is int and type(end) is int else model.NewIntVar(0, horizon, f"{name}_lifetime")
+        if type(start) is int and type(end) is int:
+            lifetime = end - start
+        else:
+            lifetime = model.NewIntVar(0, horizon, f"{name}_lifetime")
+            model.Add(lifetime == end - start)
+            buf["lifetime"] = lifetime
+
         time_interval = model.NewOptionalIntervalVar(
             start, lifetime, end, present, f"{name}_live"
         )
@@ -257,6 +277,218 @@ class OrtoolsSolver:
         model = self.model
         model.Add(node["protected"] == 1).OnlyEnforceIf(present)
         model.Add(node["release"] == horizon).OnlyEnforceIf(present)
+
+    def _compute_hints(self, bucket, nodes, horizon, makespan_var):
+        """Topological DP greedy hint generation providing a 100% complete model initialization."""
+        root_id = bucket["root_eclass_id"]
+        memo = {}
+        visiting = set()
+        
+        def get_best(cid):
+            if cid in memo: return memo[cid]
+            if cid in visiting: return (float('inf'), {})
+            visiting.add(cid)
+            
+            node = nodes[cid]
+            cls = node["cls"]
+            has_res = self.preallocated_by_base_id.get(cls["base_eclass_id"]) is not None
+            best_cost = float('inf')
+            best_e = None
+            best_deps = {}
+            for e_idx, (sel_var, enode) in node["selections"].items():
+                dur = self.duration(enode)
+                if dur is None: continue
+                children = enode.get("children", [])
+                if any(c not in nodes for c in children): continue
+                if enode.get("mem_space", cls["mem_space"]) != cls["mem_space"]: continue
+                if enode.get("is_cache") or enode.get("is_scatter"): continue
+                if enode.get("is_view"):
+                    if not children or nodes[children[0]]["mem_space"] != cls["mem_space"]: continue
+                    if has_res: continue
+                if enode.get("is_input") and children: continue
+                
+                c_cost = 0
+                valid = True
+                deps = {}
+                for c in set(children):
+                    cc, cdeps = get_best(c)
+                    if cc == float('inf'):
+                        valid = False
+                        break
+                    c_cost += cc
+                    deps.update(cdeps)
+                
+                if not valid: continue
+                t_cost = dur + c_cost
+                if t_cost < best_cost:
+                    best_cost = t_cost
+                    best_e = e_idx
+                    best_deps = deps
+                    
+            if best_e is not None:
+                res = {cid: best_e}
+                res.update(best_deps)
+                memo[cid] = (best_cost, res)
+            else:
+                memo[cid] = (float('inf'), {})
+                
+            visiting.remove(cid)
+            return memo[cid]
+            
+        cost, selections = get_best(root_id)
+        if cost == float('inf'): return
+        
+        active_cids = set(selections.keys())
+        
+        # Topological Sort Active Subgraph
+        adj = {c: [] for c in active_cids}
+        in_degree = {c: 0 for c in active_cids}
+        for c in active_cids:
+            enode = nodes[c]["selections"][selections[c]][1]
+            for child in set(enode.get("children", [])):
+                if child in active_cids:
+                    adj[child].append(c)
+                    in_degree[c] += 1
+                    
+        queue = [c for c in active_cids if in_degree[c] == 0]
+        topo = []
+        while queue:
+            curr = queue.pop(0)
+            topo.append(curr)
+            for nxt in adj[curr]:
+                in_degree[nxt] -= 1
+                if in_degree[nxt] == 0:
+                    queue.append(nxt)
+                    
+        # Simulate execution times natively as a purely sequential schedule
+        t = 0
+        start_t, end_t = {}, {}
+        for c in topo:
+            start_t[c] = t
+            dur = self.duration(nodes[c]["selections"][selections[c]][1])
+            end_t[c] = t + (dur if dur else 0)
+            t = end_t[c]
+            
+        # Simulate tensor lifetimes
+        read_end_t, release_t, protected_val = {}, {}, {}
+        for c in topo:
+            enode = nodes[c]["selections"][selections[c]][1]
+            has_res = self.preallocated_by_base_id.get(nodes[c]["cls"]["base_eclass_id"]) is not None
+            consumers = adj[c]
+            
+            read_end_t[c] = max([end_t[cons] for cons in consumers] + [end_t[c]])
+            
+            if c == root_id or enode.get("is_input") or has_res:
+                release_t[c] = horizon
+                protected_val[c] = 1
+            else:
+                release_t[c] = read_end_t[c]
+                protected_val[c] = 0
+
+        # View Lifetimes propagate to underlying parent
+        for c in reversed(topo):
+            enode = nodes[c]["selections"][selections[c]][1]
+            if enode.get("is_view"):
+                child = enode["children"][0]
+                read_end_t[child] = max(read_end_t.get(child, 0), read_end_t[c])
+                release_t[child] = max(release_t.get(child, 0), release_t[c])
+                protected_val[c] = protected_val[child]
+            if c == root_id:
+                read_end_t[c] = horizon
+
+        # Bump Allocate Safe 2D Offsets (Simple Greedy 1D Interval Allocator)
+        offsets = {}
+        for c in topo:
+            node = nodes[c]
+            enode = node["selections"][selections[c]][1]
+            has_res = self.preallocated_by_base_id.get(node["cls"]["base_eclass_id"]) is not None
+            is_view = enode.get("is_view")
+            fresh = not has_res and not is_view
+            
+            if fresh and node["page_offset"] is not None:
+                ms = memSpaceKey(node["mem_space"])
+                pages = self.alignedSize(node["size"]) // self.alignment
+                if pages == 0:
+                    offsets[c] = 0
+                    continue
+                
+                live_intervals = []
+                for past_c in topo:
+                    if past_c == c: break
+                    if past_c in offsets and release_t[past_c] > start_t[c]:
+                        past_ms = memSpaceKey(nodes[past_c]["mem_space"])
+                        if past_ms == ms:
+                            past_pages = self.alignedSize(nodes[past_c]["size"]) // self.alignment
+                            live_intervals.append((offsets[past_c], offsets[past_c] + past_pages))
+                            
+                for res in self.preallocated:
+                    if res["mem_space"]["type"] != 0 and memSpaceKey(res["mem_space"]) == ms:
+                        p_start = res["offset"] // self.alignment
+                        p_pages = self.alignedSize(res["size"]) // self.alignment
+                        live_intervals.append((p_start, p_start + p_pages))
+                        
+                live_intervals.sort()
+                
+                curr_offset = 0
+                assigned = False
+                for start_p, end_p in live_intervals:
+                    if curr_offset + pages <= start_p:
+                        offsets[c] = curr_offset
+                        assigned = True
+                        break
+                    curr_offset = max(curr_offset, end_p)
+                    
+                if not assigned:
+                    if curr_offset + pages <= self.memoryCapPages(node["mem_space"]):
+                        offsets[c] = curr_offset
+                    else:
+                        offsets[c] = 0
+
+        # Inject Hints natively to CP-SAT
+        self.model.AddHint(makespan_var, max(end_t.values()) if end_t else 0)
+
+        for cid, node in nodes.items():
+            if cid in active_cids:
+                self.model.AddHint(node["active"], 1)
+                self.model.AddHint(node["start"], start_t[cid])
+                self.model.AddHint(node["end"], end_t[cid])
+                self.model.AddHint(node["read_end"], read_end_t[cid])
+                self.model.AddHint(node["release"], release_t[cid])
+                self.model.AddHint(node["protected"], protected_val[cid])
+                if "lifetime" in node:
+                    self.model.AddHint(node["lifetime"], release_t[cid] - start_t[cid])
+                
+                enode = node["selections"][selections[cid]][1]
+                has_res = self.preallocated_by_base_id.get(node["cls"]["base_eclass_id"]) is not None
+                fresh = 1 if (not has_res and not enode.get("is_view")) else 0
+                self.model.AddHint(node["fresh"], fresh)
+                
+                if node["page_offset"] is not None and type(node["page_offset"]) is not int:
+                    self.model.AddHint(node["page_offset"], offsets.get(cid, 0))
+                    
+                for e_idx, (sel_var, _) in node["selections"].items():
+                    self.model.AddHint(sel_var, 1 if e_idx == selections[cid] else 0)
+            else:
+                self.model.AddHint(node["active"], 0)
+                self.model.AddHint(node["fresh"], 0)
+                self.model.AddHint(node["protected"], 0)
+                self.model.AddHint(node["start"], 0)
+                self.model.AddHint(node["end"], 0)
+                self.model.AddHint(node["read_end"], 0)
+                self.model.AddHint(node["release"], 0)
+                if "lifetime" in node:
+                    self.model.AddHint(node["lifetime"], 0)
+                    
+                if node["page_offset"] is not None and type(node["page_offset"]) is not int:
+                    self.model.AddHint(node["page_offset"], 0)
+                for sel_var, _ in node["selections"].values():
+                    self.model.AddHint(sel_var, 0)
+                    
+            for inplace_var, _ in node["inplace_choices"]:
+                self.model.AddHint(inplace_var, 0)
+            if type(node["cached"]) is not int:
+                self.model.AddHint(node["cached"], 0)
+
 
     def createBucket(self, bucket):
         model = self.model
@@ -326,14 +558,22 @@ class OrtoolsSolver:
             
             node["sources"].append((node["fresh"], node["id"], False))
 
+            if page_offset is not None and type(page_offset) is not int:
+                model.Add(page_offset == 0).OnlyEnforceIf(node["fresh"].Not())
+
             model.Add(node["release"] >= node["start"] + 1).OnlyEnforceIf(
                 node["active"]
             )
-            model.Add(node["release"] >= node["end"])
-            model.Add(node["read_end"] >= node["end"])
-            model.Add(node["release"] >= node["read_end"])
-            for field in ("start", "end", "read_end", "release"):
-                model.Add(node[field] == 0).OnlyEnforceIf(~node["active"])
+            model.Add(node["read_end"] >= node["end"]).OnlyEnforceIf(
+                node["active"]
+            )
+            model.Add(node["release"] >= node["read_end"]).OnlyEnforceIf(
+                node["active"]
+            )
+            
+            for field in ("start", "end", "read_end", "release", "protected"):
+                model.Add(node[field] == 0).OnlyEnforceIf(node["active"].Not())
+                
             self.addRectangle(
                 rectangles, node, node["start"], node["release"], horizon, name
             )
@@ -421,7 +661,6 @@ class OrtoolsSolver:
                     consumers[child_id].append(selected)
                     model.AddImplication(selected, child["active"])
                     model.Add(child["end"] <= node["start"]).OnlyEnforceIf(selected)
-                    model.Add(child["release"] >= node["end"]).OnlyEnforceIf(selected)
 
                 if duration:
                     interval = model.NewOptionalIntervalVar(
@@ -449,11 +688,6 @@ class OrtoolsSolver:
                     
                     if reserved is not None:
                         model.Add(selected == 0)
-                        
-                    for child_id in set(children):
-                        model.Add(
-                            nodes[child_id]["read_end"] >= node["end"]
-                        ).OnlyEnforceIf(selected)
                     continue
 
                 inplace_by_child = {}
@@ -503,7 +737,7 @@ class OrtoolsSolver:
                 for child_id in set(children):
                     read_conditions = [selected]
                     if child_id in inplace_by_child:
-                        read_conditions.append(~inplace_by_child[child_id])
+                        read_conditions.append(inplace_by_child[child_id].Not())
                     model.Add(
                         nodes[child_id]["read_end"] >= node["end"]
                     ).OnlyEnforceIf(read_conditions)
@@ -519,12 +753,12 @@ class OrtoolsSolver:
                         [selected, node["fresh"]]
                     )
 
-            model.AddExactlyOne([item[0] for item in node["selections"].values()] + [~active])
+            model.AddExactlyOne([item[0] for item in node["selections"].values()] + [node["active"].Not()])
             
             if reserved is not None:
                 model.Add(node["fresh"] == 0)
             else:
-                terms = [node["fresh"], ~active] + choices
+                terms = [node["fresh"], node["active"].Not()] + choices
                 if type(cached) is not int:
                     terms.append(cached)
                 model.AddExactlyOne(terms)
@@ -566,7 +800,9 @@ class OrtoolsSolver:
                 model.AddAtMostOne(users)
 
         makespan = model.NewIntVar(0, horizon, f"b{b}_makespan")
-        model.AddMaxEquality(makespan, [node["end"] for node in nodes.values()])
+        
+        for node in nodes.values():
+            model.Add(makespan >= node["end"])
 
         for engine, intervals in engines.items():
             model.AddNoOverlap(intervals)
@@ -581,6 +817,9 @@ class OrtoolsSolver:
         if not math.isfinite(weight) or weight < 0:
             raise ValueError(f"Invalid bucket weight {weight}")
         self.objective_terms.append(weight * makespan)
+        
+        self._compute_hints(bucket, nodes, horizon, makespan)
+        
         self.bucket_models.append(
             {
                 "bucket": bucket,
