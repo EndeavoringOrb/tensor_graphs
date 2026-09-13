@@ -548,6 +548,9 @@ class Krea2Session
     LogicalId attentionMaskId;
     LogicalId latentInputId;
     LogicalId imageOutputId;
+    std::vector<int32_t> previous_token_ids;
+    std::vector<float> previous_latent_data;
+    bool has_previous_inputs = false;
 
     Krea2TurboConfig cfg;
     Krea2TurboVAEConfig vae_cfg;
@@ -637,6 +640,21 @@ class Krea2Session
                                             min_compile_time, act_delegate, log_cost_calls);
         session->settings.use_ortools_full = use_ortools_full;
         session->settings.max_time_seconds = max_time_seconds;
+
+        // These buckets cover the input combinations used when regenerating
+        // an image.  The prompt and latent tensors are fixed-size, so changing
+        // their contents only needs a new execution plan for the dirty input
+        // region, not a graph recompilation.
+        if (!disable_caching)
+        {
+            const std::vector<Region> output_regions = makeFull(g->getNode(imageOutputId).getShape());
+            const std::vector<Region> token_regions = makeFull(g->getNode(inputIdsId).getShape());
+            const std::vector<Region> latent_regions = makeFull(g->getNode(latentInputId).getShape());
+
+            session->addBucket({{inputIdsId, token_regions}}, output_regions);
+            session->addBucket({{latentInputId, latent_regions}}, output_regions);
+            session->addBucket({{inputIdsId, token_regions}, {latentInputId, latent_regions}}, output_regions);
+        }
         session->compile(true);
     }
 
@@ -662,6 +680,35 @@ class Krea2Session
         session->writeInput(latentInputId, latent_data.data(), latent_data.size() * sizeof(float));
 
         Bucket b;
+        const bool token_changed = !has_previous_inputs || previous_token_ids != padded_tokens;
+        const bool latent_changed = !has_previous_inputs || previous_latent_data != latent_data;
+        b.outputNeededRegion = makeFull(g->getNode(imageOutputId).getShape());
+
+        if (token_changed && latent_changed)
+        {
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+        else if (token_changed)
+        {
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+        }
+        else if (latent_changed)
+        {
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+        else
+        {
+            // There is no no-op bucket.  Treat an unchanged request as a full
+            // refresh so it remains correct when caching is disabled or when
+            // the caller repeats the same inputs.
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+
+        previous_token_ids = padded_tokens;
+        previous_latent_data = latent_data;
+        has_previous_inputs = true;
         const float *device_output = static_cast<const float *>(session->run(b));
 
         uint64_t num_pixels = 1ULL * vae_cfg.in_channels * cfg.height * cfg.width;

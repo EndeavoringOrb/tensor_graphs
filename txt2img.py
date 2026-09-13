@@ -53,6 +53,22 @@ def encodePromptTokens(tokenizer_obj, prompt: str, max_seq_len: int | None = Non
     return model_token_ids, attention_mask
 
 
+def generateAndSaveImage(session, token_ids, attention_mask, latent, output_path, height, width, steps):
+    print(f"\nGenerating image with {steps} unrolled flow-matching steps...")
+    t_start = time.perf_counter()
+    pixels = session.generate_image(token_ids, attention_mask, latent.flatten().tolist())
+    t_total = time.perf_counter() - t_start
+    print(f"End-to-end generation complete in {t_total * 1000:.2f} ms")
+
+    image_array = np.asarray(pixels, dtype=np.float32).reshape(3, height, width)
+    image_array = np.clip((image_array + 1.0) / 2.0, 0.0, 1.0)
+    image_np = (np.transpose(image_array, (1, 2, 0)) * 255.0).astype(np.uint8)
+
+    img = Image.fromarray(image_np)
+    img.save(output_path)
+    print(f"\nImage successfully saved to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Krea 2 Turbo Text-to-Image Generation (Unified Unrolled Pipeline)"
@@ -244,21 +260,52 @@ def main():
         (1, 16, latent_h, latent_w), dtype=np.float32
     )
 
-    print(f"\nGenerating image with {args.steps} unrolled flow-matching steps...")
-    t_start = time.perf_counter()
-    pixels = session.generate_image(token_ids, attention_mask, latent.flatten().tolist())
-    t_total = time.perf_counter() - t_start
-    print(f"End-to-end generation complete in {t_total * 1000:.2f} ms")
-
-    image_array = np.asarray(pixels, dtype=np.float32).reshape(
-        3, args.height, args.width
+    generateAndSaveImage(
+        session,
+        token_ids,
+        attention_mask,
+        latent,
+        args.output,
+        args.height,
+        args.width,
+        args.steps,
     )
-    image_array = np.clip((image_array + 1.0) / 2.0, 0.0, 1.0)
-    image_np = (np.transpose(image_array, (1, 2, 0)) * 255.0).astype(np.uint8)
 
-    img = Image.fromarray(image_np)
-    img.save(args.output)
-    print(f"\nImage successfully saved to: {args.output}")
+    print(f"Watching {args.prompt_file} for changes. Press Ctrl+C to exit.")
+    try:
+        while True:
+            time.sleep(0.5)
+            try:
+                next_prompt = args.prompt_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError) as exc:
+                print(f"[Txt2Img] Warning: Failed to read {args.prompt_file}: {exc}")
+                continue
+
+            if next_prompt == prompt:
+                continue
+
+            try:
+                next_token_ids, next_attention_mask = encodePromptTokens(tokenizer, next_prompt)
+            except ValueError as exc:
+                print(f"[Txt2Img] Warning: Prompt update ignored: {exc}")
+                continue
+
+            prompt = next_prompt
+            token_ids = next_token_ids
+            attention_mask = next_attention_mask
+            print(f"\nPrompt updated from {args.prompt_file}; rerunning...")
+            generateAndSaveImage(
+                session,
+                token_ids,
+                attention_mask,
+                latent,
+                args.output,
+                args.height,
+                args.width,
+                args.steps,
+            )
+    except KeyboardInterrupt:
+        print("\nExiting prompt watcher.")
 
 
 if __name__ == "__main__":
