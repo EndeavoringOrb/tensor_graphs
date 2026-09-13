@@ -5,11 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import tensor_graphs
-import torch
 from PIL import Image
-from safetensors.torch import load_file
-
-from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
 from utils.decode import load_tokenizer
 
 PROMPT_TEMPLATE_ENCODE_PREFIX = (
@@ -170,6 +166,17 @@ def main():
 
         model_file = run_dir_path / "model.safetensors"
         if model_file.exists():
+            try:
+                from safetensors.torch import load_file
+                from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
+            except ModuleNotFoundError as exc:
+                if exc.name == "torch":
+                    raise RuntimeError(
+                        "Loading a trained --run-dir requires PyTorch. "
+                        "Run without --run-dir or install a PyTorch build "
+                        "compatible with this platform."
+                    ) from exc
+                raise
             state_dict = load_file(model_file)
             model = CostPredictorRNN(hidden_dim=cfg.hidden_dim)
             model.load_state_dict(state_dict, strict=False)
@@ -213,8 +220,13 @@ def main():
 
     latent_h = args.height // 8
     latent_w = args.width // 8
-    torch.manual_seed(args.seed)
-    latent = torch.randn((1, 16, latent_h, latent_w), dtype=torch.float32)
+    # NumPy keeps the inference entry point usable on platforms without a
+    # PyTorch wheel (for example Windows ARM64). The C++ session consumes a
+    # flat list of float32 values, so no tensor object is needed here.
+    rng = np.random.default_rng(args.seed)
+    latent = rng.standard_normal(
+        (1, 16, latent_h, latent_w), dtype=np.float32
+    )
 
     print(f"\nGenerating image with {args.steps} unrolled flow-matching steps...")
     t_start = time.perf_counter()
@@ -222,11 +234,11 @@ def main():
     t_total = time.perf_counter() - t_start
     print(f"End-to-end generation complete in {t_total * 1000:.2f} ms")
 
-    image_tensor = torch.tensor(pixels, dtype=torch.float32).reshape(
-        1, 3, args.height, args.width
+    image_array = np.asarray(pixels, dtype=np.float32).reshape(
+        3, args.height, args.width
     )
-    image_tensor = torch.clamp((image_tensor + 1.0) / 2.0, 0.0, 1.0)
-    image_np = (image_tensor[0].permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
+    image_array = np.clip((image_array + 1.0) / 2.0, 0.0, 1.0)
+    image_np = (np.transpose(image_array, (1, 2, 0)) * 255.0).astype(np.uint8)
 
     img = Image.fromarray(image_np)
     img.save(args.output)
