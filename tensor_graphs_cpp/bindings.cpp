@@ -545,6 +545,7 @@ class Krea2Session
     std::unique_ptr<TGStore> repo;
     std::unique_ptr<Session> session;
     LogicalId inputIdsId;
+    LogicalId attentionMaskId;
     LogicalId latentInputId;
     LogicalId imageOutputId;
 
@@ -618,7 +619,8 @@ class Krea2Session
                                                 width, text_seq_len, steps, mu);
         imageOutputId = roots.roots[0];
         inputIdsId = roots.inputs[0];
-        latentInputId = roots.inputs[1];
+        attentionMaskId = roots.inputs[1];
+        latentInputId = roots.inputs[2];
 
         std::string gHash = computeGraphHash(*g, {imageOutputId});
         repo = std::make_unique<TGStore>("benchmarks/repo_krea-2-turbo-pipeline", gHash, true);
@@ -638,19 +640,25 @@ class Krea2Session
         session->compile(true);
     }
 
-    std::vector<float> generate_image(const std::vector<int32_t> &token_ids, const std::vector<float> &latent_data)
+    std::vector<float> generate_image(const std::vector<int32_t> &token_ids, const std::vector<float> &attention_mask,
+                                      const std::vector<float> &latent_data)
     {
         std::vector<int32_t> padded_tokens = token_ids;
-        if (padded_tokens.size() < cfg.text_seq_len)
+        const uint32_t encoder_seq_len = cfg.text_seq_len + KREA_QWEN_PREFIX_TOKEN_COUNT;
+        if (padded_tokens.size() < encoder_seq_len)
         {
-            padded_tokens.resize(cfg.text_seq_len, 0);
+            padded_tokens.resize(encoder_seq_len, 151643);
         }
-        else if (padded_tokens.size() > cfg.text_seq_len)
+        else if (padded_tokens.size() > encoder_seq_len)
         {
-            padded_tokens.resize(cfg.text_seq_len);
+            padded_tokens.resize(encoder_seq_len);
         }
 
-        session->writeInput(inputIdsId, padded_tokens.data(), cfg.text_seq_len * sizeof(int32_t));
+        if (num_steps > 0)
+        {
+            session->writeInput(inputIdsId, padded_tokens.data(), encoder_seq_len * sizeof(int32_t));
+            session->writeInput(attentionMaskId, attention_mask.data(), cfg.text_seq_len * sizeof(float));
+        }
         session->writeInput(latentInputId, latent_data.data(), latent_data.size() * sizeof(float));
 
         Bucket b;
@@ -1038,6 +1046,8 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
              py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
              py::arg("max_time_seconds") = 0.0)
-        .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"))
-        .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("latent_data"));
+        .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
+             py::arg("latent_data"))
+        .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
+             py::arg("latent_data"));
 }

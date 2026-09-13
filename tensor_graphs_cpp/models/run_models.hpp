@@ -14,6 +14,8 @@ struct ModelGraphRoots
     std::vector<LogicalId> inputs;
 };
 
+static constexpr uint32_t KREA_QWEN_PREFIX_TOKEN_COUNT = 34;
+
 inline ModelGraphRoots build_gemma_graph(Graph &g, MemoryManager &mem, const std::string &model_path,
                                          uint32_t max_seq_len)
 {
@@ -71,20 +73,28 @@ inline ModelGraphRoots build_krea2_pipeline_graph(Graph &g, MemoryManager &mem, 
 {
     // 1. Text Encoder (Qwen3-VL)
     Qwen3VLConfig te_cfg;
-    LogicalId inputIdsId = g.input({1, text_seq_len}, DType::INT32);
-    Qwen3VLModel te_model(te_cfg, text_seq_len, g, mem, text_encoder_path);
-    LogicalId textEmbOut = te_model.build_graph(inputIdsId);
+    const uint32_t encoder_seq_len = text_seq_len + KREA_QWEN_PREFIX_TOKEN_COUNT;
+    LogicalId inputIdsId = g.input({1, encoder_seq_len}, DType::INT32);
+    LogicalId ditMaskId = g.input({1, text_seq_len}, DType::FLOAT32);
+    LogicalId encoderMask = g.concat(
+        {g.fill(1.0f, {1, KREA_QWEN_PREFIX_TOKEN_COUNT}), ditMaskId}, 1);
+    Qwen3VLModel te_model(te_cfg, encoder_seq_len, g, mem, text_encoder_path);
+    LogicalId encodedText = te_model.build_graph(inputIdsId, encoderMask);
+    LogicalId textEmbOut = g.contiguous(
+        g.slice(encodedText, {0, static_cast<int32_t>(KREA_QWEN_PREFIX_TOKEN_COUNT), 0, 0},
+                {1, static_cast<int32_t>(encoder_seq_len), static_cast<int32_t>(te_cfg.select_layers.size()),
+                 static_cast<int32_t>(te_cfg.hidden_size)}));
 
     // 2. DiT (Krea 2 Turbo) unrolled for 'steps' steps
     Krea2TurboConfig dit_cfg(height, width, text_seq_len);
     LogicalId latentId = g.input({1, dit_cfg.latent_channels, dit_cfg.latent_h, dit_cfg.latent_w}, DType::FLOAT32);
     Krea2TurboModel dit_model(dit_cfg, g, mem, dit_path);
-    LogicalId finalLatent = dit_model.build_unrolled_dit(latentId, textEmbOut, steps, mu);
+    LogicalId finalLatent = dit_model.build_unrolled_dit(latentId, textEmbOut, ditMaskId, steps, mu);
 
     // 3. VAE Decoder (Qwen Image VAE)
     Krea2TurboVAEConfig vae_cfg(height, width);
     Krea2TurboVAEModel vae_model(vae_cfg, g, mem, vae_path);
     LogicalId imageOut = vae_model.build_graph(finalLatent);
 
-    return {{imageOut}, {inputIdsId, latentId}};
+    return {{imageOut}, {inputIdsId, ditMaskId, latentId}};
 }

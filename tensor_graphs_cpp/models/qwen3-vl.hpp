@@ -204,7 +204,7 @@ class Qwen3VLModel
     }
 
     LogicalId attention(LogicalId x, uint32_t layer_idx, LogicalId cos_node, LogicalId sin_node, LogicalId mask,
-                        uint32_t S)
+                        LogicalId key_padding_mask, uint32_t S)
     {
         std::string prefix = "layers." + std::to_string(layer_idx) + ".self_attn.";
 
@@ -243,6 +243,11 @@ class Qwen3VLModel
         LogicalId scores = g.dot(q, k_t);
 
         scores = g.add(scores, g.repeat(mask, cfg.num_attention_heads, 1));
+        LogicalId key_mask = g.reshape(key_padding_mask, {1, 1, 1, (int32_t)S});
+        key_mask = g.repeat(key_mask, S, 2);
+        key_mask = g.repeat(key_mask, cfg.num_attention_heads, 1);
+        LogicalId invalid_keys = g.add(g.fill(1.0f, {1, cfg.num_attention_heads, S, S}), g.neg(key_mask));
+        scores = g.add(scores, g.mul(invalid_keys, g.fill(-1e9f, {1, cfg.num_attention_heads, S, S})));
         LogicalId probs = softmax_4d(scores, S, cfg.num_attention_heads);
 
         LogicalId attn_out = g.dot(probs, v);
@@ -263,13 +268,13 @@ class Qwen3VLModel
     }
 
     LogicalId decoder_layer(LogicalId x, uint32_t layer_idx, LogicalId cos_node, LogicalId sin_node, LogicalId mask,
-                            uint32_t S)
+                            LogicalId key_padding_mask, uint32_t S)
     {
         std::string prefix = "layers." + std::to_string(layer_idx) + ".";
         LogicalId residual = x;
 
         LogicalId norm1 = rms_norm(x, prefix + "input_layernorm.weight", S, cfg.hidden_size, cfg.rms_norm_eps);
-        LogicalId attn_out = attention(norm1, layer_idx, cos_node, sin_node, mask, S);
+        LogicalId attn_out = attention(norm1, layer_idx, cos_node, sin_node, mask, key_padding_mask, S);
         LogicalId h = g.add(residual, attn_out);
         residual = h;
 
@@ -287,6 +292,12 @@ class Qwen3VLModel
 
     LogicalId build_graph(LogicalId input_ids_id)
     {
+        LogicalId all_tokens = g.fill(1.0f, {1, seq_len});
+        return build_graph(input_ids_id, all_tokens);
+    }
+
+    LogicalId build_graph(LogicalId input_ids_id, LogicalId key_padding_mask)
+    {
         LogicalId w_emb = weight("embed_tokens.weight");
         LogicalId h = g.gather(w_emb, input_ids_id);
 
@@ -298,8 +309,11 @@ class Qwen3VLModel
 
         for (uint32_t i = 0; i < cfg.num_hidden_layers; ++i)
         {
-            h = decoder_layer(h, i, cos_node, sin_node, mask, seq_len);
-            if (select_set.count(i))
+            h = decoder_layer(h, i, cos_node, sin_node, mask, key_padding_mask, seq_len);
+            // The Qwen/ComfyUI Krea2 taps use hidden_states[n].  This loop has
+            // already applied decoder layer i, so its output is hidden state
+            // i + 1 (hidden_states[0] is the embedding output).
+            if (select_set.count(i + 1))
             {
                 int32_t sh4[] = {1, (int32_t)seq_len, 1, (int32_t)cfg.hidden_size};
                 LogicalId h_4d = g.reshape(h, g.constant({4}, sh4, DType::INT32));

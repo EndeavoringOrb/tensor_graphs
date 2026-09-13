@@ -135,6 +135,31 @@ class Krea2TurboVAEModel
         return out;
     }
 
+    // A single image is the first frame of the causal 3D decoder.  The temporal
+    // convolution therefore sees two zero frames and the current frame; its
+    // first output-channel group is the frame retained by the image wrapper.
+    LogicalId temporal_first_frame_conv(LogicalId x, const std::string &w_name, const std::string &b_name,
+                                        uint32_t in_c, uint32_t out_c, uint32_t H, uint32_t W)
+    {
+        LogicalId w_2d = load_conv_weight(w_name, out_c, in_c, 1);
+        LogicalId w_3d = g.reshape(w_2d, {1, (int32_t)out_c, (int32_t)in_c});
+        LogicalId x_flat = g.reshape(x, {1, (int32_t)in_c, (int32_t)(H * W)});
+        LogicalId out_flat = g.dot(w_3d, x_flat);
+        LogicalId out = g.reshape(out_flat, {1, (int32_t)out_c, (int32_t)H, (int32_t)W});
+
+        std::string resolved_b = resolve_weight_name(b_name);
+        if (TensorResolver::get().hasTensor(w_path, resolved_b))
+        {
+            LogicalId raw_b = g.weight(w_path, resolved_b);
+            LogicalId b = g.cast(raw_b, DType::FLOAT32);
+            b = g.contiguous(g.slice(b, {0}, {(int32_t)out_c}));
+            LogicalId b_4d = g.reshape(b, {1, (int32_t)out_c, 1, 1});
+            LogicalId b_exp = g.repeat(g.repeat(b_4d, H, 2), W, 3);
+            out = g.add(out, b_exp);
+        }
+        return out;
+    }
+
     LogicalId rms_norm_2d(LogicalId x, const std::string &gamma_name, uint32_t C, uint32_t H, uint32_t W,
                           float eps = 1e-6f)
     {
@@ -269,6 +294,8 @@ class Krea2TurboVAEModel
         x = residual_block(x, "decoder.upsamples.0.", 384, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.1.", 384, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.2.", 384, 384, cur_h, cur_w);
+        x = temporal_first_frame_conv(x, "decoder.upsamples.3.time_conv.weight",
+                                      "decoder.upsamples.3.time_conv.bias", 384, 384, cur_h, cur_w);
         x = upsample_2d(x, 384, cur_h, cur_w);
         cur_h *= 2;
         cur_w *= 2;
@@ -278,6 +305,8 @@ class Krea2TurboVAEModel
         x = residual_block(x, "decoder.upsamples.4.", 192, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.5.", 384, 384, cur_h, cur_w);
         x = residual_block(x, "decoder.upsamples.6.", 384, 384, cur_h, cur_w);
+        x = temporal_first_frame_conv(x, "decoder.upsamples.7.time_conv.weight",
+                                      "decoder.upsamples.7.time_conv.bias", 384, 384, cur_h, cur_w);
         x = upsample_2d(x, 384, cur_h, cur_w);
         cur_h *= 2;
         cur_w *= 2;

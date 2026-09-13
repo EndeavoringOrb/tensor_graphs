@@ -17,7 +17,7 @@ PROMPT_TEMPLATE_ENCODE_PREFIX = (
 PROMPT_TEMPLATE_ENCODE_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 
 
-def encode_prompt(tokenizer_obj, prompt: str, max_seq_len: int = 128) -> list[int]:
+def encodePromptTokens(tokenizer_obj, prompt: str, max_seq_len: int | None = None) -> tuple[list[int], list[float]]:
     raw_tok = tokenizer_obj[0] if isinstance(tokenizer_obj, tuple) else tokenizer_obj
     full_prompt = PROMPT_TEMPLATE_ENCODE_PREFIX + prompt
 
@@ -31,17 +31,26 @@ def encode_prompt(tokenizer_obj, prompt: str, max_seq_len: int = 128) -> list[in
     else:
         raise ValueError("Unsupported tokenizer object")
 
-    token_ids = token_ids[prefix_len:]
-
     enc_suf = raw_tok.encode(PROMPT_TEMPLATE_ENCODE_SUFFIX)
     suffix_ids = enc_suf.ids if hasattr(enc_suf, "ids") else enc_suf
-    token_ids = list(token_ids) + list(suffix_ids)
+    prefix_ids = list(prefix_ids)
+    token_ids = list(token_ids)
+    suffix_ids = list(suffix_ids)
 
-    if len(token_ids) < max_seq_len:
-        token_ids = token_ids + [0] * (max_seq_len - len(token_ids))
-    else:
-        token_ids = token_ids[:max_seq_len]
+    # ComfyUI's native Krea2 tokenizer keeps the sequence dynamic.  Qwen sees
+    # the complete prefix, prompt, and assistant suffix; Krea2 removes the
+    # prefix from the selected hidden states before feeding the DiT.
+    if max_seq_len is not None:
+        body_len = max_seq_len + prefix_len - len(suffix_ids)
+        token_ids = token_ids[:body_len]
+    model_token_ids = token_ids + suffix_ids
+    attention_mask = [1.0] * len(model_token_ids)
+    return model_token_ids, attention_mask
 
+
+def encode_prompt(tokenizer_obj, prompt: str, max_seq_len: int | None = None) -> list[int]:
+    """Encode a Krea prompt using the native dynamic ComfyUI sequence."""
+    token_ids, _ = encodePromptTokens(tokenizer_obj, prompt, max_seq_len)
     return token_ids
 
 
@@ -119,7 +128,7 @@ def main():
         "--steps",
         type=int,
         default=8,
-        help="Number of flow-matching inference steps (default: 8)",
+        help="Number of flow-matching inference steps (default: 8; 0 decodes the initial latent)",
     )
     parser.add_argument(
         "--mu",
@@ -154,6 +163,11 @@ def main():
         f" Resolution: {args.width}x{args.height} | Steps: {args.steps} | Shift mu: {args.mu}"
     )
     print("=========================================================")
+
+    tokenizer = load_tokenizer(["Qwen/Qwen3-VL-4B-Instruct"])
+    token_ids, attention_mask = encodePromptTokens(tokenizer, prompt)
+    prefix_len = len(tokenizer[0].encode(PROMPT_TEMPLATE_ENCODE_PREFIX).ids)
+    text_seq_len = len(token_ids) - prefix_len
 
     # Initialize search agent delegate
     if args.run_dir:
@@ -209,7 +223,7 @@ def main():
         vae_path=args.vae_path,
         height=args.height,
         width=args.width,
-        text_seq_len=128,
+        text_seq_len=text_seq_len,
         steps=args.steps,
         mu=args.mu,
         delegate=delegate,
@@ -220,9 +234,6 @@ def main():
         use_ortools_full=args.use_ortools_full,
         max_time_seconds=args.max_time_seconds or 0.0,
     )
-
-    tokenizer = load_tokenizer(["Qwen/Qwen3-VL-4B-Instruct"])
-    token_ids = encode_prompt(tokenizer, prompt, max_seq_len=128)
 
     latent_h = args.height // 8
     latent_w = args.width // 8
@@ -236,7 +247,7 @@ def main():
 
     print(f"\nGenerating image with {args.steps} unrolled flow-matching steps...")
     t_start = time.perf_counter()
-    pixels = session.generate_image(token_ids, latent.flatten().tolist())
+    pixels = session.generate_image(token_ids, attention_mask, latent.flatten().tolist())
     t_total = time.perf_counter() - t_start
     print(f"End-to-end generation complete in {t_total * 1000:.2f} ms")
 

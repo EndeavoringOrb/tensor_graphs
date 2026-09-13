@@ -43,7 +43,7 @@ struct Krea2TurboConfig
     uint32_t time_mlp_dim = 6144;
 
     float rope_theta = 1000.0f;
-    float rms_eps = 1e-6f;
+    float rms_eps = 1e-5f;
     float mu = 1.15f;
     uint32_t num_inference_steps = 8;
 
@@ -219,6 +219,20 @@ class Krea2TurboModel
         return g.div(exps, sums);
     }
 
+    LogicalId apply_key_mask(LogicalId scores, LogicalId valid_keys, uint32_t query_len, uint32_t num_heads,
+                             uint32_t key_len)
+    {
+        LogicalId key_mask = g.reshape(valid_keys, {1, 1, 1, static_cast<int32_t>(key_len)});
+        key_mask = g.repeat(key_mask, query_len, 2);
+        key_mask = g.repeat(key_mask, num_heads, 1);
+        LogicalId query_mask = g.reshape(valid_keys, {1, 1, static_cast<int32_t>(query_len), 1});
+        query_mask = g.repeat(query_mask, key_len, 3);
+        query_mask = g.repeat(query_mask, num_heads, 1);
+        LogicalId valid = g.mul(key_mask, query_mask);
+        LogicalId invalid = g.add(g.fill(1.0f, {1, num_heads, query_len, key_len}), g.neg(valid));
+        return g.add(scores, g.mul(invalid, g.fill(-1e9f, {1, num_heads, query_len, key_len})));
+    }
+
     // Interleaved 2D pair RoPE rotation matching mmdit.py (ropeapply)
     LogicalId apply_rope(LogicalId x, LogicalId cos_node, LogicalId sin_node, uint32_t num_heads, uint32_t S,
                          uint32_t head_dim)
@@ -275,7 +289,8 @@ class Krea2TurboModel
         return linear(h, "tmlp.2.weight", "tmlp.2.bias", cfg.time_mlp_dim, cfg.time_mlp_dim, 1);
     }
 
-    LogicalId text_fusion_block(LogicalId x, const std::string &prefix, uint32_t B, uint32_t S)
+    LogicalId text_fusion_block(LogicalId x, const std::string &prefix, uint32_t B, uint32_t S,
+                                LogicalId token_mask, bool use_token_mask)
     {
         LogicalId residual = x;
         LogicalId h = rms_norm(x, prefix + "prenorm.scale", B, S, cfg.text_dim, cfg.rms_eps);
@@ -307,6 +322,8 @@ class Krea2TurboModel
 
         LogicalId k_t = g.contiguous(g.permute(k, {0, 1, 3, 2}));
         LogicalId scores = g.dot(q, k_t);
+        if (use_token_mask)
+            scores = apply_key_mask(scores, token_mask, S, cfg.text_fusion_heads, S);
         LogicalId probs = softmax_4d(scores, S, cfg.text_fusion_heads, B);
 
         LogicalId attn_out = g.dot(probs, v);
@@ -359,7 +376,7 @@ class Krea2TurboModel
     }
 
     LogicalId single_stream_block(LogicalId x, uint32_t layer_idx, LogicalId t_mod, LogicalId cos_node,
-                                  LogicalId sin_node)
+                                  LogicalId sin_node, LogicalId attention_mask)
     {
         std::string prefix = "blocks." + std::to_string(layer_idx) + ".";
         uint32_t S = cfg.total_seq_len;
@@ -423,6 +440,7 @@ class Krea2TurboModel
                                            static_cast<int32_t>(cfg.head_dim)});
 
         LogicalId scores = g.dot(q, g.contiguous(g.permute(k, {0, 1, 3, 2})));
+        scores = apply_key_mask(scores, attention_mask, S, cfg.num_heads, S);
         LogicalId probs = softmax_4d(scores, S, cfg.num_heads);
 
         LogicalId attn_out = g.dot(probs, v);
@@ -457,7 +475,8 @@ class Krea2TurboModel
     std::tuple<LogicalId, LogicalId> compute_rope_3d(uint32_t S_text, uint32_t grid_h, uint32_t grid_w,
                                                      uint32_t head_dim)
     {
-        uint32_t S_total = S_text + grid_h * grid_w;
+        uint32_t actual_seq_len = S_text + grid_h * grid_w;
+        uint32_t S_total = actual_seq_len;
         uint32_t half_head_dim = head_dim / 2; // 64
         std::vector<float> freqs_cos(S_total * half_head_dim);
         std::vector<float> freqs_sin(S_total * half_head_dim);
@@ -475,8 +494,11 @@ class Krea2TurboModel
             if (s >= S_text)
             {
                 uint32_t p = s - S_text;
-                pos_h = static_cast<float>(p / grid_w);
-                pos_w = static_cast<float>(p % grid_w);
+                if (p < grid_h * grid_w)
+                {
+                    pos_h = static_cast<float>(p / grid_w);
+                    pos_w = static_cast<float>(p % grid_w);
+                }
             }
 
             uint32_t offset = 0;
@@ -512,7 +534,7 @@ class Krea2TurboModel
         return {cos_node, sin_node};
     }
 
-    LogicalId text_fusion(LogicalId text_raw)
+    LogicalId text_fusion(LogicalId text_raw, LogicalId token_mask)
     {
         // text_raw: [1, text_seq_len, text_num_layers, text_dim] -> [128, 12, 2560]
         uint32_t B_tok = cfg.text_seq_len;      // 128
@@ -523,7 +545,7 @@ class Krea2TurboModel
         for (uint32_t i = 0; i < cfg.num_layerwise_blocks; ++i)
         {
             std::string prefix = "txtfusion.layerwise_blocks." + std::to_string(i) + ".";
-            h = text_fusion_block(h, prefix, B_tok, S_layer);
+            h = text_fusion_block(h, prefix, B_tok, S_layer, token_mask, false);
         }
 
         // Projector: rearrange "(b l) n d -> b l d n", project n=12 -> 1
@@ -543,7 +565,7 @@ class Krea2TurboModel
         for (uint32_t i = 0; i < cfg.num_refiner_blocks; ++i)
         {
             std::string prefix = "txtfusion.refiner_blocks." + std::to_string(i) + ".";
-            fused = text_fusion_block(fused, prefix, 1, B_tok);
+            fused = text_fusion_block(fused, prefix, 1, B_tok, token_mask, true);
         }
 
         LogicalId h_norm = rms_norm(fused, "txtmlp.0.scale", 1, B_tok, cfg.text_dim, cfg.rms_eps);
@@ -553,7 +575,7 @@ class Krea2TurboModel
     }
 
     LogicalId predict_velocity_step(LogicalId latent_id, LogicalId timestep_id, LogicalId txt_tokens,
-                                    LogicalId cos_node, LogicalId sin_node)
+                                    LogicalId cos_node, LogicalId sin_node, LogicalId attention_mask)
     {
         LogicalId t = compute_timestep_embedding(timestep_id); // [1, 1, 6144]
         LogicalId t_gelu = gelu_tanh(t, {1, 1, cfg.time_mlp_dim});
@@ -564,11 +586,12 @@ class Krea2TurboModel
 
         for (uint32_t i = 0; i < cfg.num_layers; ++i)
         {
-            x = single_stream_block(x, i, t_mod, cos_node, sin_node);
+            x = single_stream_block(x, i, t_mod, cos_node, sin_node, attention_mask);
         }
 
         LogicalId x_img = g.slice(x, {0, static_cast<int32_t>(cfg.text_seq_len), 0},
-                                  {1, static_cast<int32_t>(cfg.total_seq_len), static_cast<int32_t>(cfg.hidden_size)});
+                                  {1, static_cast<int32_t>(cfg.text_seq_len + cfg.num_patches),
+                                   static_cast<int32_t>(cfg.hidden_size)});
         x_img = g.contiguous(x_img);
 
         LogicalId x_norm = rms_norm(x_img, "last.norm.scale", cfg.num_patches, cfg.hidden_size, cfg.rms_eps);
@@ -597,16 +620,24 @@ class Krea2TurboModel
 
     LogicalId build_graph(LogicalId latent_id, LogicalId timestep_id, LogicalId text_id)
     {
-        LogicalId txt_tokens = text_fusion(text_id);
+        LogicalId all_text = g.fill(1.0f, {1, cfg.text_seq_len});
+        LogicalId txt_tokens = text_fusion(text_id, all_text);
         auto [cos_node, sin_node] = compute_rope_3d(cfg.text_seq_len, cfg.grid_h, cfg.grid_w, cfg.head_dim);
-        return predict_velocity_step(latent_id, timestep_id, txt_tokens, cos_node, sin_node);
+        LogicalId all_attention = g.fill(1.0f, {1, cfg.total_seq_len});
+        return predict_velocity_step(latent_id, timestep_id, txt_tokens, cos_node, sin_node, all_attention);
     }
 
-    LogicalId build_unrolled_dit(LogicalId initial_latent, LogicalId text_embeddings, uint32_t steps = 8,
-                                 float mu = 1.15f)
+    LogicalId build_unrolled_dit(LogicalId initial_latent, LogicalId text_embeddings, LogicalId token_mask,
+                                 uint32_t steps = 8, float mu = 1.15f)
     {
-        LogicalId txt_tokens = text_fusion(text_embeddings);
+        if (steps == 0)
+            return initial_latent;
+
+        LogicalId txt_tokens = text_fusion(text_embeddings, token_mask);
         auto [cos_node, sin_node] = compute_rope_3d(cfg.text_seq_len, cfg.grid_h, cfg.grid_w, cfg.head_dim);
+
+        LogicalId image_mask = g.fill(1.0f, {1, cfg.num_patches});
+        LogicalId attention_mask = g.concat({token_mask, image_mask}, 1);
 
         std::vector<float> timesteps(steps + 1);
         float exp_mu = std::exp(mu);
@@ -624,7 +655,7 @@ class Krea2TurboModel
             float dt = t_nxt - t_cur;
 
             LogicalId t_node = g.constant({1}, &t_cur, DType::FLOAT32);
-            LogicalId v = predict_velocity_step(cur_latent, t_node, txt_tokens, cos_node, sin_node);
+            LogicalId v = predict_velocity_step(cur_latent, t_node, txt_tokens, cos_node, sin_node, attention_mask);
 
             LogicalId dt_node = g.fill(dt, {1, cfg.latent_channels, cfg.latent_h, cfg.latent_w});
             LogicalId delta = g.mul(v, dt_node);
