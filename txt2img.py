@@ -89,6 +89,8 @@ def main():
         default=0.0,
         help="Minimum required compile time per bucket in seconds",
     )
+    parser.add_argument("--max-time-seconds", type=float, default=None,
+                        help="Maximum time in seconds for the OR-Tools solver")
     parser.add_argument(
         "--disable-caching",
         action="store_true",
@@ -203,6 +205,7 @@ def main():
         disable_caching=args.disable_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
+        max_time_seconds=args.max_time_seconds or 0.0,
     )
 
     tokenizer = load_tokenizer(["Qwen/Qwen3-VL-4B-Instruct"])

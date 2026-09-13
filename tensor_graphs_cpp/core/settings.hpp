@@ -74,6 +74,7 @@ struct Settings
     bool fold_weights = false;
     bool use_ortools = false;
     bool use_ortools_full = false;
+    double max_time_seconds = 0.0;
     // Optional raw weights in bucket insertion order. Session normalizes these
     // when scoring shared cache selections.
     std::vector<float> bucket_weights;

@@ -94,6 +94,8 @@ def main():
         action="store_true",
         help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
     )
+    parser.add_argument("--max-time-seconds", type=float, default=None,
+                        help="Maximum time in seconds for the OR-Tools solver")
     parser.add_argument(
         "--cache-file",
         type=str,
@@ -174,6 +176,7 @@ def main():
         max_sequence_length=args.seq_len,
         use_ortools=args.use_ortools,
         use_ortools_full=args.use_ortools_full,
+        max_time_seconds=args.max_time_seconds or 0.0,
     )
 
     print(f"Loading tokenizer for {args.model}...")

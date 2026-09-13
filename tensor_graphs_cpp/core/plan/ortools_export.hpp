@@ -52,6 +52,8 @@ inline json serializeProblem(
     root_json["min_compile_seconds"] = settings.min_compile_seconds;
     root_json["use_ortools_full"] = settings.use_ortools_full;
     root_json["disable_caching"] = settings.disable_caching;
+    if (settings.max_time_seconds > 0.0)
+        root_json["max_time_seconds"] = settings.max_time_seconds;
 
     // Mem caps
     json mem_caps_json = json::object();
