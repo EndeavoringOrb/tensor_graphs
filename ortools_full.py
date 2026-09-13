@@ -106,7 +106,7 @@ class OrtoolsSolver:
             cap = int(cap)
             if cap < 0:
                 raise ValueError(f"Negative memory cap for {key}")
-            self.caps[key] = min(cap, self.arena_bound)
+            self.caps[key] = cap
         return self.caps[key]
 
     def memoryCapPages(self, mem_space):
@@ -265,7 +265,7 @@ class OrtoolsSolver:
             page_offset, page_size, page_offset + page_size, present, f"{name}_pages"
         )
         rectangles[memSpaceKey(buf["mem_space"])].append(
-            (time_interval, space_interval)
+            (time_interval, space_interval, page_size)
         )
 
     def aliasBuffer(self, node, child, present, is_view):
@@ -280,9 +280,64 @@ class OrtoolsSolver:
         model.Add(node["protected"] == 1).OnlyEnforceIf(present)
         model.Add(node["release"] == horizon).OnlyEnforceIf(present)
 
-    def _extract_greedy_plan(self, bucket):
-        """Pure non-recursive Knuth Dijkstra to calculate optimal grounding and sequence."""
+    def _get_reachable_classes(self, bucket):
+        """Prunes dead and ungrounded classes before model generation to eliminate wasted presolve cycles."""
         classes = {cls["id"]: cls for cls in bucket["classes"]}
+        root_id = bucket["root_eclass_id"]
+
+        grounded = set()
+        parent_enodes = defaultdict(list)
+        remaining = {}
+
+        for cid, cls in classes.items():
+            for enode in cls["enodes"]:
+                key = (cid, enode["enode_idx"])
+                children = [c for c in enode.get("children", []) if c in classes]
+                u_children = set(children)
+                remaining[key] = len(u_children)
+                if len(u_children) == 0:
+                    grounded.add(cid)
+                for child in u_children:
+                    parent_enodes[child].append((cid, key))
+
+        queue = list(grounded)
+        while queue:
+            curr = queue.pop()
+            for p_cid, p_key in parent_enodes[curr]:
+                if remaining[p_key] > 0:
+                    remaining[p_key] -= 1
+                    if remaining[p_key] == 0:
+                        if p_cid not in grounded:
+                            grounded.add(p_cid)
+                            queue.append(p_cid)
+
+        reachable = set()
+        roots = [root_id]
+        if self.caching_enabled:
+            for cand in self.candidates:
+                base_id = cand["base_eclass_id"]
+                for cid, cls in classes.items():
+                    if cls.get("base_eclass_id") == base_id and cid in grounded:
+                        roots.append(cid)
+
+        q = [r for r in roots if r in grounded]
+        while q:
+            curr = q.pop()
+            if curr in reachable:
+                continue
+            reachable.add(curr)
+            cls = classes[curr]
+            for enode in cls["enodes"]:
+                children = [c for c in enode.get("children", []) if c in classes and c in grounded]
+                if len(set(children)) == len(set(enode.get("children", []))):
+                    for child in children:
+                        if child not in reachable:
+                            q.append(child)
+
+        return reachable
+
+    def _extract_greedy_plan(self, bucket, classes):
+        """Non-recursive Knuth Dijkstra to calculate optimal grounding and sequential plan."""
         root_id = bucket["root_eclass_id"]
         
         reserved = {}
@@ -299,6 +354,9 @@ class OrtoolsSolver:
 
         for cid, cls in classes.items():
             has_res = reserved[cid] is not None
+            if cls["mem_space"]["type"] != 0 and self.allocationSize(cls) > self.memoryCap(cls["mem_space"]):
+                continue
+
             for enode in cls["enodes"]:
                 e_idx = enode["enode_idx"]
                 if not self.caching_enabled and (
@@ -371,7 +429,7 @@ class OrtoolsSolver:
         active_cids = set()
         queue = [root_id]
         while queue:
-            curr = queue.pop(0)
+            curr = queue.pop()
             if curr in active_cids:
                 continue
             active_cids.add(curr)
@@ -391,10 +449,11 @@ class OrtoolsSolver:
                     adj[child].append(c)
                     in_degree[c] += 1
 
+        # LIFO (Depth-First) ready queue minimizes peak concurrent activation memory
         queue = [c for c in active_cids if in_degree[c] == 0]
         topo = []
         while queue:
-            curr = queue.pop(0)
+            curr = queue.pop()
             topo.append(curr)
             for nxt in adj[curr]:
                 in_degree[nxt] -= 1
@@ -433,12 +492,60 @@ class OrtoolsSolver:
         valid_enodes = plan["valid_enodes"]
         reserved = plan["reserved"]
 
+        # 1. Greedy In-place Identification
+        topo_pos = {c: i for i, c in enumerate(topo)}
+        reused_children = set()
+        inplace_chosen = {}
+
+        for c in topo:
+            enode = valid_enodes[(c, best_selection[c])]
+            has_res = reserved.get(c) is not None
+            if has_res or enode.get("is_input") or enode.get("is_view"):
+                continue
+
+            safe_idxs = set(enode.get("safe_inplace_idxs", []))
+            children = enode.get("children", [])
+            for idx in sorted(safe_idxs):
+                if not (0 <= idx < len(children)):
+                    continue
+                child_id = children[idx]
+                if child_id not in active_cids or child_id in reused_children:
+                    continue
+                if reserved.get(child_id) is not None:
+                    continue
+                child_enode = valid_enodes[(child_id, best_selection[child_id])]
+                if child_enode.get("is_input") or child_enode.get("is_view"):
+                    continue
+                if nodes[child_id]["mem_space"] != nodes[c]["mem_space"]:
+                    continue
+                if nodes[c]["cls"]["raw_size_bytes"] > nodes[child_id]["cls"]["raw_size_bytes"]:
+                    continue
+
+                consumers = adj[child_id]
+                if not consumers:
+                    continue
+                last_consumer = max(consumers, key=lambda cons: topo_pos[cons])
+                if last_consumer != c:
+                    continue
+
+                inplace_chosen[c] = child_id
+                reused_children.add(child_id)
+                break
+
+        # 2. Synchronize Tensor Lifetimes
         read_end_t, release_t, protected_val = {}, {}, {}
         for c in topo:
             enode = valid_enodes[(c, best_selection[c])]
             has_res = reserved.get(c) is not None
             consumers = adj[c]
-            read_end_t[c] = max([end_t[cons] for cons in consumers] + [end_t[c]])
+
+            if c in reused_children:
+                cons_inplace = [cons for cons in consumers if inplace_chosen.get(cons) == c][0]
+                other_cons = [cons for cons in consumers if cons != cons_inplace]
+                read_end_t[c] = max([end_t[cons] for cons in other_cons] + [end_t[c]])
+                read_end_t[c] = min(read_end_t[c], start_t[cons_inplace])
+            else:
+                read_end_t[c] = max([end_t[cons] for cons in consumers] + [end_t[c]])
 
             if c == root_id or enode.get("is_input") or has_res:
                 release_t[c] = horizon
@@ -448,6 +555,9 @@ class OrtoolsSolver:
                 protected_val[c] = 0
 
         for c in reversed(topo):
+            if c in inplace_chosen:
+                child_id = inplace_chosen[c]
+                release_t[child_id] = max(release_t[child_id], release_t[c])
             enode = valid_enodes[(c, best_selection[c])]
             if enode.get("is_view"):
                 child = enode["children"][0]
@@ -457,6 +567,7 @@ class OrtoolsSolver:
             if c == root_id:
                 read_end_t[c] = horizon
 
+        # 3. Fast 1D Allocator with In-Place Reuse
         preallocated_intervals = defaultdict(list)
         for res in self.preallocated:
             if res["mem_space"]["type"] != 0:
@@ -473,8 +584,11 @@ class OrtoolsSolver:
             enode = valid_enodes[(c, best_selection[c])]
             has_res = reserved.get(c) is not None
             is_view = enode.get("is_view")
-            fresh = not has_res and not is_view
 
+            if c in inplace_chosen or is_view:
+                continue
+
+            fresh = not has_res
             if fresh and node["page_offset"] is not None:
                 ms = memSpaceKey(node["mem_space"])
                 pages = self.alignedSize(node["size"]) // self.alignment
@@ -501,9 +615,8 @@ class OrtoolsSolver:
                 if curr_offset + pages <= self.memoryCapPages(node["mem_space"]):
                     offsets[c] = curr_offset
                     active_allocations[ms].append((release_t[c], curr_offset, curr_offset + pages))
-                else:
-                    offsets[c] = 0
 
+        # 4. Inject Complete Hints
         self.addHint(makespan_var, max(end_t.values()) if end_t else 0)
 
         for cid, node in nodes.items():
@@ -519,13 +632,27 @@ class OrtoolsSolver:
 
                 enode = valid_enodes[(cid, best_selection[cid])]
                 has_res = reserved.get(cid) is not None
-                fresh = 1 if (not has_res and not enode.get("is_view")) else 0
+                is_view = enode.get("is_view")
+                is_inplace = (cid in inplace_chosen)
+                fresh = 1 if (not has_res and not is_view and not is_inplace) else 0
                 self.addHint(node["fresh"], fresh)
 
-                self.addHint(node.get("page_offset"), offsets.get(cid, 0))
+                if node["page_offset"] is not None and type(node["page_offset"]) is not int:
+                    if fresh:
+                        if cid in offsets:
+                            self.addHint(node["page_offset"], offsets[cid])
+                        else:
+                            print(f"[Warning] Fresh tensor {cid} in {node['mem_space']} exceeded cap!")
+                    else:
+                        self.addHint(node["page_offset"], 0)
+
 
                 for e_idx, (sel_var, _) in node["selections"].items():
                     self.addHint(sel_var, 1 if e_idx == best_selection[cid] else 0)
+
+                for inplace_var, child_id in node["inplace_choices"]:
+                    is_in = (cid in inplace_chosen and inplace_chosen[cid] == child_id)
+                    self.addHint(inplace_var, 1 if is_in else 0)
             else:
                 self.addHint(node["active"], 0)
                 self.addHint(node["fresh"], 0)
@@ -541,17 +668,21 @@ class OrtoolsSolver:
                 for sel_var, _ in node["selections"].values():
                     self.addHint(sel_var, 0)
 
-            for inplace_var, _ in node["inplace_choices"]:
-                self.addHint(inplace_var, 0)
+                for inplace_var, _ in node["inplace_choices"]:
+                    self.addHint(inplace_var, 0)
+
             if type(node["cached"]) is not int:
                 self.addHint(node["cached"], 0)
 
     def createBucket(self, bucket):
         model = self.model
         b = bucket["bucket_idx"]
-        classes = {cls["id"]: cls for cls in bucket["classes"]}
+
+        # 1. Prune dead classes prior to model construction
+        reachable = self._get_reachable_classes(bucket)
+        classes = {cls["id"]: cls for cls in bucket["classes"] if cls["id"] in reachable}
         if (
-            len(classes) != len(bucket["classes"])
+            len(classes) == 0
             or bucket["root_eclass_id"] not in classes
         ):
             raise ValueError(f"Invalid eclass ids in bucket {b}")
@@ -562,10 +693,10 @@ class OrtoolsSolver:
             for enode in cls["enodes"]
         }
 
-        # 1. Non-recursive Grounding Pass to tightly bound problem horizon
-        plan = self._extract_greedy_plan(bucket)
+        # 2. Extract Greedy Plan for Tight Horizon
+        plan = self._extract_greedy_plan(bucket, classes)
 
-        # 2. Compute Total Memory Pages to enforce mathematical overflow guard
+        # 3. Enforce mathematical overflow guard against CP-SAT int64_t::max() limits
         total_pages = sum(
             self.alignedSize(cls["size_bytes"]) // self.alignment
             for cls in classes.values()
@@ -885,9 +1016,15 @@ class OrtoolsSolver:
             model.AddNoOverlap(intervals)
             model.Add(makespan >= sum(engine_work[engine]))
 
-        for items in rectangles.values():
+        for ms_key, items in rectangles.items():
             model.AddNoOverlap2D(
                 [item[0] for item in items], [item[1] for item in items]
+            )
+            
+            # Redundant Cumulative constraint for global memory capacity reasoning
+            cap_pages = self.caps[ms_key] // self.alignment
+            model.AddCumulative(
+                [item[0] for item in items], [item[2] for item in items], cap_pages
             )
 
         weight = float(bucket.get("weight", 1.0))
@@ -1076,6 +1213,8 @@ class OrtoolsSolver:
         solver.parameters.log_search_progress = bool(
             self.problem_data.get("print_progress", True)
         )
+        # solver.parameters.linearization_level = 0
+        # solver.parameters.stop_after_first_solution = True
         status = solver.Solve(self.model)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             raise RuntimeError(

@@ -234,10 +234,16 @@ class HeuristicSearchDelegate : public SearchDelegate
         }
         else
         {
-            // Prioritize fitting within memory capacity first
+            // When seeking feasibility, rank by relative memory pressure on the specific device:
             std::stable_sort(res.begin(), res.end(), [&](uint32_t a, uint32_t b) {
-                if (enodes[a].dp_mem != enodes[b].dp_mem)
-                    return enodes[a].dp_mem < enodes[b].dp_mem;
+                double cap_a = enodes[a].mem_cap > 0 ? (double)enodes[a].mem_cap : 1e12;
+                double cap_b = enodes[b].mem_cap > 0 ? (double)enodes[b].mem_cap : 1e12;
+                double pressure_a = (double)enodes[a].dp_mem / cap_a;
+                double pressure_b = (double)enodes[b].dp_mem / cap_b;
+
+                if (std::abs(pressure_a - pressure_b) > 1e-4)
+                    return pressure_a < pressure_b;
+
                 if (enodes[a].dp_cost != enodes[b].dp_cost)
                     return enodes[a].dp_cost < enodes[b].dp_cost;
                 return enodes[a].cost < enodes[b].cost;
