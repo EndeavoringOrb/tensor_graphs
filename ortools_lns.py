@@ -194,7 +194,6 @@ class OrtoolsLnsSolver:
         return OrtoolsSolver(
             candidate_data,
             primary_fixings=fixings,
-            must_change_groups=unfrozen,
             incumbent_assignments=assignments,
         )
 

@@ -155,7 +155,6 @@ def buildCandidate(problem_data, incumbent, neighborhood, timeout_sec):
     return OrtoolsSolver(
         candidate_data,
         primary_fixings=fixings,
-        must_change_groups=neighborhood,
         incumbent_assignments=assignments,
     )
 
@@ -216,13 +215,27 @@ def generateSamples(
         try:
             candidate = candidate_model.solve()
         except RuntimeError as error:
-            if str(error) not in {
-                "OR-Tools full found no feasible joint plan: INFEASIBLE",
-                "OR-Tools full found no feasible joint plan: UNKNOWN",
-            }:
+            error_text = str(error)
+            if error_text == "OR-Tools full found no feasible joint plan: INFEASIBLE":
+                # Infeasibility is a definitive negative label for this
+                # neighborhood.  Treat it like a repair that found no
+                # improvement, while UNKNOWN remains an unresolved timeout.
+                sample = metadataSample(
+                    metadata,
+                    neighborhood,
+                    current_objective,
+                    current_objective,
+                )
+                samples.append(sample)
+                if on_sample is not None:
+                    on_sample(sample)
+                print(f"Recording infeasible candidate repair: {error}")
+                continue
+            if error_text == "OR-Tools full found no feasible joint plan: UNKNOWN":
+                print(f"Skipping candidate repair: {error}")
+                continue
+            else:
                 raise
-            print(f"Skipping candidate repair: {error}")
-            continue
 
         if candidate.get("status") != "OPTIMAL":
             print(
