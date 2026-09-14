@@ -14,6 +14,7 @@ from lns_selectors import (
     NeighborhoodSelector,  # noqa: F401
     RandomNeighborhoodSelector,
     RandomSubgraphSelector,  # noqa: F401
+    StructuralNeighborhoodSelector,  # noqa: F401
 )
 from ortools_cp_model import OrtoolsSolver
 

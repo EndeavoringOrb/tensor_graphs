@@ -1,14 +1,8 @@
 """Neighborhood selectors for exact CP-SAT large neighborhood search."""
 
+from .protocol import NeighborhoodSelector
 from .random import RandomNeighborhoodSelector, RandomSubgraphSelector
-
-
-class NeighborhoodSelector:
-    """Small selector protocol kept dependency-free for custom selectors."""
-
-    def selectNeighborhood(self, context):
-        raise NotImplementedError
-
+from .structural import StructuralNeighborhoodSelector
 
 __all__ = [
     "GnnNeighborhoodSelector",
@@ -16,6 +10,7 @@ __all__ = [
     "NeuralNeighborhoodSelector",
     "RandomNeighborhoodSelector",
     "RandomSubgraphSelector",
+    "StructuralNeighborhoodSelector",
 ]
 
 
