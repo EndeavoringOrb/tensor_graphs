@@ -270,7 +270,7 @@ class OrtoolsLnsSolver:
         }
         return incumbent
 
-
+# TODO: ortools_lns.py shouldn't call OrtoolsSolver. only OrtoolsLnsSolver. make ortools.py that routes to OrtoolsSolver/OrtoolsLnsSolver based on args. remove TENSOR_GRAPHS_USE_LNS from codebase.
 def solveOrtools(problem_data):
     """Unified OR-Tools entry point."""
     use_lns = (
