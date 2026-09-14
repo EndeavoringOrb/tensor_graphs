@@ -1,5 +1,7 @@
+import json
 import heapq
 import math
+import sys
 from collections import defaultdict
 
 from ortools.sat.python import cp_model
@@ -30,7 +32,13 @@ class OrtoolsSolver:
     integer_limit = 2**60
     persistent_end = 2**32 - 1
 
-    def __init__(self, problem_data):
+    def __init__(
+        self,
+        problem_data,
+        primary_fixings=None,
+        must_change_groups=None,
+        incumbent_assignments=None,
+    ):
         self.problem_data = problem_data
         self.model = cp_model.CpModel()
         self.buckets = problem_data["buckets"]
@@ -54,6 +62,10 @@ class OrtoolsSolver:
         ) if problem_data.get("cpu_hints") else {"cached": {}, "buckets": {}}
         self.model_built = False
         self.full_bucket_idx = problem_data["full_bucket_idx"]
+        self.primary_fixings = dict(primary_fixings or {})
+        self.must_change_groups = set(must_change_groups or ())
+        self.incumbent_assignments = dict(incumbent_assignments or {})
+        self.primary_metadata = None
 
         preallocated_extent = 0
         for item in self.preallocated:
@@ -83,6 +95,18 @@ class OrtoolsSolver:
         """Apply one hint supplied by the native compiled-plan witness."""
         if var is not None and hasattr(var, "Index"):
             self.model.AddHint(var, int(val))
+
+    @staticmethod
+    def selectionKey(bucket_idx, eclass_id):
+        return f"selection:{int(bucket_idx)}:{int(eclass_id)}"
+
+    @staticmethod
+    def inplaceKey(bucket_idx, eclass_id):
+        return f"inplace:{int(bucket_idx)}:{int(eclass_id)}"
+
+    @staticmethod
+    def cacheKey(base_eclass_id):
+        return f"cache:{int(base_eclass_id)}"
 
     def addInplaceSourceConstraints(self, node, child_id, inplace):
         """Make an in-place choice follow a selected view chain.
@@ -812,6 +836,192 @@ class OrtoolsSolver:
             }
         )
 
+    def _addSelectionFixing(self, node, value):
+        selected_vars = list(node["selections"].items())
+        for enode_idx, (var, _) in selected_vars:
+            var_value = value is not None and int(enode_idx) == int(value)
+            self.model.Add(var == int(var_value))
+
+    def _addInplaceFixing(self, node, value):
+        for inplace_var, child_id, _ in node["inplace_choices"]:
+            var_value = value is not None and int(child_id) == int(value)
+            self.model.Add(inplace_var == int(var_value))
+
+    def _addPrimaryFixings(self):
+        if not self.primary_fixings and not self.must_change_groups:
+            return
+
+        group_literals = []
+        for bucket_model in self.bucket_models:
+            bucket = bucket_model["bucket"]
+            bucket_idx = int(bucket["bucket_idx"])
+            for eclass_id, node in bucket_model["nodes"].items():
+                selection_key = self.selectionKey(bucket_idx, eclass_id)
+                if selection_key in self.primary_fixings:
+                    self._addSelectionFixing(
+                        node, self.primary_fixings[selection_key]
+                    )
+                if selection_key in self.must_change_groups:
+                    incumbent = self.incumbent_assignments.get(selection_key)
+                    for enode_idx, (var, _) in node["selections"].items():
+                        if incumbent is None:
+                            group_literals.append(var)
+                        else:
+                            group_literals.append(
+                                var.Not()
+                                if int(enode_idx) == int(incumbent)
+                                else var
+                            )
+
+                inplace_key = self.inplaceKey(bucket_idx, eclass_id)
+                if inplace_key in self.primary_fixings:
+                    self._addInplaceFixing(node, self.primary_fixings[inplace_key])
+                if inplace_key in self.must_change_groups:
+                    incumbent = self.incumbent_assignments.get(inplace_key)
+                    for inplace_var, child_id, _ in node["inplace_choices"]:
+                        if incumbent is None:
+                            group_literals.append(inplace_var)
+                        else:
+                            group_literals.append(
+                                inplace_var.Not()
+                                if int(child_id) == int(incumbent)
+                                else inplace_var
+                            )
+
+        for base_eclass_id, (present, _) in self.cache_choices.items():
+            cache_key = self.cacheKey(base_eclass_id)
+            if cache_key in self.primary_fixings:
+                self.model.Add(
+                    present == int(bool(self.primary_fixings[cache_key]))
+                )
+            if cache_key in self.must_change_groups:
+                incumbent = bool(self.incumbent_assignments.get(cache_key, 0))
+                group_literals.append(present.Not() if incumbent else present)
+
+        if self.must_change_groups:
+            if not group_literals:
+                self.model.AddBoolOr([])
+            else:
+                self.model.AddBoolOr(group_literals)
+
+    def getNeighborhoodMetadata(self):
+        """Return selector-facing metadata for the complete CP model.
+
+        The metadata intentionally describes primary decision groups rather than
+        individual timing/allocation variables.  Derived variables remain free
+        during an LNS repair solve and are propagated by the exact model.
+        """
+        groups = {}
+        adjacency = defaultdict(set)
+
+        for bucket_model in self.bucket_models:
+            bucket = bucket_model["bucket"]
+            bucket_idx = int(bucket["bucket_idx"])
+            nodes = bucket_model["nodes"]
+            for eclass_id, node in nodes.items():
+                cls = node["cls"]
+                key = self.selectionKey(bucket_idx, eclass_id)
+                enodes = list(cls.get("enodes", []))
+                costs = []
+                for enode in enodes:
+                    try:
+                        cost = float(enode.get("cost", 0.0) or 0.0)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if math.isfinite(cost):
+                        costs.append(cost)
+                groups[key] = {
+                    "key": key,
+                    "kind": "selection",
+                    "bucket_idx": bucket_idx,
+                    "eclass_id": int(eclass_id),
+                    "base_eclass_id": int(cls.get("base_eclass_id", eclass_id)),
+                    "choice_count": len(node["selections"]),
+                    "selectable": len(node["selections"]) > 1,
+                    "features": [
+                        float(len(node["selections"])),
+                        float(min(costs, default=0.0)),
+                        float(max(costs, default=0.0)),
+                        float(cls.get("size_bytes", 0)),
+                        float(cls.get("raw_size_bytes", 0)),
+                        float(cls.get("mem_space", {}).get("type", 0)),
+                        float(cls.get("mem_space", {}).get("idx", 0)),
+                    ],
+                }
+                adjacency.setdefault(key, set())
+
+                if node["inplace_choices"]:
+                    inplace_key = self.inplaceKey(bucket_idx, eclass_id)
+                    groups[inplace_key] = {
+                        "key": inplace_key,
+                        "kind": "inplace",
+                        "bucket_idx": bucket_idx,
+                        "eclass_id": int(eclass_id),
+                        "base_eclass_id": int(
+                            cls.get("base_eclass_id", eclass_id)
+                        ),
+                        "choice_count": len(node["inplace_choices"]),
+                        "selectable": True,
+                        "features": [
+                            1.0,
+                            float(len(node["inplace_choices"])),
+                            float(cls.get("size_bytes", 0)),
+                            float(cls.get("raw_size_bytes", 0)),
+                            float(cls.get("mem_space", {}).get("type", 0)),
+                            float(cls.get("mem_space", {}).get("idx", 0)),
+                            0.0,
+                        ],
+                    }
+                    adjacency.setdefault(inplace_key, set()).add(key)
+                    adjacency[key].add(inplace_key)
+
+                for enode in enodes:
+                    for child_id in enode.get("children", []):
+                        child_key = self.selectionKey(bucket_idx, child_id)
+                        if child_key in groups:
+                            adjacency[key].add(child_key)
+                            adjacency[child_key].add(key)
+
+        # Add dataflow edges in a second pass so class ordering in the input
+        # cannot hide an edge to a class that was encountered later.
+        for bucket_model in self.bucket_models:
+            bucket_idx = int(bucket_model["bucket"]["bucket_idx"])
+            for eclass_id, node in bucket_model["nodes"].items():
+                key = self.selectionKey(bucket_idx, eclass_id)
+                for enode in node["cls"].get("enodes", []):
+                    for child_id in enode.get("children", []):
+                        child_key = self.selectionKey(bucket_idx, child_id)
+                        if child_key in groups:
+                            adjacency[key].add(child_key)
+                            adjacency[child_key].add(key)
+
+        for base_eclass_id in self.cache_choices:
+            cache_key = self.cacheKey(base_eclass_id)
+            groups[cache_key] = {
+                "key": cache_key,
+                "kind": "cache",
+                "base_eclass_id": int(base_eclass_id),
+                "choice_count": 2,
+                "selectable": True,
+                "features": [2.0, float(base_eclass_id), 0.0, 0.0, 0.0, 0.0, 1.0],
+            }
+            adjacency.setdefault(cache_key, set())
+            for key, group in groups.items():
+                if group.get("base_eclass_id") == int(base_eclass_id):
+                    adjacency[cache_key].add(key)
+                    adjacency[key].add(cache_key)
+
+        return {
+            "groups": groups,
+            "adjacency": {
+                key: sorted(neighbors) for key, neighbors in adjacency.items()
+            },
+            "feature_dim": max(
+                (len(group["features"]) for group in groups.values()),
+                default=0,
+            ),
+        }
+
     def decodeSolution(self, solver, status):
         global_buffers = [
             {
@@ -834,11 +1044,21 @@ class OrtoolsSolver:
             for base_eclass_id, (present, buf) in self.cache_choices.items()
             if solver.Value(present)
         ]
+        include_primary_assignments = bool(
+            self.problem_data.get("include_primary_assignments", False)
+        )
+        primary_assignments = {
+            self.cacheKey(base_eclass_id): int(solver.Value(present))
+            for base_eclass_id, (present, _) in self.cache_choices.items()
+        }
         extractions = []
         
         for bucket_model in self.bucket_models:
             nodes = bucket_model["nodes"]
-            active_cids = set(cid for cid, node in nodes.items() if solver.Value(node["active"]))
+            bucket_idx = int(bucket_model["bucket"]["bucket_idx"])
+            active_cids = {
+                cid for cid, node in nodes.items() if solver.Value(node["active"])
+            }
             
             selections = {}
             for cid in active_cids:
@@ -847,6 +1067,22 @@ class OrtoolsSolver:
                     if solver.Value(present):
                         selections[cid] = enode
                         break
+
+            if include_primary_assignments:
+                for cid, node in nodes.items():
+                    selected_idx = None
+                    for enode_idx, (present, _) in node["selections"].items():
+                        if solver.Value(present):
+                            selected_idx = int(enode_idx)
+                            break
+                    primary_assignments[self.selectionKey(bucket_idx, cid)] = selected_idx
+
+                    inplace_child = None
+                    for inplace_var, child_id, _ in node["inplace_choices"]:
+                        if solver.Value(inplace_var):
+                            inplace_child = int(child_id)
+                            break
+                    primary_assignments[self.inplaceKey(bucket_idx, cid)] = inplace_child
 
             # Reconstruct topological sequence based exactly on solver timestamps
             adj = {cid: [] for cid in active_cids}
@@ -935,7 +1171,7 @@ class OrtoolsSolver:
                 }
             )
             
-        return {
+        result = {
             "solver": "ortools_full",
             "status": solver.StatusName(status),
             "cached_nodes": cached_nodes,
@@ -943,8 +1179,11 @@ class OrtoolsSolver:
             "objective": solver.ObjectiveValue(),
             "best_bound": solver.BestObjectiveBound(),
         }
+        if include_primary_assignments:
+            result["primary_assignments"] = primary_assignments
+        return result
 
-    def solve(self):
+    def buildModel(self):
         if not self.buckets:
             raise ValueError("OR-Tools full requires at least one bucket")
         if len({bucket["bucket_idx"] for bucket in self.buckets}) != len(self.buckets):
@@ -956,8 +1195,13 @@ class OrtoolsSolver:
             for bucket in self.buckets:
                 self.createBucket(bucket)
             self.model.Minimize(sum(self.objective_terms))
-            
+            self._addPrimaryFixings()
             self.model_built = True
+
+        return self
+
+    def solve(self):
+        self.buildModel()
 
         error = self.model.Validate()
         if error:
@@ -974,14 +1218,36 @@ class OrtoolsSolver:
         if num_workers < 0:
             raise ValueError("num_workers must be nonnegative")
         solver.parameters.num_workers = num_workers
-        solver.parameters.log_search_progress = bool(
-            self.problem_data.get("print_progress", True)
+        solver.parameters.log_search_progress = True #bool(self.problem_data.get("print_progress", True))
+        solver.parameters.stop_after_first_solution = bool(
+            self.problem_data.get("stop_after_first_solution", False)
         )
         # solver.parameters.linearization_level = 0
-        # solver.parameters.stop_after_first_solution = True
         status = solver.Solve(self.model)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             raise RuntimeError(
                 f"OR-Tools full found no feasible joint plan: {solver.StatusName(status)}"
             )
         return self.decodeSolution(solver, status)
+
+
+def solveOrtools(problem_data):
+    """Solve one exported problem for the native subprocess bridge."""
+    return OrtoolsSolver(problem_data).solve()
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python ortools_full.py <problem.json> <solution.json>", file=sys.stderr)
+        return 2
+
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        problem_data = json.load(handle)
+    solution = solveOrtools(problem_data)
+    with open(sys.argv[2], "w", encoding="utf-8") as handle:
+        json.dump(solution, handle, indent=2)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

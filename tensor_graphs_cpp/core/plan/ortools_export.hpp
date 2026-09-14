@@ -405,7 +405,12 @@ inline bool runOrtoolsSolverProcess(const std::string &problem_json_path, const 
         LOG(ERROR) << "[Ortools] Solver process exited with code " << ret;
         return false;
     }
-    return std::filesystem::exists(solution_json_path);
+    if (!std::filesystem::exists(solution_json_path))
+    {
+        LOG(ERROR) << "[Ortools] Solver exited successfully but did not create " << solution_json_path;
+        return false;
+    }
+    return true;
 }
 
 } // namespace ortools_export
