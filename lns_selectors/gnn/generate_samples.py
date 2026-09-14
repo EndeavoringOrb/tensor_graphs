@@ -213,7 +213,16 @@ def generateSamples(
         candidate_model = buildCandidate(
             problem_data, incumbent, neighborhood, repair_time_seconds
         )
-        candidate = candidate_model.solve()
+        try:
+            candidate = candidate_model.solve()
+        except RuntimeError as error:
+            if str(error) not in {
+                "OR-Tools full found no feasible joint plan: INFEASIBLE",
+                "OR-Tools full found no feasible joint plan: UNKNOWN",
+            }:
+                raise
+            print(f"Skipping candidate repair: {error}")
+            continue
 
         if candidate.get("status") != "OPTIMAL":
             print(
