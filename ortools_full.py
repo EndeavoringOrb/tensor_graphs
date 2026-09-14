@@ -281,7 +281,11 @@ class OrtoolsSolver:
             cached_value = self.external_hints.get("cached", {}).get(base_eclass_id)
             if cached_value is not None:
                 self.addHint(present, cached_value)
-                if not cached_value and buf.get("page_offset") is not None:
+                if (
+                    not cached_value
+                    and base_eclass_id not in by_base_id
+                    and buf.get("page_offset") is not None
+                ):
                     self.addHint(buf["page_offset"], 0)
             
         self.preallocated_by_base_id = by_base_id
@@ -435,8 +439,6 @@ class OrtoolsSolver:
                     int(active and selection == enode_idx and inplace_child == child_id),
                 )
 
-            if type(node["cached"]) is not int:
-                self.addHint(node["cached"], 0)
 
     def createBucket(self, bucket):
         model = self.model
