@@ -1,27 +1,59 @@
 """Generate supervised samples for the LNS neighborhood-selection GNN.
 
-The input is the same problem JSON accepted by ``ortools_lns.py``.  Each
-sample contains the complete CP model's primary-decision graph, the current
-incumbent runtime, the tested neighborhood, and the optimal repaired runtime
-relative to the incumbent.  Run this script before ``train_gnn.py`` when a
-selector checkpoint is not available yet.
+The input is the same problem JSON accepted by ``ortools_lns.py``.  The run
+stores the complete problem once and appends compact samples containing the
+tested neighborhood and the repaired runtime relative to the incumbent.  Run
+this script before ``train.py`` when a selector checkpoint is not available.
 
 Example::
 
-    .venvx64\\Scripts\\python.exe generate_gnn_samples.py \
-        problem.json runs/lns_samples.json --samples 500
+    .venvx64\\Scripts\\python.exe -m lns_selectors.gnn.generate_samples \
+        problem.json --samples 500
 """
 
 import argparse
 import copy
-import hashlib
-import json
 import math
-import os
 import random
-import tempfile
+import sys
+from pathlib import Path
 
-from lns_selectors.random import RandomNeighborhoodSelector
+if __package__ in (None, ""):
+    # Permit ``python lns_selectors/gnn/generate_samples.py ...`` as well as ``-m``.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from lns_selectors.gnn.common import (
+        CONFIG_FILE,
+        PROBLEM_FILE,
+        SAMPLES_FILE,
+        SAMPLES_ROOT,
+        SampleGenerationConfig,
+        SampleWriter,
+        initializeRun,
+        loadJsonl,
+        loadProblem,
+        problemHash,
+        readJson,
+        resolveRunDirectory,
+        writeJson,
+    )
+    from lns_selectors.random import RandomNeighborhoodSelector
+else:
+    from ..random import RandomNeighborhoodSelector
+    from .common import (
+        CONFIG_FILE,
+        PROBLEM_FILE,
+        SAMPLES_FILE,
+        SAMPLES_ROOT,
+        SampleGenerationConfig,
+        SampleWriter,
+        initializeRun,
+        loadJsonl,
+        loadProblem,
+        problemHash,
+        readJson,
+        resolveRunDirectory,
+        writeJson,
+    )
 from ortools_cp_model import OrtoolsSolver
 
 
@@ -41,9 +73,7 @@ def closeNeighborhood(seeds, metadata, target_size, random_generator):
     """Expand seeds while keeping only groups that can actually change."""
     groups = metadata.get("groups", {})
     adjacency = metadata.get("adjacency", {})
-    selected = {
-        key for key in seeds if key in groups and isChangeable(groups[key])
-    }
+    selected = {key for key in seeds if key in groups and isChangeable(groups[key])}
     frontier = list(selected)
     while frontier and len(selected) < target_size:
         current = frontier.pop()
@@ -137,6 +167,7 @@ def generateSamples(
     max_neighborhood_size=64,
     repair_time_seconds=90.0,
     seed=0,
+    on_sample=None,
 ):
     """Collect random-repair samples from one problem instance."""
     if not problem_data.get("buckets"):
@@ -185,7 +216,9 @@ def generateSamples(
         candidate = candidate_model.solve()
 
         if candidate.get("status") != "OPTIMAL":
-            print(f"Skipping non-OPTIMAL candidate. consider using simpler problem or raising timeout")
+            print(
+                "Skipping non-OPTIMAL candidate. consider using simpler problem or raising timeout"
+            )
             # A FEASIBLE result at the time limit is deliberately excluded.
             continue
 
@@ -195,14 +228,15 @@ def generateSamples(
         ):
             continue
         improvement = current_objective - candidate_objective
-        samples.append(
-            metadataSample(
-                metadata,
-                neighborhood,
-                current_objective,
-                candidate_objective,
-            )
+        sample = metadataSample(
+            metadata,
+            neighborhood,
+            current_objective,
+            candidate_objective,
         )
+        samples.append(sample)
+        if on_sample is not None:
+            on_sample(sample)
         if improvement > 1e-6:
             incumbent_model = candidate_model
             incumbent = candidate
@@ -212,102 +246,110 @@ def generateSamples(
     return samples
 
 
-def loadProblem(path):
-    with open(path, "r", encoding="utf-8") as handle:
-        problem_data = json.load(handle)
-    if not isinstance(problem_data, dict):
-        raise TypeError("The problem file must contain a JSON object")
-    print(f"Loaded problem")
-    return problem_data
-
-
-def problemId(problem_data):
-    """Return a stable identity for one complete problem description."""
-    encoded = json.dumps(
-        problem_data, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _sampleStore(existing):
-    """Normalize current and legacy files to the appendable store schema."""
-    if isinstance(existing, dict) and isinstance(existing.get("problems"), dict):
-        return existing
-    if isinstance(existing, list):
-        # Do not throw away files created by the previous generator.  They do
-        # not have a problem identity, so retain them in a legacy bucket.
-        return {
-            "format": "tensor_graphs_gnn_samples",
-            "version": 2,
-            "problems": {"legacy": {"samples": existing}},
-        }
-    if existing is None:
-        return {
-            "format": "tensor_graphs_gnn_samples",
-            "version": 2,
-            "problems": {},
-        }
-    raise ValueError("The existing training sample file must contain a list or store")
-
-
-def saveSamples(samples, path, problem_id="default"):
-    """Append samples under one problem key without discarding old samples."""
-    output_directory = os.path.dirname(os.path.abspath(path))
-    if output_directory:
-        os.makedirs(output_directory, exist_ok=True)
-
-    existing = None
-    if os.path.exists(path) and os.path.getsize(path) > 0:
-        with open(path, "r", encoding="utf-8") as handle:
-            existing = json.load(handle)
-    store = _sampleStore(existing)
-    problems = store.setdefault("problems", {})
-    problem_entry = problems.setdefault(problem_id, {"samples": []})
-    if isinstance(problem_entry, list):
-        problem_entry = {"samples": problem_entry}
-        problems[problem_id] = problem_entry
-    problem_entry.setdefault("samples", []).extend(samples)
-    temporary_path = None
-    try:
-        descriptor, temporary_path = tempfile.mkstemp(
-            dir=output_directory, prefix=".gnn_samples_", suffix=".tmp"
-        )
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(store, handle)
-        os.replace(temporary_path, path)
-        temporary_path = None
-    finally:
-        if temporary_path is not None and os.path.exists(temporary_path):
-            os.remove(temporary_path)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("problem", help="Problem JSON accepted by ortools_lns.py")
-    parser.add_argument("output", help="Output JSON sample file")
-    parser.add_argument("--samples", type=int, default=500)
-    parser.add_argument("--neighborhood-size", type=int, default=15)
-    parser.add_argument("--max-neighborhood-size", type=int, default=64)
+    parser.add_argument(
+        "problem",
+        nargs="?",
+        help="Problem JSON accepted by ortools_lns.py (required for a new run)",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        metavar="INDEX",
+        help="Resume the latest run, or the numbered run INDEX",
+    )
+    parser.add_argument("--samples-root", default=str(SAMPLES_ROOT))
+    parser.add_argument("--samples", type=int, default=None)
+    parser.add_argument("--neighborhood-size", type=int, default=None)
+    parser.add_argument("--max-neighborhood-size", type=int, default=None)
     parser.add_argument(
         "--repair-time",
         type=float,
-        default=90.0,
+        default=None,
         help="Optimal-solve timeout for each repair neighborhood (seconds)",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
 
-    problem_data = loadProblem(args.problem)
-    samples = generateSamples(
-        problem_data,
-        sample_count=args.samples,
-        neighborhood_size=args.neighborhood_size,
-        max_neighborhood_size=args.max_neighborhood_size,
-        repair_time_seconds=args.repair_time,
-        seed=args.seed,
+    if args.resume is None and not args.problem:
+        parser.error("problem is required when starting a new run")
+    run_directory = resolveRunDirectory(args.samples_root, args.resume)
+    if args.resume is None:
+        config = SampleGenerationConfig(
+            sample_count=args.samples if args.samples is not None else 500,
+            neighborhood_size=args.neighborhood_size
+            if args.neighborhood_size is not None
+            else 15,
+            max_neighborhood_size=(
+                args.max_neighborhood_size
+                if args.max_neighborhood_size is not None
+                else 64
+            ),
+            repair_time=args.repair_time if args.repair_time is not None else 90.0,
+            seed=args.seed if args.seed is not None else 0,
+        )
+        problem_data = initializeRun(args.problem, run_directory, config)
+    else:
+        problem_data = loadProblem(run_directory / PROBLEM_FILE)
+        saved_config = readJson(run_directory / CONFIG_FILE)
+        config = SampleGenerationConfig(
+            sample_count=args.samples
+            if args.samples is not None
+            else saved_config["sample_count"],
+            neighborhood_size=(
+                args.neighborhood_size
+                if args.neighborhood_size is not None
+                else saved_config["neighborhood_size"]
+            ),
+            max_neighborhood_size=(
+                args.max_neighborhood_size
+                if args.max_neighborhood_size is not None
+                else saved_config["max_neighborhood_size"]
+            ),
+            repair_time=(
+                args.repair_time
+                if args.repair_time is not None
+                else saved_config.get(
+                    "repair_time", saved_config.get("repair_time_seconds", 90.0)
+                )
+            ),
+            seed=args.seed if args.seed is not None else saved_config["seed"],
+        )
+        writeJson(run_directory / CONFIG_FILE, config.toDict())
+
+    samples_path = run_directory / SAMPLES_FILE
+    existing_count = len(loadJsonl(samples_path))
+    if existing_count >= config.sample_count:
+        print(
+            f"[generate_samples] run already contains {existing_count} samples: {run_directory}"
+        )
+        return
+
+    emitted_count = 0
+
+    def appendNewSample(sample):
+        nonlocal emitted_count
+        if emitted_count >= existing_count:
+            writer.append(sample)
+        emitted_count += 1
+
+    with SampleWriter(samples_path) as writer:
+        generateSamples(
+            problem_data,
+            sample_count=config.sample_count,
+            neighborhood_size=config.neighborhood_size,
+            max_neighborhood_size=config.max_neighborhood_size,
+            repair_time_seconds=config.repair_time,
+            seed=config.seed,
+            on_sample=appendNewSample,
+        )
+    print(
+        f"[generate_samples] run={run_directory.name} "
+        f"samples={max(existing_count, emitted_count)} "
+        f"problem_hash={problemHash(problem_data)}"
     )
-    saveSamples(samples, args.output, problemId(problem_data))
-    print(f"[generate_gnn_samples] wrote {len(samples)} samples to {args.output}")
 
 
 if __name__ == "__main__":

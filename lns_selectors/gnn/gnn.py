@@ -1,16 +1,12 @@
-"""Graph neural neighborhood selector and model definition.
+"""Graph neural neighborhood selector and model definition."""
 
-The training entry point lives in the root-level ``train_gnn.py`` script so
-this module remains focused on inference and model architecture.
-"""
-
-import math
 import random
 
 import torch
 from torch import nn
 
-from .random import RandomNeighborhoodSelector
+from ..random import RandomNeighborhoodSelector
+from .common import metadataGraph
 
 
 class GraphMessageLayer(nn.Module):
@@ -105,9 +101,7 @@ class GnnNeighborhoodSelector:
         self.hidden_dim = int(hidden_dim)
         self.layers = int(layers)
         self.random = random.Random(seed)
-        self.device = device or (
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.model_path = model_path
         self.runtime_available = False
@@ -118,7 +112,9 @@ class GnnNeighborhoodSelector:
         checkpoint = torch.load(model_path, map_location=self.device)
         feature_dim = int(checkpoint["feature_dim"])
         self.model = NeighborhoodGnn(
-            feature_dim, checkpoint.get("hidden_dim", self.hidden_dim), checkpoint.get("layers", self.layers)
+            feature_dim,
+            checkpoint.get("hidden_dim", self.hidden_dim),
+            checkpoint.get("layers", self.layers),
         ).to(self.device)
         # Former checkpoints do not have a runtime head.  Shared encoder
         # weights can still be loaded while a runtime checkpoint is trained.
@@ -130,24 +126,16 @@ class GnnNeighborhoodSelector:
 
     def _tensorize(self, context):
         metadata = context.get("metadata", {})
-        groups = metadata.get("groups", {})
-        keys = list(groups)
+        keys, features, edges = metadataGraph(metadata)
         feature_dim = int(metadata.get("feature_dim", 0))
         if not keys or feature_dim <= 0:
             return keys, None, None
-        features = []
-        for key in keys:
-            row = list(groups[key].get("features", []))[:feature_dim]
-            row.extend([0.0] * (feature_dim - len(row)))
-            features.append([0.0 if not math.isfinite(float(value)) else float(value) for value in row])
-        index = {key: position for position, key in enumerate(keys)}
-        edges = []
-        for source, neighbors in metadata.get("adjacency", {}).items():
-            for target in neighbors:
-                if source in index and target in index:
-                    edges.append((index[source], index[target]))
         node_features = torch.tensor(features, dtype=torch.float32, device=self.device)
-        edge_index = torch.tensor(edges, dtype=torch.long, device=self.device).t().contiguous() if edges else torch.empty((2, 0), dtype=torch.long, device=self.device)
+        edge_index = (
+            torch.tensor(edges, dtype=torch.long, device=self.device).t().contiguous()
+            if edges
+            else torch.empty((2, 0), dtype=torch.long, device=self.device)
+        )
         return keys, node_features, edge_index
 
     def selectNeighborhood(self, context):
@@ -159,7 +147,9 @@ class GnnNeighborhoodSelector:
         if not candidates:
             return set()
         if self.model is None or node_features is None:
-            return RandomNeighborhoodSelector(self.target_size, seed=self.random.randrange(2**31)).selectNeighborhood(context)
+            return RandomNeighborhoodSelector(
+                self.target_size, seed=self.random.randrange(2**31)
+            ).selectNeighborhood(context)
 
         with torch.inference_mode():
             if not self.runtime_available:
@@ -186,9 +176,7 @@ class GnnNeighborhoodSelector:
                 .cpu()
                 .tolist()
             )
-        ranked = sorted(
-            zip(candidates, scores), key=lambda item: item[1]
-        )
+        ranked = sorted(zip(candidates, scores), key=lambda item: item[1])
         return {key for key, _ in ranked[: self.target_size]}
 
     def selectUnfrozenNodes(self, *args):
@@ -200,8 +188,17 @@ class GnnNeighborhoodSelector:
             selection_map = args[1]
             order = args[2]
             return RandomNeighborhoodSelector(self.target_size).selectUnfrozenNodes(
-                args[0], selection_map, order, args[3], args[4], args[5], args[6], classes_by_id, args[8]
+                args[0],
+                selection_map,
+                order,
+                args[3],
+                args[4],
+                args[5],
+                args[6],
+                classes_by_id,
+                args[8],
             )
         raise TypeError("Expected a full model context")
+
 
 NeuralNeighborhoodSelector = GnnNeighborhoodSelector

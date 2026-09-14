@@ -1,6 +1,5 @@
 """Neighborhood selectors for exact CP-SAT large neighborhood search."""
 
-from .gnn import GnnNeighborhoodSelector, NeuralNeighborhoodSelector
 from .random import RandomNeighborhoodSelector, RandomSubgraphSelector
 
 
@@ -18,3 +17,15 @@ __all__ = [
     "RandomNeighborhoodSelector",
     "RandomSubgraphSelector",
 ]
+
+
+def __getattr__(name):
+    """Load the optional torch-backed selector only when it is requested."""
+    if name in {"GnnNeighborhoodSelector", "NeuralNeighborhoodSelector"}:
+        from .gnn import GnnNeighborhoodSelector, NeuralNeighborhoodSelector
+
+        return {
+            "GnnNeighborhoodSelector": GnnNeighborhoodSelector,
+            "NeuralNeighborhoodSelector": NeuralNeighborhoodSelector,
+        }[name]
+    raise AttributeError(name)
