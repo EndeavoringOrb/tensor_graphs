@@ -74,6 +74,9 @@ struct Settings
     bool fold_weights = false;
     bool use_ortools = false;
     bool use_ortools_full = false;
+    // Restrict native planning to operations that can execute on the CPU.
+    // This is used to produce a portable feasible witness for OR-Tools.
+    bool cpu_only = false;
     double max_time_seconds = 0.0;
     // Optional raw weights in bucket insertion order. Session normalizes these
     // when scoring shared cache selections.

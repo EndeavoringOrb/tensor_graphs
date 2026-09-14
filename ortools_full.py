@@ -1,8 +1,10 @@
-import math
 import heapq
+import math
 from collections import defaultdict
 
 from ortools.sat.python import cp_model
+
+from ortools_hints import compiledGraphsToHints
 
 
 def memSpaceKey(mem_space):
@@ -33,8 +35,8 @@ class OrtoolsSolver:
         self.model = cp_model.CpModel()
         self.buckets = problem_data["buckets"]
         self.caching_enabled = not problem_data["disable_caching"]
-        self.candidates = problem_data["candidates"] if self.caching_enabled else []
-        self.preallocated = problem_data["preallocated_buffers"]
+        self.candidates = problem_data.get("candidates", []) if self.caching_enabled else []
+        self.preallocated = problem_data.get("preallocated_buffers", [])
         self.mem_caps = problem_data["mem_caps"]
         self.next_buffer_id = (
             max((int(item["buffer_id"]) for item in self.preallocated), default=-1) + 1
@@ -46,7 +48,10 @@ class OrtoolsSolver:
         self.caps = {}
         self.preallocated_by_base_id = {}
         self.candidates_by_base_id = {}
-        self.hints = {}
+        self.inplace_nodes = {}
+        self.external_hints = compiledGraphsToHints(
+            problem_data, problem_data.get("cpu_hints", [])
+        ) if problem_data.get("cpu_hints") else {"cached": {}, "buckets": {}}
         self.model_built = False
         self.full_bucket_idx = problem_data["full_bucket_idx"]
 
@@ -75,9 +80,52 @@ class OrtoolsSolver:
             raise ValueError("OR-Tools full problem exceeds the integer memory range")
 
     def addHint(self, var, val):
-        """Safely record unique hints by variable index to prevent CP-SAT validation errors."""
+        """Apply one hint supplied by the native compiled-plan witness."""
         if var is not None and hasattr(var, "Index"):
-            self.hints[var.Index()] = (var, int(val))
+            self.model.AddHint(var, int(val))
+
+    def addInplaceSourceConstraints(self, node, child_id, inplace):
+        """Make an in-place choice follow a selected view chain.
+
+        Native bufferization resolves a safe in-place operand to the underlying
+        non-view eclass before checking size, memory space, and last use.  The
+        CP model must apply those checks to the same terminal source while
+        retaining the direct child for source reconstruction during decoding.
+        """
+
+        def visit(source_id, conditions, seen):
+            source = self.inplace_nodes.get(source_id)
+            if source is None or source_id in seen:
+                self.model.Add(inplace == 0).OnlyEnforceIf(conditions)
+                return
+
+            next_seen = seen | {source_id}
+            for selected, enode in source["selections"].values():
+                path = conditions + [selected]
+                children = enode.get("children", [])
+                if enode.get("is_view"):
+                    if not children:
+                        self.model.Add(inplace == 0).OnlyEnforceIf(path)
+                    else:
+                        visit(int(children[0]), path, next_seen)
+                    continue
+
+                compatible = (
+                    not enode.get("is_input")
+                    and not enode.get("is_cache")
+                    and enode.get("mem_space", source["mem_space"])
+                    == node["mem_space"]
+                    and int(node["cls"]["raw_size_bytes"])
+                    <= int(source["cls"]["raw_size_bytes"])
+                )
+                if not compatible:
+                    self.model.Add(inplace == 0).OnlyEnforceIf(path)
+                else:
+                    # The terminal source, rather than a view's temporary
+                    # eclass, must be dead before the overwrite begins.
+                    self.model.Add(source["read_end"] <= node["start"]).OnlyEnforceIf(path)
+
+        visit(int(child_id), [inplace], set())
 
     def alignedSize(self, size):
         size = int(size)
@@ -228,11 +276,13 @@ class OrtoolsSolver:
                 
                 if page_offset is not None and type(page_offset) is not int:
                     self.model.Add(page_offset == 0).OnlyEnforceIf(present.Not())
-                    self.addHint(page_offset, 0)
-                
                 self.global_buffers.append(buf)
             self.cache_choices[base_eclass_id] = (present, buf)
-            self.addHint(present, 0)
+            cached_value = self.external_hints.get("cached", {}).get(base_eclass_id)
+            if cached_value is not None:
+                self.addHint(present, cached_value)
+                if not cached_value and buf.get("page_offset") is not None:
+                    self.addHint(buf["page_offset"], 0)
             
         self.preallocated_by_base_id = by_base_id
 
@@ -336,340 +386,54 @@ class OrtoolsSolver:
 
         return reachable
 
-    def _extract_greedy_plan(self, bucket, classes):
-        """Non-recursive Knuth Dijkstra to calculate optimal grounding and sequential plan."""
-        root_id = bucket["root_eclass_id"]
-        
-        reserved = {}
-        for cid, cls in classes.items():
-            base_id = cls["base_eclass_id"]
-            res = self.preallocated_by_base_id.get(base_id)
-            if res is not None and not self.matchesBuffer(cls, res):
-                res = None
-            reserved[cid] = res
+    def applyExternalHints(self, plan, nodes, horizon, makespan):
+        """Hint the CP model with the native extraction choices.
 
-        parent_enodes = defaultdict(list)
-        remaining_children = {}
-        valid_enodes = {}
-
-        for cid, cls in classes.items():
-            has_res = reserved[cid] is not None
-            if cls["mem_space"]["type"] != 0 and self.allocationSize(cls) > self.memoryCap(cls["mem_space"]):
-                continue
-
-            for enode in cls["enodes"]:
-                e_idx = enode["enode_idx"]
-                if not self.caching_enabled and (
-                    enode.get("is_cache") or enode.get("is_scatter")
-                ):
-                    continue
-                dur = self.duration(enode)
-                if dur is None:
-                    continue
-                children = enode.get("children", [])
-                if any(c not in classes for c in children):
-                    continue
-                if enode.get("mem_space", cls["mem_space"]) != cls["mem_space"]:
-                    continue
-                if enode.get("is_cache") or enode.get("is_scatter"):
-                    continue
-                if enode.get("is_view"):
-                    if not children or classes[children[0]]["mem_space"] != cls["mem_space"]:
-                        continue
-                    if has_res:
-                        continue
-                if enode.get("is_input") and children:
-                    continue
-
-                key = (cid, e_idx)
-                valid_enodes[key] = enode
-                u_children = set(children)
-                remaining_children[key] = len(u_children)
-                for child in u_children:
-                    parent_enodes[child].append(key)
-
-        best_cost = {}
-        best_selection = {}
-        pq = []
-
-        for (cid, e_idx), enode in valid_enodes.items():
-            if remaining_children[(cid, e_idx)] == 0:
-                cost = self.duration(enode) or 0
-                if cid not in best_cost or cost < best_cost[cid]:
-                    best_cost[cid] = cost
-                    best_selection[cid] = e_idx
-                    heapq.heappush(pq, (cost, cid))
-
-        settled = set()
-        while pq:
-            curr_cost, cid = heapq.heappop(pq)
-            if cid in settled:
-                continue
-            settled.add(cid)
-            if cid == root_id:
-                break
-
-            for p_cid, p_e_idx in parent_enodes[cid]:
-                if remaining_children[(p_cid, p_e_idx)] > 0:
-                    remaining_children[(p_cid, p_e_idx)] -= 1
-                    if remaining_children[(p_cid, p_e_idx)] == 0:
-                        p_enode = valid_enodes[(p_cid, p_e_idx)]
-                        p_dur = self.duration(p_enode) or 0
-                        p_cost = p_dur + sum(
-                            best_cost[c] for c in set(p_enode.get("children", []))
-                        )
-                        if p_cid not in best_cost or p_cost < best_cost[p_cid]:
-                            best_cost[p_cid] = p_cost
-                            best_selection[p_cid] = p_e_idx
-                            heapq.heappush(pq, (p_cost, p_cid))
-
-        if root_id not in best_selection:
-            return None
-
-        active_cids = set()
-        queue = [root_id]
-        while queue:
-            curr = queue.pop()
-            if curr in active_cids:
-                continue
-            active_cids.add(curr)
-            e_idx = best_selection[curr]
-            enode = valid_enodes[(curr, e_idx)]
-            for child in set(enode.get("children", [])):
-                if child in classes and child in best_selection:
-                    queue.append(child)
-
-        adj = {c: [] for c in active_cids}
-        in_degree = {c: 0 for c in active_cids}
-        for c in active_cids:
-            e_idx = best_selection[c]
-            enode = valid_enodes[(c, e_idx)]
-            for child in set(enode.get("children", [])):
-                if child in active_cids:
-                    adj[child].append(c)
-                    in_degree[c] += 1
-
-        # LIFO (Depth-First) ready queue minimizes peak concurrent activation memory
-        queue = [c for c in active_cids if in_degree[c] == 0]
-        topo = []
-        while queue:
-            curr = queue.pop()
-            topo.append(curr)
-            for nxt in adj[curr]:
-                in_degree[nxt] -= 1
-                if in_degree[nxt] == 0:
-                    queue.append(nxt)
-
-        t = 0
-        start_t, end_t = {}, {}
-        for c in topo:
-            start_t[c] = t
-            dur = self.duration(valid_enodes[(c, best_selection[c])]) or 0
-            end_t[c] = t + dur
-            t = end_t[c]
-
-        return {
-            "root_id": root_id,
-            "best_selection": best_selection,
-            "active_cids": active_cids,
-            "topo": topo,
-            "adj": adj,
-            "start_t": start_t,
-            "end_t": end_t,
-            "hint_makespan": t,
-            "valid_enodes": valid_enodes,
-            "reserved": reserved,
-        }
-
-    def _apply_hints(self, plan, nodes, horizon, makespan_var):
-        root_id = plan["root_id"]
-        active_cids = plan["active_cids"]
-        best_selection = plan["best_selection"]
-        topo = plan["topo"]
-        adj = plan["adj"]
-        start_t = plan["start_t"]
-        end_t = plan["end_t"]
-        valid_enodes = plan["valid_enodes"]
-        reserved = plan["reserved"]
-
-        # 1. Greedy In-place Identification
-        topo_pos = {c: i for i, c in enumerate(topo)}
-        reused_children = set()
-        inplace_chosen = {}
-
-        for c in topo:
-            enode = valid_enodes[(c, best_selection[c])]
-            has_res = reserved.get(c) is not None
-            if has_res or enode.get("is_input") or enode.get("is_view"):
-                continue
-
-            safe_idxs = set(enode.get("safe_inplace_idxs", []))
-            children = enode.get("children", [])
-            for idx in sorted(safe_idxs):
-                if not (0 <= idx < len(children)):
-                    continue
-                child_id = children[idx]
-                if child_id not in active_cids or child_id in reused_children:
-                    continue
-                if reserved.get(child_id) is not None:
-                    continue
-                child_enode = valid_enodes[(child_id, best_selection[child_id])]
-                if child_enode.get("is_input") or child_enode.get("is_view"):
-                    continue
-                if nodes[child_id]["mem_space"] != nodes[c]["mem_space"]:
-                    continue
-                if nodes[c]["cls"]["raw_size_bytes"] > nodes[child_id]["cls"]["raw_size_bytes"]:
-                    continue
-
-                consumers = adj[child_id]
-                if not consumers:
-                    continue
-                last_consumer = max(consumers, key=lambda cons: topo_pos[cons])
-                if last_consumer != c:
-                    continue
-
-                inplace_chosen[c] = child_id
-                reused_children.add(child_id)
-                break
-
-        # 2. Synchronize Tensor Lifetimes
-        read_end_t, release_t, protected_val = {}, {}, {}
-        for c in topo:
-            enode = valid_enodes[(c, best_selection[c])]
-            has_res = reserved.get(c) is not None
-            consumers = adj[c]
-
-            if c in reused_children:
-                cons_inplace = [cons for cons in consumers if inplace_chosen.get(cons) == c][0]
-                other_cons = [cons for cons in consumers if cons != cons_inplace]
-                read_end_t[c] = max([end_t[cons] for cons in other_cons] + [end_t[c]])
-                read_end_t[c] = min(read_end_t[c], start_t[cons_inplace])
-            else:
-                read_end_t[c] = max([end_t[cons] for cons in consumers] + [end_t[c]])
-
-            if c == root_id or enode.get("is_input") or has_res:
-                release_t[c] = horizon
-                protected_val[c] = 1
-            else:
-                release_t[c] = read_end_t[c]
-                protected_val[c] = 0
-
-        for c in reversed(topo):
-            if c in inplace_chosen:
-                child_id = inplace_chosen[c]
-                release_t[child_id] = max(release_t[child_id], release_t[c])
-            enode = valid_enodes[(c, best_selection[c])]
-            if enode.get("is_view"):
-                child = enode["children"][0]
-                read_end_t[child] = max(read_end_t.get(child, 0), read_end_t[c])
-                release_t[child] = max(release_t.get(child, 0), release_t[c])
-                protected_val[c] = protected_val[child]
-            if c == root_id:
-                read_end_t[c] = horizon
-
-        # 3. Fast 1D Allocator with In-Place Reuse
-        preallocated_intervals = defaultdict(list)
-        for res in self.preallocated:
-            if res["mem_space"]["type"] != 0:
-                ms = memSpaceKey(res["mem_space"])
-                pages = self.alignedSize(res["size"]) // self.alignment
-                start_page = res["offset"] // self.alignment
-                preallocated_intervals[ms].append((start_page, start_page + pages))
-
-        offsets = {}
-        active_allocations = defaultdict(list)
-
-        for c in topo:
-            node = nodes[c]
-            enode = valid_enodes[(c, best_selection[c])]
-            has_res = reserved.get(c) is not None
-            is_view = enode.get("is_view")
-
-            if c in inplace_chosen or is_view:
-                continue
-
-            fresh = not has_res
-            if fresh and node["page_offset"] is not None:
-                ms = memSpaceKey(node["mem_space"])
-                pages = self.alignedSize(node["size"]) // self.alignment
-                if pages == 0:
-                    offsets[c] = 0
-                    continue
-
-                cur_t = start_t[c]
-                active_allocations[ms] = [
-                    alloc for alloc in active_allocations[ms] if alloc[0] > cur_t
-                ]
-
-                live_intervals = [
-                    (sp, ep) for (_, sp, ep) in active_allocations[ms]
-                ] + preallocated_intervals[ms]
-                live_intervals.sort()
-
-                curr_offset = 0
-                for sp, ep in live_intervals:
-                    if curr_offset + pages <= sp:
-                        break
-                    curr_offset = max(curr_offset, ep)
-
-                if curr_offset + pages <= self.memoryCapPages(node["mem_space"]):
-                    offsets[c] = curr_offset
-                    active_allocations[ms].append((release_t[c], curr_offset, curr_offset + pages))
-
-        # 4. Inject Complete Hints
-        self.addHint(makespan_var, max(end_t.values()) if end_t else 0)
+        The native witness and this model use the same selected eclasses,
+        alias sources, lifetimes, and arena offsets.  Every variable belonging
+        to this bucket is assigned so CP-SAT can validate the native witness
+        before searching for an improvement.
+        """
+        hinted_nodes = plan.get("nodes", {})
+        self.addHint(makespan, int(plan.get("makespan", 0)))
 
         for cid, node in nodes.items():
-            if cid in active_cids:
-                self.addHint(node["active"], 1)
-                self.addHint(node["start"], start_t[cid])
-                self.addHint(node["end"], end_t[cid])
-                self.addHint(node["read_end"], read_end_t[cid])
-                self.addHint(node["release"], release_t[cid])
-                self.addHint(node["protected"], protected_val[cid])
-                if "lifetime" in node:
-                    self.addHint(node["lifetime"], release_t[cid] - start_t[cid])
+            hint = hinted_nodes.get(cid)
+            active = hint is not None and int(hint.get("active", 0)) != 0
 
-                enode = valid_enodes[(cid, best_selection[cid])]
-                has_res = reserved.get(cid) is not None
-                is_view = enode.get("is_view")
-                is_inplace = (cid in inplace_chosen)
-                fresh = 1 if (not has_res and not is_view and not is_inplace) else 0
-                self.addHint(node["fresh"], fresh)
+            self.addHint(node["active"], int(active))
+            self.addHint(node["fresh"], int(hint.get("fresh", 0)) if active else 0)
+            self.addHint(node["protected"], int(hint.get("protected", 0)) if active else 0)
+            self.addHint(node["start"], int(hint.get("start", 0)) if active else 0)
+            self.addHint(node["end"], int(hint.get("end", 0)) if active else 0)
+            read_end = int(hint.get("read_end", 0)) if active else 0
+            if active and int(hint.get("release_horizon", 0)):
+                read_end = horizon if int(cid) == int(plan.get("root_id", -1)) else read_end
+            release = int(hint.get("release", 0)) if active else 0
+            if active and int(hint.get("release_horizon", 0)):
+                release = horizon
+            self.addHint(node["read_end"], read_end)
+            self.addHint(node["release"], release)
+            if node["page_offset"] is not None:
+                self.addHint(node["page_offset"], int(hint.get("page_offset", 0)) if active else 0)
+            if "lifetime" in node:
+                lifetime = (
+                    release - (int(hint.get("start", 0)) if active else 0)
+                    if active
+                    else 0
+                )
+                self.addHint(node["lifetime"], lifetime)
 
-                if node["page_offset"] is not None and type(node["page_offset"]) is not int:
-                    if fresh:
-                        if cid in offsets:
-                            self.addHint(node["page_offset"], offsets[cid])
-                        else:
-                            print(f"[Warning] Fresh tensor {cid} in {node['mem_space']} exceeded cap!")
-                    else:
-                        self.addHint(node["page_offset"], 0)
+            selection = hint.get("selection") if active else None
+            for e_idx, (selection_var, _) in node["selections"].items():
+                self.addHint(selection_var, int(selection == e_idx))
 
-
-                for e_idx, (sel_var, _) in node["selections"].items():
-                    self.addHint(sel_var, 1 if e_idx == best_selection[cid] else 0)
-
-                for inplace_var, child_id in node["inplace_choices"]:
-                    is_in = (cid in inplace_chosen and inplace_chosen[cid] == child_id)
-                    self.addHint(inplace_var, 1 if is_in else 0)
-            else:
-                self.addHint(node["active"], 0)
-                self.addHint(node["fresh"], 0)
-                self.addHint(node["protected"], 0)
-                self.addHint(node["start"], 0)
-                self.addHint(node["end"], 0)
-                self.addHint(node["read_end"], 0)
-                self.addHint(node["release"], 0)
-                if "lifetime" in node:
-                    self.addHint(node["lifetime"], 0)
-
-                self.addHint(node.get("page_offset"), 0)
-                for sel_var, _ in node["selections"].values():
-                    self.addHint(sel_var, 0)
-
-                for inplace_var, _ in node["inplace_choices"]:
-                    self.addHint(inplace_var, 0)
+            inplace_child = hint.get("inplace") if active else None
+            for inplace_var, child_id, enode_idx in node["inplace_choices"]:
+                self.addHint(
+                    inplace_var,
+                    int(active and selection == enode_idx and inplace_child == child_id),
+                )
 
             if type(node["cached"]) is not int:
                 self.addHint(node["cached"], 0)
@@ -693,8 +457,10 @@ class OrtoolsSolver:
             for enode in cls["enodes"]
         }
 
-        # 2. Extract Greedy Plan for Tight Horizon
-        plan = self._extract_greedy_plan(bucket, classes)
+        # 2. Reserve enough integer time for the native CPU witness.  The
+        # witness itself is produced by the C++ iterative search and is only
+        # a starting point for this model.
+        plan = self.external_hints.get("buckets", {}).get(b)
 
         # 3. Enforce mathematical overflow guard against CP-SAT int64_t::max() limits
         total_pages = sum(
@@ -707,23 +473,22 @@ class OrtoolsSolver:
         )
         max_safe_horizon = (2**62 - 1) // max(1, total_pages)
 
-        if plan is not None:
-            desired_horizon = max(count + 1, int(plan["hint_makespan"] * 2))
-        else:
-            desired_horizon = (
-                1
-                + count
-                + sum(
-                    max(
-                        (
-                            durations.get((cid, enode["enode_idx"])) or 0
-                            for enode in cls["enodes"]
-                        ),
-                        default=0,
-                    )
-                    for cid, cls in classes.items()
+        desired_horizon = (
+            1
+            + count
+            + sum(
+                max(
+                    (
+                        durations.get((cid, enode["enode_idx"])) or 0
+                        for enode in cls["enodes"]
+                    ),
+                    default=0,
                 )
+                for cid, cls in classes.items()
             )
+        )
+        if plan is not None:
+            desired_horizon = max(desired_horizon, int(plan["makespan"]) + 1)
 
         horizon = min(desired_horizon, max_safe_horizon)
         if horizon >= self.integer_limit:
@@ -916,9 +681,7 @@ class OrtoolsSolver:
                             if operand == child_id
                         ):
                             continue
-                        if child["mem_space"] != cls["mem_space"] or cls[
-                            "raw_size_bytes"
-                        ] > child["cls"]["raw_size_bytes"]:
+                        if child["mem_space"] != cls["mem_space"]:
                             continue
                         inplace = model.NewBoolVar(
                             f"b{b}_c{cid}_e{e_idx}_inplace{child_id}"
@@ -929,7 +692,7 @@ class OrtoolsSolver:
                             inplace
                         )
                         self.aliasBuffer(node, child, inplace, is_view=False)
-                        node["inplace_choices"].append((inplace, child_id))
+                        node["inplace_choices"].append((inplace, child_id, e_idx))
                         node["sources"].append((inplace, child_id, True))
                         
                         inplace_by_child[child_id] = inplace
@@ -980,11 +743,14 @@ class OrtoolsSolver:
             if len(users) > 1:
                 model.AddAtMostOne(users)
                 
+        # Apply native-compatible terminal-source checks after every class has
+        # had its selection variables created.  This allows an in-place choice
+        # against a direct view child while still enforcing the underlying
+        # source's size, protection, and last-read constraints.
+        self.inplace_nodes = nodes
         for node in nodes.values():
-            for present, child_id in node["inplace_choices"]:
-                for selected, enode in nodes[child_id]["selections"].values():
-                    if enode.get("is_view"):
-                        model.AddAtMostOne([present, selected])
+            for present, child_id, _ in node["inplace_choices"]:
+                self.addInplaceSourceConstraints(node, child_id, present)
 
         for cid, node in nodes.items():
             if cid != bucket["root_eclass_id"]:
@@ -1033,7 +799,7 @@ class OrtoolsSolver:
         self.objective_terms.append(weight * makespan)
         
         if plan is not None:
-            self._apply_hints(plan, nodes, horizon, makespan)
+            self.applyExternalHints(plan, nodes, horizon, makespan)
         
         self.bucket_models.append(
             {
@@ -1189,10 +955,6 @@ class OrtoolsSolver:
                 self.createBucket(bucket)
             self.model.Minimize(sum(self.objective_terms))
             
-            # Commit unique, deduplicated hints to CP-SAT
-            for var, val in self.hints.values():
-                self.model.AddHint(var, val)
-                
             self.model_built = True
 
         error = self.model.Validate()

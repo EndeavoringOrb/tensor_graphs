@@ -303,6 +303,90 @@ class FullSolverTests(unittest.TestCase):
         owners = solution["extractions"][0]["eclass_to_buf"]
         self.assertEqual(owners["1"], owners["2"])
 
+    def testNativeHintReusesBufferThroughView(self):
+        problem = makeProblem(
+            [
+                makeClass(1, [makeNode(cost=1)]),
+                makeClass(2, [makeNode(children=[1], cost=0, is_view=True)]),
+                makeClass(3, [makeNode(children=[2], safe_inplace_idxs=[0])]),
+                makeClass(4, [makeNode(cost=10)]),
+                makeClass(
+                    5,
+                    [
+                        makeNode(children=[3], safe_inplace_idxs=[0]),
+                        makeNode(1, children=[4], cost=10),
+                    ],
+                ),
+            ],
+            5,
+            pages=1,
+        )
+        problem["cpu_hints"] = [
+            {
+                "cost": 2.0,
+                "selection_map": {"1": 0, "2": 0, "3": 0, "5": 0},
+                "order": [1, 2, 3, 5],
+                "eclass_to_buf": {"1": 0, "2": 0, "3": 0, "5": 0},
+                "buffers": [
+                    {
+                        "id": 0,
+                        "mem_space": CPU,
+                        "size": PAGE,
+                        "start": 0,
+                        "end": 3,
+                        "offset": 0,
+                    }
+                ],
+            }
+        ]
+        solution = self.solveProblem(problem)
+        self.checkSolution(problem, solution)
+        owners = solution["extractions"][0]["eclass_to_buf"]
+        self.assertEqual(owners["1"], owners["2"])
+        self.assertEqual(owners["2"], owners["3"])
+        self.assertEqual(owners["3"], owners["5"])
+
+    def testNativeHintPinsInplaceToSelectedEnode(self):
+        problem = makeProblem(
+            [
+                makeClass(1, [makeNode(cost=1)]),
+                makeClass(
+                    2,
+                    [
+                        makeNode(children=[1], safe_inplace_idxs=[0], cost=1),
+                        makeNode(1, children=[1], safe_inplace_idxs=[0], cost=1),
+                    ],
+                ),
+            ],
+            2,
+            pages=1,
+        )
+        problem["cpu_hints"] = [
+            {
+                "cost": 2.0,
+                "selection_map": {"1": 0, "2": 1},
+                "order": [1, 2],
+                "eclass_to_buf": {"1": 0, "2": 0},
+                "buffers": [
+                    {
+                        "id": 0,
+                        "mem_space": CPU,
+                        "size": PAGE,
+                        "start": 0,
+                        "end": 2,
+                        "offset": 0,
+                    }
+                ],
+            }
+        ]
+        solution = self.solveProblem(problem)
+        self.checkSolution(problem, solution)
+        self.assertEqual(solution["extractions"][0]["selection_map"]["2"], 1)
+        self.assertEqual(
+            solution["extractions"][0]["eclass_to_buf"]["1"],
+            solution["extractions"][0]["eclass_to_buf"]["2"],
+        )
+
     def testInputCannotBeOverwritten(self):
         problem = makeProblem(
             [

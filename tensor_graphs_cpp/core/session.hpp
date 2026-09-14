@@ -558,8 +558,10 @@ struct Session
         std::vector<std::unordered_set<EClassId>> bucket_clean_eclasses;
         std::vector<EGraph> bucket_egraphs;
         std::vector<EClassId> bucket_root_eclass_ids;
+        std::vector<std::unordered_map<LogicalId, EClassId>> bucket_node_to_eclasses;
         std::vector<std::unordered_map<EClassId, LogicalId>> bucket_eclass_to_logicals;
         std::vector<std::vector<ENodeInfo>> bucket_enode_infos;
+        std::vector<ExtractionResult> cpu_hint_extractions;
         std::vector<CacheCandidate> candidates;
         std::vector<std::vector<uint32_t>> candidate_clean_buckets;
         std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
@@ -644,6 +646,7 @@ struct Session
         state->bucket_egraphs.reserve(state->bucket_states.size());
         state->bucket_root_eclass_ids.reserve(state->bucket_states.size());
         state->bucket_eclass_to_logicals.reserve(state->bucket_states.size());
+        state->bucket_node_to_eclasses.reserve(state->bucket_states.size());
         state->bucket_enode_infos.reserve(state->bucket_states.size());
         state->bucket_clean_eclasses.reserve(state->bucket_states.size());
         for (size_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
@@ -682,9 +685,56 @@ struct Session
             state->bucket_clean_eclasses.push_back(std::move(bucket_state.cleanEClasses));
             state->bucket_root_eclass_ids.push_back(
                 bucket_state.egraph.findConst(bucket_state.nodeToEClass.at(rootId)));
+            state->bucket_node_to_eclasses.push_back(bucket_state.nodeToEClass);
             state->bucket_egraphs.push_back(std::move(bucket_state.egraph));
             state->bucket_eclass_to_logicals.push_back(std::move(bucket_state.eclassToLogical));
             state->bucket_enode_infos.push_back(std::move(enode_infos));
+        }
+
+        if (!settings.use_ortools_full)
+            return state;
+
+        // Build one native witness per bucket.  The full solver receives the
+        // complete native extraction, dispatch, and allocation as its initial
+        // assignment, while remaining free to search for an improvement.
+        // Reusing the already saturated e-graphs avoids a second saturation.
+        Settings hint_settings = settings;
+        hint_settings.cpu_only = true;
+        Planner native_planner(costModel, hint_settings);
+        std::unordered_set<BaseEClassId> no_cached_nodes;
+        std::unordered_set<EClassId> no_cached_eclasses;
+        state->cpu_hint_extractions.reserve(state->bucket_egraphs.size());
+        for (size_t bucket_idx = 0; bucket_idx < state->bucket_egraphs.size(); ++bucket_idx)
+        {
+            // Keep the CP problem's complete hardware e-graph intact.  The
+            // native witness can use a CPU-pruned copy, which avoids walking
+            // OpenCL alternatives during dispatch and bufferization search.
+            EGraph hint_egraph = state->bucket_egraphs[bucket_idx];
+            auto native_infos = native_planner.computeENodeInfos(
+                hint_egraph, state->bucket_eclass_to_logicals[bucket_idx],
+                no_cached_nodes, false);
+            native_planner.pruneEGraph(hint_egraph, native_infos);
+            ExtractionResult hint = native_planner.extractBest(
+                rootId, graph, hint_egraph, state->bucket_node_to_eclasses[bucket_idx],
+                no_cached_nodes, state->bucket_eclass_to_logicals[bucket_idx],
+                hint_settings.min_compile_seconds == 0.0f, false, hint_settings.min_compile_seconds, delegate,
+                native_infos, &no_cached_eclasses, &state->bucket_clean_eclasses[bucket_idx]);
+
+            // Pruning changes each eclass's local enode index.  CP-SAT uses
+            // the indices from the original, unpruned problem, so restore
+            // those indices by matching stable ENodeIds.
+            const EGraph &full_egraph = state->bucket_egraphs[bucket_idx];
+            for (auto &[eclass_id, enode_idx] : hint.selection_map)
+            {
+                const EClass &hint_class = hint_egraph.getEClass(eclass_id);
+                const ENodeId selected_enode = hint_class.enodes.at(enode_idx);
+                const EClass &full_class = full_egraph.getEClass(eclass_id);
+                auto full_index = std::find(full_class.enodes.begin(), full_class.enodes.end(), selected_enode);
+                if (full_index == full_class.enodes.end())
+                    Error::throw_err("[Session.prepareOrtoolsState] CPU hint enode missing from CP e-graph.");
+                enode_idx = static_cast<uint32_t>(std::distance(full_class.enodes.begin(), full_index));
+            }
+            state->cpu_hint_extractions.push_back(std::move(hint));
         }
 
         return state;
@@ -698,6 +748,9 @@ struct Session
             state->bucket_eclass_to_logicals, state->bucket_enode_infos, state->candidates,
             state->candidate_clean_buckets, state->bucket_clean_eclasses, graph, state->preallocated_buffers, settings);
         prob["full_bucket_idx"] = fullBucketIdx;
+        prob["cpu_hints"] = nlohmann::json::array();
+        for (const auto &extraction : state->cpu_hint_extractions)
+            prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
         return prob.dump();
     }
 
@@ -823,6 +876,9 @@ struct Session
             state->bucket_eclass_to_logicals, state->bucket_enode_infos, state->candidates,
             state->candidate_clean_buckets, state->bucket_clean_eclasses, graph, state->preallocated_buffers, settings);
         prob["full_bucket_idx"] = fullBucketIdx;
+        prob["cpu_hints"] = nlohmann::json::array();
+        for (const auto &extraction : state->cpu_hint_extractions)
+            prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
 
         std::filesystem::create_directories("benchmarks");
         std::string prefix = settings.use_ortools_full ? "benchmarks/ortools_full_" : "benchmarks/ortools_";

@@ -1085,6 +1085,18 @@ struct Planner
                 info.cost = TGConstants::INF;
             }
 
+            if (settings.cpu_only && enode.getOpType() != OpType::INPUT &&
+                enode.getOpType() != OpType::CACHE)
+            {
+                const auto &engines = enode.getEngines();
+                const bool cpu_only = engines.empty() ||
+                    std::all_of(engines.begin(), engines.end(), [](const Engine &engine) {
+                        return engine.type == EngineType::CPU;
+                    });
+                if (!cpu_only)
+                    info.cost = TGConstants::INF;
+            }
+
             enodeInfos[i] = std::move(info);
             timer.tick();
         }

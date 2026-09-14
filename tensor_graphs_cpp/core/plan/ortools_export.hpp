@@ -35,6 +35,45 @@ inline MemSpace memSpaceFromJson(const json &j)
     return MemSpace{j.value("idx", 0u), static_cast<HandleType>(j.value("type", 1))};
 }
 
+// The native planner uses this compact witness as the source of OR-Tools
+// hints.  Keep it separate from the solver solution format: a hint is only a
+// feasible starting point and must not be treated as the selected solution.
+inline json serializeExtractionHint(const ExtractionResult &extraction)
+{
+    json out;
+    out["cost"] = extraction.cost;
+
+    json selection = json::object();
+    for (const auto &[eclass_id, enode_idx] : extraction.selection_map)
+        selection[std::to_string(eclass_id.value)] = enode_idx;
+    out["selection_map"] = std::move(selection);
+
+    json order = json::array();
+    for (EClassId eclass_id : extraction.order)
+        order.push_back(eclass_id.value);
+    out["order"] = std::move(order);
+
+    json owners = json::object();
+    for (const auto &[eclass_id, buffer_id] : extraction.eclass_to_buf)
+        owners[std::to_string(eclass_id.value)] = buffer_id.value;
+    out["eclass_to_buf"] = std::move(owners);
+
+    json buffers = json::array();
+    for (const auto &buffer : extraction.buffers)
+    {
+        buffers.push_back({
+            {"id", buffer.id.value},
+            {"mem_space", memSpaceToJson(buffer.mem_space)},
+            {"size", buffer.size},
+            {"start", buffer.start},
+            {"end", buffer.end},
+            {"offset", buffer.offset},
+        });
+    }
+    out["buffers"] = std::move(buffers);
+    return out;
+}
+
 inline json serializeProblem(
     const std::vector<Bucket> &buckets,
     const std::vector<EGraph> &bucket_egraphs,
