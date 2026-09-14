@@ -246,7 +246,7 @@ def solveOrtools(problem_data):
         or problem_data.get("use_ortools_lns", False)
     )
     if use_lns or not problem_data.get("use_ortools_full", False):
-        return OrtoolsLnsSolver(problem_data).solve()
+        return OrtoolsLnsSolver(problem_data, selector=StructuralNeighborhoodSelector()).solve()
     return OrtoolsSolver(problem_data).solve()
 
 
