@@ -53,11 +53,41 @@ class NeighborhoodGnn(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 1),
         )
+        self.runtime = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),
+        )
 
-    def forward(self, node_features, edge_index):
+    def encode(self, node_features, edge_index):
         state = self.encoder(node_features)
         for layer in self.layers:
             state = layer(state, edge_index)
+        return state
+
+    def predictRuntimeFromState(self, state, neighborhood_mask):
+        mask = neighborhood_mask.to(dtype=state.dtype)
+        if mask.ndim == 1:
+            selected = (state * mask.unsqueeze(-1)).sum(dim=0)
+            selected = selected / mask.sum().clamp_min(1.0)
+        elif mask.ndim == 2:
+            selected = mask @ state
+            selected = selected / mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        else:
+            raise ValueError("neighborhood_mask must be a 1D or 2D tensor")
+        global_state = state.mean(dim=0)
+        if selected.ndim == 2:
+            global_state = global_state.expand(selected.shape[0], -1)
+        return self.runtime(torch.cat((selected, global_state), dim=-1)).squeeze(-1)
+
+    def predictRuntime(self, node_features, edge_index, neighborhood_mask):
+        return self.predictRuntimeFromState(
+            self.encode(node_features, edge_index), neighborhood_mask
+        )
+
+    def forward(self, node_features, edge_index):
+        state = self.encode(node_features, edge_index)
         return self.score(state).squeeze(-1)
 
 
@@ -80,6 +110,7 @@ class GnnNeighborhoodSelector:
         )
         self.model = None
         self.model_path = model_path
+        self.runtime_available = False
         if model_path:
             self.loadModel(model_path)
 
@@ -89,7 +120,11 @@ class GnnNeighborhoodSelector:
         self.model = NeighborhoodGnn(
             feature_dim, checkpoint.get("hidden_dim", self.hidden_dim), checkpoint.get("layers", self.layers)
         ).to(self.device)
-        self.model.load_state_dict(checkpoint["state_dict"])
+        # Former checkpoints do not have a runtime head.  Shared encoder
+        # weights can still be loaded while a runtime checkpoint is trained.
+        state_dict = checkpoint["state_dict"]
+        self.runtime_available = any(key.startswith("runtime.") for key in state_dict)
+        self.model.load_state_dict(state_dict, strict=False)
         self.model.eval()
         self.model_path = model_path
 
@@ -127,13 +162,34 @@ class GnnNeighborhoodSelector:
             return RandomNeighborhoodSelector(self.target_size, seed=self.random.randrange(2**31)).selectNeighborhood(context)
 
         with torch.inference_mode():
-            scores = self.model(node_features, edge_index).detach().cpu().tolist()
+            if not self.runtime_available:
+                # Preserve behavior for checkpoints from the former
+                # node-classification model.
+                scores = self.model(node_features, edge_index).detach().cpu().tolist()
+                ranked = sorted(
+                    candidates,
+                    key=lambda key: scores[keys.index(key)],
+                    reverse=True,
+                )
+                return set(ranked[: self.target_size])
+
+            state = self.model.encode(node_features, edge_index)
+            candidate_positions = [keys.index(key) for key in candidates]
+            # Evaluate singleton neighborhoods without materializing an
+            # O(num_candidates * num_nodes) mask matrix.
+            selected_state = state[candidate_positions]
+            global_state = state.mean(dim=0).expand(len(candidate_positions), -1)
+            scores = (
+                self.model.runtime(torch.cat((selected_state, global_state), dim=-1))
+                .squeeze(-1)
+                .detach()
+                .cpu()
+                .tolist()
+            )
         ranked = sorted(
-            (key for key in candidates),
-            key=lambda key: scores[keys.index(key)],
-            reverse=True,
+            zip(candidates, scores), key=lambda item: item[1]
         )
-        return set(ranked[: self.target_size])
+        return {key for key, _ in ranked[: self.target_size]}
 
     def selectUnfrozenNodes(self, *args):
         """Compatibility adapter for the former eclass-based API."""

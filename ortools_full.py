@@ -1218,7 +1218,11 @@ class OrtoolsSolver:
         if num_workers < 0:
             raise ValueError("num_workers must be nonnegative")
         solver.parameters.num_workers = num_workers
-        solver.parameters.log_search_progress = True #bool(self.problem_data.get("print_progress", True))
+        solver.parameters.log_search_progress = bool(
+            self.problem_data.get(
+                "log_search_progress", self.problem_data.get("print_progress", True)
+            )
+        )
         solver.parameters.stop_after_first_solution = bool(
             self.problem_data.get("stop_after_first_solution", False)
         )

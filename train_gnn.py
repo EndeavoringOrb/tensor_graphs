@@ -6,11 +6,11 @@ Samples are serialized dictionaries with at least:
     ``[num_nodes, feature_dim]`` floating-point features.
 ``edge_index``
     Either ``[[sources], [targets]]`` or a list of ``[source, target]`` pairs.
-``target_indices``
-    Node indices that belonged to the successful repair neighborhood.
-
-An optional ``reward`` scales the loss for samples that produced larger
-objective improvements.
+``neighborhood_indices``
+    Node indices that were allowed to change in this repair.
+``relative_runtime``
+    The optimal repaired plan's runtime divided by the incumbent runtime,
+    clipped to ``[0, 1]``.
 """
 
 import argparse
@@ -30,6 +30,14 @@ def loadSamples(path):
             samples = json.load(handle)
     else:
         samples = torch.load(path, map_location="cpu")
+    if isinstance(samples, dict) and isinstance(samples.get("problems"), dict):
+        flattened = []
+        for problem in samples["problems"].values():
+            if isinstance(problem, dict):
+                flattened.extend(problem.get("samples", []))
+            elif isinstance(problem, list):
+                flattened.extend(problem)
+        samples = flattened
     if not isinstance(samples, list) or not samples:
         raise ValueError("The training sample file must contain a non-empty list")
     return samples
@@ -50,13 +58,27 @@ def sampleTensors(sample, device):
     else:
         raise ValueError("edge_index must be a 2xE array or an Ex2 array")
 
-    target = torch.zeros(
+    neighborhood = torch.zeros(
         node_features.shape[0], dtype=torch.float32, device=device
     )
-    for index in sample.get("target_indices", []):
-        if 0 <= int(index) < target.numel():
-            target[int(index)] = 1.0
-    return node_features, edge_index, target
+    for index in sample.get(
+        "neighborhood_indices", sample.get("target_indices", [])
+    ):
+        if 0 <= int(index) < neighborhood.numel():
+            neighborhood[int(index)] = 1.0
+    relative_runtime = float(
+        sample.get(
+            "relative_runtime",
+            sample.get(
+                "runtime_ratio",
+                sample.get("target", 1.0 - float(sample.get("reward", 0.0))),
+            ),
+        )
+    )
+    target = torch.tensor(
+        max(0.0, min(1.0, relative_runtime)), dtype=torch.float32, device=device
+    )
+    return node_features, edge_index, neighborhood, target
 
 
 def trainGnn(
@@ -87,18 +109,15 @@ def trainGnn(
         total_loss = 0.0
 
         for sample in shuffled_samples:
-            node_features, edge_index, target = sampleTensors(sample, device)
+            node_features, edge_index, neighborhood, target = sampleTensors(
+                sample, device
+            )
             if node_features.shape[1] != feature_dim:
                 raise ValueError("All samples must use the same feature dimension")
-            logits = model(node_features, edge_index)
-            positive = target.sum().clamp_min(1.0)
-            negative = (target.numel() - target.sum()).clamp_min(1.0)
-            pos_weight = (negative / positive).detach()
-            loss = F.binary_cross_entropy_with_logits(
-                logits, target, pos_weight=pos_weight
+            prediction = model.predictRuntime(
+                node_features, edge_index, neighborhood
             )
-            reward = float(sample.get("reward", 0.0))
-            loss = loss * (1.0 + max(0.0, reward))
+            loss = F.mse_loss(prediction, target)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()

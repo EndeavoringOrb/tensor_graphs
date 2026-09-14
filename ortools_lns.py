@@ -91,7 +91,7 @@ class OrtoolsLnsSolver:
             raise ValueError("max_time_seconds must be positive")
         self.print_progress = bool(problem_data.get("print_progress", True))
         self.subproblem_timeout_sec = float(
-            problem_data.get("lns_subproblem_time_seconds", 0.5)
+            problem_data.get("lns_subproblem_time_seconds", 90.0)
         )
         self.initial_timeout_sec = float(
             problem_data.get(
