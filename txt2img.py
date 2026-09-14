@@ -122,6 +122,11 @@ def main():
         help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
     )
     parser.add_argument(
+        "--use-ortools-lns",
+        action="store_true",
+        help="Use iterative subgraph LNS solver with OR-Tools",
+    )
+    parser.add_argument(
         "--log-cost-calls",
         action="store_true",
         default=True,
@@ -232,6 +237,9 @@ def main():
         )
         delegate = None
 
+    if args.use_ortools_lns:
+        os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
+
     session = tensor_graphs.Krea2Session(
         model_path=args.model_path,
         text_encoder_path=args.text_encoder_path,
@@ -248,6 +256,7 @@ def main():
         log_cost_calls=args.log_cost_calls,
         use_ortools_full=args.use_ortools_full,
         max_time_seconds=args.max_time_seconds or 0.0,
+        use_ortools_lns=args.use_ortools_lns,
     )
 
     latent_h = args.height // 8

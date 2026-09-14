@@ -94,6 +94,11 @@ def main():
         action="store_true",
         help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
     )
+    parser.add_argument(
+        "--use-ortools-lns",
+        action="store_true",
+        help="Use iterative subgraph LNS solver with OR-Tools",
+    )
     parser.add_argument("--max-time-seconds", type=float, default=None,
                         help="Maximum time in seconds for the OR-Tools solver")
     parser.add_argument(
@@ -162,6 +167,9 @@ def main():
         )
         delegate = tensor_graphs.HeuristicSearchDelegate()
 
+    if args.use_ortools_lns:
+        os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
+
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(
         args.model,
@@ -177,6 +185,7 @@ def main():
         use_ortools=args.use_ortools,
         use_ortools_full=args.use_ortools_full,
         max_time_seconds=args.max_time_seconds or 0.0,
+        use_ortools_lns=args.use_ortools_lns,
     )
 
     print(f"Loading tokenizer for {args.model}...")

@@ -37,7 +37,7 @@ void testFullSession()
     session.isPlanned = true;
     session.compile(false);
 
-    requireFull(session.selectedCachedNodes.count(stable), "Expected the clean intermediate to be cached");
+    requireFull(session.selectedCachedNodes.count(BaseEClassId{stable.value}), "Expected the clean intermediate to be cached");
     auto solution = nlohmann::json::parse(std::ifstream("benchmarks/ortools_full_solution.json"));
     for (size_t b = 0; b < session.cachedGraphs.size(); ++b)
     {

@@ -99,7 +99,12 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
 
     Settings sessionSettings = settings;
     sessionSettings.cache_file = cache_file;
-    if (settings.use_ortools_full)
+    if (settings.use_ortools_lns)
+    {
+        auto path = std::filesystem::path(cache_file);
+        sessionSettings.cache_file = (path.parent_path() / ("ortools_lns_" + path.filename().string())).string();
+    }
+    else if (settings.use_ortools_full)
     {
         auto path = std::filesystem::path(cache_file);
         sessionSettings.cache_file = (path.parent_path() / ("ortools_full_" + path.filename().string())).string();

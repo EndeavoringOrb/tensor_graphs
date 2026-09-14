@@ -74,6 +74,7 @@ struct Settings
     bool fold_weights = false;
     bool use_ortools = false;
     bool use_ortools_full = false;
+    bool use_ortools_lns = false;
     // Restrict native planning to operations that can execute on the CPU.
     // This is used to produce a portable feasible witness for OR-Tools.
     bool cpu_only = false;
@@ -451,6 +452,8 @@ struct Settings
             use_ortools = true;
         if (parser.get_flag("--use-ortools-full"))
             use_ortools_full = true;
+        if (parser.get_flag("--use-ortools-lns"))
+            use_ortools_lns = true;
 
         std::string cli_repo_path = parser.get_option("--repo-path");
         if (!cli_repo_path.empty())

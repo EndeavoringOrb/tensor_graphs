@@ -691,7 +691,7 @@ struct Session
             state->bucket_enode_infos.push_back(std::move(enode_infos));
         }
 
-        if (!settings.use_ortools_full)
+        if (!settings.use_ortools_full && !settings.use_ortools_lns)
             return state;
 
         // Build one native witness per bucket.  The full solver receives the
@@ -770,7 +770,7 @@ struct Session
                              " buckets, expected " + std::to_string(manualBuckets.size()));
         }
 
-        if (settings.use_ortools_full)
+        if (settings.use_ortools_full || settings.use_ortools_lns)
         {
             if (sol.value("solver", "") != "ortools_full")
                 Error::throw_err("[Session.applyOrtoolsSolution] Expected a full joint OR-Tools solution.");
@@ -881,7 +881,7 @@ struct Session
             prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
 
         std::filesystem::create_directories("benchmarks");
-        std::string prefix = settings.use_ortools_full ? "benchmarks/ortools_full_" : "benchmarks/ortools_";
+        std::string prefix = settings.use_ortools_lns ? "benchmarks/ortools_lns_" : (settings.use_ortools_full ? "benchmarks/ortools_full_" : "benchmarks/ortools_");
         std::string prob_path = prefix + "problem.json";
         std::string sol_path = prefix + "solution.json";
 
@@ -925,7 +925,7 @@ struct Session
 
     void ensureCacheCoverage(bool doSaturate)
     {
-        if (settings.use_ortools || settings.use_ortools_full)
+        if (settings.use_ortools || settings.use_ortools_full || settings.use_ortools_lns)
         {
             ensureCacheCoverageOrtools(doSaturate);
             return;

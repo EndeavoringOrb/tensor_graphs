@@ -90,6 +90,7 @@ inline json serializeProblem(
     json root_json;
     root_json["min_compile_seconds"] = settings.min_compile_seconds;
     root_json["use_ortools_full"] = settings.use_ortools_full;
+    root_json["use_ortools_lns"] = settings.use_ortools_lns;
     root_json["disable_caching"] = settings.disable_caching;
     if (settings.max_time_seconds > 0.0)
         root_json["max_time_seconds"] = settings.max_time_seconds;
@@ -98,7 +99,7 @@ inline json serializeProblem(
     json mem_caps_json = json::object();
     for (const auto &kv : settings.mem_caps)
     {
-        std::string key = settings.use_ortools_full
+        std::string key = (settings.use_ortools_full || settings.use_ortools_lns)
                               ? std::to_string(static_cast<int>(kv.first.type)) + ":" + std::to_string(kv.first.idx)
                               : toString(kv.first.type) + std::to_string(kv.first.idx);
         mem_caps_json[key] = kv.second;
@@ -364,14 +365,33 @@ inline bool runOrtoolsSolverProcess(const std::string &problem_json_path, const 
     std::string py = findPythonExecutable();
     std::string prob_p = std::filesystem::path(problem_json_path).make_preferred().string();
     std::string sol_p = std::filesystem::path(solution_json_path).make_preferred().string();
-    std::ostringstream cmd;
-    if (std::filesystem::exists("ortools_solver.py"))
+    bool use_lns = false;
     {
-        cmd << "\"" << py << "\" ortools_solver.py \"" << prob_p << "\" \"" << sol_p << "\"";
+        std::ifstream problem_file(problem_json_path);
+        if (problem_file)
+        {
+            try
+            {
+                json problem;
+                problem_file >> problem;
+                use_lns = problem.value("use_ortools_lns", false);
+            }
+            catch (const json::exception &)
+            {
+                LOG(WARNING) << "[Ortools] Could not read solver mode from " << problem_json_path;
+            }
+        }
+    }
+    std::ostringstream cmd;
+    const char *solver_script = use_lns ? "ortools_lns.py" : "ortools_full.py";
+    const char *solver_module = use_lns ? "tensor_graphs.ortools_lns" : "tensor_graphs.ortools_full";
+    if (std::filesystem::exists(solver_script))
+    {
+        cmd << "\"" << py << "\" " << solver_script << " \"" << prob_p << "\" \"" << sol_p << "\"";
     }
     else
     {
-        cmd << "\"" << py << "\" -m tensor_graphs.ortools_solver \"" << prob_p << "\" \"" << sol_p << "\"";
+        cmd << "\"" << py << "\" -m " << solver_module << " \"" << prob_p << "\" \"" << sol_p << "\"";
     }
     std::cout << "[Ortools] Invoking solver command: " << cmd.str() << std::endl;
 #if defined(_WIN32)

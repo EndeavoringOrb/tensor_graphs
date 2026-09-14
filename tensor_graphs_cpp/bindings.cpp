@@ -370,8 +370,8 @@ class LLMSession
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
-               uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
-               double max_time_seconds = 0.0)
+                uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
+                double max_time_seconds = 0.0, bool use_ortools_lns = false)
     {
         max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
@@ -421,7 +421,7 @@ class LLMSession
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            std::string prefix = use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : "");
+            std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : ""));
             actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
 
@@ -429,6 +429,7 @@ class LLMSession
                                             min_compile_time, act_delegate, log_cost_calls);
         session->settings.use_ortools = use_ortools;
         session->settings.use_ortools_full = use_ortools_full;
+        session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
 
         if (compile_decode_buckets)
@@ -563,8 +564,9 @@ class Krea2Session
                  const std::string &vae_path = "", uint32_t height = 1024, uint32_t width = 1024,
                  uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
                  std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
-                 const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
-                 bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0)
+                  const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
+                  bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0,
+                  bool use_ortools_lns = false)
         : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
     {
         if (threads > 0)
@@ -632,13 +634,15 @@ class Krea2Session
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            actual_cache = "dirty_region_caches/krea-2-turbo-pipeline-" + std::to_string(width) + "x" +
+            std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : "");
+            actual_cache = "dirty_region_caches/" + prefix + "krea-2-turbo-pipeline-" + std::to_string(width) + "x" +
                            std::to_string(height) + "-s" + std::to_string(steps) + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
                                             min_compile_time, act_delegate, log_cost_calls);
         session->settings.use_ortools_full = use_ortools_full;
+        session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
 
         // These buckets cover the input combinations used when regenerating
@@ -885,6 +889,7 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def(py::init<>(&Settings::get_default))
         .def_readwrite("use_ortools", &Settings::use_ortools)
         .def_readwrite("use_ortools_full", &Settings::use_ortools_full)
+        .def_readwrite("use_ortools_lns", &Settings::use_ortools_lns)
         .def_readwrite("cpu_only", &Settings::cpu_only)
         .def_readwrite("disable_caching", &Settings::disable_caching)
         .def_readwrite("only_plan", &Settings::only_plan)
@@ -894,17 +899,18 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<Session>(m, "Session")
         .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
-                          bool disable_caching, bool use_ortools, bool use_ortools_full) {
+                          bool disable_caching, bool use_ortools, bool use_ortools_full, bool use_ortools_lns) {
             Settings settings = Settings::get_default();
             settings.use_ortools = use_ortools;
             settings.use_ortools_full = use_ortools_full;
+            settings.use_ortools_lns = use_ortools_lns;
             settings.disable_caching = disable_caching;
             if (!cache_file.empty())
                 settings.cache_file = cache_file;
             return std::make_unique<Session>(g, mem, root_id, settings);
         }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
             py::arg("disable_caching") = false, py::arg("use_ortools") = false,
-            py::arg("use_ortools_full") = false)
+            py::arg("use_ortools_full") = false, py::arg("use_ortools_lns") = false)
         .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
                               const std::vector<Region> &outNeeded, float weight) {
             s.addBucket(inDirty, outNeeded, weight);
@@ -1075,25 +1081,25 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
              py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
              py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
-             py::arg("max_time_seconds") = 0.0)
+             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
                       uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t,
-                      bool, bool, double>(),
+                      bool, bool, double, bool>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
              py::arg("mu") = 1.15f, py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
              py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
              py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
-             py::arg("max_time_seconds") = 0.0)
+             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false)
         .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
              py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
