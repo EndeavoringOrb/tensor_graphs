@@ -14,7 +14,6 @@ Example::
 import argparse
 import copy
 import math
-import random
 import sys
 from pathlib import Path
 
@@ -63,34 +62,6 @@ def selectorMetadata(model, incumbent):
     for key, group in metadata.get("groups", {}).items():
         group["incumbent_value"] = assignments.get(key)
     return metadata
-
-
-def isChangeable(group):
-    return bool(group.get("selectable")) and int(group.get("choice_count", 0)) > 1
-
-
-def closeNeighborhood(seeds, metadata, target_size, random_generator):
-    """Expand seeds while keeping only groups that can actually change."""
-    groups = metadata.get("groups", {})
-    adjacency = metadata.get("adjacency", {})
-    selected = {key for key in seeds if key in groups and isChangeable(groups[key])}
-    frontier = list(selected)
-    while frontier and len(selected) < target_size:
-        current = frontier.pop()
-        neighbors = list(adjacency.get(current, ()))
-        random_generator.shuffle(neighbors)
-        for neighbor in neighbors:
-            if (
-                neighbor in selected
-                or neighbor not in groups
-                or not isChangeable(groups[neighbor])
-            ):
-                continue
-            selected.add(neighbor)
-            frontier.append(neighbor)
-            if len(selected) >= target_size:
-                break
-    return selected
 
 
 def metadataSample(
@@ -174,7 +145,6 @@ def generateSamples(
     if sample_count <= 0:
         raise ValueError("sample_count must be positive")
 
-    random_generator = random.Random(seed)
     initial_data = copy.deepcopy(problem_data)
     initial_data.pop("max_time_seconds", None)
     initial_data["stop_after_first_solution"] = True
@@ -200,12 +170,9 @@ def generateSamples(
             "objective": current_objective,
         }
         seeds = selector.selectNeighborhood(context)
-        neighborhood = closeNeighborhood(
-            seeds,
-            metadata,
-            max(1, min(int(max_neighborhood_size), int(neighborhood_size))),
-            random_generator,
-        )
+        # The selector owns the neighborhood.  Keep max_neighborhood_size in
+        # the API for compatibility with persisted sample-run configurations.
+        neighborhood = set(seeds)
         if not neighborhood:
             continue
 

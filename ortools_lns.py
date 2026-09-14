@@ -3,7 +3,6 @@
 import copy
 import json
 import os
-import random
 import sys
 import time
 from collections import defaultdict
@@ -98,9 +97,6 @@ class OrtoolsLnsSolver:
                 "lns_initial_time_seconds", max(0.1, min(2.0, self.timeout_sec * 0.2))
             )
         )
-        self.max_neighborhood_size = int(
-            problem_data.get("lns_max_neighborhood_size", 64)
-        )
         self.selector = selector or RandomNeighborhoodSelector(
             target_size=int(problem_data.get("lns_neighborhood_size", 15)),
             seed=problem_data.get("random_seed"),
@@ -153,35 +149,6 @@ class OrtoolsLnsSolver:
                 selector, context["incumbent"], context["metadata"]
             )
 
-    def _closeNeighborhood(self, seeds, metadata):
-        groups = metadata.get("groups", {})
-        adjacency = metadata.get("adjacency", {})
-        selected = {
-            key
-            for key in seeds
-            if key in groups
-            and groups[key].get("selectable", False)
-            and int(groups[key].get("choice_count", 0)) > 1
-        }
-        frontier = list(selected)
-        while frontier and len(selected) < self.max_neighborhood_size:
-            current = frontier.pop()
-            neighbors = list(adjacency.get(current, ()))
-            random.shuffle(neighbors)
-            for neighbor in neighbors:
-                if (
-                    neighbor in selected
-                    or neighbor not in groups
-                    or not groups[neighbor].get("selectable", False)
-                    or int(groups[neighbor].get("choice_count", 0)) <= 1
-                ):
-                    continue
-                selected.add(neighbor)
-                frontier.append(neighbor)
-                if len(selected) >= self.max_neighborhood_size:
-                    break
-        return selected
-
     def _buildCandidate(self, incumbent, unfrozen, timeout_sec):
         candidate_data = copy.deepcopy(self.problem_data)
         candidate_data["max_time_seconds"] = max(0.01, timeout_sec)
@@ -232,7 +199,7 @@ class OrtoolsLnsSolver:
                 "remaining_seconds": self.timeout_sec - (time.perf_counter() - started),
             }
             seeds = self._selectSeeds(context)
-            unfrozen = self._closeNeighborhood(seeds, metadata)
+            unfrozen = set(seeds)
             if not unfrozen:
                 outcomes["empty"] += 1
                 continue

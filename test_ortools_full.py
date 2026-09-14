@@ -387,6 +387,36 @@ class FullSolverTests(unittest.TestCase):
             solution["extractions"][0]["eclass_to_buf"]["2"],
         )
 
+    def testPrimaryFixingPreservesDuplicateInplaceChild(self):
+        problem = makeProblem(
+            [
+                makeClass(1, [makeNode(cost=1)]),
+                makeClass(
+                    2,
+                    [
+                        makeNode(children=[1], safe_inplace_idxs=[0], cost=1),
+                        makeNode(1, children=[1], safe_inplace_idxs=[0], cost=1),
+                    ],
+                ),
+            ],
+            2,
+            pages=1,
+        )
+        problem["include_primary_assignments"] = True
+        solution = self.solveProblem(problem)
+        assignments = solution["primary_assignments"]
+
+        repaired = OrtoolsSolver(
+            copy.deepcopy(problem),
+            primary_fixings=assignments,
+            incumbent_assignments=assignments,
+        ).solve()
+        self.assertEqual(repaired["status"], "OPTIMAL")
+        self.assertEqual(
+            repaired["extractions"][0]["selection_map"]["2"],
+            solution["extractions"][0]["selection_map"]["2"],
+        )
+
     def testInputCannotBeOverwritten(self):
         problem = makeProblem(
             [

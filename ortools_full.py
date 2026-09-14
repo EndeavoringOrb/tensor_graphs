@@ -842,9 +842,26 @@ class OrtoolsSolver:
             var_value = value is not None and int(enode_idx) == int(value)
             self.model.Add(var == int(var_value))
 
+    @staticmethod
+    def _inplaceAssignmentMatches(value, child_id, enode_idx):
+        """Match an in-place assignment without losing its selected enode."""
+        if value is None:
+            return False
+        if not isinstance(value, dict):
+            raise ValueError(
+                "In-place assignments must be None or an object with "
+                "enode_idx and child_id"
+            )
+        return (
+            int(value["child_id"]) == int(child_id)
+            and int(value["enode_idx"]) == int(enode_idx)
+        )
+
     def _addInplaceFixing(self, node, value):
-        for inplace_var, child_id, _ in node["inplace_choices"]:
-            var_value = value is not None and int(child_id) == int(value)
+        for inplace_var, child_id, enode_idx in node["inplace_choices"]:
+            var_value = self._inplaceAssignmentMatches(
+                value, child_id, enode_idx
+            )
             self.model.Add(inplace_var == int(var_value))
 
     def _addPrimaryFixings(self):
@@ -875,16 +892,23 @@ class OrtoolsSolver:
 
                 inplace_key = self.inplaceKey(bucket_idx, eclass_id)
                 if inplace_key in self.primary_fixings:
-                    self._addInplaceFixing(node, self.primary_fixings[inplace_key])
+                    self._addInplaceFixing(
+                        node,
+                        self.primary_fixings[inplace_key],
+                    )
                 if inplace_key in self.must_change_groups:
                     incumbent = self.incumbent_assignments.get(inplace_key)
-                    for inplace_var, child_id, _ in node["inplace_choices"]:
+                    for inplace_var, child_id, enode_idx in node["inplace_choices"]:
                         if incumbent is None:
                             group_literals.append(inplace_var)
                         else:
                             group_literals.append(
                                 inplace_var.Not()
-                                if int(child_id) == int(incumbent)
+                                if self._inplaceAssignmentMatches(
+                                    incumbent,
+                                    child_id,
+                                    enode_idx,
+                                )
                                 else inplace_var
                             )
 
@@ -1077,12 +1101,17 @@ class OrtoolsSolver:
                             break
                     primary_assignments[self.selectionKey(bucket_idx, cid)] = selected_idx
 
-                    inplace_child = None
-                    for inplace_var, child_id, _ in node["inplace_choices"]:
+                    inplace_assignment = None
+                    for inplace_var, child_id, enode_idx in node["inplace_choices"]:
                         if solver.Value(inplace_var):
-                            inplace_child = int(child_id)
+                            inplace_assignment = {
+                                "enode_idx": int(enode_idx),
+                                "child_id": int(child_id),
+                            }
                             break
-                    primary_assignments[self.inplaceKey(bucket_idx, cid)] = inplace_child
+                    primary_assignments[
+                        self.inplaceKey(bucket_idx, cid)
+                    ] = inplace_assignment
 
             # Reconstruct topological sequence based exactly on solver timestamps
             adj = {cid: [] for cid in active_cids}
