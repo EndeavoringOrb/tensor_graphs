@@ -81,6 +81,26 @@ def checkToken(candidate: str) -> bool:
     return hmac.compare_digest(candidate.strip(), BENCH_TOKEN.strip())
 
 
+@app.before_request
+def enforceBenchToken():
+    """Require the benchmark token before reaching code-executing routes."""
+    if not BENCH_TOKEN or request.endpoint in {"login", "logout", "static"}:
+        return None
+    if request.method == "OPTIONS":
+        return None
+
+    candidate = (
+        request.headers.get("X-Bench-Token")
+        or request.cookies.get("bench_token")
+        or request.args.get("token", "")
+    )
+    if checkToken(candidate):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Unauthorized: valid benchmark token required"}), 401
+    return redirect(f"/login?next={request.path}")
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
@@ -1615,4 +1635,3 @@ if __name__ == "__main__":
     host = os.environ.get("BENCH_HOST", "127.0.0.1")
     port = int(os.environ.get("BENCH_PORT", "8080"))
     app.run(host=host, port=port, threaded=True)
-

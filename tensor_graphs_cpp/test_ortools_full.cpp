@@ -23,7 +23,8 @@ void testFullSession()
     graph.input_data_types[x] = InputDataType::RUNTIME;
     graph.input_data_types[y] = InputDataType::RUNTIME;
     LogicalId stable = graph.neg(y);
-    LogicalId root = graph.add(graph.reshape(x, {4}), graph.reshape(stable, {4}));
+    LogicalId root = graph.add(graph.reshape(x, std::vector<int32_t>{4}),
+                               graph.reshape(stable, std::vector<int32_t>{4}));
     ShapePropagator().inferShapeRecursive(root, graph);
     Session session(graph, memory, root, settings);
     ConstantViewRegression::populateAllKernelDummyRecords(session.costModel);
@@ -37,7 +38,8 @@ void testFullSession()
     session.isPlanned = true;
     session.compile(false);
 
-    requireFull(session.selectedCachedNodes.count(stable), "Expected the clean intermediate to be cached");
+    requireFull(session.selectedCachedNodes.count(session.getBaseEClassId(stable)),
+                "Expected the clean intermediate to be cached");
     auto solution = nlohmann::json::parse(std::ifstream("benchmarks/ortools_full_solution.json"));
     for (size_t b = 0; b < session.cachedGraphs.size(); ++b)
     {

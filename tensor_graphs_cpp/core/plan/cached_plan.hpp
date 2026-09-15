@@ -244,7 +244,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
         ctx->max_seq_len = 128;
 
         LogicalId inputIds = roots.inputs[0];
-        LogicalId latentId = roots.inputs[1];
+        LogicalId latentId = roots.inputs[2];
         LogicalId imageOut = roots.roots[0];
 
         if (compile_decode_buckets)

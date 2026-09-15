@@ -15,8 +15,6 @@ PROMPT_TEMPLATE_ENCODE_PREFIX = (
     "<|im_start|>user\n"
 )
 PROMPT_TEMPLATE_ENCODE_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
-QWEN_PAD_TOKEN_ID = 151643
-MAX_SEQ_LEN = 1024
 
 def encodePromptTokens(tokenizer_obj, prompt: str, max_seq_len: int | None = None) -> tuple[list[int], list[float]]:
     raw_tok = tokenizer_obj[0] if isinstance(tokenizer_obj, tuple) else tokenizer_obj
@@ -35,12 +33,8 @@ def encodePromptTokens(tokenizer_obj, prompt: str, max_seq_len: int | None = Non
     enc_suf = raw_tok.encode(PROMPT_TEMPLATE_ENCODE_SUFFIX)
     suffix_ids = enc_suf.ids if hasattr(enc_suf, "ids") else enc_suf
     prefix_ids = list(prefix_ids)
-    token_ids = list(token_ids) + [QWEN_PAD_TOKEN_ID]
+    token_ids = list(token_ids)
     suffix_ids = list(suffix_ids)
-    total_ids = len(prefix_ids) + len(token_ids) + len(suffix_ids)
-    if total_ids > MAX_SEQ_LEN:
-        raise ValueError(f"total_ids {total_ids} > MAX_SEQ_LEN {MAX_SEQ_LEN}")
-    token_ids += [QWEN_PAD_TOKEN_ID] * (MAX_SEQ_LEN - total_ids)
 
     # ComfyUI's native Krea2 tokenizer keeps the sequence dynamic.  Qwen sees
     # the complete prefix, prompt, and assistant suffix; Krea2 removes the
@@ -49,6 +43,8 @@ def encodePromptTokens(tokenizer_obj, prompt: str, max_seq_len: int | None = Non
         body_len = max_seq_len + prefix_len - len(suffix_ids)
         token_ids = token_ids[:body_len]
     model_token_ids = token_ids + suffix_ids
+    # The C++ pipeline prepends the always-valid prefix mask itself.  Return
+    # the body mask, with all padding tokens excluded from Qwen attention.
     attention_mask = [1.0] * len(model_token_ids)
     return model_token_ids, attention_mask
 
@@ -78,6 +74,12 @@ def main():
         type=Path,
         default=Path("prompt.txt"),
         help="Path to .txt file containing the prompt",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Prompt text; overrides --prompt_file and exits after one image",
     )
     parser.add_argument(
         "--model-path",
@@ -168,9 +170,12 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    if not args.prompt_file.is_file():
-        raise FileNotFoundError(f"Prompt file not found: {args.prompt_file}")
-    prompt = args.prompt_file.read_text(encoding="utf-8").strip()
+    if args.prompt is not None:
+        prompt = args.prompt
+    else:
+        if not args.prompt_file.is_file():
+            raise FileNotFoundError(f"Prompt file not found: {args.prompt_file}")
+        prompt = args.prompt_file.read_text(encoding="utf-8").strip()
 
     print("=========================================================")
     print(" Krea 2 Turbo (Qwen3-VL + 12B DiT + VAE)")
@@ -186,6 +191,8 @@ def main():
 
     # Initialize search agent delegate
     if args.run_dir:
+        from train import TrainConfig
+
         run_dir_path = Path(args.run_dir)
         config_file = run_dir_path / "config.json"
         cfg = TrainConfig()
@@ -202,7 +209,7 @@ def main():
         if model_file.exists():
             try:
                 from safetensors.torch import load_file
-                from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
+                from train import CostPredictorDelegate, CostPredictorRNN
             except ModuleNotFoundError as exc:
                 if exc.name == "torch":
                     raise RuntimeError(
@@ -270,6 +277,9 @@ def main():
         args.width,
         args.steps,
     )
+
+    if args.prompt is not None:
+        return
 
     print(f"Watching {args.prompt_file} for changes. Press Ctrl+C to exit.")
     try:

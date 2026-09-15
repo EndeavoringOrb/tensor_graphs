@@ -73,6 +73,7 @@ struct Session
     std::vector<CompiledGraph> cachedGraphs;
     std::unordered_set<BaseEClassId> selectedCachedNodes;
     std::vector<float> cachedBucketWeights;
+    std::unordered_map<LogicalId, BaseEClassId> baseLogicalToEClass;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
@@ -582,6 +583,13 @@ struct Session
         Graph temp_graph = graph;
         planner.initBaseEGraph(rootId, temp_graph, topo, repo, false);
         state->full_state = planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], {}, doSaturate, repo);
+        baseLogicalToEClass.clear();
+        for (const auto &[eclass_id, logical_id] : state->full_state.eclassToLogical)
+        {
+            const BaseEClassId base_id = state->full_state.egraph.getEClass(eclass_id).base_eclass_id;
+            if (base_id != BaseEClassId{})
+                baseLogicalToEClass[logical_id] = base_id;
+        }
 
         state->bucket_states.resize(manualBuckets.size());
         state->bucket_states[fullBucketIdx] = state->full_state;
@@ -914,6 +922,13 @@ struct Session
 
     const std::vector<CompiledGraph> &getCachedGraphs() const { return cachedGraphs; }
     const std::unordered_set<BaseEClassId> &getSelectedCachedNodes() const { return selectedCachedNodes; }
+    BaseEClassId getBaseEClassId(LogicalId logical_id) const
+    {
+        auto it = baseLogicalToEClass.find(logical_id);
+        if (it == baseLogicalToEClass.end())
+            Error::throw_err("[Session.getBaseEClassId] logical node is not in the base e-graph");
+        return it->second;
+    }
     void setCachedGraphs(const std::vector<CompiledGraph> &graphs,
                          const std::unordered_set<BaseEClassId> &cached)
     {
