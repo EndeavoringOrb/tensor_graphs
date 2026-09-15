@@ -26,6 +26,7 @@
 
 int main(int argc, char *argv[])
 {
+    System::get();
     ArgParser parser("bench", "Benchmark registered kernels.");
     parser.add_option({"--skip", "-s"}, "Number of kernels to skip.", "0");
     parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
@@ -225,13 +226,20 @@ int main(int argc, char *argv[])
             dummyOutput.strides = r.outputStrides;
             dummyOutput.dtype = r.outputDType;
 
-            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines, false,
-                                false, false, true))
+            HardwareBinding binding;
+            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines,
+                                false, false, false, false, nullptr, nullptr, &binding))
             {
                 std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId
                           << "): record fails matches() validity check." << std::endl;
                 continue;
             }
+
+            // Records from prior runs may contain abstract template indices. Benchmark only
+            // against the concrete physical topology selected for this machine.
+            r.output_mem_space = binding.output_mem_space;
+            r.input_mem_spaces = binding.input_mem_spaces;
+            r.engines = binding.engines;
 
             PreparedKernel pk;
             pk.prepare(kernel, r);

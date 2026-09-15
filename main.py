@@ -1,11 +1,8 @@
+# main.py
 import argparse
 from pathlib import Path
 
 import tensor_graphs
-from safetensors.torch import load_file
-
-from train_models import AlphaZeroTransformer
-from train_shared import ActorDelegate, TrainConfig
 from utils.decode import load_tokenizer
 
 
@@ -57,13 +54,19 @@ def main():
         "--run-dir",
         type=str,
         default=None,
-        help="Path to runs/N to load the agent from",
+        help="Path to run directory (e.g. runs/0) to load the cost predictor model from",
     )
     parser.add_argument(
         "--tokens",
         type=int,
         default=20,
         help="Max tokens to generate per response turn",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=128,
+        help="Maximum model sequence length (also determines the decode buckets)",
     )
     parser.add_argument(
         "--min-compile-time",
@@ -82,6 +85,36 @@ def main():
         help="Disable dirty region session caching",
     )
     parser.add_argument(
+        "--use-ortools",
+        action="store_true",
+        help="Use the OR-Tools global cache/extraction planner",
+    )
+    parser.add_argument(
+        "--use-ortools-full",
+        action="store_true",
+        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
+    )
+    parser.add_argument("--max-time-seconds", type=float, default=None,
+                        help="Maximum time in seconds for the OR-Tools solver")
+    parser.add_argument(
+        "--cache-file",
+        type=str,
+        default="",
+        help="Optional compiled-session cache path (use a new path to force a fresh plan)",
+    )
+    parser.add_argument(
+        "--log-cost-calls",
+        action="store_true",
+        default=True,
+        help="Log cost model calls to benchmarks/calls.bin (default: True)",
+    )
+    parser.add_argument(
+        "--no-log-cost-calls",
+        dest="log_cost_calls",
+        action="store_false",
+        help="Disable logging cost model calls to benchmarks/calls.bin",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
         default=0,
@@ -92,31 +125,42 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    cfg = TrainConfig()
-
     run_dir_path = Path(args.run_dir) if args.run_dir else None
     if run_dir_path:
+        from safetensors.torch import load_file
+        from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
+
+        cfg = TrainConfig()
         config_file = run_dir_path / "config.json"
-        try:
-            cfg = TrainConfig.load(config_file)
-        except FileNotFoundError as e:
-            print(f"Warning: Failed to load config from {config_file}: {e}")
+        if config_file.exists():
+            try:
+                cfg = TrainConfig.load(config_file)
+                print(f"[Main] Loaded config from {config_file}")
+            except Exception as e:
+                print(f"[Main] Warning: Failed to load config from {config_file}: {e}")
 
-    agent = AlphaZeroTransformer(
-        d_model=cfg.d_model,
-        nhead=cfg.nhead,
-        num_layers=cfg.num_layers,
-        max_feat_dim=cfg.max_feat_dim,
-    )
-
-    if run_dir_path:
         model_file = run_dir_path / "model.safetensors"
         if model_file.exists():
-            agent.load_state_dict(load_file(model_file))
-            print(f"Loaded trained delegate agent from {model_file}")
-
-    agent.eval()
-    delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+            state_dict = load_file(model_file)
+            model = CostPredictorRNN(hidden_dim=cfg.hidden_dim)
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            delegate = CostPredictorDelegate(
+                model=model,
+                epsilon=0.0,
+                is_training=False,
+            )
+            print(f"[Main] Loaded trained CostPredictorRNN agent from {model_file}")
+        else:
+            print(
+                f"[Main] Warning: Model file not found at {model_file}, using default HeuristicSearchDelegate."
+            )
+            delegate = tensor_graphs.HeuristicSearchDelegate()
+    else:
+        print(
+            "[Main] No --run-dir specified. Using HeuristicSearchDelegate."
+        )
+        delegate = tensor_graphs.HeuristicSearchDelegate()
 
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(
@@ -125,8 +169,14 @@ def main():
         delegate,
         min_compile_time=args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
+        cache_file=args.cache_file,
         disable_caching=args.disable_caching,
         threads=args.threads,
+        log_cost_calls=args.log_cost_calls,
+        max_sequence_length=args.seq_len,
+        use_ortools=args.use_ortools,
+        use_ortools_full=args.use_ortools_full,
+        max_time_seconds=args.max_time_seconds or 0.0,
     )
 
     print(f"Loading tokenizer for {args.model}...")

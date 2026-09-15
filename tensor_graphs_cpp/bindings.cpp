@@ -1,5 +1,261 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <iomanip>
+#include <sstream>
+
+#if defined(_WIN32) || defined(_WIN64)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+// clang-format off
+#include <cstdio>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <windows.h>
+#include <dbghelp.h>
+// clang-format on
+
+#pragma comment(lib, "dbghelp.lib")
+
+inline const char *get_exception_code_name(DWORD code)
+{
+    switch (code)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:
+        return "EXCEPTION_ACCESS_VIOLATION (0xc0000005)";
+    case EXCEPTION_IN_PAGE_ERROR:
+        return "EXCEPTION_IN_PAGE_ERROR (0xc0000006)";
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+        return "EXCEPTION_ILLEGAL_INSTRUCTION (0xc000001d)";
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED (0xc000008c)";
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+        return "EXCEPTION_DATATYPE_MISALIGNMENT (0xc0000002)";
+    case EXCEPTION_STACK_OVERFLOW:
+        return "EXCEPTION_STACK_OVERFLOW (0xc00000fd)";
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        return "EXCEPTION_INT_DIVIDE_BY_ZERO (0xc0000094)";
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        return "EXCEPTION_FLT_DIVIDE_BY_ZERO (0xc000008e)";
+    case EXCEPTION_FLT_UNDERFLOW:
+        return "EXCEPTION_FLT_UNDERFLOW (0xc0000091)";
+    default:
+        return "UNKNOWN_FATAL_EXCEPTION";
+    }
+}
+
+inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
+{
+    // 1. Resolve module name and relative base offset
+    char mod_name[MAX_PATH] = "<unknown>";
+    DWORD64 mod_base = SymGetModuleBase64(process, addr);
+    if (!mod_base)
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+        {
+            mod_base = reinterpret_cast<DWORD64>(mbi.AllocationBase);
+        }
+    }
+    if (mod_base)
+    {
+        char full_path[MAX_PATH] = {0};
+        if (GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), full_path, sizeof(full_path)))
+        {
+            const char *slash = strrchr(full_path, '\\');
+            const char *fslash = strrchr(full_path, '/');
+            const char *base_name = slash ? slash + 1 : (fslash ? fslash + 1 : full_path);
+            strncpy_s(mod_name, sizeof(mod_name), base_name, _TRUNCATE);
+        }
+    }
+
+    DWORD64 offset_in_mod = mod_base ? (addr - mod_base) : 0;
+
+    // 2. Resolve symbol using stack-allocated memory (no heap allocations)
+    alignas(SYMBOL_INFO) char symbol_buffer[sizeof(SYMBOL_INFO) + 256] = {0};
+    SYMBOL_INFO *symbol = reinterpret_cast<SYMBOL_INFO *>(symbol_buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 255;
+    DWORD64 sym_disp = 0;
+    bool has_sym = SymFromAddr(process, addr, &sym_disp, symbol) && (symbol->NameLen > 0);
+
+    // 3. Resolve source file & line number if PDB is present
+    IMAGEHLP_LINE64 line = {0};
+    line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+    DWORD line_disp = 0;
+    bool has_line = SymGetLineFromAddr64(process, addr, &line_disp, &line);
+
+    if (frame_idx >= 0)
+    {
+        std::cerr << "  [" << std::setw(2) << frame_idx << "] ";
+    }
+    else
+    {
+        std::cerr << "  ";
+    }
+
+    std::cerr << "0x" << std::hex << std::setw(16) << std::setfill('0') << addr << std::dec << std::setfill(' ') << " "
+              << mod_name;
+
+    if (mod_base)
+    {
+        std::cerr << " + 0x" << std::hex << offset_in_mod << std::dec;
+    }
+    if (has_sym)
+    {
+        std::cerr << " : " << symbol->Name;
+    }
+    if (has_line)
+    {
+        std::cerr << " (" << line.FileName << ":" << line.LineNumber << ")";
+    }
+    std::cerr << "\n";
+}
+
+inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // Filter strictly for fatal hardware/memory errors
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_FLT_UNDERFLOW)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
+    static volatile LONG g_in_handler = 0;
+    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE process = GetCurrentProcess();
+    HANDLE thread = GetCurrentThread();
+
+    // Ensure DbgHelp symbol engine is initialized
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+    SymInitialize(process, NULL, TRUE);
+
+    DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
+
+    std::cerr << "\n========================================================\n"
+              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
+              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
+
+    // Diagnostic information for Access Violations
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+    {
+        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
+        const char *op = (access_type == 0)   ? "read from"
+                         : (access_type == 1) ? "write to"
+                         : (access_type == 8) ? "execute at"
+                                              : "access";
+        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
+        if (fault_target < 0x1000)
+        {
+            std::cerr << " (Null / near-null pointer dereference)";
+        }
+        std::cerr << "\n";
+    }
+
+    std::cerr << "========================================================\n"
+              << "Call Stack (Crash Site):\n";
+
+    // Copy the context record because StackWalk64 mutates it during unwinding
+    CONTEXT ctx = *ep->ContextRecord;
+    ctx.ContextFlags = CONTEXT_FULL;
+
+    STACKFRAME64 frame;
+    memset(&frame, 0, sizeof(frame));
+    DWORD machineType = IMAGE_FILE_MACHINE_UNKNOWN;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+    machineType = IMAGE_FILE_MACHINE_ARM64;
+    frame.AddrPC.Offset = ctx.Pc;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Fp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Sp;
+    frame.AddrStack.Mode = AddrModeFlat;
+#elif defined(_M_X64) || defined(__x86_64__)
+    machineType = IMAGE_FILE_MACHINE_AMD64;
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+#elif defined(_M_IX86) || defined(__i386__)
+    machineType = IMAGE_FILE_MACHINE_I386;
+    frame.AddrPC.Offset = ctx.Eip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Ebp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Esp;
+    frame.AddrStack.Mode = AddrModeFlat;
+#endif
+
+    int frame_idx = 0;
+    DWORD64 prev_pc = 0;
+
+    while (frame_idx < 64)
+    {
+        if (!StackWalk64(machineType, process, thread, &frame, &ctx, NULL, SymFunctionTableAccess64, SymGetModuleBase64,
+                         NULL))
+        {
+            break;
+        }
+
+        DWORD64 pc = frame.AddrPC.Offset;
+        if (pc == 0 || pc == prev_pc)
+        {
+            break;
+        }
+        prev_pc = pc;
+
+        print_frame_info(process, pc, frame_idx);
+        frame_idx++;
+    }
+
+    // If StackWalk64 was unable to unwind even frame 0, print the fault PC directly
+    if (frame_idx == 0)
+    {
+        print_frame_info(process, fault_pc, 0);
+    }
+
+    std::cerr << "========================================================\n" << std::flush;
+    fflush(stderr);
+    fflush(stdout);
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+struct InstallCrashHandler
+{
+    InstallCrashHandler()
+    {
+        HANDLE process = GetCurrentProcess();
+        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+        SymInitialize(process, NULL, TRUE);
+        AddVectoredExceptionHandler(1, TG_CrashHandler);
+    }
+} static _install_crash_handler;
+#endif
 
 #include "core/common/thread_pool.hpp"
 #include "core/hardware.hpp"
@@ -9,11 +265,13 @@
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "models/deepseek-v4-flash.hpp"
+#include "models/krea-2-turbo.hpp"
+#include "models/qwen-image-vae.hpp"
+#include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
 
 namespace py = pybind11;
 
-// Pybind11 Trampoline Class for C++ SearchDelegate virtual method overrides
 class PySearchDelegate : public SearchDelegate
 {
   public:
@@ -30,6 +288,10 @@ class PySearchDelegate : public SearchDelegate
     void on_leaf_evaluated(float cost) override
     {
         PYBIND11_OVERRIDE(void, SearchDelegate, on_leaf_evaluated, cost);
+    }
+    void on_bucket_leaf_evaluated(uint32_t bucket_idx, float cost) override
+    {
+        PYBIND11_OVERRIDE(void, SearchDelegate, on_bucket_leaf_evaluated, bucket_idx, cost);
     }
 
     void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
@@ -86,14 +348,18 @@ class PySearchDelegate : public SearchDelegate
     {
         PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_malloc, avail_buffers);
     }
+
+    std::vector<uint32_t> order_frontier(const std::vector<ActionFeatureFrontier> &frontier) override
+    {
+        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_frontier, frontier);
+    }
 };
 
-// C++ API for LLM Generation accessible to Python
 class LLMSession
 {
     std::unique_ptr<MemoryManager> mem;
     std::unique_ptr<Graph> g;
-    std::unique_ptr<Repo> repo;
+    std::unique_ptr<TGStore> repo;
     std::unique_ptr<Session> session;
     LogicalId inputIdsId;
     LogicalId logitsId;
@@ -105,22 +371,19 @@ class LLMSession
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
-               uint32_t threads = 0)
+               uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
+               uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
+               double max_time_seconds = 0.0)
     {
+        max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
         {
             set_num_threads(threads);
         }
 
-        std::unordered_map<MemSpace, uint64_t> bufferSizes = {
-            {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
+        auto act_delegate = delegate ? delegate : std::make_shared<HeuristicSearchDelegate>();
 
-        if (HardwareCaps::get().has_opencl)
-        {
-            bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-        }
-
-        mem = std::make_unique<MemoryManager>(bufferSizes);
+        mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
         if (model_name == "gemma-3-270m")
@@ -153,17 +416,22 @@ class LLMSession
         }
 
         std::string gHash = computeGraphHash(*g, {logitsId});
-        repo = std::make_unique<Repo>("benchmarks/repo_" + model_name, gHash, true);
+        repo = std::make_unique<TGStore>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
+                                      gHash, true);
 
         std::string actual_cache = cache_file;
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            actual_cache = "dirty_region_caches/" + model_name + "-cpp.bin";
+            std::string prefix = use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : "");
+            actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, delegate);
+                                            min_compile_time, act_delegate, log_cost_calls);
+        session->settings.use_ortools = use_ortools;
+        session->settings.use_ortools_full = use_ortools_full;
+        session->settings.max_time_seconds = max_time_seconds;
 
         if (compile_decode_buckets)
         {
@@ -178,6 +446,12 @@ class LLMSession
                 outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
                 session->addBucket(inputDirty, {outputNeeded});
             }
+        }
+
+        if (!bucket_weights.empty())
+        {
+            session->ensureFullBucket();
+            session->setBucketWeights(bucket_weights);
         }
 
         session->compile(true);
@@ -266,6 +540,209 @@ class LLMSession
     }
 };
 
+class Krea2Session
+{
+    std::unique_ptr<MemoryManager> mem;
+    std::unique_ptr<Graph> g;
+    std::unique_ptr<TGStore> repo;
+    std::unique_ptr<Session> session;
+    LogicalId inputIdsId;
+    LogicalId attentionMaskId;
+    LogicalId latentInputId;
+    LogicalId imageOutputId;
+    std::vector<int32_t> previous_token_ids;
+    std::vector<float> previous_latent_data;
+    bool has_previous_inputs = false;
+
+    Krea2TurboConfig cfg;
+    Krea2TurboVAEConfig vae_cfg;
+    Qwen3VLConfig te_cfg;
+    uint32_t num_steps;
+    float mu_val;
+
+  public:
+    Krea2Session(const std::string &model_path, const std::string &text_encoder_path = "",
+                 const std::string &vae_path = "", uint32_t height = 1024, uint32_t width = 1024,
+                 uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
+                 std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
+                 const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
+                 bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0)
+        : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
+    {
+        if (threads > 0)
+        {
+            set_num_threads(threads);
+        }
+
+        auto act_delegate = delegate ? delegate : std::make_shared<HeuristicSearchDelegate>();
+
+        std::string actual_dit_path = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/krea.safetensors"))
+                actual_dit_path = model_path + "/krea.safetensors";
+            else if (std::filesystem::exists(model_path + "/turbo.safetensors"))
+                actual_dit_path = model_path + "/turbo.safetensors";
+            else if (std::filesystem::exists(model_path + "/krea2_turbo_fp8_scaled.safetensors"))
+                actual_dit_path = model_path + "/krea2_turbo_fp8_scaled.safetensors";
+            else if (std::filesystem::exists(model_path + "/transformer"))
+                actual_dit_path = model_path + "/transformer";
+        }
+
+        std::string actual_te_path = text_encoder_path;
+        if (actual_te_path.empty())
+        {
+            if (std::filesystem::exists(model_path + "/text_encoder"))
+                actual_te_path = model_path + "/text_encoder";
+            else if (std::filesystem::exists(model_path + "/text_encoders"))
+                actual_te_path = model_path + "/text_encoders";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_bf16.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b_bf16.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_fp8_scaled.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b_fp8_scaled.safetensors";
+            else
+                actual_te_path = model_path;
+        }
+
+        std::string actual_vae_path = vae_path;
+        if (actual_vae_path.empty())
+        {
+            if (std::filesystem::exists(model_path + "/vae"))
+                actual_vae_path = model_path + "/vae";
+            else if (std::filesystem::exists(model_path + "/qwen_image_vae.safetensors"))
+                actual_vae_path = model_path + "/qwen_image_vae.safetensors";
+            else
+                actual_vae_path = model_path;
+        }
+
+        mem = std::make_unique<MemoryManager>();
+        g = std::make_unique<Graph>();
+
+        auto roots = build_krea2_pipeline_graph(*g, *mem, actual_dit_path, actual_te_path, actual_vae_path, height,
+                                                width, text_seq_len, steps, mu);
+        imageOutputId = roots.roots[0];
+        inputIdsId = roots.inputs[0];
+        attentionMaskId = roots.inputs[1];
+        latentInputId = roots.inputs[2];
+
+        std::string gHash = computeGraphHash(*g, {imageOutputId});
+        repo = std::make_unique<TGStore>("benchmarks/repo_krea-2-turbo-pipeline", gHash, true);
+
+        std::string actual_cache = cache_file;
+        if (actual_cache.empty())
+        {
+            std::filesystem::create_directories("dirty_region_caches");
+            // TODO: make a better cache loading/saving system where the program searches through header of existing caches to look for matches
+            // The constructor loads the cache before solver settings can be
+            // changed by the binding caller.  Keep every plan-affecting Krea
+            // parameter in the default filename so a cache from another
+            // shape, checkpoint, timestep schedule, or solver cannot match.
+            std::ostringstream cache_identity;
+            cache_identity << actual_dit_path << "|" << actual_te_path << "|" << actual_vae_path << "|"
+                           << width << "|" << height << "|" << text_seq_len << "|" << steps << "|"
+                           << std::setprecision(9) << mu << "|" << (use_ortools_full ? 1 : 0) << "|"
+                           << std::setprecision(9) << max_time_seconds << "|" << min_compile_time;
+            SHA256 cache_hash;
+            cache_hash.update(cache_identity.str());
+            actual_cache = "dirty_region_caches/krea-2-turbo-pipeline-" + cache_hash.digest() + ".bin";
+        }
+
+        session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
+                                            min_compile_time, act_delegate, log_cost_calls);
+        session->settings.use_ortools_full = use_ortools_full;
+        session->settings.max_time_seconds = max_time_seconds;
+
+        // These buckets cover the input combinations used when regenerating
+        // an image.  The prompt and latent tensors are fixed-size, so changing
+        // their contents only needs a new execution plan for the dirty input
+        // region, not a graph recompilation.
+        if (!disable_caching)
+        {
+            const std::vector<Region> output_regions = makeFull(g->getNode(imageOutputId).getShape());
+            const std::vector<Region> token_regions = makeFull(g->getNode(inputIdsId).getShape());
+            const std::vector<Region> latent_regions = makeFull(g->getNode(latentInputId).getShape());
+
+            session->addBucket({{inputIdsId, token_regions}}, output_regions);
+            session->addBucket({{latentInputId, latent_regions}}, output_regions);
+            session->addBucket({{inputIdsId, token_regions}, {latentInputId, latent_regions}}, output_regions);
+        }
+        session->compile(true);
+    }
+
+    std::vector<float> generate_image(const std::vector<int32_t> &token_ids, const std::vector<float> &attention_mask,
+                                      const std::vector<float> &latent_data)
+    {
+        std::vector<int32_t> padded_tokens = token_ids;
+        const uint32_t encoder_seq_len = cfg.text_seq_len + KREA_QWEN_PREFIX_TOKEN_COUNT;
+        if (padded_tokens.size() < encoder_seq_len)
+        {
+            padded_tokens.resize(encoder_seq_len, 151643);
+        }
+        else if (padded_tokens.size() > encoder_seq_len)
+        {
+            padded_tokens.resize(encoder_seq_len);
+        }
+
+        if (num_steps > 0)
+        {
+            session->writeInput(inputIdsId, padded_tokens.data(), encoder_seq_len * sizeof(int32_t));
+            session->writeInput(attentionMaskId, attention_mask.data(), cfg.text_seq_len * sizeof(float));
+        }
+        session->writeInput(latentInputId, latent_data.data(), latent_data.size() * sizeof(float));
+
+        Bucket b;
+        const bool token_changed = !has_previous_inputs || previous_token_ids != padded_tokens;
+        const bool latent_changed = !has_previous_inputs || previous_latent_data != latent_data;
+        b.outputNeededRegion = makeFull(g->getNode(imageOutputId).getShape());
+
+        if (token_changed && latent_changed)
+        {
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+        else if (token_changed)
+        {
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+        }
+        else if (latent_changed)
+        {
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+        else
+        {
+            // There is no no-op bucket.  Treat an unchanged request as a full
+            // refresh so it remains correct when caching is disabled or when
+            // the caller repeats the same inputs.
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+
+        previous_token_ids = padded_tokens;
+        previous_latent_data = latent_data;
+        has_previous_inputs = true;
+        const float *device_output = static_cast<const float *>(session->run(b));
+
+        uint64_t num_pixels = 1ULL * vae_cfg.in_channels * cfg.height * cfg.width;
+        std::vector<float> host_output(num_pixels);
+
+#ifdef TG_USE_CUDA
+        cudaPointerAttributes attrs;
+        if (cudaPointerGetAttributes(&attrs, device_output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+        {
+            cudaMemcpy(host_output.data(), device_output, num_pixels * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+        else
+#endif
+        {
+            std::memcpy(host_output.data(), device_output, num_pixels * sizeof(float));
+        }
+
+        return host_output;
+    }
+};
+
 PYBIND11_MODULE(tensor_graphs, m)
 {
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
@@ -351,7 +828,8 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<Bucket>(m, "Bucket")
         .def(py::init<>())
         .def_readwrite("inputDirtyRegions", &Bucket::inputDirtyRegions)
-        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion);
+        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion)
+        .def_readwrite("weight", &Bucket::weight);
 
     py::class_<MemSpace>(m, "MemSpace")
         .def(py::init<>())
@@ -365,6 +843,92 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("__hash__", [](const LogicalId &self) { return std::hash<LogicalId>()(self); })
         .def("__eq__", [](const LogicalId &self, const LogicalId &other) { return self == other; })
         .def("__repr__", [](const LogicalId &self) { return "LogicalId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<BufferId>(m, "BufferId")
+        .def(py::init<>())
+        .def(py::init<uint32_t>())
+        .def_readwrite("value", &BufferId::value)
+        .def("__hash__", [](const BufferId &self) { return std::hash<BufferId>()(self); })
+        .def("__eq__", [](const BufferId &self, const BufferId &other) { return self == other; })
+        .def("__repr__", [](const BufferId &self) { return "BufferId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<EClassId>(m, "EClassId")
+        .def(py::init<>())
+        .def(py::init<uint32_t>())
+        .def_readwrite("value", &EClassId::value)
+        .def("__hash__", [](const EClassId &self) { return std::hash<EClassId>()(self); })
+        .def("__eq__", [](const EClassId &self, const EClassId &other) { return self == other; })
+        .def("__repr__", [](const EClassId &self) { return "EClassId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<ParallelBuffer>(m, "ParallelBuffer")
+        .def(py::init<>())
+        .def(py::init<BufferId, MemSpace, uint64_t, uint32_t, uint32_t, int64_t>(),
+             py::arg("id"), py::arg("mem_space"), py::arg("size"), py::arg("start"), py::arg("end"),
+             py::arg("offset") = -1)
+        .def_readwrite("id", &ParallelBuffer::id)
+        .def_readwrite("mem_space", &ParallelBuffer::mem_space)
+        .def_readwrite("size", &ParallelBuffer::size)
+        .def_readwrite("start", &ParallelBuffer::start)
+        .def_readwrite("end", &ParallelBuffer::end)
+        .def_readwrite("offset", &ParallelBuffer::offset)
+        .def("__repr__", [](const ParallelBuffer &b) {
+            return "ParallelBuffer(id=" + std::to_string(b.id.value) + ", size=" + std::to_string(b.size) +
+                   ", start=" + std::to_string(b.start) + ", end=" + std::to_string(b.end) +
+                   ", offset=" + std::to_string(b.offset) + ")";
+        });
+
+    py::class_<ExtractionResult>(m, "ExtractionResult")
+        .def(py::init<>())
+        .def_readwrite("selection_map", &ExtractionResult::selection_map)
+        .def_readwrite("order", &ExtractionResult::order)
+        .def_readwrite("buffers", &ExtractionResult::buffers)
+        .def_readwrite("eclass_to_buf", &ExtractionResult::eclass_to_buf)
+        .def_readwrite("cost", &ExtractionResult::cost)
+        .def_readwrite("eclass_to_cost", &ExtractionResult::eclass_to_cost);
+
+    py::class_<CompiledGraph>(m, "CompiledGraph")
+        .def(py::init<>())
+        .def_readwrite("bucket", &CompiledGraph::bucket)
+        .def_readwrite("nodeCosts", &CompiledGraph::nodeCosts)
+        .def_readwrite("eclass_to_logical", &CompiledGraph::eclass_to_logical)
+        .def_readwrite("logical_to_eclass", &CompiledGraph::logical_to_eclass)
+        .def("cost", &CompiledGraph::cost, py::arg("print_utilization") = false);
+
+    py::class_<Settings>(m, "Settings")
+        .def(py::init<>(&Settings::get_default))
+        .def_readwrite("use_ortools", &Settings::use_ortools)
+        .def_readwrite("use_ortools_full", &Settings::use_ortools_full)
+        .def_readwrite("cpu_only", &Settings::cpu_only)
+        .def_readwrite("disable_caching", &Settings::disable_caching)
+        .def_readwrite("only_plan", &Settings::only_plan)
+        .def_readwrite("min_compile_seconds", &Settings::min_compile_seconds)
+        .def_readwrite("num_threads", &Settings::num_threads)
+        .def_readwrite("bucket_weights", &Settings::bucket_weights);
+
+    py::class_<Session>(m, "Session")
+        .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
+                          bool disable_caching, bool use_ortools, bool use_ortools_full) {
+            Settings settings = Settings::get_default();
+            settings.use_ortools = use_ortools;
+            settings.use_ortools_full = use_ortools_full;
+            settings.disable_caching = disable_caching;
+            if (!cache_file.empty())
+                settings.cache_file = cache_file;
+            return std::make_unique<Session>(g, mem, root_id, settings);
+        }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
+            py::arg("disable_caching") = false, py::arg("use_ortools") = false,
+            py::arg("use_ortools_full") = false)
+        .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
+                              const std::vector<Region> &outNeeded, float weight) {
+            s.addBucket(inDirty, outNeeded, weight);
+        }, py::arg("input_dirty_regions"), py::arg("output_needed_region"), py::arg("weight") = 1.0f)
+        .def("plan", &Session::plan, py::arg("do_saturate") = true)
+        .def("compile", &Session::compile, py::arg("do_saturate") = true)
+        .def("export_ortools_problem", &Session::exportOrtoolsProblem, py::arg("do_saturate") = true)
+        .def("ensure_cache_coverage_ortools", &Session::ensureCacheCoverageOrtools, py::arg("do_saturate") = true)
+        .def("get_compiled_graphs", &Session::getCachedGraphs)
+        .def("set_compiled_graphs", &Session::setCachedGraphs)
+        .def_readwrite("settings", &Session::settings);
 
     py::class_<TensorNode>(m, "TensorNode")
         .def_readonly("id", &TensorNode::id)
@@ -397,8 +961,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("permute", [](Graph &self, LogicalId a, LogicalId dims) { return self.permute(a, dims); })
         .def("slice", [](Graph &self, LogicalId a, LogicalId st, LogicalId en,
                          LogicalId step) { return self.slice(a, st, en, step); })
-        .def("scatter", [](Graph &self, LogicalId t, LogicalId u, LogicalId st, LogicalId en,
-                           LogicalId step) { return self.scatter(t, u, st, en, step); })
+        .def("scatter", [](Graph &self, LogicalId u, LogicalId st, LogicalId en, LogicalId step,
+                           LogicalId shape) { return self.scatter(u, st, en, step, shape); })
         .def("concat",
              [](Graph &self, const std::vector<LogicalId> &ids, uint32_t axis) { return self.concat(ids, axis); })
         .def("cast", [](Graph &self, LogicalId a, DType dtype) { return self.cast(a, dtype); })
@@ -424,28 +988,49 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<ActionFeatureCache>(m, "ActionFeatureCache")
         .def_readwrite("is_cached", &ActionFeatureCache::is_cached)
         .def_readwrite("size", &ActionFeatureCache::size)
-        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
-        .def_readwrite("op_type", &ActionFeatureCache::op_type)
         .def_readwrite("num_users", &ActionFeatureCache::num_users)
-        .def_readwrite("logical_id", &ActionFeatureCache::logical_id);
+        .def_readwrite("logical_id", &ActionFeatureCache::logical_id)
+        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureCache::mem_cap);
 
     py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
         .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
+        .def_readwrite("dp_cost", &ActionFeatureExtractDispatch::dp_cost)
+        .def_readwrite("min_dp_cp_cost", &ActionFeatureExtractDispatch::min_dp_cp_cost)
+        .def_readwrite("rev_cp_cost", &ActionFeatureExtractDispatch::rev_cp_cost)
+        .def_readwrite("dp_mem", &ActionFeatureExtractDispatch::dp_mem)
         .def_readwrite("size", &ActionFeatureExtractDispatch::size)
         .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
         .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
-        .def_readwrite("graph", &ActionFeatureExtractDispatch::graph);
+        .def_readwrite("num_nodes", &ActionFeatureExtractDispatch::num_nodes)
+        .def_readwrite("num_edges", &ActionFeatureExtractDispatch::num_edges)
+        .def_readwrite("mem_cap", &ActionFeatureExtractDispatch::mem_cap);
 
     py::class_<ActionFeatureBufferize>(m, "ActionFeatureBufferize")
         .def_readwrite("is_new_buffer", &ActionFeatureBufferize::is_new_buffer)
         .def_readwrite("size", &ActionFeatureBufferize::size)
         .def_readwrite("parent_size", &ActionFeatureBufferize::parent_size)
-        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time);
+        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time)
+        .def_readwrite("mem_space", &ActionFeatureBufferize::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureBufferize::mem_cap);
 
     py::class_<ActionFeatureMalloc>(m, "ActionFeatureMalloc")
         .def_readwrite("size", &ActionFeatureMalloc::size)
         .def_readwrite("start", &ActionFeatureMalloc::start)
-        .def_readwrite("end", &ActionFeatureMalloc::end);
+        .def_readwrite("end", &ActionFeatureMalloc::end)
+        .def_readwrite("mem_space", &ActionFeatureMalloc::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureMalloc::mem_cap);
+
+    py::class_<ActionFeatureFrontier>(m, "ActionFeatureFrontier")
+        .def_readwrite("eclass_id", &ActionFeatureFrontier::eclass_id)
+        .def_readwrite("num_enodes", &ActionFeatureFrontier::num_enodes)
+        .def_readwrite("min_dp_cp_cost", &ActionFeatureFrontier::min_dp_cp_cost)
+        .def_readwrite("min_dp_cost", &ActionFeatureFrontier::min_dp_cost)
+        .def_readwrite("min_dp_mem", &ActionFeatureFrontier::min_dp_mem)
+        .def_readwrite("size", &ActionFeatureFrontier::size)
+        .def_readwrite("dtype", &ActionFeatureFrontier::dtype)
+        .def_readwrite("mem_space", &ActionFeatureFrontier::mem_space)
+        .def_readwrite("mem_cap", &ActionFeatureFrontier::mem_cap);
 
     // Search Delegate
     py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")
@@ -453,6 +1038,7 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("push_state", &SearchDelegate::push_state)
         .def("pop_state", &SearchDelegate::pop_state)
         .def("on_leaf_evaluated", &SearchDelegate::on_leaf_evaluated)
+        .def("on_bucket_leaf_evaluated", &SearchDelegate::on_bucket_leaf_evaluated)
         .def("init_cache_graph", &SearchDelegate::init_cache_graph)
         .def("init_egraph", &SearchDelegate::init_egraph)
         .def("init_dispatch_graph", &SearchDelegate::init_dispatch_graph)
@@ -462,29 +1048,67 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("order_enodes", &SearchDelegate::order_enodes)
         .def("order_dispatch", &SearchDelegate::order_dispatch)
         .def("order_bufferize", &SearchDelegate::order_bufferize)
-        .def("order_malloc", &SearchDelegate::order_malloc);
+        .def("order_malloc", &SearchDelegate::order_malloc)
+        .def("order_frontier", &SearchDelegate::order_frontier);
+
+    py::class_<HeuristicSearchDelegate, SearchDelegate, std::shared_ptr<HeuristicSearchDelegate>>(
+        m, "HeuristicSearchDelegate")
+        .def(py::init<>());
+    m.attr("HeuristicDelegate") = m.attr("HeuristicSearchDelegate");
 
     // Saturated E-Graph Context & Simulations
     py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")
-        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); });
+        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); })
+        .def_property("bucket_weights", &SaturatedEGraphContext::getBucketWeights,
+                      &SaturatedEGraphContext::setBucketWeights);
 
     m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
-          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
+          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true, py::arg("max_seq_len") = 8);
 
     m.def("build_and_saturate_egraph_from_graph", &build_and_saturate_egraph_from_graph, py::arg("graph"),
-          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false);
+          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false,
+          py::arg("mem_cap_override") = 0);
 
-    m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
-          py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false);
+    using WeightedSimulationFn =
+        std::vector<float> (*)(std::shared_ptr<SaturatedEGraphContext>, std::shared_ptr<SearchDelegate>,
+                               const std::vector<uint32_t> &, bool, float);
+    m.def("run_hierarchical_simulations", static_cast<WeightedSimulationFn>(&run_hierarchical_simulations),
+          py::arg("ctx"), py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false,
+          py::arg("min_compile_seconds") = 0.0f);
+
+    using LegacySimulationFn =
+        std::vector<float> (*)(std::shared_ptr<SaturatedEGraphContext>, int, std::shared_ptr<SearchDelegate>,
+                               const std::vector<uint32_t> &, bool, float);
+    m.def("run_hierarchical_simulations", static_cast<LegacySimulationFn>(&run_hierarchical_simulations),
+          py::arg("ctx"), py::arg("bucket_idx"), py::arg("delegate"), py::arg("level_simulations"),
+          py::arg("log_cost_calls") = false, py::arg("min_compile_seconds") = 0.0f);
 
     m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
           py::arg("log_cost_calls") = false);
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false, py::arg("threads") = 0)
+             py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
+             py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
+             py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
+             py::arg("max_time_seconds") = 0.0)
         .def("generate_step", &LLMSession::generate_step);
+
+    py::class_<Krea2Session>(m, "Krea2Session")
+        .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
+                      uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t,
+                      bool, bool, double>(),
+             py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
+             py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
+             py::arg("mu") = 1.15f, py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
+             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
+             py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
+             py::arg("max_time_seconds") = 0.0)
+        .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
+             py::arg("latent_data"))
+        .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
+             py::arg("latent_data"));
 }

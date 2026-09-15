@@ -1,0 +1,17 @@
+[Unit]
+Description=KernelBench Flask Service
+After=network.target
+
+[Service]
+Type=simple
+User=aaron
+WorkingDirectory=/home/aaron/Projects/tensor_graphs
+ExecStart=/home/aaron/Projects/tensor_graphs/.venv/bin/python -m kernel_bench.app
+Restart=always
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+Environment=BENCH_HOST=127.0.0.1
+Environment=BENCH_PORT=8080
+
+[Install]
+WantedBy=multi-user.target

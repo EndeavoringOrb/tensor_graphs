@@ -4,7 +4,7 @@
 struct AddOp : public ElementwiseBinaryOp<AddOp>
 {
     static constexpr OpType op_type = OpType::ADD;
-    static constexpr const char *name = "ADD";
+    static constexpr const char *name = "ADD"; // TODO: can use toString OpType instead?
 
     static LogicalId buildPattern(Graph &pGraph, const std::vector<LogicalId> &pInputs, DType)
     {

@@ -1,0 +1,35 @@
+{
+  "rules": {
+    "dispatch": {
+      "InputDispatchDominationRule": true,
+      "UnifiedMemoryExchangeableDispatchRule": false,
+      "MemoryPressureDispatchRule": true,
+      "DispatchCostPruningRule": true,
+      "DispatchCycleRule": true
+    },
+    "bufferize": {
+      "MemSpaceMismatchInplaceRule": true,
+      "CommutativeInplaceSymmetryRule": true,
+      "PeakMemoryPruningRule": true,
+      "BufferizeCostPruningRule": true
+    },
+    "malloc": {
+      "OffsetMonotoneRule": true,
+      "IdMaxSymmetryRule": true,
+      "HMinBoundRule": true
+    },
+    "cache": {},
+    "extract": {
+      "InfiniteCostSkipRule": true,
+      "CachedENodeValidityRule": true,
+      "MissingCachedEClassRule": true,
+      "ExtractorCycleStepRule": true,
+      "ExtractorJacksonCarlierRule": true,
+      "ExtractorDynamicMinCutRule": false
+    },
+    "enode": {
+      "MemCapENodeDominationRule": true,
+      "FasterEquivalentENodeDominationRule": true
+    }
+  }
+}

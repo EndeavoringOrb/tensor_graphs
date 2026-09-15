@@ -1,5 +1,3 @@
-#pragma once
-
 #ifdef TG_OS_WINDOWS
 
 #ifndef NOMINMAX
@@ -7,6 +5,9 @@
 #endif
 #include <io.h>
 #include <windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
 
 #include <cstring>
 #include <string>

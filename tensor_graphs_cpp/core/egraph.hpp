@@ -11,15 +11,16 @@
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 
-class ENode
+struct ENode
 {
   public:
     ENode(KernelId kernelId, OpType opType, std::string opName, std::vector<EClassId> children,
           std::vector<uint32_t> shape, std::vector<uint64_t> strides, DType dtype, MemSpace mem_space,
-          std::vector<Engine> engines, std::string contentHash = "", uint64_t sig = 0)
+          std::vector<Engine> engines, std::string contentHash = "", uint64_t sig = 0, std::string debugOrigin = "")
         : kernelId(kernelId), opType(opType), opName(std::move(opName)), children(std::move(children)),
           shape(std::move(shape)), strides(std::move(strides)), dtype(dtype), mem_space(mem_space),
-          engines(std::move(engines)), contentHash(std::move(contentHash)), sig(sig)
+          engines(std::move(engines)), contentHash(std::move(contentHash)), sig(sig),
+          debugOrigin(std::move(debugOrigin))
     {
     }
 
@@ -28,6 +29,11 @@ class ENode
         return kernelId == other.kernelId && opType == other.opType && opName == other.opName &&
                children == other.children && shape == other.shape && strides == other.strides && dtype == other.dtype &&
                mem_space == other.mem_space && engines == other.engines && contentHash == other.contentHash;
+    }
+
+    bool operator!=(const ENode &other) const
+    {
+        return !(*this == other);
     }
 
     // Read-only getters
@@ -63,7 +69,7 @@ class ENode
     {
         return mem_space;
     }
-    std::vector<Engine> getEngines() const
+    const std::vector<Engine> &getEngines() const
     {
         return engines;
     }
@@ -75,6 +81,10 @@ class ENode
     {
         return sig;
     }
+    const std::string &getDebugOrigin() const
+    {
+        return debugOrigin;
+    }
 
     // Setters
     void setChildren(std::vector<EClassId> newChildren)
@@ -85,25 +95,30 @@ class ENode
     {
         sig = newSig;
     }
+    void setDebugOrigin(std::string origin)
+    {
+        debugOrigin = std::move(origin);
+    }
 
   private:
     KernelId kernelId;
     OpType opType;
     std::string opName;
-    std::vector<EClassId> children; // list of child eclass ids
+    std::vector<EClassId> children;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
     DType dtype;
     MemSpace mem_space;
     std::vector<Engine> engines;
     std::string contentHash;
-
-    uint64_t sig; // Precomputed structural signature used by hashcons buckets.
+    uint64_t sig;
+    std::string debugOrigin;
 };
 
 struct EClass
 {
     EClassId id;
+    BaseEClassId base_eclass_id;
     std::vector<ENodeId> enodes;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
@@ -325,6 +340,16 @@ struct EGraph
         }
 #endif
 
+        const BaseEClassId baseA = classes[ra.value].base_eclass_id;
+        const BaseEClassId baseB = classes[rb.value].base_eclass_id;
+        if (baseA != BaseEClassId{} && baseB != BaseEClassId{})
+        {
+            Error::throw_err("EClass merge would merge two base eclasses: " + toString(ra) + " and " +
+                             toString(rb));
+        }
+        if (baseA == BaseEClassId{})
+            classes[ra.value].base_eclass_id = baseB;
+
         parent[rb.value] = ra;
         ufSize[ra.value] += ufSize[rb.value];
 
@@ -445,6 +470,25 @@ struct EGraph
     const EClass &getEClass(EClassId id) const
     {
         return classes[findConst(id).value];
+    }
+
+    void populateBaseEClassIds()
+    {
+        for (EClass &cls : classes)
+        {
+            if (findConst(cls.id) == cls.id)
+                cls.base_eclass_id = BaseEClassId{cls.id.value};
+        }
+    }
+
+    EClassId findEClassByBaseId(BaseEClassId base_id) const
+    {
+        for (const EClass &cls : classes)
+        {
+            if (findConst(cls.id) == cls.id && cls.base_eclass_id == base_id)
+                return cls.id;
+        }
+        return EClassId{};
     }
 
     EClassId getENodeEClass(ENodeId enodeId) const

@@ -2,12 +2,15 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <vector>
+
+#include "core/logging.hpp"
 
 class ThreadPool
 {
@@ -92,6 +95,15 @@ class ThreadPool
             std::atomic<uint32_t> counter{0};
             std::atomic<uint32_t> completed{0};
             std::function<void(uint32_t)> task;
+            std::exception_ptr exception;
+            std::mutex exception_mutex;
+
+            void record_exception(std::exception_ptr error)
+            {
+                std::lock_guard<std::mutex> lock(exception_mutex);
+                if (!exception)
+                    exception = std::move(error);
+            }
         };
         auto state = std::make_shared<State>();
         state->task = task;
@@ -102,7 +114,17 @@ class ThreadPool
                 uint32_t idx = state->counter.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= num_tasks)
                     break;
-                state->task(idx);
+                    
+                try
+                {
+                    state->task(idx);
+                }
+                catch (...)
+                {
+                    // Never allow an exception to escape a worker thread:
+                    // doing so calls std::terminate and loses the diagnostic.
+                    state->record_exception(std::current_exception());
+                }
                 state->completed.fetch_add(1, std::memory_order_release);
             }
         };
@@ -125,6 +147,14 @@ class ThreadPool
         {
             std::this_thread::yield();
         }
+
+        std::exception_ptr error;
+        {
+            std::lock_guard<std::mutex> lock(state->exception_mutex);
+            error = state->exception;
+        }
+        if (error)
+            std::rethrow_exception(error);
     }
 
   private:

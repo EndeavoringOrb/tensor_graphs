@@ -10,30 +10,40 @@ struct ScatterOp
 
     static void inferShape(LogicalId nodeId, Graph &graph)
     {
-        graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape());
+        const auto &node = graph.getNode(nodeId);
+        const std::vector<int32_t> shape = graph.getConstantInt32(node.child_ids[4]);
+        if (shape.empty())
+            Error::throw_err("[ScatterOp.inferShape] scatter output shape must not be empty");
+
+        std::vector<uint32_t> output_shape;
+        output_shape.reserve(shape.size());
+        for (int32_t dim : shape)
+        {
+            if (dim <= 0)
+                Error::throw_err("[ScatterOp.inferShape] scatter output dimensions must be positive");
+            output_shape.push_back(static_cast<uint32_t>(dim));
+        }
+        graph.getNode(nodeId).setShape(output_shape);
     }
 
     static std::vector<Region> forwardRegion(const TensorNode &node, const Graph &graph,
                                              const std::vector<std::vector<Region>> &parentRegions)
     {
-        if (!parentRegions[2].empty() || !parentRegions[3].empty() || !parentRegions[4].empty())
+        if (!parentRegions[1].empty() || !parentRegions[2].empty() || !parentRegions[3].empty() ||
+            !parentRegions[4].empty())
             return makeFull(node.getShape());
 
-        const auto &targetRegions = parentRegions[0];
-        const auto &updateRegions = parentRegions[1];
-        if (targetRegions.empty() && updateRegions.empty())
+        const auto &updateRegions = parentRegions[0];
+        if (updateRegions.empty())
             return {};
 
-        const auto &targetShape = graph.getNode(node.child_ids[0]).getShape();
-        auto starts = graph.getConstantInt32(node.child_ids[2]);
-        auto ends = graph.getConstantInt32(node.child_ids[3]);
-        auto steps = graph.getConstantInt32(node.child_ids[4]);
+        auto starts = graph.getConstantInt32(node.child_ids[1]);
+        auto ends = graph.getConstantInt32(node.child_ids[2]);
+        auto steps = graph.getConstantInt32(node.child_ids[3]);
 
         std::vector<Region> outBoxes;
-        for (const auto &region : targetRegions)
-            outBoxes.push_back(region);
         for (const auto &region : updateRegions)
-            outBoxes.push_back(mapSliceRegionBackward(region, targetShape, starts, ends, steps));
+            outBoxes.push_back(mapSliceRegionBackward(region, node.getShape(), starts, ends, steps));
         return mergeRegions(outBoxes);
     }
 
@@ -43,20 +53,15 @@ struct ScatterOp
         if (outputRegions.empty())
             return {{}, {}, {}, {}, {}};
 
-        const auto &targetShape = graph.getNode(node.child_ids[0]).getShape();
-        auto starts = graph.getConstantInt32(node.child_ids[2]);
-        auto ends = graph.getConstantInt32(node.child_ids[3]);
-        auto steps = graph.getConstantInt32(node.child_ids[4]);
+        auto starts = graph.getConstantInt32(node.child_ids[1]);
+        auto ends = graph.getConstantInt32(node.child_ids[2]);
+        auto steps = graph.getConstantInt32(node.child_ids[3]);
 
-        std::vector<Region> targetBoxes;
         std::vector<Region> updateBoxes;
         for (const auto &region : outputRegions)
-        {
-            targetBoxes.push_back(region);
-            updateBoxes.push_back(mapSliceRegionForward(region, targetShape, starts, ends, steps));
-        }
+            updateBoxes.push_back(mapSliceRegionForward(region, node.getShape(), starts, ends, steps));
 
-        return {mergeRegions(targetBoxes), mergeRegions(updateBoxes),
+        return {mergeRegions(updateBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape()),
                 makeFull(graph.getNode(node.child_ids[2]).getShape()),
                 makeFull(graph.getNode(node.child_ids[3]).getShape()),
                 makeFull(graph.getNode(node.child_ids[4]).getShape())};
@@ -71,7 +76,7 @@ struct ScatterOp
 
     static bool isConstant(uint64_t inputIdx, uint64_t)
     {
-        return inputIdx == 2 || inputIdx == 3 || inputIdx == 4;
+        return inputIdx >= 1;
     }
 
     static LogicalId buildPattern(Graph &pGraph, const std::vector<LogicalId> &pInputs, DType)

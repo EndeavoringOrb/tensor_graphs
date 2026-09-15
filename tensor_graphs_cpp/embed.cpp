@@ -51,7 +51,7 @@
 #include "core/kernels.hpp"
 #include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/repo.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/session.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
@@ -193,7 +193,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem, int width, in
     cs.root_id = model.build_graph(cs.patch_input_id);
 
     std::string gHash = computeGraphHash(*cs.graph, {cs.root_id});
-    Repo repo("benchmarks/repo_jina-embeddings-v5-omni-nano-retrieval", gHash, true);
+    TGStore repo("benchmarks/repo_jina-embeddings-v5-omni-nano-retrieval", gHash, true);
 
     std::string cache_file =
         "dirty_region_caches/jina-v5-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";
@@ -364,16 +364,7 @@ int main(int argc, char *argv[])
     // -----------------------------------------------------------------------
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
-    // TODO: make this and getDefaultBufferSizes load from some common place
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
-#ifdef TG_USE_CUDA
-    bufferSizes[MemSpace{2, HandleType::CUDA}] = 16ULL * 1024 * 1024 * 1024;
-#endif
-    if (HardwareCaps::get().has_opencl)
-    {
-        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-    }
-    MemoryManager mem(bufferSizes);
+    MemoryManager mem;
 
     SharedMemoryPayload *shm_payload = nullptr;
 #ifdef TG_OS_WINDOWS

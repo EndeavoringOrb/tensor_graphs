@@ -17,12 +17,18 @@
 #include "core/types.hpp"
 
 #if defined(TG_OS_WINDOWS)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #ifdef min
 #undef min
 #endif
 #ifdef max
 #undef max
+#endif
+#ifdef ERROR
+#undef ERROR
 #endif
 #elif defined(TG_OS_LINUX)
 #include <unistd.h>
@@ -88,6 +94,7 @@ struct OpenCLState
     std::string device_name;
     std::string platform_name;
     std::string platform_vendor;
+    cl_ulong max_mem_alloc_size = 0;
     bool initialized = false;
 
     static OpenCLState &get()
@@ -160,6 +167,13 @@ struct OpenCLState
             clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(devName), devName, nullptr);
             device_name = std::string(devName);
 
+            cl_ulong max_alloc = 0;
+            if (clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc), &max_alloc, nullptr) ==
+                CL_SUCCESS)
+            {
+                max_mem_alloc_size = max_alloc;
+            }
+
             cl_int err;
             context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
             if (err == CL_SUCCESS && context)
@@ -185,6 +199,7 @@ struct HardwareCaps
     std::string hw_tag;
     uint64_t num_threads = 1;
     uint32_t num_cuda_devices = 0;
+    uint64_t opencl_max_alloc = 0;
 
     static HardwareCaps &get()
     {
@@ -232,6 +247,7 @@ struct HardwareCaps
         if (cl_state.initialized && cl_state.device)
         {
             has_opencl = true;
+            opencl_max_alloc = cl_state.max_mem_alloc_size;
             queryOpenCLDeviceLimits(cl_state.device);
 
             if (cl_state.device_name.find("Adreno") != std::string::npos)
@@ -347,7 +363,7 @@ struct System
             total_ram = static_cast<uint64_t>(mac_mem);
         }
 #endif
-        uint64_t cpu_buffer_size = std::max<uint64_t>((uint64_t)(total_ram * 0.75), 4ULL * 1024 * 1024 * 1024);
+        uint64_t cpu_buffer_size = std::max<uint64_t>((uint64_t)(total_ram * 0.93), 4ULL * 1024 * 1024 * 1024);
 
         MemSpace cpu_ms{1, HandleType::CPP};
         default_buffer_sizes[cpu_ms] = cpu_buffer_size;
@@ -365,7 +381,7 @@ struct System
                 size_t free_mem = 0, total_mem = 0;
                 cudaMemGetInfo(&free_mem, &total_mem);
                 uint64_t vram_size =
-                    (total_mem > 0) ? static_cast<uint64_t>(total_mem * 0.90) : 8ULL * 1024 * 1024 * 1024;
+                    (total_mem > 0) ? static_cast<uint64_t>(total_mem * 0.93) : 8ULL * 1024 * 1024 * 1024;
 
                 MemSpace cuda_ms{dev, HandleType::CUDA};
                 default_buffer_sizes[cuda_ms] = vram_size;
@@ -393,22 +409,24 @@ struct System
         if (caps.has_opencl)
         {
             MemSpace cl_ms{1, HandleType::OPENCL};
-            default_buffer_sizes[cl_ms] = 1ULL * 1024 * 1024 * 1024;
+            uint64_t opencl_mem = caps.opencl_max_alloc > 0 ? caps.opencl_max_alloc : (1ULL * 1024 * 1024 * 1024);
+            default_buffer_sizes[cl_ms] = opencl_mem;
             mem_spaces.push_back(cl_ms);
 
-            // OpenCL GPU compute engine operates strictly on cl_ms
             engines.push_back(Engine{0, EngineType::QUALCOMM_IGPU, {cl_ms}});
         }
 #endif
         std::cout << "[System] Initialized with " << mem_spaces.size() << " MemSpaces and " << engines.size()
-                  << " Engines.\n";
-        for (auto &mem_space : mem_spaces)
+                  << " Engines:\n";
+        for (const auto &mem_space : mem_spaces)
         {
-            LOG(INFO) << "  " << mem_space;
+            uint64_t size_bytes = default_buffer_sizes.count(mem_space) ? default_buffer_sizes.at(mem_space) : 0;
+            double size_mb = static_cast<double>(size_bytes) / (1024.0 * 1024.0);
+            LOG(INFO) << mem_space << ": " << size_bytes << " bytes (" << size_mb << " MB)";
         }
-        for (auto &engine : engines)
+        for (const auto &engine : engines)
         {
-            LOG(INFO) << "  " << engine;
+            LOG(INFO) << engine;
         }
     }
 };

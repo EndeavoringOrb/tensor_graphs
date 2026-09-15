@@ -34,9 +34,14 @@ struct FusedOp
         return LogicalId();
     }
 
+    static WorkloadMetrics computeWorkload(const std::vector<std::vector<uint32_t>> &in_shapes,
+                                           const std::vector<DType> &in_dtypes,
+                                           const std::vector<uint32_t> &out_shape,
+                                           DType out_dtype, const std::string &op_name);
+
     static OpTraits traits()
     {
-        return OpTraits{op_type,        name,    is_elementwise, inferShape,  forwardRegion,
-                        backwardRegion, nullptr, isConstant,     buildPattern};
+        return OpTraits{op_type,        name,            is_elementwise, inferShape, forwardRegion,
+                        backwardRegion, computeWorkload, isConstant,     buildPattern};
     }
 };

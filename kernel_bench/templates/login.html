@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KernelBench - Access Protected</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #090d16;
+            color: #e6edf3;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 36px 32px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+            text-align: center;
+        }
+        .icon { font-size: 40px; margin-bottom: 16px; }
+        h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; color: #58a6ff; }
+        p { font-size: 14px; color: #8b949e; margin-bottom: 24px; line-height: 1.5; }
+        .error {
+            background: rgba(248, 81, 73, 0.15);
+            border: 1px solid #f85149;
+            color: #ff7b72;
+            padding: 10px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 18px;
+            text-align: left;
+        }
+        .form-group { margin-bottom: 20px; text-align: left; }
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: #8b949e;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        input[type="password"], input[type="text"] {
+            width: 100%;
+            padding: 12px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #238636;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover { background: #2ea043; }
+        .footer { margin-top: 22px; font-size: 12px; color: #484f58; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔒</div>
+        <h1>KernelBench Access</h1>
+        <p>This server compiles and executes GPU kernels. Enter your secret token to continue.</p>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="/login{% if next_param %}?next={{ next_param }}{% endif %}">
+            <div class="form-group">
+                <label for="token">Secret Access Token</label>
+                <input type="password" id="token" name="token" placeholder="Paste access token..." autofocus required autocomplete="current-password">
+            </div>
+            <button type="submit">Unlock</button>
+        </form>
+        <div class="footer">Configured in .bench_token on host</div>
+    </div>
+</body>
+</html>

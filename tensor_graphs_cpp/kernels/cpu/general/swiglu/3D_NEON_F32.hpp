@@ -148,7 +148,7 @@ inline LogicalId refFactorySwiGLU_3D_NEON(const std::vector<LogicalId> &inputs, 
     return graph.mul(silu_gate, up);
 }
 
-REGISTER_KERNEL("SwiGLU_3D_NEON_F32", 2, 2, matchSwiGLU_3D_NEON, runSwiGLU_3D_NEON, refFactorySwiGLU_3D_NEON, {0},
+REGISTER_KERNEL("SwiGLU_3D_NEON_F32", 2, 2, matchSwiGLU_3D_NEON, runSwiGLU_3D_NEON, refFactorySwiGLU_3D_NEON, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

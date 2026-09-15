@@ -1,3 +1,4 @@
+// In tensor_graphs_cpp/core/argparse.hpp
 #pragma once
 #include <algorithm>
 #include <cstdlib>
@@ -25,8 +26,17 @@ class ArgParser
     {
     }
 
+    void set_verbose_logging(bool verbose)
+    {
+        verbose_logging = verbose;
+    }
+
     void add_flag(const std::vector<std::string> &names, const std::string &help)
     {
+        if (!names.empty() && options.find(names[0]) != options.end())
+        {
+            return;
+        }
         ArgOption opt{names[0], names, help, true, "false", false};
         for (const auto &name : names)
         {
@@ -38,6 +48,10 @@ class ArgParser
     void add_option(const std::vector<std::string> &names, const std::string &help, const std::string &default_val = "",
                     bool required = false)
     {
+        if (!names.empty() && options.find(names[0]) != options.end())
+        {
+            return;
+        }
         ArgOption opt{names[0], names, help, false, default_val, required};
         for (const auto &name : names)
         {
@@ -108,13 +122,26 @@ class ArgParser
         }
     }
 
-    bool parse(int argc, char *argv[])
+    static bool is_known_flag_syntax(const std::string &name)
+    {
+        return name == "--disable-caching" || name == "--only-plan" || name == "--help" || name == "-h" ||
+               name == "--list" || name == "-l" || name == "--no-records" || name == "--skip-fused" ||
+               name == "--server";
+    }
+
+    bool parse(int argc, char *argv[], std::vector<std::string> *out_remaining = nullptr)
     {
         std::vector<std::string> args;
         for (int i = 1; i < argc; ++i)
         {
             args.push_back(argv[i]);
         }
+        return parse(args, out_remaining);
+    }
+
+    bool parse(const std::vector<std::string> &args, std::vector<std::string> *out_remaining = nullptr)
+    {
+        remaining_args.clear();
 
         for (const auto &arg : args)
         {
@@ -131,16 +158,39 @@ class ArgParser
             const std::string &arg = args[i];
             if (arg.rfind("-", 0) == 0)
             {
-                auto it = options.find(arg);
+                std::string opt_name = arg;
+                std::string inline_val = "";
+                bool has_inline_val = false;
+                auto eq_pos = arg.find('=');
+                if (eq_pos != std::string::npos && arg.rfind("--", 0) == 0)
+                {
+                    opt_name = arg.substr(0, eq_pos);
+                    inline_val = arg.substr(eq_pos + 1);
+                    has_inline_val = true;
+                }
+
+                auto it = options.find(opt_name);
                 if (it != options.end())
                 {
                     if (it->second.is_flag)
                     {
-                        parsed_values[it->second.primary_name] = "true";
+                        if (has_inline_val)
+                        {
+                            parsed_values[it->second.primary_name] =
+                                (inline_val == "true" || inline_val == "1" || inline_val == "TRUE") ? "true" : "false";
+                        }
+                        else
+                        {
+                            parsed_values[it->second.primary_name] = "true";
+                        }
                     }
                     else
                     {
-                        if (i + 1 < args.size())
+                        if (has_inline_val)
+                        {
+                            parsed_values[it->second.primary_name] = inline_val;
+                        }
+                        else if (i + 1 < args.size())
                         {
                             parsed_values[it->second.primary_name] = args[++i];
                         }
@@ -154,9 +204,28 @@ class ArgParser
                 }
                 else
                 {
-                    std::cerr << "Error: Unknown option " << arg << "\n";
-                    print_help();
-                    return false;
+                    if (out_remaining != nullptr)
+                    {
+                        remaining_args.push_back(arg);
+                        if (!has_inline_val && i + 1 < args.size())
+                        {
+                            const std::string &next_arg = args[i + 1];
+                            if (next_arg.rfind("-", 0) != 0)
+                            {
+                                if (!is_known_flag_syntax(opt_name))
+                                {
+                                    remaining_args.push_back(next_arg);
+                                    ++i;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        std::cerr << "Error: Unknown option " << arg << "\n";
+                        print_help();
+                        return false;
+                    }
                 }
             }
             else
@@ -169,7 +238,14 @@ class ArgParser
                 }
                 else
                 {
-                    extra_positionals.push_back(arg);
+                    if (out_remaining != nullptr)
+                    {
+                        remaining_args.push_back(arg);
+                    }
+                    else
+                    {
+                        extra_positionals.push_back(arg);
+                    }
                 }
             }
         }
@@ -202,36 +278,49 @@ class ArgParser
             }
         }
 
-        std::cout << "[ArgParser] Parsed arguments for " << prog_name << ":\n";
-        for (const auto &opt : ordered_options)
+        if (verbose_logging)
         {
-            std::string val = parsed_values[opt.primary_name];
-            if (opt.is_flag)
+            std::cout << "[ArgParser] Parsed arguments for " << prog_name << ":\n";
+            for (const auto &opt : ordered_options)
             {
-                std::cout << "  " << opt.primary_name << ": " << (val == "true" ? "ENABLED" : "DISABLED") << "\n";
+                std::string val = parsed_values[opt.primary_name];
+                if (opt.is_flag)
+                {
+                    std::cout << "  " << opt.primary_name << ": " << (val == "true" ? "ENABLED" : "DISABLED") << "\n";
+                }
+                else
+                {
+                    std::cout << "  " << opt.primary_name << ": " << (val.empty() ? "(empty)" : val) << "\n";
+                }
             }
-            else
+            for (const auto &pos : positional_options)
             {
-                std::cout << "  " << opt.primary_name << ": " << (val.empty() ? "(empty)" : val) << "\n";
+                std::cout << "  <" << pos.primary_name << ">: "
+                          << (parsed_positionals[pos.primary_name].empty() ? "(empty)"
+                                                                           : parsed_positionals[pos.primary_name])
+                          << "\n";
             }
-        }
-        for (const auto &pos : positional_options)
-        {
-            std::cout << "  <" << pos.primary_name << ">: "
-                      << (parsed_positionals[pos.primary_name].empty() ? "(empty)"
-                                                                       : parsed_positionals[pos.primary_name])
-                      << "\n";
-        }
-        if (!extra_positionals.empty())
-        {
-            std::cout << "  <Extra Positionals>:";
-            for (const auto &ep : extra_positionals)
-                std::cout << " " << ep;
+            if (!extra_positionals.empty())
+            {
+                std::cout << "  <Extra Positionals>:";
+                for (const auto &ep : extra_positionals)
+                    std::cout << " " << ep;
+                std::cout << "\n";
+            }
             std::cout << "\n";
         }
-        std::cout << "\n";
+
+        if (out_remaining != nullptr)
+        {
+            *out_remaining = remaining_args;
+        }
 
         return true;
+    }
+
+    const std::vector<std::string> &get_remaining_args() const
+    {
+        return remaining_args;
     }
 
     bool get_flag(const std::string &name) const
@@ -272,10 +361,12 @@ class ArgParser
   private:
     std::string prog_name;
     std::string desc;
+    bool verbose_logging = true;
     std::unordered_map<std::string, ArgOption> options;
     std::vector<ArgOption> ordered_options;
     std::vector<ArgOption> positional_options;
     std::unordered_map<std::string, std::string> parsed_values;
     std::unordered_map<std::string, std::string> parsed_positionals;
     std::vector<std::string> extra_positionals;
+    std::vector<std::string> remaining_args;
 };

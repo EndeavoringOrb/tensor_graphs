@@ -10,56 +10,194 @@
 #include "core/misc.hpp"
 #include "core/types.hpp"
 
+#include "core/reference_graph_registry.hpp"
+
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
 using KernelFunc = void (*)(const KernelContext &ctx);
-using ReferenceFactory = LogicalId (*)(const std::vector<LogicalId> &inputs, Graph &graph);
 using InferViewFunc = void (*)(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph);
 
-struct ReferenceGraphEntry
+// Concrete physical hardware assignment for a kernel instance.
+struct HardwareBinding
 {
-    uint32_t min_num_inputs;
-    uint32_t max_num_inputs;
-    ReferenceFactory factory;
-    std::vector<DType> dtypes;
-    std::vector<std::vector<uint32_t>> dummyShapes;
+    MemSpace output_mem_space;
+    std::vector<MemSpace> input_mem_spaces;
+    std::vector<Engine> engines;
 };
 
-class ReferenceGraphRegistry
+// Resolves the abstract topology used by a registered kernel to physical hardware.
+class TopologyMapper
 {
   public:
-    static ReferenceGraphRegistry &get()
+    static bool resolve(const MemSpace &kernel_out_ms, const std::vector<MemSpace> &kernel_in_ms,
+                        const std::vector<Engine> &kernel_engines, bool is_view, size_t num_inputs,
+                        MemSpace target_out_ms, const std::vector<MemSpace> &target_in_ms,
+                        const std::vector<Engine> &target_engines, bool ignore_out_ms, bool ignore_in_ms,
+                        bool ignore_eng, HardwareBinding &out_binding)
     {
-        static ReferenceGraphRegistry instance;
-        return instance;
-    }
+        const auto &sys_spaces = System::get().getAvailableMemSpaces();
+        const auto &sys_engines = System::get().getAvailableEngines();
+        const auto isPhysicalMem = [&](const MemSpace &ms) {
+            return std::find(sys_spaces.begin(), sys_spaces.end(), ms) != sys_spaces.end();
+        };
+        const auto isPhysicalEngine = [&](const Engine &engine) {
+            return std::find(sys_engines.begin(), sys_engines.end(), engine) != sys_engines.end();
+        };
 
-    void registerFactory(const std::string &name, uint32_t min_num_inputs, uint32_t max_num_inputs,
-                         ReferenceFactory factory, const std::vector<DType> &dtypes,
-                         const std::vector<std::vector<uint32_t>> &dummyShapes)
-    {
-        auto it = factories.find(name);
-        if (it != factories.end())
+        if (is_view)
         {
-            Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
+            if (!ignore_out_ms && !ignore_in_ms && !target_in_ms.empty() &&
+                target_out_ms.type != HandleType::STORAGE && target_in_ms[0].type != HandleType::STORAGE &&
+                target_out_ms != target_in_ms[0])
+                return false;
+
+            MemSpace resolved_out{1, HandleType::CPP};
+            if (!ignore_out_ms && target_out_ms.type != HandleType::STORAGE && isPhysicalMem(target_out_ms))
+                resolved_out = target_out_ms;
+            else if (!ignore_in_ms && !target_in_ms.empty() && isPhysicalMem(target_in_ms[0]))
+                resolved_out = target_in_ms[0];
+
+            out_binding.output_mem_space = resolved_out;
+            out_binding.input_mem_spaces.assign(num_inputs, MemSpace{1, HandleType::CPP});
+            if (num_inputs > 0)
+                out_binding.input_mem_spaces[0] = resolved_out;
+
+            out_binding.engines.clear();
+            if (!ignore_eng && !target_engines.empty())
+            {
+                bool all_physical = true;
+                for (const auto &engine : target_engines)
+                {
+                    if (!isPhysicalEngine(engine))
+                    {
+                        all_physical = false;
+                        break;
+                    }
+                }
+                if (all_physical)
+                    out_binding.engines = target_engines;
+            }
+            if (out_binding.engines.empty())
+            {
+                for (const auto &engine : sys_engines)
+                {
+                    if ((resolved_out.type == HandleType::CUDA && engine.type == EngineType::CUDA_GPU &&
+                         engine.idx == resolved_out.idx) ||
+                        (resolved_out.type == HandleType::OPENCL && engine.type == EngineType::QUALCOMM_IGPU) ||
+                        (resolved_out.type == HandleType::CPP && engine.type == EngineType::CPU))
+                    {
+                        out_binding.engines.push_back(engine);
+                        break;
+                    }
+                }
+            }
+            return !out_binding.engines.empty();
         }
-        factories[name] = {min_num_inputs, max_num_inputs, factory, dtypes, dummyShapes};
-    }
 
-    const ReferenceGraphEntry *getFactory(const std::string &name) const
-    {
-        auto it = factories.find(name);
-        if (it != factories.end())
-            return &it->second;
-        return nullptr;
-    }
+        // Storage is read-only. Only metadata views may retain a storage output;
+        // executable kernels must never treat an explicit storage target as a wildcard.
+        if (kernel_out_ms.type == HandleType::STORAGE ||
+            (!ignore_out_ms && target_out_ms.type == HandleType::STORAGE))
+            return false;
 
-    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const
-    {
-        return factories;
-    }
+        std::unordered_map<MemSpace, MemSpace> local_to_actual_mem;
+        std::unordered_map<MemSpace, MemSpace> actual_to_local_mem;
+        const auto reconcileMem = [&](const MemSpace &local, const MemSpace &actual) {
+            if (local.type != actual.type)
+                return false;
+            auto [forward, inserted_forward] = local_to_actual_mem.try_emplace(local, actual);
+            if (!inserted_forward && forward->second != actual)
+                return false;
+            auto [backward, inserted_backward] = actual_to_local_mem.try_emplace(actual, local);
+            return inserted_backward || backward->second == local;
+        };
 
-  private:
-    std::unordered_map<std::string, ReferenceGraphEntry> factories;
+        std::unordered_map<Engine, Engine> local_to_actual_engine;
+        std::unordered_map<Engine, Engine> actual_to_local_engine;
+        const auto reconcileEngine = [&](const Engine &local, const Engine &actual) {
+            if (local.type != actual.type)
+                return false;
+            auto [forward, inserted_forward] = local_to_actual_engine.try_emplace(local, actual);
+            if (!inserted_forward && forward->second != actual)
+                return false;
+            auto [backward, inserted_backward] = actual_to_local_engine.try_emplace(actual, local);
+            return inserted_backward || backward->second == local;
+        };
+
+        if (!ignore_out_ms && target_out_ms.type != HandleType::STORAGE && isPhysicalMem(target_out_ms) &&
+            !reconcileMem(kernel_out_ms, target_out_ms))
+            return false;
+        if (!ignore_in_ms && !kernel_in_ms.empty())
+        {
+            for (size_t i = 0; i < num_inputs && i < target_in_ms.size(); ++i)
+            {
+                if (isPhysicalMem(target_in_ms[i]) &&
+                    !reconcileMem(kernel_in_ms[std::min(i, kernel_in_ms.size() - 1)], target_in_ms[i]))
+                    return false;
+            }
+        }
+        if (!ignore_eng && !kernel_engines.empty() && !target_engines.empty())
+        {
+            if (kernel_engines.size() != target_engines.size())
+                return false;
+            for (size_t i = 0; i < kernel_engines.size(); ++i)
+            {
+                if (isPhysicalEngine(target_engines[i]) && !reconcileEngine(kernel_engines[i], target_engines[i]))
+                    return false;
+            }
+        }
+
+        std::vector<MemSpace> needed_spaces{kernel_out_ms};
+        for (size_t i = 0; i < num_inputs && !kernel_in_ms.empty(); ++i)
+            needed_spaces.push_back(kernel_in_ms[std::min(i, kernel_in_ms.size() - 1)]);
+        for (const auto &local : needed_spaces)
+        {
+            if (local_to_actual_mem.find(local) != local_to_actual_mem.end())
+                continue;
+            bool mapped = false;
+            for (const auto &available : sys_spaces)
+            {
+                if (available.type == local.type && actual_to_local_mem.find(available) == actual_to_local_mem.end() &&
+                    reconcileMem(local, available))
+                {
+                    mapped = true;
+                    break;
+                }
+            }
+            if (!mapped)
+                return false; // A bijection cannot collapse distinct local spaces.
+        }
+        for (const auto &local : kernel_engines)
+        {
+            if (local_to_actual_engine.find(local) != local_to_actual_engine.end())
+                continue;
+            bool mapped = false;
+            for (const auto &available : sys_engines)
+            {
+                if (available.type == local.type &&
+                    actual_to_local_engine.find(available) == actual_to_local_engine.end() &&
+                    reconcileEngine(local, available))
+                {
+                    mapped = true;
+                    break;
+                }
+            }
+            if (!mapped)
+                return false;
+        }
+
+        out_binding.output_mem_space = local_to_actual_mem.at(kernel_out_ms);
+        out_binding.input_mem_spaces.clear();
+        for (size_t i = 0; i < num_inputs; ++i)
+        {
+            out_binding.input_mem_spaces.push_back(
+                kernel_in_ms.empty() ? out_binding.output_mem_space
+                                      : local_to_actual_mem.at(kernel_in_ms[std::min(i, kernel_in_ms.size() - 1)]));
+        }
+        out_binding.engines.clear();
+        for (const auto &local : kernel_engines)
+            out_binding.engines.push_back(local_to_actual_engine.at(local));
+        return true;
+    }
 };
 
 struct KernelEntry
@@ -98,7 +236,8 @@ struct KernelEntry
                  bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false,
                  bool ignore_engines = false, bool ignore_input_contig = false,
                  std::vector<Engine> *out_mapped_engines = nullptr,
-                 std::vector<MemSpace> *out_mapped_input_mem_spaces = nullptr) const
+                 std::vector<MemSpace> *out_mapped_input_mem_spaces = nullptr,
+                 HardwareBinding *out_binding = nullptr) const
     {
         // 1. Check number of inputs
         if (inputs.size() < min_num_inputs || inputs.size() > max_num_inputs)
@@ -112,9 +251,125 @@ struct KernelEntry
             for (uint64_t i = 0; i < inputs.size(); ++i)
             {
                 uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(requiresContiguous.size() - 1));
-                if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
+                if (ruleIdx < requiresContiguous.size() && requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
                     return false;
             }
+        }
+
+        HardwareBinding binding;
+        if (!TopologyMapper::resolve(this->output_mem_space, this->input_mem_spaces, this->engines, this->is_view,
+                                     inputs.size(), output_mem_space, input_mem_spaces, engines,
+                                     ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines, binding))
+            return false;
+
+        if (out_mapped_engines)
+            *out_mapped_engines = binding.engines;
+        if (out_mapped_input_mem_spaces)
+            *out_mapped_input_mem_spaces = binding.input_mem_spaces;
+        if (out_binding)
+            *out_binding = binding;
+
+        if (!dtypes.empty())
+        {
+            for (uint64_t i = 0; i < inputs.size(); ++i)
+            {
+                const uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(dtypes.size() - 1));
+                if (inputs[i].dtype != dtypes[ruleIdx])
+                    return false;
+            }
+        }
+        return !match || match(inputs, output);
+
+#if 0 // Legacy topology reconciliation retained temporarily for reference.
+
+        // View operations (SLICE, RESHAPE, PERMUTE, REPEAT, FILL, view CAST) perform compile-time
+        // metadata calculations on the host and do not dispatch device kernels. They operate
+        // agnostically on any backend, provided the output memory space matches data input #0.
+        if (this->is_view)
+        {
+            if (!ignore_output_mem_space && !ignore_input_mem_spaces && !input_mem_spaces.empty())
+            {
+                if (output_mem_space.type != HandleType::STORAGE && input_mem_spaces[0].type != HandleType::STORAGE)
+                {
+                    if (!(output_mem_space == input_mem_spaces[0]))
+                        return false;
+                }
+            }
+
+            if (out_mapped_engines)
+            {
+                out_mapped_engines->clear();
+                if (!engines.empty())
+                {
+                    *out_mapped_engines = engines;
+                }
+                else
+                {
+                    const auto &avail_engines = System::get().getAvailableEngines();
+                    bool found = false;
+                    for (const auto &eng : avail_engines)
+                    {
+                        if (output_mem_space.type == HandleType::CUDA && eng.type == EngineType::CUDA_GPU &&
+                            eng.idx == output_mem_space.idx)
+                        {
+                            out_mapped_engines->push_back(eng);
+                            found = true;
+                            break;
+                        }
+                        else if (output_mem_space.type == HandleType::OPENCL && eng.type == EngineType::QUALCOMM_IGPU)
+                        {
+                            out_mapped_engines->push_back(eng);
+                            found = true;
+                            break;
+                        }
+                        else if (output_mem_space.type == HandleType::CPP && eng.type == EngineType::CPU)
+                        {
+                            out_mapped_engines->push_back(eng);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                    {
+                        if (output_mem_space.type == HandleType::CUDA)
+                            out_mapped_engines->push_back(
+                                Engine{output_mem_space.idx, EngineType::CUDA_GPU, {output_mem_space}});
+                        else if (output_mem_space.type == HandleType::OPENCL)
+                            out_mapped_engines->push_back(Engine{0, EngineType::QUALCOMM_IGPU, {output_mem_space}});
+                        else
+                            out_mapped_engines->push_back(Engine{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}});
+                    }
+                }
+            }
+
+            if (out_mapped_input_mem_spaces)
+            {
+                *out_mapped_input_mem_spaces = input_mem_spaces;
+                if (out_mapped_input_mem_spaces->empty())
+                {
+                    out_mapped_input_mem_spaces->assign(inputs.size(), output_mem_space);
+                    for (size_t i = 1; i < inputs.size(); ++i)
+                    {
+                        (*out_mapped_input_mem_spaces)[i] = MemSpace{1, HandleType::CPP};
+                    }
+                }
+            }
+
+            if (!dtypes.empty())
+            {
+                for (uint64_t i = 0; i < inputs.size(); ++i)
+                {
+                    uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(dtypes.size() - 1));
+                    if (inputs[i].dtype != dtypes[ruleIdx])
+                        return false;
+                }
+            }
+
+            if (match)
+            {
+                return match(inputs, output);
+            }
+            return true;
         }
 
         // 3 & 4. Check memory space topology.
@@ -188,40 +443,40 @@ struct KernelEntry
             }
         }
 
-        // Correlate unmapped local engines with reconciled memory spaces
+        // Map any unmapped local engines to available system engines of matching EngineType
+        const auto &available_engines = System::get().getAvailableEngines();
         for (const auto &local_eng : this->engines)
         {
             if (localToActualEngine.find(local_eng) == localToActualEngine.end())
             {
-                if (local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA)
+                bool mapped = false;
+                // First pass: try an unused available engine of the matching EngineType
+                for (const auto &avail_eng : available_engines)
                 {
-                    MemSpace local_cuda_ms{local_eng.idx, HandleType::CUDA};
-                    auto it = localToActualMem.find(local_cuda_ms);
-                    if (it != localToActualMem.end())
+                    if (avail_eng.type == local_eng.type &&
+                        actualToLocalEngine.find(avail_eng) == actualToLocalEngine.end())
                     {
-                        Engine actual_eng{it->second.idx, local_eng.type, {it->second}};
-                        reconcileEngine(local_eng, actual_eng);
-                    }
-                    else if (!ignore_output_mem_space && output_mem_space.type == HandleType::CUDA)
-                    {
-                        Engine actual_eng{output_mem_space.idx, local_eng.type, {output_mem_space}};
-                        reconcileEngine(local_eng, actual_eng);
+                        reconcileEngine(local_eng, avail_eng);
+                        mapped = true;
+                        break;
                     }
                 }
-                else if (local_eng.type == EngineType::CPU)
+                // Second pass fallback: any available engine of matching EngineType
+                if (!mapped)
                 {
-                    Engine actual_eng{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}};
-                    reconcileEngine(local_eng, actual_eng);
-                }
-                else if (local_eng.type == EngineType::QUALCOMM_IGPU)
-                {
-                    MemSpace local_cl_ms{local_eng.idx, HandleType::OPENCL};
-                    auto it = localToActualMem.find(local_cl_ms);
-                    if (it != localToActualMem.end())
+                    for (const auto &avail_eng : available_engines)
                     {
-                        Engine actual_eng{it->second.idx, EngineType::QUALCOMM_IGPU, {it->second}};
-                        reconcileEngine(local_eng, actual_eng);
+                        if (avail_eng.type == local_eng.type)
+                        {
+                            reconcileEngine(local_eng, avail_eng);
+                            mapped = true;
+                            break;
+                        }
                     }
+                }
+                if (!mapped)
+                {
+                    reconcileEngine(local_eng, Engine{local_eng.idx, local_eng.type});
                 }
             }
         }
@@ -237,11 +492,6 @@ struct KernelEntry
                 {
                     out_mapped_engines->push_back(it->second);
                 }
-                else if ((local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA) &&
-                         !ignore_output_mem_space && output_mem_space.type == HandleType::CUDA)
-                {
-                    out_mapped_engines->push_back(Engine{output_mem_space.idx, local_eng.type, {output_mem_space}});
-                }
                 else
                 {
                     out_mapped_engines->push_back(local_eng);
@@ -252,6 +502,8 @@ struct KernelEntry
                 if (output_mem_space.type == HandleType::CUDA)
                     out_mapped_engines->push_back(
                         Engine{output_mem_space.idx, EngineType::CUDA_GPU, {output_mem_space}});
+                else if (output_mem_space.type == HandleType::OPENCL)
+                    out_mapped_engines->push_back(Engine{0, EngineType::QUALCOMM_IGPU, {output_mem_space}});
                 else
                     out_mapped_engines->push_back(Engine{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}});
             }
@@ -276,7 +528,7 @@ struct KernelEntry
                     {
                         out_mapped_input_mem_spaces->push_back(it->second);
                     }
-                    else if (local_in.type == HandleType::CUDA && output_mem_space.type == HandleType::CUDA)
+                    else if (!ignore_output_mem_space && local_in.type == output_mem_space.type)
                     {
                         out_mapped_input_mem_spaces->push_back(output_mem_space);
                     }
@@ -305,6 +557,7 @@ struct KernelEntry
             return match(inputs, output);
         }
         return true;
+#endif
     }
 };
 

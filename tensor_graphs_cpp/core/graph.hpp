@@ -1,12 +1,11 @@
 #pragma once
 #include <deque>
 #include <filesystem>
-#include <source_location>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
-#include "core/loaders/loader.hpp"
+#include "core/loaders/resolver.hpp"
 #include "core/memory.hpp"
 #include "core/types.hpp"
 
@@ -76,7 +75,7 @@ struct Graph
 
     TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids,
                              std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {},
-                             std::string _contentHash = "", std::source_location loc = std::source_location::current())
+                             std::string _contentHash = "", SourceLocation loc = SourceLocation::current())
     {
         LogicalId id = LogicalIdAllocator::allocate();
         std::string origin = toString(loc);
@@ -85,7 +84,7 @@ struct Graph
     }
 
     LogicalId constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype,
-                       std::source_location loc = std::source_location::current())
+                       SourceLocation loc = SourceLocation::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
         uint64_t dataHash = tg_hash::computeConstantHash(shape, dtype, dataPtr, sizeBytes);
@@ -127,20 +126,21 @@ struct Graph
         return id;
     }
 
-    LogicalId weight(const std::string &path, const std::string &name,
-                     std::source_location loc = std::source_location::current())
+    LogicalId weight(const std::string &path, const std::string &name, SourceLocation loc = SourceLocation::current())
     {
-        if (!FileRegistry::get().hasTensor(path, name))
+        if (!TensorResolver::get().hasTensor(path, name))
         {
             Error::throw_err("Tensor '" + name + "' not found in: " + path);
         }
 
-        SHA256 sha;
-        sha.update(path + "::" + name);
+        const auto &meta = TensorResolver::get().getMetadata(path, name);
+        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, "", loc);
 
-        const auto &meta = FileRegistry::get().getMetadata(path, name);
-        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, sha.digest(), loc);
-        FileRegistry::get().registerNode(node.id, path, name);
+        SHA256 sha;
+        sha.update(path + "::" + name + "::" + toString(node.id));
+        node.contentHash = sha.digest();
+
+        TensorResolver::get().registerNode(node.id, path, name);
         input_data_types[node.id] = InputDataType::STORAGE;
         TensorNode &copyNode = allocateNode(OpType::COPY_TO, "", meta.dtype, {node.id}, {}, {}, "", loc);
 
@@ -148,27 +148,27 @@ struct Graph
     }
 
     LogicalId input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {},
-                    std::source_location loc = std::source_location::current())
+                    SourceLocation loc = SourceLocation::current())
     {
         TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, "", loc);
         input_data_types[node.id] = InputDataType::RUNTIME;
         return node.id;
     }
 
-    LogicalId _copyto(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId _copyto(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         TensorNode &node = allocateNode(OpType::COPY_TO, "", getNode(id0).dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    LogicalId contiguous(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId contiguous(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    LogicalId add(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId add(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -181,7 +181,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId mul(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId mul(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -194,7 +194,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId div(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId div(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -207,7 +207,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId dot(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId dot(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -220,28 +220,28 @@ struct Graph
         return node.id;
     }
 
-    LogicalId sin(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId sin(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::SIN, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    LogicalId cos(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId cos(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::COS, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    LogicalId neg(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId neg(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::NEGATE, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    LogicalId pow(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId pow(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -254,7 +254,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId sum(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId sum(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -267,7 +267,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId max(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId max(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -280,7 +280,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId reshape(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId reshape(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -293,7 +293,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId permute(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId permute(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -307,7 +307,7 @@ struct Graph
     }
 
     LogicalId slice(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3,
-                    std::source_location loc = std::source_location::current())
+                    SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -332,32 +332,33 @@ struct Graph
         return node.id;
     }
 
+    // Scatter updates an existing output buffer.  The output shape is an
+    // explicit INT32 tensor because there is no longer a target tensor input.
     LogicalId scatter(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3, LogicalId id4,
-                      std::source_location loc = std::source_location::current())
+                      SourceLocation loc = SourceLocation::current())
     {
+        if (getNode(id1).dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(getNode(id1).dtype);
+            Error::throw_err(ss.str());
+        }
         if (getNode(id2).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(getNode(id2).dtype);
+            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(getNode(id2).dtype);
             Error::throw_err(ss.str());
         }
         if (getNode(id3).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(getNode(id3).dtype);
+            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(getNode(id3).dtype);
             Error::throw_err(ss.str());
         }
         if (getNode(id4).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(getNode(id4).dtype);
-            Error::throw_err(ss.str());
-        }
-        if (getNode(id0).dtype != getNode(id1).dtype)
-        {
-            std::stringstream ss;
-            ss << "[Graph.scatter] DType mismatch between target (" << toString(getNode(id0).dtype) << ") and updates ("
-               << toString(getNode(id1).dtype) << ")";
+            ss << "[Graph.scatter] Expected INT32 for shape, got: " << toString(getNode(id4).dtype);
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
@@ -365,8 +366,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId concat(std::vector<LogicalId> ids, LogicalId id1,
-                     std::source_location loc = std::source_location::current())
+    LogicalId concat(std::vector<LogicalId> ids, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (ids.size() == 0)
         {
@@ -397,14 +397,14 @@ struct Graph
         return node.id;
     }
 
-    LogicalId cast(LogicalId id0, DType dtype, std::source_location loc = std::source_location::current())
+    LogicalId cast(LogicalId id0, DType dtype, SourceLocation loc = SourceLocation::current())
     {
         TensorNode &node = allocateNode(OpType::CAST, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
     LogicalId repeat(LogicalId id0, LogicalId repeats_id, LogicalId axis_id,
-                     std::source_location loc = std::source_location::current())
+                     SourceLocation loc = SourceLocation::current())
     {
         if (getNode(repeats_id).dtype != DType::INT32)
         {
@@ -423,8 +423,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId arange(LogicalId id1, LogicalId id2, LogicalId id3,
-                     std::source_location loc = std::source_location::current())
+    LogicalId arange(LogicalId id1, LogicalId id2, LogicalId id3, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -448,7 +447,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId triu(LogicalId id0, LogicalId k_id, std::source_location loc = std::source_location::current())
+    LogicalId triu(LogicalId id0, LogicalId k_id, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(k_id).dtype != DType::INT32)
         {
@@ -461,7 +460,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId gather(LogicalId id0, LogicalId indices_id, std::source_location loc = std::source_location::current())
+    LogicalId gather(LogicalId id0, LogicalId indices_id, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(indices_id).dtype != DType::INT32)
         {
@@ -474,7 +473,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId fill(LogicalId value_id, LogicalId shape_id, std::source_location loc = std::source_location::current())
+    LogicalId fill(LogicalId value_id, LogicalId shape_id, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(shape_id).dtype != DType::INT32)
         {
@@ -488,7 +487,7 @@ struct Graph
     }
 
     LogicalId im2col(LogicalId input_id, LogicalId kernel_size_id, LogicalId stride_id, LogicalId padding_id,
-                     std::source_location loc = std::source_location::current())
+                     SourceLocation loc = SourceLocation::current())
     {
         if (getNode(kernel_size_id).dtype != DType::INT32)
         {
@@ -514,15 +513,14 @@ struct Graph
         return node.id;
     }
 
-    LogicalId log(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId log(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::LOG, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    LogicalId argmax(LogicalId id0, LogicalId dim_id, LogicalId k_id,
-                     std::source_location loc = std::source_location::current())
+    LogicalId argmax(LogicalId id0, LogicalId dim_id, LogicalId k_id, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(dim_id).dtype != DType::INT32)
         {
@@ -540,7 +538,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId lt(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId lt(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -552,7 +550,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId eq(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId eq(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -564,7 +562,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId logical_and(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId logical_and(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != DType::BOOL || getNode(id1).dtype != DType::BOOL)
         {
@@ -577,7 +575,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId logical_or(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId logical_or(LogicalId id0, LogicalId id1, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != DType::BOOL || getNode(id1).dtype != DType::BOOL)
         {
@@ -589,7 +587,7 @@ struct Graph
         return node.id;
     }
 
-    LogicalId logical_not(LogicalId id0, std::source_location loc = std::source_location::current())
+    LogicalId logical_not(LogicalId id0, SourceLocation loc = SourceLocation::current())
     {
         if (getNode(id0).dtype != DType::BOOL)
         {
@@ -601,80 +599,118 @@ struct Graph
         return node.id;
     }
 
-    LogicalId unpack(LogicalId id0, DType dtype, std::source_location loc = std::source_location::current())
+    LogicalId unpack(LogicalId id0, DType dtype, SourceLocation loc = SourceLocation::current())
     {
         TensorNode &node = allocateNode(OpType::UNPACK, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
     // Higher level stuff
-    LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis,
-                     std::source_location loc = std::source_location::current())
+    LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis, SourceLocation loc = SourceLocation::current())
     {
         if (repeats <= 1)
             return id;
         int32_t r = repeats, a = axis;
-        return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32), loc);
+        return repeat(id, constant({1}, &r, DType::INT32, loc), constant({1}, &a, DType::INT32, loc), loc);
     }
 
     LogicalId fill(const LogicalId scalar_id, const std::vector<uint32_t> &shape,
-                   std::source_location loc = std::source_location::current())
+                   SourceLocation loc = SourceLocation::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
-        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32, loc);
         return fill(scalar_id, shape_node, loc);
     }
 
     LogicalId fill(const float value, const std::vector<uint32_t> &shape,
-                   std::source_location loc = std::source_location::current())
+                   SourceLocation loc = SourceLocation::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
-        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
-        return fill(constant({1}, &value, DType::FLOAT32), shape_node, loc);
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32, loc);
+        return fill(constant({1}, &value, DType::FLOAT32, loc), shape_node, loc);
     }
 
     LogicalId fill(const int32_t value, const std::vector<uint32_t> &shape,
-                   std::source_location loc = std::source_location::current())
+                   SourceLocation loc = SourceLocation::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
-        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
-        return fill(constant({1}, &value, DType::INT32), shape_node, loc);
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32, loc);
+        return fill(constant({1}, &value, DType::INT32, loc), shape_node, loc);
     }
 
-    LogicalId reshape(LogicalId id, const std::vector<int32_t> &shape,
-                      std::source_location loc = std::source_location::current())
+    LogicalId reshape(LogicalId id, const std::vector<int32_t> &shape, SourceLocation loc = SourceLocation::current())
     {
-        LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32);
+        LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32, loc);
         return reshape(id, shape_node, loc);
     }
 
-    LogicalId concat(std::vector<LogicalId> ids, uint32_t axis,
-                     std::source_location loc = std::source_location::current())
+    LogicalId concat(std::vector<LogicalId> ids, uint32_t axis, SourceLocation loc = SourceLocation::current())
     {
-        return concat(ids, constant({1}, &axis, DType::INT32), loc);
+        return concat(ids, constant({1}, &axis, DType::INT32, loc), loc);
     }
 
-    LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape,
-                   std::source_location loc = std::source_location::current())
+    LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape, SourceLocation loc = SourceLocation::current())
     {
-        // 1. Create a zero tensor with matching shape
-        LogicalId zeros = fill(0.0f, shape);
-
-        // 2. Element-wise comparison: (0 < scores) -> BOOL tensor
-        LogicalId is_positive = lt(zeros, scores);
-
-        // 3. Cast BOOL -> FLOAT32 (1.0f for true, 0.0f for false)
-        LogicalId mask_f32 = cast(is_positive, DType::FLOAT32);
-
-        // 4. Element-wise multiply: x * (x > 0)
-        LogicalId relu_scores = mul(scores, mask_f32);
-
-        return relu_scores;
+        LogicalId zeros = fill(0.0f, shape, loc);
+        LogicalId is_positive = lt(zeros, scores, loc);
+        LogicalId mask_f32 = cast(is_positive, DType::FLOAT32, loc);
+        return mul(scores, mask_f32, loc);
     }
 
-    LogicalId constant(const std::vector<int32_t> &vals)
+    LogicalId constant(const std::vector<int32_t> &vals, SourceLocation loc = SourceLocation::current())
     {
-        return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32);
+        return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32, loc);
+    }
+
+    LogicalId sum(LogicalId id0, int32_t axis, SourceLocation loc = SourceLocation::current())
+    {
+        return sum(id0, constant({1}, &axis, DType::INT32, loc), loc);
+    }
+
+    LogicalId max(LogicalId id0, int32_t axis, SourceLocation loc = SourceLocation::current())
+    {
+        return max(id0, constant({1}, &axis, DType::INT32, loc), loc);
+    }
+
+    LogicalId permute(LogicalId id0, const std::vector<int32_t> &dims, SourceLocation loc = SourceLocation::current())
+    {
+        LogicalId dims_node = constant({(uint32_t)dims.size()}, dims.data(), DType::INT32, loc);
+        return permute(id0, dims_node, loc);
+    }
+
+    LogicalId slice(LogicalId id0, const std::vector<int32_t> &starts, const std::vector<int32_t> &ends,
+                    const std::vector<int32_t> &steps = {}, SourceLocation loc = SourceLocation::current())
+    {
+        std::vector<int32_t> actual_steps = steps;
+        if (actual_steps.empty())
+            actual_steps.assign(starts.size(), 1);
+        LogicalId st_node = constant({(uint32_t)starts.size()}, starts.data(), DType::INT32, loc);
+        LogicalId en_node = constant({(uint32_t)ends.size()}, ends.data(), DType::INT32, loc);
+        LogicalId step_node = constant({(uint32_t)actual_steps.size()}, actual_steps.data(), DType::INT32, loc);
+        return slice(id0, st_node, en_node, step_node, loc);
+    }
+
+    LogicalId arange(int32_t start, int32_t stop, int32_t step = 1, SourceLocation loc = SourceLocation::current())
+    {
+        LogicalId st_node = constant({1}, &start, DType::INT32, loc);
+        LogicalId sp_node = constant({1}, &stop, DType::INT32, loc);
+        LogicalId step_node = constant({1}, &step, DType::INT32, loc);
+        return arange(st_node, sp_node, step_node, loc);
+    }
+
+    LogicalId triu(LogicalId id0, int32_t k = 0, SourceLocation loc = SourceLocation::current())
+    {
+        LogicalId k_node = constant({1}, &k, DType::INT32, loc);
+        return triu(id0, k_node, loc);
+    }
+
+    LogicalId im2col(LogicalId input_id, int32_t kernel_size, int32_t stride, int32_t padding,
+                     SourceLocation loc = SourceLocation::current())
+    {
+        LogicalId k_id = constant({1}, &kernel_size, DType::INT32, loc);
+        LogicalId s_id = constant({1}, &stride, DType::INT32, loc);
+        LogicalId p_id = constant({1}, &padding, DType::INT32, loc);
+        return im2col(input_id, k_id, s_id, p_id, loc);
     }
 };
 

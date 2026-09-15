@@ -20,27 +20,20 @@ class Executor
     void run(const CompiledGraph &compiled, const Debug::Callback &debugCallback = nullptr)
     {
         uint32_t nInst = compiled.instructions.size();
-        bool disableTimer = true;
+        bool disableTimer = false;
 #ifdef TG_DEBUG
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
 
-        std::unordered_set<EClassId> restored_constants;
-        for (const auto &inst : compiled.instructions)
+        // TODO: we should write constants for all buckets once in Session::compile
+        for (const auto &pair : compiled.constantStaging)
         {
-            for (size_t i = 0; i < inst.children.size(); ++i)
+            EClassId eclass_id = pair.first;
+            if (compiled.nodeViews.count(eclass_id))
             {
-                EClassId child = inst.children[i];
-                if (!compiled.has_logical_id(child) && compiled.constantStaging.count(child))
-                {
-                    if (restored_constants.insert(child).second)
-                    {
-                        const ParallelBuffer &buf = inst.inBuffers[i];
-                        memManager.write(buf.mem_space, buf.offset, compiled.constantStaging.at(child)->data(),
-                                         compiled.constantStaging.at(child)->size());
-                    }
-                }
+                const TensorView &view = compiled.nodeViews.at(eclass_id);
+                memManager.write(MemSpace{1, HandleType::CPP}, view.offset, pair.second->data(), pair.second->size());
             }
         }
 
@@ -107,12 +100,28 @@ class Executor
             {
                 logical_id = compiled.get_logical_id(inst.eclass_id);
             }
+            const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             outBufObj->setupOutput(ctx, outView, logical_id);
 
             bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
-                kernel.run(ctx);
+                try
+                {
+                    kernel.run(ctx);
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "[Executor ERROR at instruction " << idx << "] kernel=" << kernel_name
+                              << " eclass=" << inst.eclass_id.value
+                              << " logical_id=" << inst.logical_id.value
+                              << " debugOrigin=" << inst.debugOrigin << std::endl;
+                    std::cerr << "  children: ";
+                    for (auto c : inst.children)
+                        std::cerr << c.value << " ";
+                    std::cerr << std::endl;
+                    throw;
+                }
                 issued_work = true;
             }
 
