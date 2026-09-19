@@ -1266,6 +1266,7 @@ class OrtoolsSolver:
             self.problem_data.get("stop_after_first_solution", False)
         )
         # solver.parameters.linearization_level = 0
+        solver.parameters.use_lns_only = True
         status = solver.Solve(self.model)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             raise RuntimeError(
