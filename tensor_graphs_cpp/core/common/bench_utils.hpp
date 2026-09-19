@@ -719,21 +719,25 @@ struct CacheFile
     std::string invalidReason;
 };
 
-inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernels = false)
+inline CacheFile loadCacheFile(const std::string &cache_path, bool validateKernels = false)
 {
     CacheFile cache;
-    if (cachePath.empty())
+    if (cache_path.empty())
     {
         cache.isValid = false;
         cache.invalidReason = "Cache path is empty";
         return cache;
     }
 
-    std::ifstream file(cachePath, std::ios::binary);
+    if (!fs::exists(cache_path)) {
+        cache.invalidReason = "No cache file at " + cache_path;
+    }
+
+    std::ifstream file(cache_path, std::ios::binary);
     if (!file.is_open())
     {
         cache.isValid = false;
-        cache.invalidReason = "Could not open cache file: " + cachePath;
+        cache.invalidReason = "Could not open cache file: " + cache_path;
         return cache;
     }
 
@@ -804,12 +808,12 @@ inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernel
     return cache;
 }
 
-inline std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+inline std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cache_path)
 {
     std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
     std::unordered_set<std::string> seen;
 
-    CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/false);
+    CacheFile cache = loadCacheFile(cache_path, /*validateKernels=*/false);
     if (!cache.isValid)
     {
         std::cerr << "Warning: " << cache.invalidReason << std::endl;
