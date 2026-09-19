@@ -33,6 +33,40 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
         self._candidate_signature = None
         self._candidates = []
         self._candidate_targets = {}
+        self._classes_by_base = {}
+        self._candidates_by_base = {}
+        self._selected_parents = {}
+        self._candidate_phase = None
+
+    def _prepareContext(self, context):
+        super()._prepareContext(context)
+
+        self._classes_by_base = {}
+        for bucket_idx, classes in self._bucket_classes.items():
+            for eclass_id, cls in classes.items():
+                base_eclass_id = self._asInt(cls.get("base_eclass_id"), eclass_id)
+                self._classes_by_base.setdefault(base_eclass_id, []).append(
+                    (bucket_idx, eclass_id, cls)
+                )
+
+        problem_data = self._problemData()
+        self._candidates_by_base = {
+            self._asInt(item.get("base_eclass_id")): item
+            for item in problem_data.get("candidates", [])
+            if isinstance(item, dict) and item.get("base_eclass_id") is not None
+        }
+
+        self._selected_parents = {}
+        for bucket_idx, extraction in self._bucket_extractions.items():
+            for eclass_id in self._activeIds(bucket_idx, extraction):
+                enode = self._selectedEnode(bucket_idx, eclass_id, extraction)
+                if not enode:
+                    continue
+                for child_id in enode.get("children", []):
+                    child_id = self._asInt(child_id, child_id)
+                    self._selected_parents.setdefault(
+                        (bucket_idx, child_id), set()
+                    ).add(self._selectionKeyFromParts(bucket_idx, eclass_id))
 
     @staticmethod
     def _shapeVolume(shape):
@@ -64,34 +98,59 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
         return self._lookup(assignments, key)
 
     def _classesForBase(self, base_eclass_id):
-        result = []
-        for bucket_idx, classes in self._bucket_classes.items():
-            for eclass_id, cls in classes.items():
-                if self._asInt(cls.get("base_eclass_id"), eclass_id) == base_eclass_id:
-                    result.append((bucket_idx, eclass_id, cls))
-        return result
+        return self._classes_by_base.get(base_eclass_id, ())
 
     def _candidateForBase(self, base_eclass_id, cache_key, groups, assignments):
-        problem_data = self._problemData()
-        cache_candidates = {
-            self._asInt(item.get("base_eclass_id")): item
-            for item in problem_data.get("candidates", [])
-            if isinstance(item, dict) and item.get("base_eclass_id") is not None
-        }
-        candidate = cache_candidates.get(base_eclass_id)
+        candidate = self._candidates_by_base.get(base_eclass_id)
         if candidate is None:
             return None
 
+        current_cache = int(bool(self._assignment(assignments, cache_key)))
+        target_cache = 1 - current_cache
         matching = []
         scatter_rank = 0
         best_ratio = 0.0
+        estimated_savings = 0.0
+        full_bucket_idx = self._asInt(
+            self._problemData().get("full_bucket_idx"), 0
+        )
         for bucket_idx, eclass_id, cls in self._classesForBase(base_eclass_id):
             selection_key = self._selectionKeyFromParts(bucket_idx, eclass_id)
-            if selection_key not in groups:
+            group = groups.get(selection_key, {})
+            if not group.get("selectable"):
                 continue
             if not self._matchesCacheClass(cls, candidate):
                 continue
             matching.append(selection_key)
+
+            if bucket_idx != full_bucket_idx:
+                cache_enodes = [
+                    enode
+                    for enode in self._validEnodes(
+                        bucket_idx,
+                        eclass_id,
+                        {cache_key: target_cache},
+                    )
+                    if enode.get("is_cache")
+                ]
+                if cache_enodes:
+                    selected = self._selectedEnode(bucket_idx, eclass_id)
+                    try:
+                        selected_cost = float(selected.get("cost", 0.0))
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        selected_cost = 0.0
+                    try:
+                        cache_cost = min(
+                            float(enode.get("cost", 0.0))
+                            for enode in cache_enodes
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        cache_cost = selected_cost
+                    if math.isfinite(selected_cost) and math.isfinite(cache_cost):
+                        estimated_savings += max(
+                            0.0,
+                            selected_cost - cache_cost,
+                        )
 
             scatter_volumes = []
             for enode in cls.get("enodes", []):
@@ -119,12 +178,12 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
         if not matching:
             return None
 
-        current_cache = int(bool(self._assignment(assignments, cache_key)))
-        target_cache = 1 - current_cache
         # The tuple is consumed from the end.  Cache enabling therefore wins,
-        # followed by scatter-capable classes and then the largest ratio.
+        # followed by estimated execution savings, scatter-capable classes,
+        # and then the largest update ratio.
         priority = (
             2 if target_cache else 1,
+            estimated_savings,
             scatter_rank,
             best_ratio,
             -base_eclass_id,
@@ -170,15 +229,7 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
                     self._incumbentAssignments(self._context), cache_key
                 )
             )
-        candidate = next(
-            (
-                item
-                for item in problem_data.get("candidates", [])
-                if isinstance(item, dict)
-                and self._asInt(item.get("base_eclass_id")) == base_eclass_id
-            ),
-            {},
-        )
+        candidate = self._candidates_by_base.get(base_eclass_id, {})
         clean = {
             self._asInt(value, value)
             for value in self._bucket_specs.get(bucket_idx, {}).get(
@@ -256,31 +307,18 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
         if cache_value and self._cacheKeyMatchesClass(cache_key, bucket_idx, eclass_id):
             return True
 
-        for parent_idx, classes in self._bucket_classes.items():
-            for parent_id in classes:
-                parent_key = self._selectionKeyFromParts(parent_idx, parent_id)
-                if parent_key in nodes:
-                    continue
-                selected = self._selectedEnode(parent_idx, parent_id)
-                if selected and eclass_id in {
-                    self._asInt(child, child)
-                    for child in selected.get("children", [])
-                } and parent_idx == bucket_idx:
-                    return True
+        if any(
+            parent_key not in nodes
+            for parent_key in self._selected_parents.get(
+                (bucket_idx, eclass_id), ()
+            )
+        ):
+            return True
         return False
 
     def _cacheKeyMatchesClass(self, cache_key, bucket_idx, eclass_id):
         base_eclass_id = self._asInt(cache_key.split(":")[-1])
-        problem_data = self._problemData()
-        candidate = next(
-            (
-                item
-                for item in problem_data.get("candidates", [])
-                if isinstance(item, dict)
-                and self._asInt(item.get("base_eclass_id")) == base_eclass_id
-            ),
-            None,
-        )
+        candidate = self._candidates_by_base.get(base_eclass_id)
         cls = self._classesForBucket(bucket_idx).get(eclass_id)
         return candidate is not None and cls is not None and self._matchesCacheClass(cls, candidate)
 
@@ -393,7 +431,6 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
             )
             if candidate is not None:
                 candidates.append(candidate)
-        candidates.extend(self._fallbackCandidates(metadata, assignments))
         return sorted(candidates, key=lambda candidate: candidate.priority)
 
     def selectNeighborhood(self, context):
@@ -404,10 +441,19 @@ class CacheNeighborhoodSelector(StructuralNeighborhoodSelector):
             self._candidate_targets = {}
             return set()
 
+        assignments = self._incumbentAssignments(context)
         signature = self._candidateSignature(context)
         if signature != self._candidate_signature:
             self._candidate_signature = signature
             self._candidates = self._buildCandidates(context, metadata)
+            self._candidate_phase = "cache"
+            if not self._candidates:
+                self._candidates = self._fallbackCandidates(metadata, assignments)
+                self._candidate_phase = "fallback"
+
+        elif not self._candidates and self._candidate_phase == "cache":
+            self._candidates = self._fallbackCandidates(metadata, assignments)
+            self._candidate_phase = "fallback"
 
         if not self._candidates:
             self._candidate_targets = {}
