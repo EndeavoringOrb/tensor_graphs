@@ -1,10 +1,12 @@
 """Neighborhood selectors for exact CP-SAT large neighborhood search."""
 
+from .cache import CacheNeighborhoodSelector
 from .protocol import NeighborhoodSelector
 from .random import RandomNeighborhoodSelector, RandomSubgraphSelector
 from .structural import StructuralNeighborhoodSelector
 
 __all__ = [
+    "CacheNeighborhoodSelector",
     "GnnNeighborhoodSelector",
     "NeighborhoodSelector",
     "NeuralNeighborhoodSelector",

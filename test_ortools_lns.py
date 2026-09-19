@@ -5,9 +5,11 @@ Run with:
 """
 
 import unittest
+from unittest.mock import patch
 from typing import Any, Dict, List
 
 from ortools_lns import (
+    CacheNeighborhoodSelector,
     CompositeNeighborhoodSelector,
     CriticalPathSelector,
     MultiChoiceSelector,
@@ -75,6 +77,115 @@ class CustomDummySelector(NeighborhoodSelector):
 
 
 class TestOrtoolsLns(unittest.TestCase):
+    def testCacheSelectorDiamondClosureOmitsCommonChild(self):
+        classes = [
+            makeClass(
+                1,
+                [makeNode(0, [2]), makeNode(1, [3])],
+            ),
+            makeClass(2, [makeNode(0, [4])]),
+            makeClass(3, [makeNode(0, [4])]),
+            makeClass(4, [makeNode(0)]),
+        ]
+        problem = makeProblem(classes, 1)
+        problem["disable_caching"] = True
+        assignments = {
+            "selection:0:1": 0,
+            "selection:0:2": 0,
+            "selection:0:3": None,
+            "selection:0:4": 0,
+        }
+        groups = {
+            f"selection:0:{eclass_id}": {
+                "kind": "selection",
+                "selectable": eclass_id == 1,
+                "choice_count": 2 if eclass_id == 1 else 1,
+            }
+            for eclass_id in range(1, 5)
+        }
+        context = {
+            "model": problem,
+            "incumbent": {
+                "primary_assignments": assignments,
+                "extractions": [{"selection_map": {"1": 0, "2": 0, "4": 0}}],
+            },
+            "metadata": {"groups": groups},
+        }
+
+        selector = CacheNeighborhoodSelector()
+        neighborhood = selector.selectNeighborhood(context)
+
+        self.assertEqual(
+            neighborhood,
+            {"selection:0:1", "selection:0:2", "selection:0:3"},
+        )
+        self.assertNotIn("selection:0:4", neighborhood)
+
+    def testCacheSelectorRanksScatterAndConsumesOneCandidate(self):
+        scatter = makeClass(
+            1,
+            [
+                makeNode(0),
+                makeNode(1, [3], is_scatter=True, cost=0),
+            ],
+        )
+        scatter.update(shape=[100])
+        update = makeClass(3, [makeNode(0)])
+        update.update(shape=[10])
+        pure = makeClass(
+            2,
+            [makeNode(0), makeNode(1, cost=0, is_cache=True)],
+        )
+        pure.update(shape=[100])
+        problem = makeProblem([scatter, pure, update], 1)
+        problem["candidates"] = [
+            {
+                "base_eclass_id": 1,
+                "mem_space": CPU,
+                "size_bytes": PAGE,
+                "raw_size_bytes": PAGE,
+            },
+            {
+                "base_eclass_id": 2,
+                "mem_space": CPU,
+                "size_bytes": PAGE,
+                "raw_size_bytes": PAGE,
+            },
+        ]
+        assignments = {
+            "cache:1": 0,
+            "cache:2": 0,
+            "selection:0:1": 0,
+            "selection:0:2": 0,
+            "selection:0:3": 0,
+        }
+        groups = {
+            "cache:1": {"kind": "cache", "base_eclass_id": 1},
+            "cache:2": {"kind": "cache", "base_eclass_id": 2},
+            "selection:0:1": {"kind": "selection", "selectable": True},
+            "selection:0:2": {"kind": "selection", "selectable": True},
+            "selection:0:3": {"kind": "selection", "selectable": False},
+        }
+        context = {
+            "model": problem,
+            "incumbent": {
+                "primary_assignments": assignments,
+                "extractions": [{"selection_map": {"1": 0, "2": 0, "3": 0}}],
+            },
+            "metadata": {"groups": groups},
+        }
+
+        selector = CacheNeighborhoodSelector()
+        first = selector.selectNeighborhood(context)
+        first_targets = selector.getCandidateFixings()
+        second = selector.selectNeighborhood(context)
+        second_targets = selector.getCandidateFixings()
+
+        self.assertIn("cache:1", first)
+        self.assertEqual(first_targets, {"cache:1": 1})
+        self.assertIn("cache:2", second)
+        self.assertEqual(second_targets, {"cache:2": 1})
+
     def testRandomSubgraphSelector(self):
         classes = [
             makeClass(1, [makeNode(0, cost=1.0)]),
@@ -232,6 +343,28 @@ class TestOrtoolsLns(unittest.TestCase):
         # Verify total cost decreased from 12 to 4 (1 + 2 + 1)
         self.assertLess(ext["cost"], 12.0)
         self.assertEqual(ext["cost"], 4.0)
+
+    def testLnsWithoutMaxTimeRunsNeighborhoodsAfterFirstFeasibleSolve(self):
+        problem = makeProblem([makeClass(1, [makeNode(cost=1.0)])], 1)
+        problem.pop("max_time_seconds")
+
+        with patch("ortools_lns.OrtoolsSolver") as solver_type:
+            solver_type.return_value.solve.return_value = {
+                "solver": "ortools_full",
+                "objective": 1.0,
+            }
+            solver_type.return_value.getNeighborhoodMetadata.return_value = {
+                "groups": {}
+            }
+            solution = OrtoolsLnsSolver(
+                problem, selector=CustomDummySelector(set())
+            ).solve()
+
+        solver_problem = solver_type.call_args.args[0]
+        self.assertNotIn("max_time_seconds", solver_problem)
+        self.assertTrue(solver_problem["stop_after_first_solution"])
+        self.assertEqual(solution["lns"]["iterations"], 1)
+        self.assertEqual(solution["lns"]["outcomes"], {"empty": 1})
 
     def testSolveOrtoolsDispatcher(self):
         classes = [

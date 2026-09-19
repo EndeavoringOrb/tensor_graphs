@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 import os
 import sys
 import time
@@ -10,6 +11,7 @@ from collections import defaultdict
 from ortools.sat.python import cp_model  # noqa: F401
 
 from lns_selectors import (
+    CacheNeighborhoodSelector,
     GnnNeighborhoodSelector,
     NeighborhoodSelector,  # noqa: F401
     RandomNeighborhoodSelector,
@@ -86,19 +88,38 @@ class OrtoolsLnsSolver:
 
     def __init__(self, problem_data, selector=None):
         self.problem_data = problem_data
-        self.timeout_sec = float(problem_data.get("max_time_seconds") or 30.0)
-        if self.timeout_sec <= 0:
+        configured_timeout = problem_data.get("max_time_seconds")
+        self.timeout_sec = (
+            None if configured_timeout is None else float(configured_timeout)
+        )
+        if self.timeout_sec is not None and (
+            not math.isfinite(self.timeout_sec) or self.timeout_sec <= 0
+        ):
             raise ValueError("max_time_seconds must be positive")
         self.print_progress = bool(problem_data.get("print_progress", True))
-        self.subproblem_timeout_sec = float(
-            problem_data.get("lns_subproblem_time_seconds", 90.0)
+        configured_subproblem_timeout = problem_data.get("lns_subproblem_time_seconds")
+        self.subproblem_timeout_sec = (
+            None if self.timeout_sec is None else 90.0
+            if configured_subproblem_timeout is None
+            else float(configured_subproblem_timeout)
         )
-        self.initial_timeout_sec = float(
-            problem_data.get(
-                "lns_initial_time_seconds", max(0.1, min(2.0, self.timeout_sec * 0.2))
+        configured_initial_timeout = problem_data.get("lns_initial_time_seconds")
+        self.initial_timeout_sec = (
+            None
+            if configured_initial_timeout is None and self.timeout_sec is None
+            else float(
+                configured_initial_timeout
+                if configured_initial_timeout is not None
+                else max(0.1, min(2.0, self.timeout_sec * 0.2))
             )
         )
-        self.selector = selector or RandomNeighborhoodSelector(
+        for name, timeout in (
+            ("lns_subproblem_time_seconds", self.subproblem_timeout_sec),
+            ("lns_initial_time_seconds", self.initial_timeout_sec),
+        ):
+            if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+                raise ValueError(f"{name} must be finite and positive")
+        self.selector = selector or CacheNeighborhoodSelector(
             target_size=int(problem_data.get("lns_neighborhood_size", 15)),
             seed=problem_data.get("random_seed"),
         )
@@ -152,16 +173,24 @@ class OrtoolsLnsSolver:
 
     def _buildCandidate(self, incumbent, unfrozen, timeout_sec):
         candidate_data = copy.deepcopy(self.problem_data)
-        candidate_data["max_time_seconds"] = max(0.01, timeout_sec)
-        candidate_data["print_progress"] = False
+        if timeout_sec is None:
+            candidate_data.pop("max_time_seconds", None)
+        else:
+            candidate_data["max_time_seconds"] = max(0.01, timeout_sec)
+        candidate_data["print_progress"] = True
         candidate_data["include_primary_assignments"] = True
         assignments = incumbent.get("primary_assignments", {})
         fixings = {
             key: value for key, value in assignments.items() if key not in unfrozen
         }
+        target_getter = getattr(self.selector, "getCandidateFixings", None)
+        target_fixings = target_getter() if target_getter is not None else {}
+        fixings.update(target_fixings or {})
+        must_change_groups = set(target_fixings or ()) or set(unfrozen)
         return OrtoolsSolver(
             candidate_data,
             primary_fixings=fixings,
+            must_change_groups=must_change_groups,
             incumbent_assignments=assignments,
         )
 
@@ -171,11 +200,16 @@ class OrtoolsLnsSolver:
 
         started = time.perf_counter()
         initial_data = copy.deepcopy(self.problem_data)
-        initial_data["max_time_seconds"] = max(
-            0.01, min(self.timeout_sec, self.initial_timeout_sec)
-        )
-        initial_data["print_progress"] = False
+        if self.timeout_sec is None:
+            initial_data.pop("max_time_seconds", None)
+            initial_data["print_progress"] = self.print_progress
+        else:
+            initial_data["max_time_seconds"] = max(
+                0.01, min(self.timeout_sec, self.initial_timeout_sec)
+            )
+            initial_data["print_progress"] = False
         initial_data["include_primary_assignments"] = True
+        initial_data["stop_after_first_solution"] = True
         incumbent_model = OrtoolsSolver(initial_data)
         incumbent = incumbent_model.solve()
         metadata = self._selectorMetadata(incumbent_model, incumbent)
@@ -189,24 +223,36 @@ class OrtoolsLnsSolver:
                 f"groups: {len(metadata.get('groups', {}))}"
             )
 
-        while time.perf_counter() - started < self.timeout_sec:
+        while self.timeout_sec is None or time.perf_counter() - started < self.timeout_sec:
             iterations += 1
+            remaining_seconds = (
+                None
+                if self.timeout_sec is None
+                else self.timeout_sec - (time.perf_counter() - started)
+            )
             context = {
                 "model": incumbent_model,
                 "metadata": metadata,
                 "incumbent": incumbent,
                 "objective": incumbent.get("objective", float("inf")),
                 "iteration": iterations,
-                "remaining_seconds": self.timeout_sec - (time.perf_counter() - started),
+                "remaining_seconds": remaining_seconds,
             }
             seeds = self._selectSeeds(context)
             unfrozen = set(seeds)
             if not unfrozen:
                 outcomes["empty"] += 1
+                if self.timeout_sec is None:
+                    break
                 continue
 
-            remaining = self.timeout_sec - (time.perf_counter() - started)
-            solve_time = min(self.subproblem_timeout_sec, max(0.01, remaining))
+            if self.timeout_sec is None:
+                solve_time = self.subproblem_timeout_sec
+            else:
+                remaining = self.timeout_sec - (time.perf_counter() - started)
+                solve_time = max(0.01, remaining)
+                if self.subproblem_timeout_sec is not None:
+                    solve_time = min(self.subproblem_timeout_sec, solve_time)
             candidate_model = self._buildCandidate(incumbent, unfrozen, solve_time)
             try:
                 candidate = candidate_model.solve()
@@ -246,7 +292,7 @@ def solveOrtools(problem_data):
         or problem_data.get("use_ortools_lns", False)
     )
     if use_lns or not problem_data.get("use_ortools_full", False):
-        return OrtoolsLnsSolver(problem_data, selector=StructuralNeighborhoodSelector()).solve()
+        return OrtoolsLnsSolver(problem_data, selector=CacheNeighborhoodSelector()).solve()
     return OrtoolsSolver(problem_data).solve()
 
 
