@@ -78,7 +78,7 @@ struct Session
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
     std::string recordsPath = "benchmarks/records.bin";
 
-    uint32_t fullBucketIdx;
+    uint32_t fullBucketIdx = UINT32_MAX;
     TGStore *repo;
     std::unique_ptr<TGStore> owned_repo;
     bool disableCaching = false;
@@ -229,9 +229,15 @@ struct Session
             Error::throw_err("[Session.setBucketWeights] expected " + std::to_string(manualBuckets.size()) +
                              " weights, got " + std::to_string(weights.size()));
         }
-        (void)normalizedBucketWeights(weights);
+        const bool full_only_zero = manualBuckets.size() == 1 && fullBucketIdx == 0 && weights.size() == 1 &&
+                                    weights[0] == 0.0f;
+        if (!full_only_zero)
+            (void)normalizedBucketWeights(weights);
         for (size_t i = 0; i < weights.size(); ++i)
             manualBuckets[i].weight = weights[i];
+
+        if (fullBucketIdx < manualBuckets.size())
+            manualBuckets[fullBucketIdx].weight = 0.0f;
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, TGStore *_repo = nullptr,
@@ -308,6 +314,10 @@ struct Session
             fullBucketIdx = manualBuckets.size();
             manualBuckets.push_back(bucket);
         }
+
+        // The native planner supplies the full-bucket witness. Its cost is
+        // not part of the weighted bucket objective used for cache planning.
+        manualBuckets[fullBucketIdx].weight = 0.0f;
     }
 
     void plan(bool doSaturate = true)
@@ -322,6 +332,7 @@ struct Session
         ensureFullBucket();
         if (!settings.bucket_weights.empty())
             setBucketWeights(settings.bucket_weights);
+        manualBuckets[fullBucketIdx].weight = 0.0f;
 
         const std::vector<float> requestedWeights = normalizedBucketWeights(manualBuckets);
         bool cacheMatchesBuckets =

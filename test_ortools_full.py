@@ -166,6 +166,27 @@ class FullSolverTests(unittest.TestCase):
                         "Engine double-booked",
                     )
 
+    def testFullBucketIsExcludedFromObjective(self):
+        problem = makeProblem([makeClass(1, [makeNode(cost=7.0)])], 1)
+        problem["buckets"][0]["weight"] = 1000.0
+        partial = copy.deepcopy(problem["buckets"][0])
+        partial.update(bucket_idx=1, weight=2.0)
+        problem["buckets"].append(partial)
+
+        solver = OrtoolsSolver(problem)
+        solver.buildModel()
+
+        self.assertEqual(len(solver.objective_terms), 1)
+
+    def testExplicitZeroWeightFullOnlyHasNoObjective(self):
+        problem = makeProblem([makeClass(1, [makeNode(cost=7.0)])], 1)
+        problem["buckets"][0]["weight"] = 0.0
+
+        solver = OrtoolsSolver(problem)
+        solver.buildModel()
+
+        self.assertEqual(solver.objective_terms, [])
+
     def testWorkspacePressureChangesCacheSelection(self):
         problem = makeProblem(
             [

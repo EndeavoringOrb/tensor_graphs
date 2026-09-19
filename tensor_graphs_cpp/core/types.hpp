@@ -1647,6 +1647,13 @@ inline std::vector<float> normalizedBucketWeights(const std::vector<Bucket> &buc
     weights.reserve(buckets.size());
     for (const Bucket &bucket : buckets)
         weights.push_back(bucket.weight);
+
+    // A session with no user buckets contains only the automatically added
+    // full bucket. That bucket intentionally has no weighted objective, so
+    // preserve the zero instead of rejecting an otherwise valid session.
+    if (weights.size() == 1 && weights[0] == 0.0f)
+        return weights;
+
     return normalizedBucketWeights(weights);
 }
 

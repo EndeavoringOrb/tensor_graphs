@@ -819,10 +819,20 @@ class OrtoolsSolver:
                 [item[0] for item in items], [item[2] for item in items], cap_pages
             )
 
-        weight = float(bucket.get("weight", 1.0))
-        if not math.isfinite(weight) or weight < 0:
-            raise ValueError(f"Invalid bucket weight {weight}")
-        self.objective_terms.append(weight * makespan)
+        # The native planner already found a valid full-bucket witness. Keep
+        # the full bucket in the model for cache initialization and ordering,
+        # but exclude its makespan from the optimization objective. Keep the
+        # legacy default for hand-built single-bucket test problems that omit
+        # the weight field; exported sessions always include the full bucket's
+        # explicit zero weight.
+        include_in_objective = b != self.full_bucket_idx or (
+            len(self.buckets) == 1 and "weight" not in bucket
+        )
+        if include_in_objective:
+            weight = float(bucket.get("weight", 1.0))
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(f"Invalid bucket weight {weight}")
+            self.objective_terms.append(weight * makespan)
         
         if plan is not None:
             self.applyExternalHints(plan, nodes, horizon, makespan)
