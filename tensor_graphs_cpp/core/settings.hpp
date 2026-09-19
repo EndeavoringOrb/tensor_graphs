@@ -409,6 +409,8 @@ struct Settings
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
         parser.add_flag({"--use-ortools"}, "Use Google OR-Tools CP-SAT model for optimization.");
         parser.add_flag({"--use-ortools-full"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools.");
+        parser.add_flag({"--use-ortools-lns"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools LNS.");
+        parser.add_option({"--max-time-seconds"}, "Maximum time limit in seconds for OR-Tools optimization.", "0.0");
         parser.add_option({"--repo-path"}, "Path to the tensor repository (benchmarks/repo_<name>).", "");
         parser.add_option({"--records"}, "Path to kernel benchmark records file.", records_path);
         parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
@@ -454,6 +456,13 @@ struct Settings
             use_ortools_full = true;
         if (parser.get_flag("--use-ortools-lns"))
             use_ortools_lns = true;
+
+        // TODO: make parser handle conversion
+        std::string cli_max_time = parser.get_option("--max-time-seconds");
+        if (!cli_max_time.empty())
+        {
+            max_time_seconds = std::stod(cli_max_time);
+        }
 
         std::string cli_repo_path = parser.get_option("--repo-path");
         if (!cli_repo_path.empty())

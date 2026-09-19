@@ -30,10 +30,13 @@ tensor_graphs_cpp/main
 tensor_graphs_cpp/bench
 tensor_graphs_cpp/bench_model
 tensor_graphs_cpp/test
+tensor_graphs_cpp/embed
+tensor_graphs_cpp/test_inst
 tensor_graphs_cpp/main.exe
 tensor_graphs_cpp/bench.exe
 tensor_graphs_cpp/bench_model.exe
 tensor_graphs_cpp/test.exe
+instructions.txt
 hwinfo*.txt
 *.png
 prompt.txt

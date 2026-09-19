@@ -710,7 +710,7 @@ struct FusionRule : public Rule
                     dummyNode.opType = OpType::INPUT;
                     dummyNode.dtype = parent.dtype;
                     dummyNode.setShape(parent.shape);
-                    dummyNode.strides = parent.strides;
+                    dummyNode.strides = needContig ? calcContiguousStrides(parent.shape) : parent.strides;
 
                     cand.child_mem_paths[i] =
                         findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, mapped_engines);

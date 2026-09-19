@@ -146,7 +146,6 @@ CORE_DEPENDENCIES = [
 ALL_TARGETS = [
     "bench.cpp",
     "bench_model.cpp",
-    "chat.cpp",
     "embed.cpp",
     "main.cpp",
     "test.cpp",
