@@ -171,21 +171,20 @@ class DispatchCostPruningRule
         }
     }
 
-    bool check(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
+    float lower_bound(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
     {
-        if (!enabled || !ctx.best_cost)
-            return false;
-
-        float best_c = *ctx.best_cost;
-        if (best_c >= TGConstants::INF)
-            return false;
+        if (!enabled)
+            return 0.0f;
 
         uint32_t sel = ctx.selection_map.at(cand);
         ENodeId enode_id = ctx.egraph.getEClass(cand).enodes[sel];
         const ENode &enode = ctx.egraph.getENode(enode_id);
+        bool is_view = (enode_id.value < ctx.enodeInfos.size() && ctx.enodeInfos[enode_id.value].is_view);
+        bool is_input = (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE);
+
         float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
         if (cost == TGConstants::INF)
-            return true;
+            return TGConstants::INF;
 
         float children_finish = 0.0f;
         for (EClassId child : enode.getChildren())
@@ -193,6 +192,12 @@ class DispatchCostPruningRule
             EClassId canon_child = ctx.egraph.findConst(child);
             if (canon_child.value < node_finish.size())
                 children_finish = std::max(children_finish, node_finish[canon_child.value]);
+        }
+
+        if (is_input || is_view)
+        {
+            float finish_time = is_input ? 0.0f : children_finish;
+            return finish_time + tail_q[cand.value];
         }
 
         auto engines = enode.getEngines();
@@ -208,9 +213,7 @@ class DispatchCostPruningRule
         float finish_time = start_time + cost;
 
         // 1. Delivery tail bound
-        float lb_tail = finish_time + tail_q[cand.value];
-        if (lb_tail >= best_c)
-            return true;
+        float max_lb = finish_time + tail_q[cand.value];
 
         // 2. Scheduled engine remaining workload bound
         for (const auto &eng : engines)
@@ -218,11 +221,22 @@ class DispatchCostPruningRule
             auto it = remaining_work_per_engine.find(eng);
             float rem_work = (it != remaining_work_per_engine.end()) ? it->second : 0.0f;
             float eng_lb = finish_time + (rem_work - cost);
-            if (eng_lb >= best_c)
-                return true;
+            max_lb = std::max(max_lb, eng_lb);
         }
 
-        return false;
+        return max_lb;
+    }
+
+    bool check(EClassId cand, size_t cand_idx, const DispatchContext &ctx) const
+    {
+        if (!enabled || !ctx.best_cost)
+            return false;
+
+        float best_c = *ctx.best_cost;
+        if (best_c >= TGConstants::INF)
+            return false;
+
+        return lower_bound(cand, cand_idx, ctx) >= best_c;
     }
 
     void on_push(EClassId node, const DispatchContext &ctx)
@@ -233,6 +247,9 @@ class DispatchCostPruningRule
         uint32_t sel = ctx.selection_map.at(node);
         ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
         const ENode &enode = ctx.egraph.getENode(enode_id);
+        bool is_view = (enode_id.value < ctx.enodeInfos.size() && ctx.enodeInfos[enode_id.value].is_view);
+        bool is_input = (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE);
+
         float cost = (enode_id.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[enode_id.value].cost : 0.0f;
         if (cost == TGConstants::INF)
             cost = 0.0f;
@@ -245,30 +262,37 @@ class DispatchCostPruningRule
                 children_finish = std::max(children_finish, node_finish[canon_child.value]);
         }
 
-        auto engines = enode.getEngines();
-        float engine_ready = 0.0f;
-        for (const auto &eng : engines)
-        {
-            auto it = engine_finish.find(eng);
-            if (it != engine_finish.end())
-                engine_ready = std::max(engine_ready, it->second);
-        }
-
-        float start_time = std::max(children_finish, engine_ready);
-        float finish_time = start_time + cost;
-
         UndoState undo;
         undo.node = node;
         undo.prev_node_finish = node_finish[node.value];
-        node_finish[node.value] = finish_time;
 
-        for (const auto &eng : engines)
+        if (is_input || is_view)
         {
-            undo.prev_engine_finish.push_back({eng, engine_finish[eng]});
-            engine_finish[eng] = finish_time;
+            node_finish[node.value] = is_input ? 0.0f : children_finish;
+        }
+        else
+        {
+            auto engines = enode.getEngines();
+            float engine_ready = 0.0f;
+            for (const auto &eng : engines)
+            {
+                auto it = engine_finish.find(eng);
+                if (it != engine_finish.end())
+                    engine_ready = std::max(engine_ready, it->second);
+            }
 
-            undo.prev_rem_work.push_back({eng, remaining_work_per_engine[eng]});
-            remaining_work_per_engine[eng] -= cost;
+            float start_time = std::max(children_finish, engine_ready);
+            float finish_time = start_time + cost;
+            node_finish[node.value] = finish_time;
+
+            for (const auto &eng : engines)
+            {
+                undo.prev_engine_finish.push_back({eng, engine_finish[eng]});
+                engine_finish[eng] = finish_time;
+
+                undo.prev_rem_work.push_back({eng, remaining_work_per_engine[eng]});
+                remaining_work_per_engine[eng] -= cost;
+            }
         }
 
         undo_stack.push_back(std::move(undo));
@@ -374,163 +398,6 @@ class InputDispatchDominationRule
             if (other_op == OpType::INPUT || other_op == OpType::CACHE)
             {
                 return true; // Prune: `other` has smaller EClassId and must be dispatched first
-            }
-        }
-
-        return false;
-    }
-};
-
-class UnifiedMemoryExchangeableDispatchRule
-{
-  public:
-    TG_PRUNING_RULE(UnifiedMemoryExchangeableDispatchRule)
-    UnifiedMemoryExchangeableDispatchRule(bool en = true) : enabled(en)
-    {
-    }
-
-  private:
-    std::vector<uint32_t> remaining_users; // Tracks R(P) for each EClass
-
-  public:
-    // 1. BEFORE DFS: Initialize remaining user counts from selection_map
-    void init(const DispatchContext &ctx)
-    {
-        uint32_t max_class_id = static_cast<uint32_t>(ctx.egraph.getClasses().size());
-        remaining_users.assign(max_class_id, 0);
-
-        for (const auto &kv : ctx.selection_map)
-        {
-            EClassId node = ctx.egraph.findConst(kv.first);
-            uint32_t sel = kv.second;
-            ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
-            const ENode &enode = ctx.egraph.getENode(enode_id);
-
-            for (EClassId child : enode.getChildren())
-            {
-                EClassId canon_child = ctx.egraph.findConst(child);
-                if (canon_child.value < max_class_id)
-                {
-                    remaining_users[canon_child.value]++;
-                }
-            }
-        }
-    }
-
-    // 2. DURING DFS: O(1) decrements when a node is committed
-    void on_push(EClassId node, const DispatchContext &ctx)
-    {
-        uint32_t sel = ctx.selection_map.at(node);
-        ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
-        const ENode &enode = ctx.egraph.getENode(enode_id);
-
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (canon_child.value < remaining_users.size())
-            {
-                remaining_users[canon_child.value]--;
-            }
-        }
-    }
-
-    // 3. DURING DFS: O(1) increments when backtracking
-    void on_pop(EClassId node, const DispatchContext &ctx)
-    {
-        uint32_t sel = ctx.selection_map.at(node);
-        ENodeId enode_id = ctx.egraph.getEClass(node).enodes[sel];
-        const ENode &enode = ctx.egraph.getENode(enode_id);
-
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (canon_child.value < remaining_users.size())
-            {
-                remaining_users[canon_child.value]++;
-            }
-        }
-    }
-
-    // Computes the multiset of input buffer sizes that die on this step
-    std::vector<std::pair<MemSpace, uint64_t>> get_freed_inputs(const ENode &node, EClassId sibling_node,
-                                                                const DispatchContext &ctx) const
-    {
-        std::vector<std::pair<MemSpace, uint64_t>> freed;
-
-        // Find sibling's children to check for shared parents
-        uint32_t sib_sel = ctx.selection_map.at(sibling_node);
-        const ENode &sib_enode = ctx.egraph.getENode(ctx.egraph.getEClass(sibling_node).enodes[sib_sel]);
-        const auto &sib_children = sib_enode.getChildren();
-
-        for (EClassId child : node.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-
-            // If the parent is shared with the sibling, it won't die on Step 1 in either order
-            bool is_shared = false;
-            for (EClassId sib_child : sib_children)
-            {
-                if (ctx.egraph.findConst(sib_child) == canon_child)
-                {
-                    is_shared = true;
-                    break;
-                }
-            }
-            if (is_shared)
-                continue;
-
-            // If this is the last consumer (R(P) == 1), this buffer dies immediately
-            if (canon_child.value < remaining_users.size() && remaining_users[canon_child.value] == 1)
-            {
-                const EClass &cCls = ctx.egraph.getEClass(canon_child);
-                uint64_t size = getSizeBytes(cCls.shape, cCls.dtype);
-                freed.push_back({cCls.mem_space, size});
-            }
-        }
-        std::sort(freed.begin(), freed.end());
-        return freed;
-    }
-
-    // 4. PER-CANDIDATE PRUNING CHECK
-    bool check(EClassId cand, size_t /*cand_idx*/, const DispatchContext &ctx) const
-    {
-        if (!enabled || ctx.current_ready.size() <= 1)
-            return false;
-
-        uint32_t sel_cand = ctx.selection_map.at(cand);
-        ENodeId enode_cand_id = ctx.egraph.getEClass(cand).enodes[sel_cand];
-        const ENode &enode_cand = ctx.egraph.getENode(enode_cand_id);
-
-        uint64_t cand_out_size = getSizeBytes(enode_cand.getShape(), enode_cand.getDType());
-        MemSpace cand_ms = enode_cand.getMemSpace();
-
-        for (EClassId other : ctx.current_ready)
-        {
-            // Canonical tie-breaker: only prune cand if another exchangeable node has smaller ID
-            if (other.value >= cand.value)
-                continue;
-
-            uint32_t sel_other = ctx.selection_map.at(other);
-            ENodeId enode_other_id = ctx.egraph.getEClass(other).enodes[sel_other];
-            const ENode &enode_other = ctx.egraph.getENode(enode_other_id);
-
-            // 1. Hardware target equivalence
-            if (enode_other.getMemSpace() != cand_ms)
-                continue;
-            if (enode_other.getEngines() != enode_cand.getEngines())
-                continue;
-
-            // 2. Output allocation equivalence
-            if (getSizeBytes(enode_other.getShape(), enode_other.getDType()) != cand_out_size)
-                continue;
-
-            // 3. Immediate deallocation equivalence
-            auto freed_cand = get_freed_inputs(enode_cand, other, ctx);
-            auto freed_other = get_freed_inputs(enode_other, cand, ctx);
-
-            if (freed_cand == freed_other)
-            {
-                return true; // Symmetric transition profile -> Prune candidate
             }
         }
 
@@ -1410,8 +1277,8 @@ DispatchIterator<std::decay_t<Rules>...> makeDispatchIteratorWithDelegate(
                                                     mem_caps, timeout, std::forward<Rules>(rules)...);
 }
 
-using AllDispatchRuleTypes = std::tuple<InputDispatchDominationRule, UnifiedMemoryExchangeableDispatchRule,
-                                        MemoryPressureDispatchRule, DispatchCostPruningRule, DispatchCycleRule>;
+using AllDispatchRuleTypes =
+    std::tuple<InputDispatchDominationRule, MemoryPressureDispatchRule, DispatchCostPruningRule, DispatchCycleRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredDispatchIteratorFromBools(const EGraph &egraph,
@@ -1477,254 +1344,6 @@ struct ExtractContext
 // Extractor pruning rules (plain structs; conform to prune::PruningRuleSet)
 // =============================================================================
 
-class ExtractorDynamicMinCutRule
-{
-  public:
-    TG_PRUNING_RULE(ExtractorDynamicMinCutRule)
-    ExtractorDynamicMinCutRule(bool en = true) : enabled(en)
-    {
-    }
-
-  private:
-    struct UndoFrame
-    {
-        EClassId current;
-        MemSpace current_ms;
-        bool was_open;
-        std::vector<std::pair<MemSpace, EClassId>> newly_opened_children;
-    };
-
-    std::vector<uint64_t> class_sizes;
-    std::vector<MemSpace> class_mem_spaces;
-    std::unordered_map<MemSpace, uint64_t> open_bytes_per_ms;
-    std::unordered_map<MemSpace, std::unordered_map<EClassId, uint32_t>> open_tensors_per_ms;
-    std::vector<UndoFrame> undo_stack;
-
-    bool is_open(EClassId node, MemSpace ms) const
-    {
-        auto it_ms = open_tensors_per_ms.find(ms);
-        if (it_ms == open_tensors_per_ms.end())
-            return false;
-        auto it = it_ms->second.find(node);
-        return it != it_ms->second.end() && it->second > 0;
-    }
-
-  public:
-    void init(const ExtractContext &ctx)
-    {
-        open_bytes_per_ms.clear();
-        open_tensors_per_ms.clear();
-        undo_stack.clear();
-
-        uint32_t num_classes = static_cast<uint32_t>(ctx.egraph.getClasses().size());
-        class_sizes.assign(num_classes, 0);
-        class_mem_spaces.assign(num_classes, MemSpace{1, HandleType::CPP});
-
-        for (uint32_t i = 0; i < num_classes; ++i)
-        {
-            EClassId canon = ctx.egraph.findConst(EClassId{i});
-            if (canon.value < num_classes)
-            {
-                const EClass &cls = ctx.egraph.getEClass(canon);
-                uint64_t sz = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
-                class_sizes[i] = sz;
-                class_mem_spaces[i] = cls.mem_space;
-            }
-        }
-    }
-
-    bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
-    {
-        if (!enabled || !ctx.mem_caps)
-            return false;
-
-        const ENode &enode = ctx.egraph.getENode(cand);
-        MemSpace ms = enode.getMemSpace();
-
-        if (ms.type == HandleType::STORAGE)
-            return false;
-
-        auto cap_it = ctx.mem_caps->find(ms);
-        if (cap_it == ctx.mem_caps->end() || cap_it->second == std::numeric_limits<uint64_t>::max())
-            return false;
-        uint64_t cap = cap_it->second;
-
-        uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
-
-        bool is_view = (cand.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[cand.value].is_view : false;
-        bool can_be_inplace = is_view;
-
-        if (!can_be_inplace && enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
-        {
-            const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
-            for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
-            {
-                if (inplace_idx < enode.getChildren().size())
-                {
-                    EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
-                    if (class_mem_spaces[child.value] == ms)
-                    {
-                        uint64_t in_size = class_sizes[child.value];
-                        if (out_size <= in_size)
-                        {
-                            can_be_inplace = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        uint64_t input_sum_in_ms = 0;
-        std::unordered_set<EClassId> seen_children;
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (seen_children.insert(canon_child).second)
-            {
-                if (class_mem_spaces[canon_child.value] == ms)
-                {
-                    input_sum_in_ms += class_sizes[canon_child.value];
-                }
-            }
-        }
-
-        // 1. Single Node Execution Peak Memory
-        uint64_t local_peak = (can_be_inplace ? 0 : out_size) + input_sum_in_ms;
-        if (local_peak > cap)
-        {
-            LOG(INFO) << "OOM at path size " << ctx.path.size() << " ("
-                      << (enode.getDebugOrigin().empty() ? "unknown" : enode.getDebugOrigin()) << ")";
-            return true;
-        }
-
-        // 2. Cut Memory Lower Bound (Active Bypass Frontier + Current Node Demand)
-        uint64_t live_bypass_bytes = 0;
-        auto open_it = open_bytes_per_ms.find(ms);
-        if (open_it != open_bytes_per_ms.end())
-        {
-            live_bypass_bytes = open_it->second;
-            if (ctx.current.value != UINT32_MAX)
-            {
-                EClassId canon_curr = ctx.egraph.findConst(ctx.current);
-                if (class_mem_spaces[canon_curr.value] == ms && is_open(canon_curr, ms))
-                {
-                    if (live_bypass_bytes >= class_sizes[canon_curr.value])
-                    {
-                        live_bypass_bytes -= class_sizes[canon_curr.value];
-                    }
-                }
-            }
-        }
-
-        uint64_t total_cut_memory = live_bypass_bytes + local_peak;
-        if (total_cut_memory > cap)
-        {
-            LOG(INFO) << "OOM at path size " << ctx.path.size() << " ("
-                      << (enode.getDebugOrigin().empty() ? "unknown" : enode.getDebugOrigin()) << ")";
-            return true;
-        }
-
-        return false;
-    }
-
-    void on_push(ENodeId enode_id, const ExtractContext &ctx)
-    {
-        if (!enabled)
-            return;
-
-        UndoFrame frame;
-        frame.current = EClassId{UINT32_MAX};
-        frame.was_open = false;
-
-        if (ctx.current.value != UINT32_MAX)
-        {
-            EClassId canon_curr = ctx.egraph.findConst(ctx.current);
-            frame.current = canon_curr;
-            frame.current_ms = class_mem_spaces[canon_curr.value];
-            frame.was_open = is_open(canon_curr, frame.current_ms);
-
-            // If canon_curr was open, close it (its definition is now expanded)
-            if (frame.was_open)
-            {
-                open_tensors_per_ms[frame.current_ms][canon_curr]--;
-                if (open_tensors_per_ms[frame.current_ms][canon_curr] == 0)
-                {
-                    open_bytes_per_ms[frame.current_ms] -= class_sizes[canon_curr.value];
-                }
-            }
-        }
-
-        const ENode &enode = ctx.egraph.getENode(enode_id);
-        std::unordered_set<EClassId> seen_children;
-
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (seen_children.insert(canon_child).second)
-            {
-                MemSpace child_ms = class_mem_spaces[canon_child.value];
-                if (child_ms.type != HandleType::STORAGE)
-                {
-                    if (open_tensors_per_ms[child_ms][canon_child] == 0)
-                    {
-                        open_bytes_per_ms[child_ms] += class_sizes[canon_child.value];
-                        frame.newly_opened_children.push_back({child_ms, canon_child});
-                    }
-                    open_tensors_per_ms[child_ms][canon_child]++;
-                }
-            }
-        }
-
-        undo_stack.push_back(std::move(frame));
-    }
-
-    void on_pop(ENodeId enode_id, const ExtractContext &ctx)
-    {
-        if (!enabled || undo_stack.empty())
-            return;
-
-        UndoFrame frame = std::move(undo_stack.back());
-        undo_stack.pop_back();
-
-        // Revert newly opened children
-        for (const auto &p : frame.newly_opened_children)
-        {
-            open_bytes_per_ms[p.first] -= class_sizes[p.second.value];
-        }
-
-        const ENode &enode = ctx.egraph.getENode(enode_id);
-        std::unordered_set<EClassId> seen_children;
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (seen_children.insert(canon_child).second)
-            {
-                MemSpace child_ms = class_mem_spaces[canon_child.value];
-                if (child_ms.type != HandleType::STORAGE)
-                {
-                    if (open_tensors_per_ms[child_ms][canon_child] > 0)
-                    {
-                        open_tensors_per_ms[child_ms][canon_child]--;
-                    }
-                }
-            }
-        }
-
-        // Restore current node if it was open
-        if (frame.current.value != UINT32_MAX && frame.was_open)
-        {
-            if (open_tensors_per_ms[frame.current_ms][frame.current] == 0)
-            {
-                open_bytes_per_ms[frame.current_ms] += class_sizes[frame.current.value];
-            }
-            open_tensors_per_ms[frame.current_ms][frame.current]++;
-        }
-    }
-};
-
-// =============================================================================
-// Helper: Fast O(T log T) Schrage Preemptive Bound (Jackson's Preemptive Schedule)
 // =============================================================================
 struct SchrageTask
 {
@@ -1911,28 +1530,26 @@ class ExtractorJacksonCarlierRule
         }
     }
 
-    bool check(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
+    float lower_bound(ENodeId cand, size_t /*cand_idx*/, const ExtractContext &ctx) const
     {
-        if (!enabled || !ctx.best_cost)
-            return false;
-
-        float best_c = *ctx.best_cost;
-        if (best_c >= TGConstants::INF)
-            return false;
+        if (!enabled)
+            return 0.0f;
 
         const ENode &cand_enode = ctx.egraph.getENode(cand);
         float cand_cost = (cand.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[cand.value].cost : 0.0f;
         if (cand_cost == TGConstants::INF)
-            return true;
+            return TGConstants::INF;
 
         EClassId current = ctx.current;
         float current_q = (current.value < node_q.size()) ? node_q[current.value] : 0.0f;
 
+        float max_lb = 0.0f;
+
         // 1. Candidate Critical Path Bound
         float cand_cp = (cand.value < ctx.enodeInfos.size()) ? ctx.enodeInfos[cand.value].dp_cp_cost : 0.0f;
-        if (current_q + cand_cp >= best_c)
+        if (cand_cp != TGConstants::INF && std::isfinite(cand_cp))
         {
-            return true;
+            max_lb = std::max(max_lb, current_q + cand_cp);
         }
 
         // 2. Unselected Frontier Critical Path Bound
@@ -1946,9 +1563,9 @@ class ExtractorJacksonCarlierRule
 
                 float f_q = (canon_f.value < node_q.size()) ? node_q[canon_f.value] : 0.0f;
                 float min_f_cp = (canon_f.value < class_min_cp.size()) ? class_min_cp[canon_f.value] : TGConstants::INF;
-                if (min_f_cp != TGConstants::INF && f_q + min_f_cp >= best_c)
+                if (min_f_cp != TGConstants::INF && std::isfinite(min_f_cp))
                 {
-                    return true;
+                    max_lb = std::max(max_lb, f_q + min_f_cp);
                 }
             }
         }
@@ -1961,10 +1578,7 @@ class ExtractorJacksonCarlierRule
             if (it != engine_map.end())
             {
                 float sel_w = engines_state[it->second].selected_work;
-                if (sel_w + cand_cost >= best_c)
-                {
-                    return true;
-                }
+                max_lb = std::max(max_lb, sel_w + cand_cost);
             }
         }
 
@@ -1986,30 +1600,39 @@ class ExtractorJacksonCarlierRule
                 if (canon_child.value < class_min_cp.size())
                 {
                     float min_child_dp = class_min_cp[canon_child.value];
-                    if (min_child_dp != TGConstants::INF)
+                    if (min_child_dp != TGConstants::INF && std::isfinite(min_child_dp))
                         cand_r = std::max(cand_r, min_child_dp);
                 }
             }
 
-            // O(1) Upper-Bound Filter: skip running full Schrage if theoretical max < best_c
             float total_w = es.selected_work + cand_cost;
             float max_r = std::max(es.max_r, cand_r);
             float max_q = std::max(es.max_q, current_q);
-            if (max_r + total_w + max_q < best_c)
+            if (max_r + total_w + max_q <= max_lb)
             {
                 continue;
             }
 
-            // Execute Schrage in-place without heap allocations
             es.tasks.push_back({cand_r, cand_cost, current_q});
             float jps = computeSchragePreemptiveBound(es.tasks, tmp_sorted_by_r, tmp_heap);
             es.tasks.pop_back();
 
-            if (jps >= best_c)
-                return true;
+            max_lb = std::max(max_lb, jps);
         }
 
-        return false;
+        return max_lb;
+    }
+
+    bool check(ENodeId cand, size_t cand_idx, const ExtractContext &ctx) const
+    {
+        if (!enabled || !ctx.best_cost)
+            return false;
+
+        float best_c = *ctx.best_cost;
+        if (best_c >= TGConstants::INF)
+            return false;
+
+        return lower_bound(cand, cand_idx, ctx) >= best_c;
     }
 
     void on_push(ENodeId enode_id, const ExtractContext &ctx)
@@ -2188,7 +1811,7 @@ class ExtractorCycleStepRule
 {
   public:
     TG_PRUNING_RULE(ExtractorCycleStepRule)
-    ExtractorCycleStepRule(bool en = true) : enabled(en)
+    ExtractorCycleStepRule(bool _enabled = true) : enabled(_enabled)
     {
     }
 
@@ -2261,6 +1884,7 @@ class ExtractorCycleStepRule
         }
         return false;
     }
+
 
     void collect_forward(EClassId start, uint32_t max_ord, std::vector<EClassId> &F)
     {
@@ -2948,7 +2572,7 @@ Extractor<std::decay_t<Rules>...> makeExtractorWithDelegate(
 
 using AllExtractRuleTypes =
     std::tuple<InfiniteCostSkipRule, CachedENodeValidityRule, MissingCachedEClassRule, ExtractorCycleStepRule,
-               ExtractorJacksonCarlierRule, ExtractorDynamicMinCutRule>;
+               ExtractorJacksonCarlierRule>;
 
 template <typename BoolTuple>
 inline auto makeConfiguredExtractorFromBools(const EGraph &egraph, EClassId root_eclass_id,

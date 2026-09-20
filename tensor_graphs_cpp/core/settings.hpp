@@ -70,6 +70,7 @@ struct Settings
     bool do_saturate = true;
     bool reference_only = false;
     bool only_plan = false;
+    bool only_dive = false;
     bool compile_decode_buckets = false;
     bool fold_weights = false;
     bool use_ortools = false;
@@ -343,6 +344,9 @@ struct Settings
             if (root.contains("disable_caching") && root["disable_caching"].is_boolean())
                 disable_caching = root["disable_caching"].get<bool>();
 
+            if (root.contains("only_dive") && root["only_dive"].is_boolean())
+                only_dive = root["only_dive"].get<bool>();
+
             if (root.contains("log_cost_calls") && root["log_cost_calls"].is_boolean())
                 log_cost_calls = root["log_cost_calls"].get<bool>();
 
@@ -406,6 +410,7 @@ struct Settings
         parser.add_option({"--disable-rule"}, "Comma-separated list of rule names to force disable.", "");
         parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
         parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
+        parser.add_flag({"--only-dive"}, "Only dive along heuristic path (current DFS behavior); default dives until valid then follows priority queue.");
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
         parser.add_flag({"--use-ortools"}, "Use Google OR-Tools CP-SAT model for optimization.");
         parser.add_flag({"--use-ortools-full"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools.");
@@ -446,6 +451,9 @@ struct Settings
 
         if (parser.get_flag("--only-plan"))
             only_plan = true;
+
+        if (parser.get_flag("--only-dive"))
+            only_dive = true;
 
         if (parser.get_flag("--fold-weights"))
             fold_weights = true;
@@ -575,9 +583,17 @@ struct Settings
                 {
                     cat = item.substr(0, dot_pos);
                     rname = item.substr(dot_pos + 1);
+                    rules[cat][rname] = true;
+                    category_defined[cat] = true;
                 }
-                rules[cat][rname] = true;
-                category_defined[cat] = true;
+                else
+                {
+                    for (const std::string &c : {"dispatch", "bufferize", "malloc", "cache", "extract", "enode"})
+                    {
+                        rules[c][rname] = true;
+                        category_defined[c] = true;
+                    }
+                }
             }
         }
 
@@ -597,9 +613,17 @@ struct Settings
                 {
                     cat = item.substr(0, dot_pos);
                     rname = item.substr(dot_pos + 1);
+                    rules[cat][rname] = false;
+                    category_defined[cat] = true;
                 }
-                rules[cat][rname] = false;
-                category_defined[cat] = true;
+                else
+                {
+                    for (const std::string &c : {"dispatch", "bufferize", "malloc", "cache", "extract", "enode"})
+                    {
+                        rules[c][rname] = false;
+                        category_defined[c] = true;
+                    }
+                }
             }
         }
     }
@@ -714,7 +738,6 @@ struct Settings
     {
         const std::vector<std::pair<std::string, std::string>> defaults = {
             {"dispatch", "InputDispatchDominationRule"},
-            {"dispatch", "UnifiedMemoryExchangeableDispatchRule"},
             {"dispatch", "MemoryPressureDispatchRule"},
             {"dispatch", "DispatchCostPruningRule"},
             {"dispatch", "DispatchCycleRule"},
@@ -730,7 +753,6 @@ struct Settings
             {"extract", "MissingCachedEClassRule"},
             {"extract", "ExtractorCycleStepRule"},
             {"extract", "ExtractorJacksonCarlierRule"},
-            {"extract", "ExtractorDynamicMinCutRule"},
             {"enode", "MemCapENodeDominationRule"},
             {"enode", "FasterEquivalentENodeDominationRule"}};
         for (const auto &p : defaults)

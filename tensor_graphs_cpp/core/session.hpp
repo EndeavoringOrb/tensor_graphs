@@ -175,7 +175,7 @@ struct Session
 
     void persistCache() const
     {
-        if (cachePath.empty())
+        if (disableCaching || cachePath.empty())
             return;
         ensureOutputDirectories();
         std::ofstream file(cachePath, std::ios::trunc | std::ios::binary);
@@ -351,7 +351,7 @@ struct Session
             isPlanned = false;
         }
 
-        if (isPlanned)
+        if (isPlanned && !disableCaching)
         {
             std::cout << "[Session.compile] Using cached compilation." << std::endl;
         }
@@ -1019,7 +1019,8 @@ struct Session
         }
 
         float best_cost = TGConstants::INF;
-        TimeoutChecker timeout_checker(minCompileSeconds);
+        const float cache_selection_budget = minCompileSeconds > 0.0f ? std::min(minCompileSeconds * 0.2f, 10.0f) : 0.0f;
+        TimeoutChecker timeout_checker(cache_selection_budget);
         auto cache_iter = makeConfiguredCacheIterator(candidates, search_delegate, settings, &best_cost, &timeout_checker);
         std::unordered_set<BaseEClassId> current_cache;
         const auto search_start = std::chrono::high_resolution_clock::now();
@@ -1093,8 +1094,8 @@ struct Session
 
                     ExtractionResult extraction = thread_planner.extractBest(
                         rootId, graph, bucket_state.egraph, bucket_state.nodeToEClass, current_cache,
-                        bucket_state.eclassToLogical, minCompileSeconds == 0.0f, false,
-                        minCompileSeconds, search_delegate, enode_infos, &cached_eclasses,
+                        bucket_state.eclassToLogical, /*stopOnFirstValid=*/true, false,
+                        /*minCompileSeconds=*/0.0f, search_delegate, enode_infos, &cached_eclasses,
                         &bucket_state.cleanEClasses);
                     CompiledGraph candidate = thread_planner.buildCompiledGraph(
                         rootId, graph, bucket_state.egraph, bucket_state.nodeToEClass, extraction,
@@ -1144,7 +1145,7 @@ struct Session
                 break;
             if (minCompileSeconds > 0.0f &&
                 std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - search_start).count() >=
-                    minCompileSeconds)
+                    cache_selection_budget)
                 break;
         }
         if (search_delegate)
@@ -1157,6 +1158,79 @@ struct Session
         {
             Error::throw_err("[Session.ensureCacheCoverage] Planned " + std::to_string(cachedGraphs.size()) +
                              " buckets, but expected " + std::to_string(manualBuckets.size()) + ".");
+        }
+
+        if (minCompileSeconds > 0.0f)
+        {
+            float elapsed = std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - search_start).count();
+            float remaining = minCompileSeconds - elapsed;
+            if (remaining > 0.5f && !cachedGraphs.empty())
+            {
+                LOG(INFO) << "[Session.ensureCacheCoverage] Starting priority diving optimization on selected cache configuration ("
+                          << remaining << " s remaining)...";
+                ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
+                    try
+                    {
+                        Planner thread_planner(costModel, settings);
+                        SaturationResult bucket_state = bucket_states[bucket_idx];
+                        Engine cpu = Engine{0, EngineType::CPU};
+                        for (BaseEClassId baseEClassId : selectedCachedNodes)
+                        {
+                            EClassId eclassId = bucket_state.egraph.findEClassByBaseId(baseEClassId);
+                            if (eclassId == EClassId{})
+                                continue;
+                            if (bucket_state.cleanEClasses.count(eclassId) == 0)
+                                continue;
+                            const EClass cls = bucket_state.egraph.getEClass(eclassId);
+                            bool hasCache = false;
+                            for (ENodeId enodeId : cls.enodes)
+                            {
+                                const ENode &enode = bucket_state.egraph.getENode(enodeId);
+                                if (enode.getOpType() == OpType::CACHE && enode.getMemSpace() == cls.mem_space)
+                                {
+                                    hasCache = true;
+                                    break;
+                                }
+                            }
+                            if (!hasCache)
+                            {
+                                bucket_state.egraph.addENode(
+                                    eclassId,
+                                    ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
+                                          cls.mem_space, {cpu}, std::to_string(baseEClassId.value)));
+                            }
+                        }
+
+                        auto enode_infos = thread_planner.computeENodeInfos(
+                            bucket_state.egraph, bucket_state.eclassToLogical, selectedCachedNodes, /*strictCache=*/false);
+                        thread_planner.pruneEGraph(bucket_state.egraph, enode_infos);
+
+                        std::unordered_set<EClassId> cached_eclasses;
+                        for (const EClass &cls : bucket_state.egraph.getClasses())
+                        {
+                            if (bucket_state.egraph.findConst(cls.id) == cls.id && selectedCachedNodes.count(cls.base_eclass_id))
+                                cached_eclasses.insert(cls.id);
+                        }
+
+                        ExtractionResult extraction = thread_planner.extractBest(
+                            rootId, graph, bucket_state.egraph, bucket_state.nodeToEClass, selectedCachedNodes,
+                            bucket_state.eclassToLogical, /*stopOnFirstValid=*/false, false,
+                            remaining, search_delegate, enode_infos, &cached_eclasses,
+                            &bucket_state.cleanEClasses);
+                        CompiledGraph candidate = thread_planner.buildCompiledGraph(
+                            rootId, graph, bucket_state.egraph, bucket_state.nodeToEClass, extraction,
+                            bucket_state.eclassToLogical, enode_infos);
+                        candidate.bucket = manualBuckets[bucket_idx];
+                        if (candidate.cost() < cachedGraphs[bucket_idx].cost())
+                        {
+                            cachedGraphs[bucket_idx] = std::move(candidate);
+                        }
+                    }
+                    catch (...)
+                    {
+                    }
+                });
+            }
         }
 
         persistCache();
@@ -1220,7 +1294,7 @@ struct Session
 
     void loadCache()
     {
-        if (cachePath.empty())
+        if (disableCaching || cachePath.empty())
             return;
 
         CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/true);

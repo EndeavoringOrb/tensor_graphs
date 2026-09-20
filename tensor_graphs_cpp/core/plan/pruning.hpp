@@ -59,6 +59,10 @@ template <class R, class Cand, class Ctx>
 using check_expr =
     decltype(std::declval<R &>().check(std::declval<Cand>(), std::size_t{}, std::declval<const Ctx &>()));
 
+template <class R, class Cand, class Ctx>
+using lower_bound_expr =
+    decltype(std::declval<const R &>().lower_bound(std::declval<Cand>(), std::size_t{}, std::declval<const Ctx &>()));
+
 template <class R, class Ctx>
 using leaf_expr = decltype(std::declval<R &>().validate_leaf(std::declval<const Ctx &>()));
 
@@ -69,6 +73,7 @@ template <class R, class Ctx> constexpr bool has_init_v = is_detected_v<init_exp
 template <class R, class Node, class Ctx> constexpr bool has_push_v = is_detected_v<push_expr, R, Node, Ctx>;
 template <class R, class Node, class Ctx> constexpr bool has_pop_v = is_detected_v<pop_expr, R, Node, Ctx>;
 template <class R, class Cand, class Ctx> constexpr bool has_check_v = is_detected_v<check_expr, R, Cand, Ctx>;
+template <class R, class Cand, class Ctx> constexpr bool has_lower_bound_v = is_detected_v<lower_bound_expr, R, Cand, Ctx>;
 template <class R, class Ctx> constexpr bool has_leaf_v = is_detected_v<leaf_expr, R, Ctx>;
 template <class R> constexpr bool has_name_v = is_detected_v<name_expr, R>;
 template <class R> constexpr bool has_static_kname_v = is_detected_v<static_kname_expr, R>;
@@ -318,6 +323,38 @@ template <typename... Rules> struct PruningRuleSet
     {
         return std::apply([&](auto &...rs) { return (false || ... || check_one(rs, candidate, candidate_idx, ctx)); },
                           rules);
+    }
+
+    template <class Cand, class Ctx> float compute_lower_bound(Cand candidate, size_t candidate_idx, const Ctx &ctx) const
+    {
+        float max_lb = 0.0f;
+        auto inspect = [&](const auto &rule) {
+            using RuleType = std::decay_t<decltype(rule)>;
+            if constexpr (has_lower_bound_v<RuleType, Cand, Ctx>)
+            {
+                if (rule.enabled)
+                {
+                    max_lb = std::max(max_lb, rule.lower_bound(candidate, candidate_idx, ctx));
+                }
+            }
+        };
+        std::apply([&](const auto &...rs) { (inspect(rs), ...); }, rules);
+        return max_lb;
+    }
+
+    // Return the first rule that would prune a candidate. This is primarily
+    // useful for diagnosing a complete-search dead end without changing the
+    // short-circuit semantics of is_pruned().
+    template <class Cand, class Ctx>
+    std::string first_pruning_rule(Cand candidate, size_t candidate_idx, const Ctx &ctx)
+    {
+        std::string reason;
+        auto inspect = [&](auto &rule) {
+            if (reason.empty() && check_one(rule, candidate, candidate_idx, ctx))
+                reason = name_of(rule);
+        };
+        std::apply([&](auto &...rs) { (inspect(rs), ...); }, rules);
+        return reason;
     }
 
     template <class Ctx> bool validate_leaf(const Ctx &ctx)

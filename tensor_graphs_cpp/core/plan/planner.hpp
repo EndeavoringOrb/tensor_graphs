@@ -44,6 +44,561 @@ struct ExtractionResult
     std::unordered_map<EClassId, float> eclass_to_cost;
 };
 
+#include "core/plan/unified_search.hpp"
+
+inline ExtractionResult UnifiedSearchPlanner::solve(float minCompileSeconds, bool onlyDive, bool stopOnFirstValid)
+{
+    float best_cost = TGConstants::INF;
+    std::unordered_map<EClassId, uint32_t> best_selection_map;
+    std::vector<EClassId> best_order;
+    std::vector<ParallelBuffer> best_buffers;
+    std::unordered_map<EClassId, BufferId> best_eclass_to_buf;
+
+    auto start_time = std::chrono::steady_clock::now();
+    TimeoutChecker timeout_checker(minCompileSeconds);
+    auto is_time_expired = [&]() {
+        if (minCompileSeconds <= 0.0f || best_cost == TGConstants::INF)
+            return false;
+        auto elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+        return elapsed >= minCompileSeconds;
+    };
+
+    auto extract_bools = prune::extract_enabled_states<AllExtractRuleTypes>("extract", settings);
+    auto dispatch_bools = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
+    auto bufferize_bools = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
+    (void)extract_bools;
+    (void)dispatch_bools;
+    (void)bufferize_bools;
+
+    SearchState state(egraph, rootEClassId, enodeInfos, eclassToLogical, reducedCaps, settings, &best_cost,
+                      cachedEClasses, cleanEClasses);
+    // The agenda is deliberately unbounded: priority controls exploration
+    // order, but no branch may be dropped if the search is to remain complete.
+    // Agenda nodes hold shared persistent path prefixes, so this does not copy
+    // a full decision vector for every sibling branch.
+    PriorityQueue agenda;
+    std::vector<AgendaNode> depth_first_agenda;
+    uint64_t sequence_id = 0;
+    uint64_t total_dives = 0;
+    size_t extraction_dead_ends = 0;
+    size_t dispatch_dead_ends = 0;
+    size_t bufferize_dead_ends = 0;
+    std::string last_dead_end;
+    uint32_t last_extraction_class = UINT32_MAX;
+    std::unordered_map<std::string, size_t> last_extraction_prunes;
+    const bool stop_after_first = stopOnFirstValid && minCompileSeconds <= 0.0f;
+
+    struct CandidateMove
+    {
+        Decision decision;
+        float priority = TGConstants::INF;
+        float lower_bound = TGConstants::INF;
+    };
+
+    auto finite_cost = [](float cost) {
+        return cost < TGConstants::INF && std::isfinite(cost);
+    };
+
+    auto heuristic_cost = [&](ENodeId node_id) {
+        const ENodeInfo &info = enodeInfos[node_id.value];
+        if (finite_cost(info.dp_cp_cost))
+            return info.dp_cp_cost;
+        if (finite_cost(info.dp_cost))
+            return info.dp_cost;
+        return finite_cost(info.cost) ? info.cost : 0.0f;
+    };
+
+    auto get_sorted_candidates = [&]() -> std::vector<CandidateMove> {
+        std::vector<CandidateMove> candidates;
+        state.prepareNextPhase();
+
+        if (!state.to_process.empty())
+        {
+            std::vector<EClassId> frontier;
+            for (EClassId eclass : state.to_process)
+            {
+                if (!state.selection_map.count(eclass))
+                {
+                    frontier.push_back(eclass);
+                }
+            }
+            std::vector<EClassId> frontier_order = frontier;
+            if (delegate && frontier.size() > 1)
+            {
+                frontier_order.clear();
+                std::vector<ActionFeatureFrontier> features;
+                features.reserve(frontier.size());
+                for (EClassId eclass : frontier)
+                {
+                    const EClass &class_info = egraph.getEClass(eclass);
+                    ActionFeatureFrontier feature;
+                    feature.eclass_id = eclass.value;
+                    feature.num_enodes = static_cast<uint32_t>(class_info.enodes.size());
+                    feature.size = getSizeBytes(class_info.shape, class_info.dtype);
+                    feature.dtype = class_info.dtype;
+                    feature.mem_space = class_info.mem_space;
+                    feature.mem_cap = reducedCaps.count(class_info.mem_space) ? reducedCaps.at(class_info.mem_space) : 0;
+                    feature.min_dp_cp_cost = TGConstants::INF;
+                    feature.min_dp_cost = TGConstants::INF;
+                    feature.min_dp_mem = TGConstants::INF;
+                    for (ENodeId node_id : class_info.enodes)
+                    {
+                        feature.min_dp_cp_cost = std::min(feature.min_dp_cp_cost, enodeInfos[node_id.value].dp_cp_cost);
+                        feature.min_dp_cost = std::min(feature.min_dp_cost, enodeInfos[node_id.value].dp_cost);
+                        feature.min_dp_mem = std::min(feature.min_dp_mem, enodeInfos[node_id.value].dp_mem);
+                    }
+                    if (!finite_cost(feature.min_dp_cp_cost))
+                        feature.min_dp_cp_cost = 0.0f;
+                    if (!finite_cost(feature.min_dp_cost))
+                        feature.min_dp_cost = 0.0f;
+                    if (!finite_cost(feature.min_dp_mem))
+                        feature.min_dp_mem = 0.0f;
+                    features.push_back(feature);
+                }
+                std::vector<uint32_t> relative_order = delegate->order_frontier(features);
+                std::vector<uint8_t> seen(frontier.size(), 0);
+                for (uint32_t index : relative_order)
+                {
+                    if (index < frontier.size() && !seen[index])
+                    {
+                        frontier_order.push_back(frontier[index]);
+                        seen[index] = 1;
+                    }
+                }
+                for (size_t index = 0; index < frontier.size(); ++index)
+                    if (!seen[index])
+                        frontier_order.push_back(frontier[index]);
+            }
+            std::unordered_map<std::string, size_t> extraction_prunes;
+            for (size_t fo_idx = 0; fo_idx < frontier_order.size(); ++fo_idx)
+            {
+                EClassId current = frontier_order[fo_idx];
+                last_extraction_class = current.value;
+                const auto &enodes = egraph.getEClass(current).enodes;
+                for (uint32_t selection = 0; selection < enodes.size(); ++selection)
+                {
+                    ExtractContext ctx{egraph, enodeInfos, state.selection_map, state.extract_path, current,
+                                       selection, &state.to_process, &best_cost, &reducedCaps, cachedEClasses,
+                                       cleanEClasses};
+                    if (state.extract_rules.is_pruned(enodes[selection], selection, ctx))
+                    {
+                        ++extraction_prunes[state.extract_rules.first_pruning_rule(enodes[selection], selection, ctx)];
+                        continue;
+                    }
+
+                    float rule_lb = state.extract_rules.compute_lower_bound(enodes[selection], selection, ctx);
+                    float node_cost = enodeInfos[enodes[selection].value].cost;
+                    float op_lb = state.selected_operation_lower_bound;
+                    if (finite_cost(node_cost))
+                        op_lb = std::max(op_lb, node_cost);
+                    float cand_lb = std::max(op_lb, rule_lb);
+
+                    if (cand_lb >= best_cost)
+                        continue;
+
+                    float h = heuristic_cost(enodes[selection]);
+                    float priority = cand_lb + 0.001f * std::max(0.0f, h);
+                    candidates.push_back({{DecisionPhase::EXTRACT, current.value, selection}, priority, cand_lb});
+                }
+                if (!candidates.empty())
+                    break;
+            }
+            last_extraction_prunes = std::move(extraction_prunes);
+        }
+        else if (state.ordered.size() < state.selection_map.size())
+        {
+            uint32_t position = static_cast<uint32_t>(state.ordered.size());
+            for (uint32_t index = 0; index < state.current_ready.size(); ++index)
+            {
+                EClassId node = state.current_ready[index];
+                DispatchContext ctx{egraph, state.selection_map, enodeInfos, state.ordered, state.current_ready,
+                                     position, reducedCaps, &best_cost};
+                if (state.dispatch_rules.is_pruned(node, index, ctx))
+                    continue;
+
+                float rule_lb = state.dispatch_rules.compute_lower_bound(node, index, ctx);
+                float cand_lb = std::max(state.selected_operation_lower_bound, rule_lb);
+
+                if (cand_lb >= best_cost)
+                    continue;
+
+                ENodeId node_id = egraph.getEClass(node).enodes[state.selection_map.at(node)];
+                float priority = cand_lb + 0.001f * heuristic_cost(node_id);
+                candidates.push_back({{DecisionPhase::DISPATCH, position, node.value}, priority, cand_lb});
+            }
+        }
+        else if (state.k_buf < state.ordered.size())
+        {
+            uint32_t position = state.k_buf;
+            const auto &choices = state.valid_inplace_choices[position];
+            EClassId eclass = state.ordered[position];
+            for (size_t choice_index = 0; choice_index < choices.size(); ++choice_index)
+            {
+                int choice = choices[choice_index];
+                BufferizeContext ctx{state.ordered, egraph, state.selection_map, enodeInfos, state.birth_times,
+                                     state.death_times, state.inplace_alias, choices, position, reducedCaps,
+                                     &best_cost};
+                if (state.bufferize_rules.is_pruned(choice, choice_index, ctx))
+                    continue;
+
+                float rule_lb = state.bufferize_rules.compute_lower_bound(choice, choice_index, ctx);
+                float cand_lb = std::max(state.selected_operation_lower_bound, rule_lb);
+
+                if (cand_lb >= best_cost)
+                    continue;
+
+                float priority = cand_lb + (choice == -1 ? 0.01f : 0.0f);
+                candidates.push_back({{DecisionPhase::BUFFERIZE, position, choice}, priority, cand_lb});
+            }
+        }
+
+        std::sort(candidates.begin(), candidates.end(), [](const CandidateMove &a, const CandidateMove &b) {
+            if (std::abs(a.priority - b.priority) > 1e-5f)
+                return a.priority < b.priority;
+            if (std::abs(a.lower_bound - b.lower_bound) > 1e-5f)
+                return a.lower_bound < b.lower_bound;
+            if (a.decision.phase != b.decision.phase)
+                return a.decision.phase < b.decision.phase;
+            return a.decision.choice < b.decision.choice;
+        });
+
+        return candidates;
+    };
+
+    auto remember_plan = [&](const std::unordered_map<EClassId, uint32_t> &selection_map,
+                             const std::vector<EClassId> &order, const std::vector<ParallelBuffer> &buffers,
+                             const std::unordered_map<EClassId, BufferId> &eclass_to_buf) {
+        float cost = get_cost(order, egraph, selection_map, enodeInfos);
+        if (cost < best_cost)
+        {
+            best_cost = cost;
+            best_selection_map = selection_map;
+            best_order = order;
+            best_buffers = buffers;
+            best_eclass_to_buf = eclass_to_buf;
+            float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+            LOG(INFO) << "[UnifiedSearch] Dive #" << total_dives << " found new best cost " << best_cost
+                      << " ms (elapsed: " << elapsed << " s)";
+        }
+    };
+
+    auto evaluate_leaf = [&]() {
+        std::unordered_set<BufferId> preallocated_buf_ids;
+        std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
+        for (EClassId eclass : state.ordered)
+        {
+            auto logical_it = eclassToLogical.find(eclass);
+            auto selection_it = state.selection_map.find(eclass);
+            if (logical_it == eclassToLogical.end() || selection_it == state.selection_map.end())
+                continue;
+            const ENode &node = egraph.getENode(egraph.getEClass(eclass).enodes[selection_it->second]);
+            if (node.getOpType() != OpType::INPUT && node.getOpType() != OpType::CACHE)
+                continue;
+            auto preallocated_it = preallocatedBuffers.find(egraph.getEClass(eclass).base_eclass_id);
+            if (preallocated_it == preallocatedBuffers.end())
+                continue;
+            BufferId buffer_id = state.eclass_to_buf.at(eclass);
+            preallocated_buf_ids.insert(buffer_id);
+            preallocated_overrides[buffer_id] = preallocated_it->second;
+        }
+
+        std::unordered_map<MemSpace, std::vector<ParallelBuffer>> by_memory_space;
+        std::vector<ParallelBuffer> current_buffers;
+        for (auto buffer : state.unallocated_buffers)
+        {
+            if (buffer.mem_space.type == HandleType::STORAGE)
+            {
+                buffer.offset = 0;
+                current_buffers.push_back(buffer);
+            }
+            else if (preallocated_buf_ids.count(buffer.id))
+            {
+                buffer.offset = preallocated_overrides.at(buffer.id).offset;
+                current_buffers.push_back(buffer);
+            }
+            else
+            {
+                by_memory_space[buffer.mem_space].push_back(buffer);
+            }
+        }
+
+        for (auto &[memory_space, buffers] : by_memory_space)
+        {
+            uint64_t cap = reducedCaps.count(memory_space) ? reducedCaps.at(memory_space)
+                                                            : std::numeric_limits<uint64_t>::max();
+            std::vector<ParallelBuffer> allocated;
+            BufferId overflow;
+            if (!malloc_by_time_components(cap, buffers, allocated, overflow, delegate, &settings, &best_cost,
+                                           &timeout_checker))
+            {
+                return false;
+            }
+            uint64_t reserved = reservedPerMemorySpace.count(memory_space) ? reservedPerMemorySpace.at(memory_space)
+                                                                             : 0;
+            for (auto &buffer : allocated)
+                buffer.offset += static_cast<int64_t>(reserved);
+            current_buffers.insert(current_buffers.end(), allocated.begin(), allocated.end());
+        }
+        remember_plan(state.selection_map, state.ordered, current_buffers, state.eclass_to_buf);
+        return true;
+    };
+
+    // =========================================================================
+    // PHASE 1: INITIAL DIVE / DFS (Find initial incumbent plan)
+    // =========================================================================
+    bool diving = true;
+    total_dives = 1;
+    size_t last_logged_dive = 0;
+    auto last_log_time = std::chrono::steady_clock::now();
+
+    while (diving && !is_time_expired())
+    {
+        state.prepareNextPhase();
+        if (state.isLeaf())
+        {
+            bool leaf_valid = evaluate_leaf();
+            if (leaf_valid && stop_after_first)
+                break;
+
+            if (leaf_valid)
+            {
+                if (onlyDive)
+                {
+                    if (depth_first_agenda.empty())
+                        break;
+                    AgendaNode next = std::move(depth_first_agenda.back());
+                    depth_first_agenda.pop_back();
+                    state.transition_to(next.path);
+                    state.push_decision(next.next_decision);
+                    total_dives++;
+                    continue;
+                }
+                else
+                {
+                    // Established initial incumbent plan! Switch to Priority Diving (Phase 2).
+                    diving = false;
+                    float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+                    LOG(INFO) << "[UnifiedSearch] Phase 1 Dive complete (Dive #" << total_dives
+                              << "). Established initial incumbent best_cost=" << best_cost << " ms (elapsed: "
+                              << elapsed << " s)";
+                    for (auto &node : depth_first_agenda)
+                    {
+                        if (node.next_decision.phase != DecisionPhase::BUFFERIZE && node.lower_bound < best_cost)
+                            agenda.push(std::move(node));
+                    }
+                    depth_first_agenda.clear();
+                    break;
+                }
+            }
+            else
+            {
+                // Leaf failed validation (e.g. malloc overflow).
+                // Backtrack to continue searching:
+                if (total_dives <= 5 || total_dives % 50 == 0)
+                    LOG(INFO) << "[UnifiedSearch] Dive #" << total_dives << " leaf failed evaluate_leaf()! Backtrack stack: " << depth_first_agenda.size();
+                if (depth_first_agenda.empty())
+                {
+                    break;
+                }
+                AgendaNode next = std::move(depth_first_agenda.back());
+                depth_first_agenda.pop_back();
+                state.transition_to(next.path);
+                state.push_decision(next.next_decision);
+                total_dives++;
+                continue;
+            }
+        }
+
+        auto candidates = get_sorted_candidates();
+        if (candidates.empty())
+        {
+            if (!state.to_process.empty())
+            {
+                ++extraction_dead_ends;
+                last_dead_end = "extract class=" + std::to_string(last_extraction_class) +
+                                " frontier=" + std::to_string(state.to_process.size()) +
+                                " selected=" + std::to_string(state.selection_map.size());
+            }
+            else if (state.ordered.empty() && !state.selection_map.empty() &&
+                     state.extraction_leaf_rejected)
+            {
+                ++extraction_dead_ends;
+                last_dead_end = "extract leaf rejected selected=" +
+                                std::to_string(state.selection_map.size());
+            }
+            else if (state.ordered.size() < state.selection_map.size())
+            {
+                ++dispatch_dead_ends;
+                last_dead_end = "dispatch ready=" + std::to_string(state.current_ready.size()) +
+                                " ordered=" + std::to_string(state.ordered.size()) + "/" +
+                                std::to_string(state.selection_map.size());
+            }
+            else
+            {
+                ++bufferize_dead_ends;
+                last_dead_end = "bufferize position=" + std::to_string(state.k_buf) + "/" +
+                                std::to_string(state.ordered.size());
+            }
+            if (total_dives <= 5 || total_dives % 50 == 0)
+            {
+                std::string prunes_str;
+                for (const auto &p : last_extraction_prunes)
+                    prunes_str += p.first + "=" + std::to_string(p.second) + " ";
+                LOG(INFO) << "[UnifiedSearch] Dive #" << total_dives << " dead end: " << last_dead_end << " | Prunes: " << prunes_str << "| Backtrack stack: " << depth_first_agenda.size();
+            }
+            // Dead end in dive: backtrack via depth_first_agenda to continue dive
+            if (depth_first_agenda.empty())
+                break;
+
+            AgendaNode next = std::move(depth_first_agenda.back());
+            depth_first_agenda.pop_back();
+            state.transition_to(next.path);
+            state.push_decision(next.next_decision);
+            total_dives++;
+            continue;
+        }
+        else
+        {
+            for (size_t i = candidates.size(); i > 1; --i)
+            {
+                const CandidateMove &candidate = candidates[i - 1];
+                if (candidate.lower_bound >= best_cost)
+                    continue;
+                AgendaNode node{state.active_path_ref, candidate.decision, candidate.priority, candidate.lower_bound,
+                                ++sequence_id};
+                depth_first_agenda.push_back(std::move(node));
+            }
+            if (candidates.front().lower_bound >= best_cost)
+            {
+                if (depth_first_agenda.empty())
+                    break;
+                AgendaNode next = std::move(depth_first_agenda.back());
+                depth_first_agenda.pop_back();
+                state.transition_to(next.path);
+                state.push_decision(next.next_decision);
+                total_dives++;
+                continue;
+            }
+            else
+            {
+                state.push_decision(candidates.front().decision);
+            }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        float elapsed_since_last_log = std::chrono::duration<float>(now - last_log_time).count();
+        if (elapsed_since_last_log >= 5.0f || (total_dives != last_logged_dive && (total_dives == 10 || total_dives == 50 || total_dives == 100 ||
+            total_dives == 500 || (total_dives % 500 == 0))))
+        {
+            last_log_time = now;
+            last_logged_dive = total_dives;
+            float elapsed_total = std::chrono::duration<float>(now - start_time).count();
+            LOG(INFO) << "[UnifiedSearch] Phase 1 Dives: " << total_dives
+                      << " | Backtrack stack: " << depth_first_agenda.size()
+                      << " | Elapsed: " << elapsed_total << " s";
+        }
+    }
+
+    // =========================================================================
+    // PHASE 2: PRIORITY DIVING SEARCH MODE
+    // =========================================================================
+    if (!onlyDive && !stop_after_first && best_cost < TGConstants::INF)
+    {
+        while (!agenda.empty() && !is_time_expired())
+        {
+            AgendaNode top_node = agenda.top();
+            agenda.pop();
+            if (top_node.lower_bound >= best_cost)
+                continue;
+
+            state.transition_to(top_node.path);
+            state.push_decision(top_node.next_decision);
+            total_dives++;
+
+            bool dive_active = true;
+            while (dive_active && !is_time_expired())
+            {
+                state.prepareNextPhase();
+                if (state.isLeaf())
+                {
+                    evaluate_leaf();
+                    dive_active = false;
+                    break;
+                }
+
+                auto candidates = get_sorted_candidates();
+                if (candidates.empty() || candidates.front().lower_bound >= best_cost)
+                {
+                    dive_active = false;
+                    break;
+                }
+
+                if (candidates.front().decision.phase != DecisionPhase::BUFFERIZE)
+                {
+                    for (size_t i = 1; i < candidates.size(); ++i)
+                    {
+                        if (candidates[i].lower_bound < best_cost && agenda.size() < 200000)
+                        {
+                            agenda.push(AgendaNode{state.active_path_ref, candidates[i].decision,
+                                                   candidates[i].priority, candidates[i].lower_bound,
+                                                   ++sequence_id});
+                        }
+                    }
+                }
+
+                state.push_decision(candidates.front().decision);
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            float elapsed_since_last_log = std::chrono::duration<float>(now - last_log_time).count();
+            if (elapsed_since_last_log >= 5.0f || (total_dives != last_logged_dive && (total_dives == 10 || total_dives == 50 || total_dives == 100 ||
+                total_dives == 500 || total_dives == 1000 || (total_dives % 500 == 0))))
+            {
+                last_log_time = now;
+                last_logged_dive = total_dives;
+                float elapsed_total = std::chrono::duration<float>(now - start_time).count();
+                LOG(INFO) << "[UnifiedSearch] Dives completed: " << total_dives
+                          << " | Agenda size: " << agenda.size()
+                          << " | Best cost: " << best_cost << " ms"
+                          << " (elapsed: " << elapsed_total << " s)";
+            }
+        }
+    }
+
+    float final_elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+    LOG(INFO) << "[UnifiedSearch] Search finished. Total dives: " << total_dives
+              << " | Final best cost: " << best_cost << " ms | Total elapsed: " << final_elapsed << " s";
+
+    if (best_cost == TGConstants::INF)
+    {
+        LOG(ERROR) << "[UnifiedSearchPlanner] exhausted agenda without a valid leaf; dead ends: extract="
+                   << extraction_dead_ends << ", dispatch=" << dispatch_dead_ends
+                   << ", bufferize=" << bufferize_dead_ends << "; last=" << last_dead_end;
+        if (!last_extraction_prunes.empty())
+        {
+            std::ostringstream prune_summary;
+            bool first = true;
+            for (const auto &[rule, count] : last_extraction_prunes)
+            {
+                if (!first)
+                    prune_summary << ", ";
+                first = false;
+                prune_summary << rule << "=" << count;
+            }
+            LOG(ERROR) << "[UnifiedSearchPlanner] last extraction prune reasons: " << prune_summary.str();
+        }
+        Error::throw_err("[UnifiedSearchPlanner] no valid extraction found under given constraints. try running bench");
+    }
+
+    std::unordered_map<EClassId, float> best_eclass_to_cost;
+    for (const auto &entry : best_selection_map)
+    {
+        ENodeId node_id = egraph.getEClass(entry.first).enodes[entry.second];
+        best_eclass_to_cost[entry.first] = enodeInfos[node_id.value].cost;
+    }
+    return {best_selection_map, best_order, best_buffers, best_eclass_to_buf, best_cost, best_eclass_to_cost};
+}
+
 // =============================================================================
 // CacheContext -- view into CacheIterator state at check() time
 // =============================================================================
@@ -941,7 +1496,7 @@ struct Planner
                 info.is_view = kernel.is_view;
             }
 
-            if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+            if (info.is_view || enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
             {
                 info.cost = 0.0f;
                 if (strictCache && enode.getOpType() == OpType::CACHE)
@@ -1463,218 +2018,11 @@ struct Planner
             reserved = std::max(reserved, buffer.offset + buffer.size);
         }
 
-        float best_cost = TGConstants::INF;
-        std::unordered_map<EClassId, uint32_t> best_selection_map;
-        std::vector<EClassId> best_order;
-        std::vector<ParallelBuffer> best_buffers;
-        std::unordered_map<EClassId, BufferId> best_eclass_to_buf;
+        UnifiedSearchPlanner unified_planner(
+            egraph, rootEClassId, enodeInfos, nodeToEClass, cachedNodes, eclassToLogical, settings, delegate,
+            cachedEClasses, cleanEClasses, preallocatedBuffers, reduced_caps, reserved_per_ms);
+        return unified_planner.solve(minCompileSeconds, settings.only_dive, stopOnFirstValid);
 
-        auto extract_bools = prune::extract_enabled_states<AllExtractRuleTypes>("extract", settings);
-        auto dispatch_bools = prune::extract_enabled_states<AllDispatchRuleTypes>("dispatch", settings);
-        auto bufferize_bools = prune::extract_enabled_states<AllBufferizeRuleTypes>("bufferize", settings);
-
-        TimeoutChecker timeout_checker(minCompileSeconds);
-
-        auto extractor = makeConfiguredExtractorFromBools(egraph, rootEClassId, enodeInfos, delegate, extract_bools,
-                                                          &best_cost, &reduced_caps, &timeout_checker, cachedEClasses,
-                                                          cleanEClasses);
-
-        int max_iters = 10'000'000;
-        int remaining_iters = max_iters;
-        ProgressTimer timer(max_iters, "extracting graphs", false, false, 2.0, LogLevel::INFO);
-        ProgressTimer loopTimer(0, "", true);
-        auto start_time = std::chrono::high_resolution_clock::now();
-        LOG(DEBUG) << "entering loop";
-
-        auto is_time_expired = [&]() -> bool {
-            if (minCompileSeconds <= 0.0f)
-                return false;
-            if (best_cost >= TGConstants::INF)
-                return false; // Never abort if no feasible baseline exists yet
-            return timeout_checker.is_expired();
-        };
-
-        while (remaining_iters-- > 0)
-        {
-            if (is_time_expired())
-                break;
-            if (extractor.is_done())
-                break;
-            if (!extractor.getNextSelection())
-            {
-                extractor.ascend();
-                timer.tick();
-                continue;
-            }
-
-            const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
-
-            bool valid = false;
-            std::vector<EClassId> order;
-            float cost = TGConstants::INF;
-
-            auto dispatch_iterator =
-                makeConfiguredDispatchIteratorFromBools(egraph, selection_map, enodeInfos, delegate, dispatch_bools,
-                                                        &best_cost, &reduced_caps, &timeout_checker);
-
-            while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
-            {
-                if (is_time_expired())
-                    break;
-                LOG(DEBUG) << "got dispatch order";
-
-                auto buf_iter =
-                    makeConfiguredBufferizeIteratorFromBools(order, egraph, selection_map, enodeInfos, reduced_caps,
-                                                             delegate, bufferize_bools, &best_cost, &timeout_checker);
-
-                std::vector<ParallelBuffer> unallocated_buffers;
-                std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
-
-                while (buf_iter.getNextBufferization(unallocated_buffers, eclass_to_buf_local))
-                {
-                    if (is_time_expired())
-                        break;
-                    std::unordered_set<BufferId> preallocated_buf_ids;
-                    std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
-
-                    for (EClassId eclass : order)
-                    {
-                        auto logicalIt = eclassToLogical.find(eclass);
-                        if (logicalIt == eclassToLogical.end())
-                            continue;
-                        auto sel_it = selection_map.find(eclass);
-                        if (sel_it == selection_map.end())
-                            continue;
-                        uint32_t sel = sel_it->second;
-                        ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
-                        const ENode &node = egraph.getENode(enode_id);
-                        if (node.getOpType() != OpType::INPUT && node.getOpType() != OpType::CACHE)
-                            continue;
-
-                        const BaseEClassId baseEClassId = egraph.getEClass(eclass).base_eclass_id;
-                        auto preIt = preallocatedBuffers.find(baseEClassId);
-                        if (preIt == preallocatedBuffers.end())
-                            continue;
-
-                        BufferId buf_id = eclass_to_buf_local.at(eclass);
-                        preallocated_buf_ids.insert(buf_id);
-                        preallocated_overrides[buf_id] = preIt->second;
-                    }
-
-                    std::unordered_map<MemSpace, std::vector<ParallelBuffer>> buf_by_mem_space;
-                    for (auto &buf : unallocated_buffers)
-                    {
-                        if (buf.mem_space.type == HandleType::STORAGE || preallocated_buf_ids.count(buf.id))
-                            continue;
-                        buf_by_mem_space[buf.mem_space].push_back(buf);
-                    }
-
-                    std::vector<ParallelBuffer> current_buffers;
-                    current_buffers.reserve(unallocated_buffers.size());
-
-                    for (auto &buf : unallocated_buffers)
-                    {
-                        if (buf.mem_space.type == HandleType::STORAGE)
-                        {
-                            buf.offset = 0;
-                            current_buffers.push_back(buf);
-                        }
-                        else if (preallocated_buf_ids.count(buf.id))
-                        {
-                            buf.offset = preallocated_overrides.at(buf.id).offset;
-                            current_buffers.push_back(buf);
-                        }
-                    }
-
-                    bool alloc_ok = true;
-                    BufferId overflow;
-
-                    for (auto &kv : buf_by_mem_space)
-                    {
-                        MemSpace ms = kv.first;
-                        uint64_t cap =
-                            reduced_caps.count(ms) ? reduced_caps.at(ms) : std::numeric_limits<uint64_t>::max();
-                        uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
-
-                        std::vector<ParallelBuffer> allocated;
-                        if (!malloc_by_time_components(cap, kv.second, allocated, overflow, delegate, &settings,
-                                                       &best_cost, &timeout_checker))
-                        {
-                            alloc_ok = false;
-                            break;
-                        }
-                        for (auto &buf : allocated)
-                        {
-                            buf.offset += static_cast<int64_t>(reserved);
-                        }
-                        current_buffers.insert(current_buffers.end(), std::make_move_iterator(allocated.begin()),
-                                               std::make_move_iterator(allocated.end()));
-                    }
-
-                    if (alloc_ok)
-                    {
-                        valid = true;
-                        cost = get_cost(order, egraph, selection_map, enodeInfos);
-                        if (cost < best_cost)
-                        {
-                            best_cost = cost;
-                            best_selection_map = selection_map;
-                            best_order = order;
-                            best_buffers = std::move(current_buffers);
-                            best_eclass_to_buf = std::move(eclass_to_buf_local);
-                            LOG(INFO) << "new best cost " << best_cost;
-                        }
-                        if (stopOnFirstValid || is_time_expired())
-                            break;
-                    }
-                }
-
-                if ((valid && stopOnFirstValid) || is_time_expired())
-                    break;
-
-                uint32_t failure_pos = static_cast<uint32_t>(std::max(0, buf_iter.k));
-                dispatch_iterator.ascend_to(failure_pos);
-                continue;
-            }
-
-            if (extractor.active_options == 0)
-            {
-                break;
-            }
-
-            if ((valid && stopOnFirstValid && best_cost < TGConstants::INF) || is_time_expired())
-                break;
-
-            if (valid && minCompileSeconds > 0.0f)
-            {
-                auto current_time = std::chrono::high_resolution_clock::now();
-                if (std::chrono::duration<float>(current_time - start_time).count() >= minCompileSeconds)
-                {
-                    break;
-                }
-            }
-
-            extractor.ascend();
-            timer.tick();
-        }
-
-        if (best_cost == TGConstants::INF)
-        {
-            Error::throw_err("[Planner.extractBest] no valid extraction found under "
-                             "given constraints. try running bench");
-        }
-
-        std::unordered_map<EClassId, float> best_eclass_to_cost;
-        for (const auto &pair : best_selection_map)
-        {
-            best_eclass_to_cost[pair.first] =
-                enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
-        }
-        ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
-        LOG(INFO) << "best_cost=" << std::to_string(best_cost) << std::endl;
-
-        return result;
     }
 
     CompiledGraph buildCompiledGraph(LogicalId rootId, const Graph &graph, const EGraph &egraph,

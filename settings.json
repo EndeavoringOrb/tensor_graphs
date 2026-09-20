@@ -2,7 +2,6 @@
   "rules": {
     "dispatch": {
       "InputDispatchDominationRule": true,
-      "UnifiedMemoryExchangeableDispatchRule": false,
       "MemoryPressureDispatchRule": true,
       "DispatchCostPruningRule": true,
       "DispatchCycleRule": true
@@ -24,8 +23,7 @@
       "CachedENodeValidityRule": true,
       "MissingCachedEClassRule": true,
       "ExtractorCycleStepRule": true,
-      "ExtractorJacksonCarlierRule": true,
-      "ExtractorDynamicMinCutRule": false
+      "ExtractorJacksonCarlierRule": true
     },
     "enode": {
       "MemCapENodeDominationRule": true,

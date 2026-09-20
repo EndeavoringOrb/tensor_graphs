@@ -30,6 +30,10 @@
 #include "core/timer.hpp"
 #include "core/types.hpp"
 
+inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
+                                   const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                   const std::vector<ENodeInfo> &enodeInfos);
+
 inline float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
                       const std::unordered_map<EClassId, uint32_t> &selection_map,
                       const std::vector<ENodeInfo> &enodeInfos, bool print_utilization = false)
@@ -47,17 +51,19 @@ inline float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
 
-        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE ||
+            (enode_id.value < enodeInfos.size() && enodeInfos[enode_id.value].is_view))
         {
             birth_times[eclass] = 0.0f;
             continue;
         }
 
-        float cost = enodeInfos[enode_id.value].cost;
+        float cost = (enode_id.value < enodeInfos.size()) ? enodeInfos[enode_id.value].cost : 0.0f;
 
         float children_finish = 0.0f;
         for (EClassId child : node.getChildren())
         {
+            child = resolve_view_alias(child, egraph, selection_map, enodeInfos);
             child = egraph.findConst(child);
             auto c_sel_it = selection_map.find(child);
             if (c_sel_it == selection_map.end())
@@ -247,11 +253,16 @@ class BufferizeCostPruningRule
         order_cost = get_cost(ctx.ordered, ctx.egraph, ctx.selection_map, ctx.enodeInfos);
     }
 
-    bool check(int /*candidate_choice*/, size_t /*cand_idx*/, const BufferizeContext &ctx) const
+    float lower_bound(int /*candidate_choice*/, size_t /*cand_idx*/, const BufferizeContext & /*ctx*/) const
+    {
+        return enabled ? order_cost : 0.0f;
+    }
+
+    bool check(int candidate_choice, size_t cand_idx, const BufferizeContext &ctx) const
     {
         if (!enabled || !ctx.best_cost)
             return false;
-        return order_cost >= *ctx.best_cost;
+        return lower_bound(candidate_choice, cand_idx, ctx) >= *ctx.best_cost;
     }
 };
 

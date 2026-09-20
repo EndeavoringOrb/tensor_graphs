@@ -124,7 +124,7 @@ class ArgParser
 
     static bool is_known_flag_syntax(const std::string &name)
     {
-        return name == "--disable-caching" || name == "--only-plan" || name == "--help" || name == "-h" ||
+        return name == "--disable-caching" || name == "--only-plan" || name == "--only-dive" || name == "--help" || name == "-h" ||
                name == "--list" || name == "-l" || name == "--no-records" || name == "--skip-fused" ||
                name == "--server";
     }
