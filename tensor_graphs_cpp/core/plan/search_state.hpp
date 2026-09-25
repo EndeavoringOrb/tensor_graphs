@@ -82,6 +82,7 @@ class SearchState
     std::vector<std::unordered_map<LogicalId, EClassId>> bucket_node_to_eclass;
     std::vector<std::unordered_map<EClassId, LogicalId>> bucket_eclass_to_logical;
     std::vector<std::vector<ENodeInfo>> bucket_enode_infos;
+    std::vector<std::vector<EClassId>> reachable_cids;
 
     std::vector<CacheCandidate> candidates;
     std::unordered_map<MemSpace, uint64_t> mem_caps;

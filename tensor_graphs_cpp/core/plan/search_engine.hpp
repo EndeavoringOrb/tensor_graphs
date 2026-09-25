@@ -59,10 +59,10 @@ class SearchEngine
         propagators.push_back(std::move(prop));
     }
 
-    void restoreNode(const std::shared_ptr<SearchNode> &target_node)
+    bool restoreNode(const std::shared_ptr<SearchNode> &target_node)
     {
         if (current_node_id == target_node->id)
-            return;
+            return true;
 
         // Path from current_node up to root
         std::vector<uint32_t> current_path;
@@ -93,35 +93,36 @@ class SearchEngine
             j--;
         }
 
-        // Unplay up to LCA
-        for (int k = 0; k <= i; ++k)
-        {
-            uint32_t nid = current_path[k];
-            if (nid == lca)
-                break;
-            // Unplay deltas of this node
-            const auto &node = all_nodes[nid];
-            // Delta unplay is achieved by restoring from trail or replaying from root
-        }
+        // Backtrack to LCA's trail marker
+        size_t lca_marker = (lca != UINT32_MAX) ? all_nodes[lca]->trail_marker : 0;
+        state.backtrackTo(lca_marker);
 
-        // To ensure clean, robust delta play/unplay without state corruption:
-        // Backtrack entire trail to root (0), then play down target_path from root to target_node
-        state.backtrackTo(0);
-        for (int k = static_cast<int>(target_path.size()) - 1; k >= 0; --k)
+        // Play decisions and propagate from child of LCA down to target_node
+        for (int k = j; k >= 0; --k)
         {
             uint32_t nid = target_path[k];
             for (const auto &p : all_nodes[nid]->delta)
             {
                 state.setDomain(p.first, p.second);
             }
+            float lb = 0.0f;
+            if (!runPropagators(lb))
+            {
+                current_node_id = (k < static_cast<int>(target_path.size()) - 1) ? target_path[k + 1] : lca;
+                return false;
+            }
+            all_nodes[nid]->lower_bound = lb;
+            all_nodes[nid]->trail_marker = state.getTrailMarker();
         }
+
         current_node_id = target_node->id;
+        return true;
     }
 
     bool runPropagators(float &out_lower_bound)
     {
         bool changed = true;
-        int max_iters = 50;
+        int max_iters = 3;
         int iters = 0;
         while (changed && iters++ < max_iters)
         {
@@ -150,10 +151,15 @@ class SearchEngine
         std::unordered_map<Engine, float> engine_finish;
         std::vector<std::pair<int32_t, EClassId>> sorted_ops;
 
-        for (const auto &pair : st.selected_vars[b])
+        const auto &cids = (b < st.reachable_cids.size() && !st.reachable_cids[b].empty())
+                               ? st.reachable_cids[b]
+                               : std::vector<EClassId>{};
+        for (EClassId cid : cids)
         {
-            EClassId cid = pair.first;
-            VarId sel_v = pair.second;
+            auto it = st.selected_vars[b].find(cid);
+            if (it == st.selected_vars[b].end())
+                continue;
+            VarId sel_v = it->second;
             if (st.domains[sel_v].isFixed() && st.domains[sel_v].fixedValue() > 0)
             {
                 uint32_t en_idx = static_cast<uint32_t>(st.domains[sel_v].fixedValue() - 1);
@@ -197,10 +203,15 @@ class SearchEngine
             ExtractionResult &res = results[b];
             std::vector<std::pair<int32_t, EClassId>> sorted_ops;
 
-            for (const auto &pair : st.selected_vars[b])
+            const auto &cids = (b < st.reachable_cids.size() && !st.reachable_cids[b].empty())
+                                   ? st.reachable_cids[b]
+                                   : std::vector<EClassId>{};
+            for (EClassId cid : cids)
             {
-                EClassId cid = pair.first;
-                VarId sel_v = pair.second;
+                auto it = st.selected_vars[b].find(cid);
+                if (it == st.selected_vars[b].end())
+                    continue;
+                VarId sel_v = it->second;
                 if (st.domains[sel_v].isFixed() && st.domains[sel_v].fixedValue() > 0)
                 {
                     uint32_t en_idx = static_cast<uint32_t>(st.domains[sel_v].fixedValue() - 1);
@@ -301,6 +312,66 @@ class SearchEngine
                    << ", buckets=" << state.buckets.size()
                    << ", timeout=" << timeout_seconds << "s";
 
+        // 0. Initial structural reachability from root across all buckets
+        state.reachable_cids.clear();
+        state.reachable_cids.resize(state.buckets.size());
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            EClassId root_id = state.bucket_root_ids[b];
+            std::unordered_set<EClassId> reachable;
+            std::vector<EClassId> frontier = {root_id};
+            reachable.insert(root_id);
+
+            while (!frontier.empty())
+            {
+                EClassId curr_cid = frontier.back();
+                frontier.pop_back();
+
+                const EClass &cls = state.bucket_egraphs[b].getEClass(curr_cid);
+                for (ENodeId en_id : cls.enodes)
+                {
+                    const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+                    for (EClassId ch : enode.getChildren())
+                    {
+                        EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
+                        if (reachable.insert(canon_ch).second)
+                        {
+                            frontier.push_back(canon_ch);
+                        }
+                    }
+                }
+            }
+
+            for (EClassId cid : reachable)
+            {
+                state.reachable_cids[b].push_back(cid);
+            }
+
+            for (const auto &pair : state.selected_vars[b])
+            {
+                EClassId cid = pair.first;
+                if (reachable.find(cid) == reachable.end())
+                {
+                    VarId v = pair.second;
+                    state.domains[v] = Domain::makeFixed(0);
+
+                    auto off_it = state.offset_vars[b].find(cid);
+                    if (off_it != state.offset_vars[b].end())
+                    {
+                        state.domains[off_it->second] = Domain::makeFixed(0);
+                    }
+                    auto st_it = state.start_vars[b].find(cid);
+                    if (st_it != state.start_vars[b].end())
+                    {
+                        for (VarId st_v : st_it->second)
+                        {
+                            state.domains[st_v] = Domain::makeFixed(0);
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Root node
         auto root_node = std::make_shared<SearchNode>(0, UINT32_MAX, std::vector<std::pair<VarId, Domain>>{}, 0.0f,
                                                       0.0f, 0);
@@ -318,6 +389,7 @@ class SearchEngine
 
         root_node->lower_bound = root_lb;
         root_node->priority = root_lb;
+        root_node->trail_marker = state.getTrailMarker();
         selector->push(root_node);
 
         uint32_t iterations = 0;
@@ -343,7 +415,7 @@ class SearchEngine
                 continue;
 
             iterations++;
-            if (iterations == 1 || iterations % 50 == 0)
+            if (iterations == 1 || iterations % 50 == 0 || iterations >= 1345)
             {
                 LOG(DEBUG) << "[SearchEngine] Iter " << iterations
                            << " | Queue: " << selector->size()
@@ -352,10 +424,7 @@ class SearchEngine
                            << " | Best: " << (incumbent_best_cost < TGConstants::INF ? std::to_string(incumbent_best_cost) : "inf");
             }
 
-            restoreNode(node);
-
-            float current_lb = 0.0f;
-            if (!runPropagators(current_lb))
+            if (!restoreNode(node))
             {
                 if (iterations <= 20 || iterations % 50 == 0)
                 {
@@ -364,13 +433,12 @@ class SearchEngine
                 continue;
             }
 
-            if (current_lb >= incumbent_best_cost)
+            if (node->lower_bound >= incumbent_best_cost)
                 continue;
 
             // Check if branching is needed or all variables are fixed
-            VarId branch_var = kInvalidVarId;
-            Domain left_dom, right_dom;
-            bool can_branch = brancher->chooseBranch(state, branch_var, left_dom, right_dom);
+            BranchDecision decision;
+            bool can_branch = brancher->chooseBranch(state, decision);
 
             if (!can_branch)
             {
@@ -411,16 +479,41 @@ class SearchEngine
                 continue;
             }
 
-            if (iterations <= 25 || iterations % 50 == 0)
+            if (iterations <= 25 || iterations % 50 == 0 || iterations >= 1345)
             {
-                LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": branching on var " << branch_var
-                           << " (" << state.var_infos[branch_var].name << ") [dom: " << state.domains[branch_var].toString()
-                           << "] -> Left: " << left_dom.toString() << ", Right: " << right_dom.toString();
+                if (decision.left_delta.size() == 1)
+                {
+                    VarId branch_var = decision.left_delta[0].first;
+                    LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": branching on var " << branch_var
+                               << " (" << state.var_infos[branch_var].name << ") [dom: " << state.domains[branch_var].toString()
+                               << "] -> Left: " << decision.left_delta[0].second.toString()
+                               << ", Right: " << (decision.right_delta.empty() ? "{}" : decision.right_delta[0].second.toString());
+                }
+                else
+                {
+                    LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": bulk assigning "
+                               << decision.left_delta.size() << " variables (start times & memory offsets)";
+                }
             }
 
-            // Create Left Child
-            size_t trail_before = state.getTrailMarker();
-            state.setDomain(branch_var, left_dom);
+            // 1. Create Right Child (lazy alternative, pushed to queue without upfront propagation)
+            if (!decision.right_delta.empty())
+            {
+                uint32_t right_id = static_cast<uint32_t>(all_nodes.size());
+                float right_lb = node->lower_bound;
+                float right_prio = right_lb + 1.0f;
+                auto right_node = std::make_shared<SearchNode>(
+                    right_id, node->id, decision.right_delta, right_lb,
+                    right_prio, node->depth + 1);
+                all_nodes.push_back(right_node);
+                selector->push(right_node);
+            }
+
+            // 2. Create Left Child (dive immediately in place!)
+            for (const auto &p : decision.left_delta)
+            {
+                state.setDomain(p.first, p.second);
+            }
             float left_lb = 0.0f;
             bool left_ok = runPropagators(left_lb);
             if (left_ok && left_lb < incumbent_best_cost)
@@ -428,29 +521,18 @@ class SearchEngine
                 uint32_t left_id = static_cast<uint32_t>(all_nodes.size());
                 float left_prio = left_lb - (node->depth + 1) * 0.01f; // Dive bias
                 auto left_node = std::make_shared<SearchNode>(
-                    left_id, node->id, std::vector<std::pair<VarId, Domain>>{{branch_var, left_dom}}, left_lb,
-                    left_prio, node->depth + 1);
+                    left_id, node->id, decision.left_delta, left_lb,
+                    left_prio, node->depth + 1, state.getTrailMarker());
                 all_nodes.push_back(left_node);
+                current_node_id = left_id; // Current state stays at left_node!
                 selector->push(left_node);
             }
-            state.backtrackTo(trail_before);
-
-            // Create Right Child
-            trail_before = state.getTrailMarker();
-            state.setDomain(branch_var, right_dom);
-            float right_lb = 0.0f;
-            bool right_ok = runPropagators(right_lb);
-            if (right_ok && right_lb < incumbent_best_cost)
+            else
             {
-                uint32_t right_id = static_cast<uint32_t>(all_nodes.size());
-                float right_prio = right_lb - (node->depth + 1) * 0.01f;
-                auto right_node = std::make_shared<SearchNode>(
-                    right_id, node->id, std::vector<std::pair<VarId, Domain>>{{branch_var, right_dom}}, right_lb,
-                    right_prio, node->depth + 1);
-                all_nodes.push_back(right_node);
-                selector->push(right_node);
+                // Left branch failed, backtrack in place to parent node
+                state.backtrackTo(node->trail_marker);
+                current_node_id = node->id;
             }
-            state.backtrackTo(trail_before);
         }
 
         LOG(INFO) << "[SearchEngine] Search finished after " << iterations << " iterations ("

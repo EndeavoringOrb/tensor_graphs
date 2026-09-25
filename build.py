@@ -23,6 +23,7 @@ ROOT_DIR = Path("tensor_graphs_cpp")
 GENERATED_DIR = ROOT_DIR / "generated"
 KERNELS_DIR = ROOT_DIR / "kernels"
 CACHE_FILE = GENERATED_DIR / ".build_cache.json"
+CACHE_SCHEMA_VERSION = 2
 
 
 def writeIfChanged(filepath: Path, content: str) -> bool:
@@ -119,23 +120,56 @@ def isBinaryUpToDate(
     return True
 
 
+def makeLinkKey(linker: str, ld_flags: list[str], obj_paths: list[Path], object_cmd_keys: dict[str, str]) -> str:
+    """Build a link cache key that also captures how every object was compiled."""
+    objects = []
+    for obj_path in obj_paths:
+        resolved_path = str(obj_path.resolve())
+        objects.append(
+            {
+                "path": resolved_path,
+                "compile_key": object_cmd_keys.get(resolved_path, "<unknown>"),
+            }
+        )
+
+    return json.dumps(
+        {
+            "linker": linker,
+            "ld_flags": ld_flags,
+            "objects": objects,
+        },
+        sort_keys=True,
+    )
+
+
 def loadBuildCache() -> dict:
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cache = json.load(f)
+            if cache.get("__schema_version__") != CACHE_SCHEMA_VERSION:
+                console.print("[yellow]Ignoring outdated build cache schema.[/yellow]")
+                return {}
+            return cache
         except Exception:
-            return {}
+            console.print("[yellow]Ignoring unreadable build cache.[/yellow]")
     return {}
 
 
 def saveBuildCache(cache: dict) -> None:
+    """Atomically persist cache metadata so interrupted builds cannot corrupt it."""
+    cache_to_save = dict(cache)
+    cache_to_save["__schema_version__"] = CACHE_SCHEMA_VERSION
+    temp_file = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2)
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(cache_to_save, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, CACHE_FILE)
     except Exception:
-        pass
+        temp_file.unlink(missing_ok=True)
 
 
 CORE_DEPENDENCIES = [
@@ -1265,6 +1299,7 @@ class BuildOrchestrator:
             build_cache.clear()
 
         cuda_objs: list[str] = []
+        cuda_object_cmd_keys: dict[str, str] = {}
         cuda_objs_recompiled = False
 
         if self.config.use_cuda:
@@ -1297,6 +1332,7 @@ class BuildOrchestrator:
                     "built_at": time.time(),
                 }
 
+            cuda_object_cmd_keys[str(cuda_stable_obj.resolve())] = cmd_key_stable
             cuda_objs.append(str(cuda_stable_obj))
 
             cuda_gen_src = GENERATED_DIR / "cuda_generated.gen.cu"
@@ -1323,6 +1359,7 @@ class BuildOrchestrator:
                         "cmd_key": cmd_key_gen,
                         "built_at": time.time(),
                     }
+                cuda_object_cmd_keys[str(cuda_gen_obj.resolve())] = cmd_key_gen
                 cuda_objs.append(str(cuda_gen_obj))
             else:
                 if cuda_gen_obj.exists():
@@ -1426,6 +1463,10 @@ class BuildOrchestrator:
                     }
                     self._render_success_panel(out, f"compile {tf}")
 
+        object_cmd_keys = dict(cuda_object_cmd_keys)
+        for info in target_info.values():
+            object_cmd_keys[str(info["main_obj"].resolve())] = info["cmd_key"]
+
         for main_file in self.config.targets:
             info = target_info[main_file]
             target_stem = info["target_stem"]
@@ -1437,7 +1478,7 @@ class BuildOrchestrator:
                 out_path = Path(f"tensor_graphs{ext_suffix}")
                 dep_objs = [main_obj] + [Path(co) for co in cuda_objs]
                 ld_flags = py_link_flags + self.toolchain.get_ld_flags()
-                link_key = f"{info['cxx_bin']} {' '.join(ld_flags)} {' '.join(str(o) for o in dep_objs)}"
+                link_key = makeLinkKey(info["cxx_bin"], ld_flags, dep_objs, object_cmd_keys)
 
                 bin_up_to_date = isBinaryUpToDate(out_path, dep_objs, link_key, build_cache, self.config.force)
                 if bin_up_to_date and not info["recompiled"] and not cuda_objs_recompiled:
@@ -1462,7 +1503,7 @@ class BuildOrchestrator:
             out_path = Path(f"tensor_graphs_cpp/{target_stem}{out_ext}")
             dep_objs = [main_obj] + ([Path(co) for co in cuda_objs] if self.config.use_cuda else [])
             ld_flags = self.toolchain.get_cxx_flags() + self.toolchain.get_ld_flags()
-            link_key = f"{info['cxx_bin']} {' '.join(ld_flags)} {' '.join(str(o) for o in dep_objs)}"
+            link_key = makeLinkKey(info["cxx_bin"], ld_flags, dep_objs, object_cmd_keys)
 
             bin_up_to_date = isBinaryUpToDate(out_path, dep_objs, link_key, build_cache, self.config.force)
             if bin_up_to_date and not info["recompiled"] and not cuda_objs_recompiled:

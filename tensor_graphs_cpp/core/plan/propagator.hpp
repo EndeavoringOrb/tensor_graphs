@@ -31,6 +31,14 @@ class Propagator
     }
 };
 
+inline const std::vector<EClassId> &getReachableCids(const SearchState &state, uint32_t b)
+{
+    static const std::vector<EClassId> empty;
+    return (b < state.reachable_cids.size() && !state.reachable_cids[b].empty())
+               ? state.reachable_cids[b]
+               : empty;
+}
+
 class SelectionPropagator : public Propagator
 {
   public:
@@ -56,80 +64,39 @@ class SelectionPropagator : public Propagator
                 state.setDomain(root_var, root_dom);
             }
 
-            // Propagate selection implications
-            bool changed = true;
-            while (changed)
+            // Propagate selection implications:
+            // For each eclass that is definitely selected and fixed to enode e,
+            // all children of enode e cannot be 0.
+            for (EClassId cid : getReachableCids(state, b))
             {
-                changed = false;
-                for (const auto &pair : state.selected_vars[b])
+                VarId v = state.selected_vars[b].at(cid);
+                const Domain &dom = state.domains[v];
+                if (dom.isEmpty())
+                    return false;
+
+                if (dom.isFixed() && dom.fixedValue() > 0)
                 {
-                    EClassId cid = pair.first;
-                    VarId v = pair.second;
-                    Domain dom = state.domains[v];
-                    if (dom.isEmpty())
-                        return false;
-
+                    uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
                     const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-
-                    // If eclass is definitely selected (> 0) and fixed to enode e
-                    if (dom.isFixed() && dom.fixedValue() > 0)
+                    if (en_idx < cls.enodes.size())
                     {
-                        uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
-                        if (en_idx < cls.enodes.size())
+                        ENodeId en_id = cls.enodes[en_idx];
+                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+                        for (EClassId child : enode.getChildren())
                         {
-                            ENodeId en_id = cls.enodes[en_idx];
-                            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                            for (EClassId child : enode.getChildren())
+                            EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                            auto ch_it = state.selected_vars[b].find(canon_child);
+                            if (ch_it != state.selected_vars[b].end())
                             {
-                                EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                                auto ch_it = state.selected_vars[b].find(canon_child);
-                                if (ch_it != state.selected_vars[b].end())
+                                VarId ch_v = ch_it->second;
+                                Domain ch_dom = state.domains[ch_v];
+                                if (ch_dom.contains(0))
                                 {
-                                    VarId ch_v = ch_it->second;
-                                    Domain ch_dom = state.domains[ch_v];
-                                    if (ch_dom.contains(0))
-                                    {
-                                        ch_dom.remove(0);
-                                        if (ch_dom.isEmpty())
-                                            return false;
-                                        state.setDomain(ch_v, ch_dom);
-                                        changed = true;
-                                    }
+                                    ch_dom.remove(0);
+                                    if (ch_dom.isEmpty())
+                                        return false;
+                                    state.setDomain(ch_v, ch_dom);
                                 }
-                            }
-                        }
-                    }
-
-                    // Backward check: remove candidate enodes whose children cannot be selected
-                    for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
-                    {
-                        int32_t val = static_cast<int32_t>(en_idx + 1);
-                        if (dom.contains(val))
-                        {
-                            ENodeId en_id = cls.enodes[en_idx];
-                            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                            bool child_dead = false;
-                            for (EClassId child : enode.getChildren())
-                            {
-                                EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                                auto ch_it = state.selected_vars[b].find(canon_child);
-                                if (ch_it != state.selected_vars[b].end())
-                                {
-                                    VarId ch_v = ch_it->second;
-                                    if (state.domains[ch_v].isFixed() && state.domains[ch_v].fixedValue() == 0)
-                                    {
-                                        child_dead = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (child_dead)
-                            {
-                                dom.remove(val);
-                                if (dom.isEmpty())
-                                    return false;
-                                state.setDomain(v, dom);
-                                changed = true;
                             }
                         }
                     }
@@ -153,10 +120,9 @@ class CachePropagator : public Propagator
         // 1. Check CACHE and SCATTER dependencies on cached_vars
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            for (const auto &pair : state.selected_vars[b])
+            for (EClassId cid : getReachableCids(state, b))
             {
-                EClassId cid = pair.first;
-                VarId v = pair.second;
+                VarId v = state.selected_vars[b].at(cid);
                 Domain dom = state.domains[v];
                 const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
 
@@ -275,10 +241,9 @@ class TopologicalOrderPropagator : public Propagator
     {
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            for (const auto &pair : state.selected_vars[b])
+            for (EClassId cid : getReachableCids(state, b))
             {
-                EClassId cid = pair.first;
-                VarId sel_v = pair.second;
+                VarId sel_v = state.selected_vars[b].at(cid);
                 const Domain &sel_dom = state.domains[sel_v];
                 const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
 
@@ -313,14 +278,6 @@ class TopologicalOrderPropagator : public Propagator
                                             return false;
                                         state.setDomain(parent_st_v, parent_st_dom);
                                     }
-
-                                    // start[child] <= start[parent] - 1
-                                    if (child_st_dom.setMax(parent_st_dom.getMax() - 1))
-                                    {
-                                        if (child_st_dom.isEmpty())
-                                            return false;
-                                        state.setDomain(child_st_v, child_st_dom);
-                                    }
                                 }
                             }
                         }
@@ -347,10 +304,9 @@ class EngineSchedulePropagator : public Propagator
         {
             std::unordered_map<Engine, std::unordered_set<int32_t>> fixed_starts;
 
-            for (const auto &pair : state.selected_vars[b])
+            for (EClassId cid : getReachableCids(state, b))
             {
-                EClassId cid = pair.first;
-                VarId sel_v = pair.second;
+                VarId sel_v = state.selected_vars[b].at(cid);
                 const Domain &sel_dom = state.domains[sel_v];
                 if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
                 {
@@ -396,10 +352,9 @@ class MemoryNonOverlapPropagator : public Propagator
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
             // Propagate view offsets
-            for (const auto &pair : state.selected_vars[b])
+            for (EClassId cid : getReachableCids(state, b))
             {
-                EClassId cid = pair.first;
-                VarId sel_v = pair.second;
+                VarId sel_v = state.selected_vars[b].at(cid);
                 const Domain &sel_dom = state.domains[sel_v];
                 if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
                 {
@@ -454,15 +409,18 @@ class MemoryNonOverlapPropagator : public Propagator
             };
 
             std::vector<AllocEntry> allocs;
-            for (const auto &pair : state.offset_vars[b])
+            for (EClassId cid : getReachableCids(state, b))
             {
-                EClassId cid = pair.first;
+                auto off_it = state.offset_vars[b].find(cid);
+                if (off_it == state.offset_vars[b].end())
+                    continue;
+
                 VarId sel_v = state.selected_vars[b].at(cid);
                 const Domain &sel_dom = state.domains[sel_v];
                 if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
                 {
                     uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    VarId off_v = pair.second;
+                    VarId off_v = off_it->second;
                     VarId st_v = state.start_vars[b].at(cid)[en_idx];
 
                     if (state.domains[off_v].isFixed() && state.domains[st_v].isFixed())
@@ -533,10 +491,9 @@ class CostLowerBoundPropagator : public Propagator
                 continue;
 
             std::unordered_map<Engine, float> engine_work;
-            for (const auto &pair : state.selected_vars[b])
+            for (EClassId cid : getReachableCids(state, b))
             {
-                EClassId cid = pair.first;
-                VarId sel_v = pair.second;
+                VarId sel_v = state.selected_vars[b].at(cid);
                 const Domain &sel_dom = state.domains[sel_v];
                 const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
 

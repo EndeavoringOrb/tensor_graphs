@@ -257,9 +257,8 @@ struct InstallCrashHandler
 
 #include "core/common/thread_pool.hpp"
 #include "core/hardware.hpp"
-#include "core/plan/cached_plan.hpp"
+#include "core/plan/brancher.hpp"
 #include "core/plan/planner.hpp"
-#include "core/plan/search_delegate.hpp"
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "models/deepseek-v4-flash.hpp"
@@ -270,86 +269,14 @@ struct InstallCrashHandler
 
 namespace py = pybind11;
 
-class PySearchDelegate : public SearchDelegate
+class PyBrancher : public plan::Brancher
 {
   public:
-    using SearchDelegate::SearchDelegate;
+    using plan::Brancher::Brancher;
 
-    void push_state() override
+    bool chooseBranch(const plan::SearchState &state, plan::BranchDecision &out_decision) override
     {
-        PYBIND11_OVERRIDE(void, SearchDelegate, push_state);
-    }
-    void pop_state() override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, pop_state);
-    }
-    void on_leaf_evaluated(float cost) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, on_leaf_evaluated, cost);
-    }
-    void on_bucket_leaf_evaluated(uint32_t bucket_idx, float cost) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, on_bucket_leaf_evaluated, bucket_idx, cost);
-    }
-
-    void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                          const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_cache_graph, node_features, edge_src, edge_dst);
-    }
-
-    void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                     const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_egraph, node_features, edge_src, edge_dst);
-    }
-
-    void init_dispatch_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                             const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_dispatch_graph, node_features, edge_src, edge_dst);
-    }
-
-    void init_bufferize_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                              const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_bufferize_graph, node_features, edge_src, edge_dst);
-    }
-
-    void init_malloc_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                           const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_malloc_graph, node_features, edge_src, edge_dst);
-    }
-
-    std::vector<uint32_t> order_cache(const std::vector<ActionFeatureCache> &choices) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_cache, choices);
-    }
-
-    std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_enodes, enodes);
-    }
-
-    std::vector<uint32_t> order_dispatch(const std::vector<ActionFeatureExtractDispatch> &ready_nodes) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_dispatch, ready_nodes);
-    }
-
-    std::vector<uint32_t> order_bufferize(const std::vector<ActionFeatureBufferize> &choices) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_bufferize, choices);
-    }
-
-    std::vector<uint32_t> order_malloc(const std::vector<ActionFeatureMalloc> &avail_buffers) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_malloc, avail_buffers);
-    }
-
-    std::vector<uint32_t> order_frontier(const std::vector<ActionFeatureFrontier> &frontier) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_frontier, frontier);
+        PYBIND11_OVERRIDE_PURE(bool, plan::Brancher, chooseBranch, state, out_decision);
     }
 };
 
@@ -367,7 +294,7 @@ class LLMSession
 
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
-               std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
+               std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
                 uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
@@ -379,7 +306,7 @@ class LLMSession
             set_num_threads(threads);
         }
 
-        auto act_delegate = delegate ? delegate : std::make_shared<HeuristicSearchDelegate>();
+        auto act_brancher = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
         mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
@@ -426,7 +353,7 @@ class LLMSession
         }
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, act_delegate, log_cost_calls);
+                                            min_compile_time, act_brancher, log_cost_calls);
         session->settings.use_ortools = use_ortools;
         session->settings.use_ortools_full = use_ortools_full;
         session->settings.use_ortools_lns = use_ortools_lns;
@@ -563,7 +490,7 @@ class Krea2Session
     Krea2Session(const std::string &model_path, const std::string &text_encoder_path = "",
                  const std::string &vae_path = "", uint32_t height = 1024, uint32_t width = 1024,
                  uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
-                 std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
+                 std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
                   const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
                   bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0,
                   bool use_ortools_lns = false)
@@ -574,7 +501,7 @@ class Krea2Session
             set_num_threads(threads);
         }
 
-        auto act_delegate = delegate ? delegate : std::make_shared<HeuristicSearchDelegate>();
+        auto act_brancher = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
         std::string actual_dit_path = model_path;
         if (std::filesystem::is_directory(model_path))
@@ -640,7 +567,7 @@ class Krea2Session
         }
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, act_delegate, log_cost_calls);
+                                            min_compile_time, act_brancher, log_cost_calls);
         session->settings.use_ortools_full = use_ortools_full;
         session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
@@ -977,112 +904,27 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("logical_or", [](Graph &self, LogicalId a, LogicalId b) { return self.logical_or(a, b); })
         .def("logical_not", [](Graph &self, LogicalId a) { return self.logical_not(a); });
 
-    // Action Feature Structs
-    py::class_<ActionFeatureCache>(m, "ActionFeatureCache")
-        .def_readwrite("is_cached", &ActionFeatureCache::is_cached)
-        .def_readwrite("size", &ActionFeatureCache::size)
-        .def_readwrite("num_users", &ActionFeatureCache::num_users)
-        .def_readwrite("logical_id", &ActionFeatureCache::logical_id)
-        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
-        .def_readwrite("mem_cap", &ActionFeatureCache::mem_cap);
 
-    py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
-        .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
-        .def_readwrite("dp_cost", &ActionFeatureExtractDispatch::dp_cost)
-        .def_readwrite("min_dp_cp_cost", &ActionFeatureExtractDispatch::min_dp_cp_cost)
-        .def_readwrite("rev_cp_cost", &ActionFeatureExtractDispatch::rev_cp_cost)
-        .def_readwrite("dp_mem", &ActionFeatureExtractDispatch::dp_mem)
-        .def_readwrite("size", &ActionFeatureExtractDispatch::size)
-        .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
-        .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
-        .def_readwrite("num_nodes", &ActionFeatureExtractDispatch::num_nodes)
-        .def_readwrite("num_edges", &ActionFeatureExtractDispatch::num_edges)
-        .def_readwrite("mem_cap", &ActionFeatureExtractDispatch::mem_cap);
 
-    py::class_<ActionFeatureBufferize>(m, "ActionFeatureBufferize")
-        .def_readwrite("is_new_buffer", &ActionFeatureBufferize::is_new_buffer)
-        .def_readwrite("size", &ActionFeatureBufferize::size)
-        .def_readwrite("parent_size", &ActionFeatureBufferize::parent_size)
-        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time)
-        .def_readwrite("mem_space", &ActionFeatureBufferize::mem_space)
-        .def_readwrite("mem_cap", &ActionFeatureBufferize::mem_cap);
-
-    py::class_<ActionFeatureMalloc>(m, "ActionFeatureMalloc")
-        .def_readwrite("size", &ActionFeatureMalloc::size)
-        .def_readwrite("start", &ActionFeatureMalloc::start)
-        .def_readwrite("end", &ActionFeatureMalloc::end)
-        .def_readwrite("mem_space", &ActionFeatureMalloc::mem_space)
-        .def_readwrite("mem_cap", &ActionFeatureMalloc::mem_cap);
-
-    py::class_<ActionFeatureFrontier>(m, "ActionFeatureFrontier")
-        .def_readwrite("eclass_id", &ActionFeatureFrontier::eclass_id)
-        .def_readwrite("num_enodes", &ActionFeatureFrontier::num_enodes)
-        .def_readwrite("min_dp_cp_cost", &ActionFeatureFrontier::min_dp_cp_cost)
-        .def_readwrite("min_dp_cost", &ActionFeatureFrontier::min_dp_cost)
-        .def_readwrite("min_dp_mem", &ActionFeatureFrontier::min_dp_mem)
-        .def_readwrite("size", &ActionFeatureFrontier::size)
-        .def_readwrite("dtype", &ActionFeatureFrontier::dtype)
-        .def_readwrite("mem_space", &ActionFeatureFrontier::mem_space)
-        .def_readwrite("mem_cap", &ActionFeatureFrontier::mem_cap);
-
-    // Search Delegate
-    py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")
+    // Brancher
+    py::class_<plan::BranchDecision>(m, "BranchDecision")
         .def(py::init<>())
-        .def("push_state", &SearchDelegate::push_state)
-        .def("pop_state", &SearchDelegate::pop_state)
-        .def("on_leaf_evaluated", &SearchDelegate::on_leaf_evaluated)
-        .def("on_bucket_leaf_evaluated", &SearchDelegate::on_bucket_leaf_evaluated)
-        .def("init_cache_graph", &SearchDelegate::init_cache_graph)
-        .def("init_egraph", &SearchDelegate::init_egraph)
-        .def("init_dispatch_graph", &SearchDelegate::init_dispatch_graph)
-        .def("init_bufferize_graph", &SearchDelegate::init_bufferize_graph)
-        .def("init_malloc_graph", &SearchDelegate::init_malloc_graph)
-        .def("order_cache", &SearchDelegate::order_cache)
-        .def("order_enodes", &SearchDelegate::order_enodes)
-        .def("order_dispatch", &SearchDelegate::order_dispatch)
-        .def("order_bufferize", &SearchDelegate::order_bufferize)
-        .def("order_malloc", &SearchDelegate::order_malloc)
-        .def("order_frontier", &SearchDelegate::order_frontier);
+        .def_readwrite("left_delta", &plan::BranchDecision::left_delta)
+        .def_readwrite("right_delta", &plan::BranchDecision::right_delta);
 
-    py::class_<HeuristicSearchDelegate, SearchDelegate, std::shared_ptr<HeuristicSearchDelegate>>(
-        m, "HeuristicSearchDelegate")
+    py::class_<plan::Brancher, PyBrancher, std::shared_ptr<plan::Brancher>>(m, "Brancher")
         .def(py::init<>());
-    m.attr("HeuristicDelegate") = m.attr("HeuristicSearchDelegate");
-
-    // Saturated E-Graph Context & Simulations
-    py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")
-        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); })
-        .def_property("bucket_weights", &SaturatedEGraphContext::getBucketWeights,
-                      &SaturatedEGraphContext::setBucketWeights);
-
-    m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
-          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true, py::arg("max_seq_len") = 8);
-
-    m.def("build_and_saturate_egraph_from_graph", &build_and_saturate_egraph_from_graph, py::arg("graph"),
-          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false,
-          py::arg("mem_cap_override") = 0);
-
-    using WeightedSimulationFn =
-        std::vector<float> (*)(std::shared_ptr<SaturatedEGraphContext>, std::shared_ptr<SearchDelegate>,
-                               const std::vector<uint32_t> &, bool, float);
-    m.def("run_hierarchical_simulations", static_cast<WeightedSimulationFn>(&run_hierarchical_simulations),
-          py::arg("ctx"), py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false,
-          py::arg("min_compile_seconds") = 0.0f);
-
-    using LegacySimulationFn =
-        std::vector<float> (*)(std::shared_ptr<SaturatedEGraphContext>, int, std::shared_ptr<SearchDelegate>,
-                               const std::vector<uint32_t> &, bool, float);
-    m.def("run_hierarchical_simulations", static_cast<LegacySimulationFn>(&run_hierarchical_simulations),
-          py::arg("ctx"), py::arg("bucket_idx"), py::arg("delegate"), py::arg("level_simulations"),
-          py::arg("log_cost_calls") = false, py::arg("min_compile_seconds") = 0.0f);
-
-    m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
-          py::arg("log_cost_calls") = false);
+    py::class_<plan::HeuristicBrancher, plan::Brancher, std::shared_ptr<plan::HeuristicBrancher>>(
+        m, "HeuristicBrancher")
+        .def(py::init<>());
+    m.attr("SearchDelegate") = m.attr("Brancher");
+    m.attr("HeuristicSearchDelegate") = m.attr("HeuristicBrancher");
+    m.attr("HeuristicDelegate") = m.attr("HeuristicBrancher");
 
     py::class_<LLMSession>(m, "LLMSession")
-        .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
+        .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
                       const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool>(),
-             py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
+             py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
              py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
@@ -1092,11 +934,11 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
-                      uint32_t, float, std::shared_ptr<SearchDelegate>, float, const std::string &, bool, uint32_t,
+                      uint32_t, float, std::shared_ptr<plan::Brancher>, float, const std::string &, bool, uint32_t,
                       bool, bool, double, bool>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
-             py::arg("mu") = 1.15f, py::arg("delegate") = nullptr, py::arg("min_compile_time") = 0.0f,
+             py::arg("mu") = 1.15f, py::arg("brancher") = nullptr, py::arg("min_compile_time") = 0.0f,
              py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
              py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
              py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false)

@@ -9,13 +9,13 @@
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "core/plan/planner.hpp"
-#include "core/plan/rule_registry.hpp"
 #include "core/settings.hpp"
 #include "core/types.hpp"
 
 inline void setupTestSettings(Settings &settings, bool enable_rules = true)
 {
-    enableAllDefaultRules(settings, enable_rules);
+    (void)settings;
+    (void)enable_rules;
 }
 
 inline Region makeRegion(std::initializer_list<Dim> dims)

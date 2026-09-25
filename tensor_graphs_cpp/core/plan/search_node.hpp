@@ -21,12 +21,13 @@ struct SearchNode
     float lower_bound = 0.0f;
     float priority = 0.0f;
     uint32_t depth = 0;
+    size_t trail_marker = 0;
 
     SearchNode() = default;
     SearchNode(uint32_t id, uint32_t parent_id, std::vector<std::pair<VarId, Domain>> delta, float lower_bound,
-               float priority, uint32_t depth)
+               float priority, uint32_t depth, size_t trail_marker = 0)
         : id(id), parent_id(parent_id), delta(std::move(delta)), lower_bound(lower_bound), priority(priority),
-          depth(depth)
+          depth(depth), trail_marker(trail_marker)
     {
     }
 };

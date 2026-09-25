@@ -21,7 +21,6 @@
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/ortools_export.hpp"
-#include "core/plan/rule_registry.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
@@ -83,7 +82,7 @@ struct Session
     std::unique_ptr<TGStore> owned_repo;
     bool disableCaching = false;
     float minCompileSeconds = 0.0f;
-    std::shared_ptr<SearchDelegate> delegate = nullptr;
+    std::shared_ptr<plan::Brancher> brancher = nullptr;
     bool logCostCalls = false;
 
     Settings settings;
@@ -241,32 +240,26 @@ struct Session
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, TGStore *_repo = nullptr,
-            std::shared_ptr<SearchDelegate> _delegate = nullptr)
+            std::shared_ptr<plan::Brancher> _brancher = nullptr)
         : graph(g), memManager(mem), rootId(root), settings(_settings), isPlanned(false), isCompiled(false),
           cachePath(_settings.cache_file), nBucketSizes(0), repo(_repo), disableCaching(_settings.disable_caching),
           minCompileSeconds(_settings.min_compile_seconds),
-          delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()),
+          brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()),
           logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
     {
         initRepo(_repo);
-        if (!settings.is_rules_defined("dispatch") || !settings.is_rules_defined("extract") ||
-            !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
-            !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
-        {
-            enableAllDefaultRules(settings, true);
-        }
         ensureOutputDirectories();
         loadCache();
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             TGStore *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
-            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true,
+            std::shared_ptr<plan::Brancher> _brancher = nullptr, bool _logCostCalls = true,
             const std::string &_recordsPath = "benchmarks/records.bin")
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
           minCompileSeconds(_minCompileSeconds),
-          delegate(_delegate ? _delegate : std::make_shared<HeuristicSearchDelegate>()), logCostCalls(_logCostCalls),
+          brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()), logCostCalls(_logCostCalls),
           costModel(_logCostCalls, _recordsPath)
     {
         settings = Settings::get_default();
@@ -277,12 +270,6 @@ struct Session
         if (!_recordsPath.empty())
             settings.records_path = _recordsPath;
         initRepo(_repo);
-        if (!settings.is_rules_defined("dispatch") || !settings.is_rules_defined("extract") ||
-            !settings.is_rules_defined("bufferize") || !settings.is_rules_defined("malloc") ||
-            !settings.is_rules_defined("cache") || !settings.is_rules_defined("enode"))
-        {
-            enableAllDefaultRules(settings, true);
-        }
         ensureOutputDirectories();
         loadCache();
     }
@@ -728,7 +715,7 @@ struct Session
             ExtractionResult hint = native_planner.extractBest(
                 rootId, graph, hint_egraph, state->bucket_node_to_eclasses[bucket_idx],
                 no_cached_nodes, state->bucket_eclass_to_logicals[bucket_idx],
-                hint_settings.min_compile_seconds == 0.0f, false, hint_settings.min_compile_seconds, delegate,
+                hint_settings.min_compile_seconds == 0.0f, false, hint_settings.min_compile_seconds, brancher,
                 native_infos, &no_cached_eclasses, &state->bucket_clean_eclasses[bucket_idx]);
 
             // Pruning changes each eclass's local enode index.  CP-SAT uses
@@ -949,7 +936,7 @@ struct Session
 
         Planner planner(costModel, settings);
         auto [graphs, cached_nodes] = planner.planAll(
-            rootId, graph, manualBuckets, bucket_weights, doSaturate, repo, minCompileSeconds, delegate);
+            rootId, graph, manualBuckets, bucket_weights, doSaturate, repo, minCompileSeconds, brancher);
 
         cachedGraphs = std::move(graphs);
         selectedCachedNodes = std::move(cached_nodes);

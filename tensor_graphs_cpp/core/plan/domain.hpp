@@ -7,6 +7,8 @@
 #include <iostream>
 #include <string>
 
+#include "core/types.hpp"
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
 #endif
@@ -42,7 +44,11 @@ struct Domain
     {
         if (use_mask)
         {
-            assert(val >= 0 && val < 32);
+            if (val < 0 || val >= 32)
+            {
+                Error::throw_err("Domain::makeFixed mask value out of range: " + std::to_string(val) +
+                                 " (expected 0..31)");
+            }
             return makeMask(1u << val);
         }
         return makeRange(val, val);

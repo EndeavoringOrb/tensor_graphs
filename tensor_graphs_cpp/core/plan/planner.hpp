@@ -27,9 +27,7 @@
 #include "core/ops/ops.hpp"
 #include "core/plan/brancher.hpp"
 #include "core/plan/domain.hpp"
-#include "core/plan/mem.hpp"
 #include "core/plan/propagator.hpp"
-#include "core/plan/search_delegate.hpp"
 #include "core/plan/search_engine.hpp"
 #include "core/plan/search_node.hpp"
 #include "core/plan/search_state.hpp"
@@ -58,530 +56,169 @@ struct ENodeDominationContext
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 };
 
-class MemCapENodeDominationRule
+inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext &ctx)
 {
-  public:
-    TG_PRUNING_RULE(MemCapENodeDominationRule)
-    MemCapENodeDominationRule(bool en = true) : enabled(en)
+    const ENode &enode = ctx.egraph.getENode(enodeId);
+    MemSpace ms = enode.getMemSpace();
+
+    if (ms.type == HandleType::STORAGE || ctx.mem_caps.find(ms) == ctx.mem_caps.end())
+        return false;
+
+    uint64_t cap = ctx.mem_caps.at(ms);
+    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
+
+    if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
     {
+        return out_size > cap;
     }
 
-    bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
+    const ENodeInfo &info = ctx.enodeInfos[enodeId.value];
+    bool can_be_inplace = false;
+    if (info.is_view)
     {
-        if (!enabled)
-            return false;
-        const ENode &enode = ctx.egraph.getENode(enodeId);
-        MemSpace ms = enode.getMemSpace();
-
-        if (ms.type == HandleType::STORAGE || ctx.mem_caps.find(ms) == ctx.mem_caps.end())
-            return false;
-
-        uint64_t cap = ctx.mem_caps.at(ms);
-        uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
-
-        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+        can_be_inplace = true;
+    }
+    else if (enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
+    {
+        const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
+        for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
         {
-            return out_size > cap;
-        }
-
-        const ENodeInfo &info = ctx.enodeInfos[enodeId.value];
-        bool can_be_inplace = false;
-        if (info.is_view)
-        {
-            can_be_inplace = true;
-        }
-        else if (enode.getKernelId().value != 0 && KernelRegistry::get().hasKernel(enode.getKernelId()))
-        {
-            const auto &k_entry = KernelRegistry::get().getKernel(enode.getKernelId());
-            for (uint32_t inplace_idx : k_entry.safe_inplace_idxs)
+            if (inplace_idx < enode.getChildren().size())
             {
-                if (inplace_idx < enode.getChildren().size())
-                {
-                    EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
-                    const EClass cls = ctx.egraph.getEClass(child);
-                    if (cls.mem_space == ms)
-                    {
-                        uint64_t in_size = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
-                        if (out_size <= in_size)
-                        {
-                            can_be_inplace = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        uint64_t sum_inputs_in_ms = 0;
-        std::unordered_set<EClassId> seen_children;
-        for (EClassId child : enode.getChildren())
-        {
-            EClassId canon_child = ctx.egraph.findConst(child);
-            if (seen_children.insert(canon_child).second)
-            {
-                const EClass cls = ctx.egraph.getEClass(canon_child);
+                EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
+                const EClass cls = ctx.egraph.getEClass(child);
                 if (cls.mem_space == ms)
                 {
-                    sum_inputs_in_ms += (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
-                }
-            }
-        }
-
-        uint64_t required_mem = (can_be_inplace ? 0 : out_size) + sum_inputs_in_ms;
-        return required_mem > cap;
-    }
-};
-
-class FasterEquivalentENodeDominationRule
-{
-  public:
-    TG_PRUNING_RULE(FasterEquivalentENodeDominationRule)
-    FasterEquivalentENodeDominationRule(bool en = true) : enabled(en)
-    {
-    }
-
-    bool check(ENodeId enodeId, size_t /*idx*/, const ENodeDominationContext &ctx) const
-    {
-        if (!enabled)
-            return false;
-        float costA = ctx.enodeInfos[enodeId.value].cost;
-        if (costA == TGConstants::INF || std::isnan(costA))
-            return false;
-
-        const ENode &a = ctx.egraph.getENode(enodeId);
-        EClassId e_class_id = ctx.egraph.getENodeEClass(enodeId);
-        const EClass cls = ctx.egraph.getEClass(ctx.egraph.findConst(e_class_id));
-        const ENodeInfo &infoA = ctx.enodeInfos[enodeId.value];
-
-        std::vector<uint32_t> a_inplace;
-        if (a.getKernelId().value != 0 && KernelRegistry::get().hasKernel(a.getKernelId()))
-        {
-            a_inplace = KernelRegistry::get().getKernel(a.getKernelId()).safe_inplace_idxs;
-        }
-
-        for (ENodeId otherId : cls.enodes)
-        {
-            if (otherId == enodeId)
-                continue;
-
-            float costB = ctx.enodeInfos[otherId.value].cost;
-            if (costB == TGConstants::INF || std::isnan(costB))
-                continue;
-
-            const ENode &b = ctx.egraph.getENode(otherId);
-            const ENodeInfo &infoB = ctx.enodeInfos[otherId.value];
-
-            if (a.getChildren().size() != b.getChildren().size())
-                continue;
-
-            bool same_children = true;
-            for (size_t c = 0; c < a.getChildren().size(); ++c)
-            {
-                if (ctx.egraph.findConst(a.getChildren()[c]) != ctx.egraph.findConst(b.getChildren()[c]))
-                {
-                    same_children = false;
-                    break;
-                }
-            }
-            if (!same_children)
-                continue;
-
-            if (a.getMemSpace() != b.getMemSpace())
-                continue;
-            if (a.getShape() != b.getShape())
-                continue;
-            if (a.getStrides() != b.getStrides())
-                continue;
-            if (a.getDType() != b.getDType())
-                continue;
-            if (a.getEngines() != b.getEngines())
-                continue;
-            if (infoA.is_view != infoB.is_view)
-                continue;
-            if (a.getContentHash() != b.getContentHash())
-                continue;
-
-            std::vector<uint32_t> b_inplace;
-            if (b.getKernelId().value != 0 && KernelRegistry::get().hasKernel(b.getKernelId()))
-            {
-                b_inplace = KernelRegistry::get().getKernel(b.getKernelId()).safe_inplace_idxs;
-            }
-
-            bool inplace_compatible = true;
-            for (uint32_t in_idx : a_inplace)
-            {
-                if (std::find(b_inplace.begin(), b_inplace.end(), in_idx) == b_inplace.end())
-                {
-                    inplace_compatible = false;
-                    break;
-                }
-            }
-            if (!inplace_compatible)
-                continue;
-
-            if (costB < costA - 1e-9f)
-            {
-                return true;
-            }
-
-            if (std::abs(costA - costB) <= 1e-9f)
-            {
-                if (b_inplace.size() > a_inplace.size())
-                {
-                    return true;
-                }
-                if (b_inplace.size() == a_inplace.size() && otherId < enodeId)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-};
-
-struct CacheContext
-{
-    const std::vector<CacheCandidate> &candidates;
-    const std::vector<uint32_t> &num_users;
-    const std::vector<std::vector<int>> &valid_choices;
-    const std::unordered_set<BaseEClassId> &current_cache_selection;
-    uint32_t k;
-    int choice;
-};
-
-template <typename... Rules> struct CacheIterator
-{
-    prune::PruningRuleSet<Rules...> rules;
-
-    std::vector<CacheCandidate> candidates;
-    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
-    std::shared_ptr<SearchDelegate> delegate;
-    const float *best_cost = nullptr;
-    TimeoutChecker *timeout = nullptr;
-
-    std::vector<uint32_t> num_users;
-    std::vector<std::vector<int>> valid_choices;
-
-    int k = 0;
-    bool is_done = false;
-    bool first_yield = true;
-    std::vector<std::vector<int>> tried_choices;
-    std::unordered_set<BaseEClassId> current_cache_selection;
-
-    template <typename... Rs>
-    CacheIterator(const std::vector<CacheCandidate> &_candidates,
-                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps, std::shared_ptr<SearchDelegate> _delegate,
-                  const float *_best_cost = nullptr, TimeoutChecker *_timeout = nullptr, Rs &&..._rules)
-        : rules(std::forward<Rs>(_rules)...), candidates(_candidates), mem_caps(_mem_caps), delegate(std::move(_delegate)),
-          best_cost(_best_cost), timeout(_timeout)
-    {
-        if (delegate && best_cost)
-        {
-            delegate->set_best_cost_ptr(best_cost);
-        }
-        init();
-        CacheContext ctx{candidates, num_users, valid_choices, current_cache_selection, 0, 0};
-        rules.init(ctx);
-    }
-
-    bool can_abort()
-    {
-        return timeout && timeout->is_expired() && (best_cost != nullptr && *best_cost < TGConstants::INF);
-    }
-
-    void init()
-    {
-        uint32_t N = static_cast<uint32_t>(candidates.size());
-        tried_choices.resize(N);
-        valid_choices.resize(N);
-        num_users.assign(N, 0);
-
-        for (uint32_t i = 0; i < N; ++i)
-        {
-            num_users[i] = candidates[i].num_users;
-            valid_choices[i].push_back(0);
-            valid_choices[i].push_back(1);
-        }
-
-        if (delegate && N > 0)
-        {
-            std::vector<float> node_features;
-            std::vector<uint32_t> edge_src;
-            std::vector<uint32_t> edge_dst;
-            for (uint32_t i = 0; i < N; ++i)
-            {
-                const CacheCandidate &candidate = candidates[i];
-                node_features.push_back(static_cast<float>(candidate.size_bytes));
-                node_features.push_back(static_cast<float>(OpType::INPUT));
-                node_features.push_back(static_cast<float>(candidate.dtype));
-                node_features.push_back(candidate.mem_space.type == HandleType::STORAGE ? 1.0f : 0.0f);
-                node_features.push_back(static_cast<float>(num_users[i]));
-            }
-
-            delegate->init_cache_graph(node_features, edge_src, edge_dst);
-        }
-    }
-
-    bool ascend()
-    {
-        k--;
-        while (k >= 0)
-        {
-            if (valid_choices[k].empty())
-            {
-                k--;
-                continue;
-            }
-
-            BaseEClassId id = candidates[k].base_eclass_id;
-            current_cache_selection.erase(id);
-
-            if (tried_choices[k].size() < valid_choices[k].size())
-            {
-                return true;
-            }
-
-            tried_choices[k].clear();
-            if (delegate && valid_choices[k].size() > 1)
-            {
-                delegate->pop_state();
-            }
-            k--;
-        }
-        return false;
-    }
-
-    bool getNextCacheSelection(std::unordered_set<BaseEClassId> &out_cached_nodes)
-    {
-        if (is_done)
-            return false;
-
-        uint32_t N = static_cast<uint32_t>(candidates.size());
-        if (N == 0)
-        {
-            if (first_yield)
-            {
-                first_yield = false;
-                out_cached_nodes.clear();
-                return true;
-            }
-            is_done = true;
-            return false;
-        }
-
-        if (!first_yield)
-        {
-            if (!ascend())
-            {
-                is_done = true;
-                return false;
-            }
-        }
-        first_yield = false;
-
-        while (k >= 0)
-        {
-            if (can_abort())
-            {
-                is_done = true;
-                return false;
-            }
-
-            if (k == static_cast<int>(N))
-            {
-                out_cached_nodes = current_cache_selection;
-                return true;
-            }
-
-            if (valid_choices[k].empty())
-            {
-                k++;
-                continue;
-            }
-
-            BaseEClassId id = candidates[k].base_eclass_id;
-
-            std::vector<int> unexplored;
-            unexplored.reserve(valid_choices[k].size());
-            for (int choice : valid_choices[k])
-            {
-                if (std::find(tried_choices[k].begin(), tried_choices[k].end(), choice) == tried_choices[k].end())
-                {
-                    unexplored.push_back(choice);
-                }
-            }
-
-            if (unexplored.empty())
-            {
-                tried_choices[k].clear();
-                if (delegate && valid_choices[k].size() > 1)
-                {
-                    delegate->pop_state();
-                }
-                if (!ascend())
-                {
-                    is_done = true;
-                    return false;
-                }
-                continue;
-            }
-
-            std::vector<uint32_t> relative_order;
-            if (delegate && valid_choices[k].size() > 1)
-            {
-                delegate->push_state();
-
-                std::vector<ActionFeatureCache> features;
-                features.reserve(unexplored.size());
-
-                uint64_t node_size = candidates[k].size_bytes;
-
-                for (int choice : unexplored)
-                {
-                    ActionFeatureCache f;
-                    f.size = node_size;
-                    f.num_users = static_cast<float>(num_users[k]);
-                    f.logical_id = id.value;
-
-                    if (choice == 0)
+                    uint64_t in_size = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
+                    if (out_size <= in_size)
                     {
-                        f.is_cached = 0.0f;
-                        f.mem_space = MemSpace{0, HandleType::STORAGE};
-                        f.mem_cap = 0;
+                        can_be_inplace = true;
+                        break;
                     }
-                    else
-                    {
-                        f.is_cached = 1.0f;
-                        f.mem_space = candidates[k].mem_space;
-                        auto cap_it = mem_caps.find(f.mem_space);
-                        f.mem_cap = (cap_it != mem_caps.end()) ? cap_it->second : 0;
-                    }
-                    features.push_back(f);
                 }
-
-                relative_order = delegate->order_cache(features);
             }
-            else
+        }
+    }
+
+    uint64_t sum_inputs_in_ms = 0;
+    std::unordered_set<EClassId> seen_children;
+    for (EClassId child : enode.getChildren())
+    {
+        EClassId canon_child = ctx.egraph.findConst(child);
+        if (seen_children.insert(canon_child).second)
+        {
+            const EClass cls = ctx.egraph.getEClass(canon_child);
+            if (cls.mem_space == ms)
             {
-                relative_order.resize(unexplored.size());
-                std::iota(relative_order.begin(), relative_order.end(), 0u);
+                sum_inputs_in_ms += (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
             }
+        }
+    }
 
-            bool chosen = false;
-            for (uint32_t rel_idx : relative_order)
+    uint64_t required_mem = (can_be_inplace ? 0 : out_size) + sum_inputs_in_ms;
+    return required_mem > cap;
+}
+
+inline bool isFasterEquivalentENodeDominated(ENodeId enodeId, const ENodeDominationContext &ctx)
+{
+    float costA = ctx.enodeInfos[enodeId.value].cost;
+    if (costA == TGConstants::INF || std::isnan(costA))
+        return false;
+
+    const ENode &a = ctx.egraph.getENode(enodeId);
+    EClassId e_class_id = ctx.egraph.getENodeEClass(enodeId);
+    const EClass cls = ctx.egraph.getEClass(ctx.egraph.findConst(e_class_id));
+    const ENodeInfo &infoA = ctx.enodeInfos[enodeId.value];
+
+    std::vector<uint32_t> a_inplace;
+    if (a.getKernelId().value != 0 && KernelRegistry::get().hasKernel(a.getKernelId()))
+    {
+        a_inplace = KernelRegistry::get().getKernel(a.getKernelId()).safe_inplace_idxs;
+    }
+
+    for (ENodeId otherId : cls.enodes)
+    {
+        if (otherId == enodeId)
+            continue;
+
+        float costB = ctx.enodeInfos[otherId.value].cost;
+        if (costB == TGConstants::INF || std::isnan(costB))
+            continue;
+
+        const ENode &b = ctx.egraph.getENode(otherId);
+        const ENodeInfo &infoB = ctx.enodeInfos[otherId.value];
+
+        if (a.getChildren().size() != b.getChildren().size())
+            continue;
+
+        bool same_children = true;
+        for (size_t c = 0; c < a.getChildren().size(); ++c)
+        {
+            if (ctx.egraph.findConst(a.getChildren()[c]) != ctx.egraph.findConst(b.getChildren()[c]))
             {
-                int choice = unexplored[rel_idx];
-                tried_choices[k].push_back(choice);
-
-                CacheContext ctx{candidates, num_users, valid_choices, current_cache_selection,
-                                 static_cast<uint32_t>(k), choice};
-                if (rules.is_pruned(choice, static_cast<size_t>(rel_idx), ctx))
-                {
-                    continue;
-                }
-
-                if (choice > 0)
-                {
-                    current_cache_selection.insert(id);
-                }
-                else
-                {
-                    current_cache_selection.erase(id);
-                }
-
-                chosen = true;
-                k++;
+                same_children = false;
                 break;
             }
+        }
+        if (!same_children)
+            continue;
 
-            if (!chosen)
-            {
-                tried_choices[k].clear();
-                if (delegate && valid_choices[k].size() > 1)
-                {
-                    delegate->pop_state();
-                }
-                if (delegate && delegate->fast_fail())
-                {
-                    is_done = true;
-                    return false;
-                }
-                if (!ascend())
-                {
-                    is_done = true;
-                    return false;
-                }
-            }
+        if (a.getMemSpace() != b.getMemSpace())
+            continue;
+        if (a.getShape() != b.getShape())
+            continue;
+        if (a.getStrides() != b.getStrides())
+            continue;
+        if (a.getDType() != b.getDType())
+            continue;
+        if (a.getEngines() != b.getEngines())
+            continue;
+        if (infoA.is_view != infoB.is_view)
+            continue;
+        if (a.getContentHash() != b.getContentHash())
+            continue;
+
+        std::vector<uint32_t> b_inplace;
+        if (b.getKernelId().value != 0 && KernelRegistry::get().hasKernel(b.getKernelId()))
+        {
+            b_inplace = KernelRegistry::get().getKernel(b.getKernelId()).safe_inplace_idxs;
         }
 
-        is_done = true;
-        return false;
+        bool inplace_compatible = true;
+        for (uint32_t in_idx : a_inplace)
+        {
+            if (std::find(b_inplace.begin(), b_inplace.end(), in_idx) == b_inplace.end())
+            {
+                inplace_compatible = false;
+                break;
+            }
+        }
+        if (!inplace_compatible)
+            continue;
+
+        if (costB < costA - 1e-9f)
+        {
+            return true;
+        }
+
+        if (std::abs(costA - costB) <= 1e-9f)
+        {
+            if (b_inplace.size() > a_inplace.size())
+            {
+                return true;
+            }
+            if (b_inplace.size() == a_inplace.size() && otherId < enodeId)
+            {
+                return true;
+            }
+        }
     }
-};
 
-template <typename... Rules>
-CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const std::vector<CacheCandidate> &candidates,
-                                                        const std::unordered_map<MemSpace, uint64_t> &mem_caps,
-                                                        const float *best_cost = nullptr,
-                                                        TimeoutChecker *timeout = nullptr, Rules &&...rules)
-{
-    return CacheIterator<std::decay_t<Rules>...>(candidates, mem_caps, nullptr, best_cost,
-                                                 timeout, std::forward<Rules>(rules)...);
+    return false;
 }
 
-template <typename... Rules>
-CacheIterator<std::decay_t<Rules>...> makeCacheIterator(const std::vector<CacheCandidate> &candidates,
-                                                        const float *best_cost = nullptr,
-                                                        TimeoutChecker *timeout = nullptr, Rules &&...rules)
-{
-    static const std::unordered_map<MemSpace, uint64_t> empty_caps;
-    return CacheIterator<std::decay_t<Rules>...>(candidates, empty_caps, nullptr, best_cost,
-                                                 timeout, std::forward<Rules>(rules)...);
-}
 
-template <typename... Rules>
-CacheIterator<std::decay_t<Rules>...> makeCacheIteratorWithDelegate(
-    const std::vector<CacheCandidate> &candidates,
-    const std::unordered_map<MemSpace, uint64_t> &mem_caps, std::shared_ptr<SearchDelegate> delegate,
-    const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr, Rules &&...rules)
-{
-    return CacheIterator<std::decay_t<Rules>...>(candidates, mem_caps, std::move(delegate),
-                                                 best_cost, timeout, std::forward<Rules>(rules)...);
-}
 
-using AllCacheRuleTypes = std::tuple<>;
-
-template <typename BoolTuple>
-inline auto makeConfiguredCacheIteratorFromBools(const std::vector<CacheCandidate> &candidates,
-                                                 const std::unordered_map<MemSpace, uint64_t> &mem_caps,
-                                                 std::shared_ptr<SearchDelegate> delegate, const BoolTuple &bool_flags,
-                                                 const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
-{
-    return std::apply(
-        [&](auto &&...rs) {
-            return makeCacheIteratorWithDelegate(candidates, mem_caps, std::move(delegate),
-                                                 best_cost, timeout, rs...);
-        },
-        prune::instantiate_from_bools<AllCacheRuleTypes>(bool_flags));
-}
-
-inline auto makeConfiguredCacheIterator(const std::vector<CacheCandidate> &candidates,
-                                        std::shared_ptr<SearchDelegate> delegate, const Settings &settings,
-                                        const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
-{
-    settings.validate_rules("cache");
-    auto bool_flags = prune::extract_enabled_states<AllCacheRuleTypes>("cache", settings);
-    return makeConfiguredCacheIteratorFromBools(candidates, settings.mem_caps,
-                                                std::move(delegate), bool_flags, best_cost, timeout);
-}
-
-inline auto makeConfiguredCacheIterator(const std::vector<CacheCandidate> &candidates, const Settings &settings,
-                                        const float *best_cost = nullptr, TimeoutChecker *timeout = nullptr)
-{
-    return makeConfiguredCacheIterator(candidates, nullptr, settings, best_cost, timeout);
-}
 inline std::unordered_map<MemSpace, uint64_t>
 precomputeReducedMemCaps(const std::unordered_map<MemSpace, uint64_t> &mem_caps,
                          const std::unordered_map<BaseEClassId, ParallelBuffer> &preallocated)
@@ -603,12 +240,9 @@ precomputeReducedMemCaps(const std::unordered_map<MemSpace, uint64_t> &mem_caps,
     return reduced_caps;
 }
 
-using AllENodeDominationRuleTypes = std::tuple<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule>;
-
 struct Planner
 {
     CostModel &costModel;
-    prune::PruningRuleSet<MemCapENodeDominationRule, FasterEquivalentENodeDominationRule> domination_rules;
     const Settings &settings;
 
     struct BaseEGraphState
@@ -622,9 +256,7 @@ struct Planner
     bool baseStateInitialized = false;
 
     Planner(CostModel &costModel, const Settings &settings = Settings::get_default())
-        : costModel(costModel),
-          domination_rules(prune::instantiate_rules<AllENodeDominationRuleTypes>("enode", settings)),
-          settings(settings)
+        : costModel(costModel), settings(settings)
     {
     }
 
@@ -637,7 +269,7 @@ struct Planner
             ENodeId enodeId{i};
             if (enodeInfos[i].cost == TGConstants::INF)
                 continue;
-            if (domination_rules.is_pruned(enodeId, /*cand_idx=*/size_t{0}, ctx))
+            if (isENodeMemCapDominated(enodeId, ctx) || isFasterEquivalentENodeDominated(enodeId, ctx))
             {
                 enodeInfos[i].cost = TGConstants::INF;
             }
