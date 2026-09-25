@@ -621,8 +621,6 @@ struct Settings
             }
             apply_cli_args(parser);
         }
-
-        print_rules_summary();
     }
 
     void load(int argc, char *argv[], const std::string &custom_json_path = "", const std::string &custom_bin_path = "")

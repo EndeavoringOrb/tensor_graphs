@@ -1,6 +1,7 @@
 // tensor_graphs_cpp/core/plan/search_delegate.hpp
 #pragma once
 #include "core/graph.hpp"
+#include "core/plan/brancher.hpp"
 #include "core/types.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -66,10 +67,17 @@ struct ActionFeatureFrontier
     uint64_t mem_cap = 0;
 };
 
-class SearchDelegate
+class SearchDelegate : public plan::Brancher
 {
   public:
     virtual ~SearchDelegate() = default;
+
+    bool chooseBranch(const plan::SearchState &state, plan::VarId &out_var, plan::Domain &out_left_domain,
+                      plan::Domain &out_right_domain) override
+    {
+        plan::HeuristicBrancher brancher;
+        return brancher.chooseBranch(state, out_var, out_left_domain, out_right_domain);
+    }
 
     virtual void set_best_cost_ptr(const float *ptr)
     {

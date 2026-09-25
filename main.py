@@ -157,15 +157,9 @@ def main():
             )
             print(f"[Main] Loaded trained CostPredictorRNN agent from {model_file}")
         else:
-            print(
-                f"[Main] Warning: Model file not found at {model_file}, using default HeuristicSearchDelegate."
-            )
-            delegate = tensor_graphs.HeuristicSearchDelegate()
+            delegate = None
     else:
-        print(
-            "[Main] No --run-dir specified. Using HeuristicSearchDelegate."
-        )
-        delegate = tensor_graphs.HeuristicSearchDelegate()
+        delegate = None
 
     if args.use_ortools_lns:
         os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"

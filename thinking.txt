@@ -1,0 +1,37 @@
+Right now the compiler code is very messy. In my head it should be:
+1. saturate
+2. search
+-SearchState, a single state for the whole search across all buckets. can perhaps draw upon the fixed size (vars + constraints) representation used for the ortools cp model.
+-Cache selection budget shouldn't be separate from min compile time. CacheIterator is just another part of the search, it shouldn't have a separate loop.
+-I don't really like having the search being separated into hierarchical phases so starkly. For example, if I change dispatch order A,B,C to A,C,B I might not need to change bufferize/malloc for A but the way it is set up right now I have to backtrack up the tree, throwing away all bufferize/malloc decisions.
+-priority queue search/best first search. right now there is this separation of dive vs search phases that feels like a limiting abstraction. the dive vs search behavior should be achieved through the priority model instead of forced.
+-pruning rules shouldn't be separated into different phases, they should all be registered on the Searcher/Planner/whatever. Because SearchState has all the info, all pruning rules take SearchState
+-it feels like searching a tree of programs is the wrong abstraction. The reason we have the tree is because while the possible values for SearchState is astronomical, the values for SearchState that are both valid and faster than whatever incumbent we currently have is much smaller. Imagine our state is (0, 0, 0, 0) where each of these can be 0 or 1. with dfs are searching in a kind of lexicographic order (0, 0, 0, 0), (0, 0, 0, 1), (0, 0, 1, 0), (0, 0, 1, 1). And maybe we have a pruning rule that says any state with 0 at the 1st index is invalid so we go (0, 1, 0, 0), (0, 1, 0, 1), etc instead. But this is limiting because in order to go from (0, 0, 0, 0) to (1, 0, 0, 0) we have to search through a ton of items because they are far apart in lexicographic order. So I want some abstraction of the search where (a) we can freely jump around the state space, (b) we know what we have already searched or pruned so we know when we are done searching, (c) allows for pruning of the state space, (d) we can efficiently find valid/unpruned states (I don't want to have to iterate over 2 billion states before we get to the next highest priority state).
+-could formulate as
+--tree search DFS (current)
+--tree search best first search (priority queue). better than DFS, but uses more memory and still has a fixed order for the "top" of the tree
+--CDCL where the constraints prune the hyperbox search space. but how do we quickly get the "next" valid box in the search space based on the rules?
+--priority queue of hyperboxes. each hyperbox has a domain that the vars could be in. we make a series of decisions fixing vars (hyperbox -> hyperbox with var fixed, hyperbox with all other values for var) until we have a single box to evaluate. if we can prune a set of domains we shrink/split the hyperbox into multiple. uses more memory, but can quickly get next valid box and can jump around to different hyperboxes based on lower bounds. Don't want to do benders decomposition, for problems with tight memory constraints (like it requires streaming weights from disk) it will bounce back and forth a lot. HeuristicDelegate/SearchDelegate will instead be Brancher which chooses the var & value to split at. Will need to store hyperboxes as trail of search nodes. basically delta encoding that we play/unplay instead of copying the whole search state at every decision. instead of pruning rules we have propagators which shrink a given hyperbox. store lower_bound on each hyperbox so propagators can calculate it & use it to prune, but we can also use it for priority queue. SearchEngine, SearchState, SearchNode, Propagator, Domain, Brancher, Selector (selects next hyperbox from queue). use uint32_t mask on Domain to represent non-contiguous domains, but assert before solving that no eclass has >31 enodes.
+-don't want to reinvent the wheel, but google's or-tools cp-sat solver isn't working well. what advantages do I have over the generic solver?
+-I feel like having explicit bufferization is wrong. we just need to find the offset for each op, and there are various constraints on which can overlap. so no inplace var.
+
+vars
+cached_<eclass_id> in {0,1}
+selected_<bucket_id>_<eclass_id> in {0,1,2,3} if 3 enodes
+start_<bucket_id>_<eclass_id>_<enode_id> in [0, len(eclasses)] # dispatch order index. end at start+1 so explicit end var not needed
+offset_<bucket_id>_<eclass_id> in [preallocated_pages, mem_caps[eclass.mem_space]//mem_space.alignment - (eclass.size+mem_space.alignment)//mem_space.alignment) # memory offset. input & cache don't have an offset var because they are preallocated and persist across runs. we use pages instead of bytes. different mem spaces can have different page sizes
+
+constraints
+selected_<bucket_id>_<root_id> == 1 # root eclass selected
+selected_<bucket_id>_<eclass_id> == sum(selected_<bucket_id>_<eclass_id>_<enode_id>) # at least one enode of a selected eclass must be selected
+selected_<bucket_id>_<eclass_id>_<enode_id> => and(selected_<bucket_id>_<child_eclass_id> for child_eclass_id in children) # if an enode is selected, all the children eclasses must be selected
+start_<bucket_id>_<eclass_id>_<enode_id> > max(sum(selected_<bucket_id>_<child_eclass_id>_<enode_id> * start_<bucket_id>_<eclass_id>_<enode_id> for enode_id in child_eclass) for child_eclass_id in children) # all inputs must finish before enode
+offset_<bucket_id>_<eclass_id>+size can't overlap with others in same mem_space unless (is view can overlap with child which we can just omit the overlap between view and child, can overlap if safe_inplace_idxs and nothing reads child after this which we need some constraint for)
+offset_<bucket_id>_<eclass_id>+size must be inside or equal to child if is view
+selected_<bucket_id>_<eclass_id>_<enode_id> <= cached_<eclass_id> # can select OpType::CACHE enodes if the eclass is cached. can only select OpType::SCATTER enodes if the corresponding base eclass is cached (also need to check ref graph of OpType::FUSED in case the ref graph has a cache/scatter node in it. like only select fused enode if these two base eclasses are cached because it reads from one cache and scatters to another)
+start_<bucket_id>_<eclass_id>_<enode_id> must be unique if selected_<bucket_id>_<eclass_id>_<enode_id>
+for can overlap safe_inplace_idxs add some constraint that says start > max(consumers of child, consumers of view of child, consumers of view of view of child, etc.). this write-after-read ordering constraint replaces the need for read_end/release variables
+only one op can run at a time per engine
+
+objective
+sum(execution time * bucket weight for bucket in buckets)

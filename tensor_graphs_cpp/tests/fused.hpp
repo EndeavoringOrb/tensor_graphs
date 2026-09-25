@@ -59,6 +59,17 @@ void fillRandom(void *ptr, uint64_t elements, DType dtype)
         }
         break;
     }
+    case DType::INT8:
+    case DType::E2M1_PACKED_INT8:
+    case DType::E2M1:
+    case DType::F8_E8M0:
+    case DType::F8_E4M3: {
+        uint8_t *uptr = static_cast<uint8_t *>(ptr);
+        std::uniform_int_distribution<int> dist(1, 127);
+        for (uint64_t i = 0; i < elements; ++i)
+            uptr[i] = static_cast<uint8_t>(dist(gen));
+        break;
+    }
     default:
         Error::throw_err("[fillRandom] Unsupported DType " + toString(dtype));
     }

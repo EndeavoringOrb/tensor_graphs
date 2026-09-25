@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "core/common/constants.hpp"
+#include "core/plan/enode_info.hpp"
+
 #include "core/cost_model.hpp"
 #include "core/egraph.hpp"
 #include "core/graph.hpp"
@@ -27,16 +29,6 @@
 #include "core/shape_propagator.hpp"
 #include "core/timer.hpp"
 #include "core/types.hpp"
-
-struct ENodeInfo
-{
-    float cost = TGConstants::INF;
-    bool is_view = false;
-    float dp_cost = TGConstants::INF;
-    float dp_cp_cost = TGConstants::INF;
-    float rev_cp_cost = 0.0f;
-    float dp_mem = TGConstants::INF;
-};
 
 // =============================================================================
 // Updated DispatchContext with best_cost pointer
