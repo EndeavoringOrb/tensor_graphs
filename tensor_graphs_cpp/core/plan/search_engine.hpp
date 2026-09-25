@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -106,8 +107,11 @@ class SearchEngine
                 state.setDomain(p.first, p.second);
             }
             float lb = 0.0f;
-            if (!runPropagators(lb))
+            std::string conflict_reason;
+            if (!runPropagators(lb, &conflict_reason))
             {
+                LOG(DEBUG) << "[SearchEngine] Pruned hyperbox node " << nid
+                           << " while restoring: " << conflict_reason;
                 current_node_id = (k < static_cast<int>(target_path.size()) - 1) ? target_path[k + 1] : lca;
                 return false;
             }
@@ -119,19 +123,48 @@ class SearchEngine
         return true;
     }
 
-    bool runPropagators(float &out_lower_bound)
+    bool runPropagators(float &out_lower_bound, std::string *out_conflict_reason = nullptr)
     {
+        if (out_conflict_reason)
+            out_conflict_reason->clear();
+
+        // All propagators only shrink domains, so this is a finite monotone
+        // fixpoint computation. A small iteration cap leaves information
+        // behind (especially when Selection and TopologicalOrder interact)
+        // and makes the brancher rediscover the same contradiction one split
+        // at a time.
         bool changed = true;
-        int max_iters = 3;
-        int iters = 0;
-        while (changed && iters++ < max_iters)
+        size_t iters = 0;
+        while (changed)
         {
+            ++iters;
             changed = false;
             size_t marker_before = state.getTrailMarker();
             for (auto &prop : propagators)
             {
                 if (!prop->propagate(state))
+                {
+                    if (out_conflict_reason)
+                        *out_conflict_reason = prop->name();
                     return false;
+                }
+
+                // A propagator is expected to report a contradiction itself,
+                // but validate this invariant here as well. In particular,
+                // view-offset propagation can create an empty domain before a
+                // later propagator gets a chance to inspect it.
+                for (VarId var_id = 0; var_id < state.domains.size(); ++var_id)
+                {
+                    if (state.domains[var_id].isEmpty())
+                    {
+                        if (out_conflict_reason)
+                        {
+                            *out_conflict_reason = prop->name() + " emptied " +
+                                                    state.var_infos[var_id].name;
+                        }
+                        return false;
+                    }
+                }
             }
             if (state.getTrailMarker() > marker_before)
                 changed = true;
@@ -379,9 +412,11 @@ class SearchEngine
         current_node_id = 0;
 
         float root_lb = 0.0f;
-        if (!runPropagators(root_lb))
+        std::string root_conflict;
+        if (!runPropagators(root_lb, &root_conflict))
         {
-            LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation.";
+            LOG(WARNING) << "[SearchEngine] Root hyperbox pruned during initial propagation: "
+                         << root_conflict;
             return false;
         }
 
@@ -515,7 +550,8 @@ class SearchEngine
                 state.setDomain(p.first, p.second);
             }
             float left_lb = 0.0f;
-            bool left_ok = runPropagators(left_lb);
+            std::string left_conflict;
+            bool left_ok = runPropagators(left_lb, &left_conflict);
             if (left_ok && left_lb < incumbent_best_cost)
             {
                 uint32_t left_id = static_cast<uint32_t>(all_nodes.size());
@@ -529,6 +565,16 @@ class SearchEngine
             }
             else
             {
+                if (!left_ok)
+                {
+                    LOG(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
+                               << ": " << left_conflict;
+                }
+                else
+                {
+                    LOG(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
+                               << " by lower bound " << left_lb;
+                }
                 // Left branch failed, backtrack in place to parent node
                 state.backtrackTo(node->trail_marker);
                 current_node_id = node->id;

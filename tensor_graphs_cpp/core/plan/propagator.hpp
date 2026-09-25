@@ -102,6 +102,55 @@ class SelectionPropagator : public Propagator
                     }
                 }
             }
+
+            // An e-class is only allowed to remain selectable when some
+            // currently possible nonzero parent selection can reach it from
+            // the root. Without this support pass, every structurally
+            // reachable e-class remains in {0, 1, ...} forever, forcing the
+            // brancher to enumerate alternatives that are already outside
+            // the current hyperbox's selected DAG.
+            std::unordered_set<EClassId> potentially_reachable;
+            std::vector<EClassId> frontier = {root_id};
+            potentially_reachable.insert(root_id);
+            size_t frontier_head = 0;
+            while (frontier_head < frontier.size())
+            {
+                EClassId cid = frontier[frontier_head++];
+                VarId sel_v = state.selected_vars[b].at(cid);
+                const Domain &sel_dom = state.domains[sel_v];
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+
+                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+                {
+                    int32_t value = static_cast<int32_t>(en_idx + 1);
+                    if (!sel_dom.contains(value))
+                        continue;
+
+                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                    for (EClassId child : enode.getChildren())
+                    {
+                        EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                        if (state.selected_vars[b].find(canon_child) != state.selected_vars[b].end() &&
+                            potentially_reachable.insert(canon_child).second)
+                        {
+                            frontier.push_back(canon_child);
+                        }
+                    }
+                }
+            }
+
+            for (EClassId cid : getReachableCids(state, b))
+            {
+                if (cid == root_id || potentially_reachable.count(cid) != 0)
+                    continue;
+
+                VarId sel_v = state.selected_vars[b].at(cid);
+                Domain sel_dom = state.domains[sel_v];
+                if (!sel_dom.contains(0))
+                    return false;
+                if (!sel_dom.isFixed())
+                    state.setDomain(sel_v, Domain::makeFixed(0, true));
+            }
         }
         return true;
     }
@@ -241,46 +290,188 @@ class TopologicalOrderPropagator : public Propagator
     {
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            for (EClassId cid : getReachableCids(state, b))
+            const auto &reachable = getReachableCids(state, b);
+
+            auto has_fixed_path = [&](EClassId from, EClassId target) {
+                std::vector<EClassId> frontier = {from};
+                std::unordered_set<EClassId> visited;
+                visited.insert(from);
+
+                for (size_t i = 0; i < frontier.size(); ++i)
+                {
+                    EClassId cid = frontier[i];
+                    if (cid == target)
+                        return true;
+
+                    auto sel_it = state.selected_vars[b].find(cid);
+                    if (sel_it == state.selected_vars[b].end())
+                        continue;
+
+                    const Domain &selection = state.domains[sel_it->second];
+                    if (!selection.isFixed() || selection.fixedValue() <= 0)
+                        continue;
+
+                    uint32_t enode_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
+                    const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                    if (enode_idx >= cls.enodes.size())
+                        continue;
+
+                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[enode_idx]);
+                    for (EClassId child : enode.getChildren())
+                    {
+                        EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                        if (visited.insert(canon_child).second)
+                            frontier.push_back(canon_child);
+                    }
+                }
+                return false;
+            };
+
+            // Remove enodes that would immediately create a cycle with the
+            // already fixed selected graph. This makes the brancher's first
+            // choice topologically meaningful instead of waiting for a full
+            // selection assignment to discover the cycle.
+            for (EClassId cid : reachable)
+            {
+                VarId sel_v = state.selected_vars[b].at(cid);
+                Domain sel_dom = state.domains[sel_v];
+                if (sel_dom.isFixed())
+                    continue;
+
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                bool changed = false;
+                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+                {
+                    int32_t value = static_cast<int32_t>(en_idx + 1);
+                    if (!sel_dom.contains(value))
+                        continue;
+
+                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                    bool incompatible = false;
+                    for (EClassId child : enode.getChildren())
+                    {
+                        EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                        auto child_it = state.selected_vars[b].find(canon_child);
+                        if (canon_child == cid || child_it == state.selected_vars[b].end() ||
+                            state.domains[child_it->second].getMax() <= 0 ||
+                            has_fixed_path(canon_child, cid))
+                        {
+                            incompatible = true;
+                            break;
+                        }
+                    }
+
+                    if (incompatible)
+                        changed = sel_dom.remove(value) || changed;
+                }
+
+                if (changed)
+                {
+                    if (sel_dom.isEmpty())
+                        return false;
+                    state.setDomain(sel_v, sel_dom);
+                }
+            }
+
+            std::unordered_set<EClassId> active;
+            std::unordered_map<EClassId, int> in_degree;
+            std::unordered_map<EClassId, std::vector<EClassId>> parents;
+
+            for (EClassId cid : reachable)
             {
                 VarId sel_v = state.selected_vars[b].at(cid);
                 const Domain &sel_dom = state.domains[sel_v];
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-
                 if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
                 {
-                    uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    if (en_idx < cls.enodes.size())
+                    active.insert(cid);
+                    in_degree[cid] = 0;
+                }
+            }
+
+            // Build the selected DAG. The previous implementation walked
+            // reachable e-classes in hash-derived order, so a long dependency
+            // chain could require many outer propagation rounds before a
+            // lower bound reached its consumer.
+            for (EClassId cid : active)
+            {
+                VarId sel_v = state.selected_vars[b].at(cid);
+                uint32_t en_idx = static_cast<uint32_t>(state.domains[sel_v].fixedValue() - 1);
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                if (en_idx >= cls.enodes.size())
+                    continue;
+
+                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                std::unordered_set<EClassId> unique_children;
+                for (EClassId child : enode.getChildren())
+                {
+                    EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                    if (active.count(canon_child) != 0 && unique_children.insert(canon_child).second)
                     {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                        VarId parent_st_v = state.start_vars[b].at(cid)[en_idx];
-                        Domain parent_st_dom = state.domains[parent_st_v];
+                        ++in_degree[cid];
+                        parents[canon_child].push_back(cid);
+                    }
+                }
+            }
 
-                        for (EClassId child : enode.getChildren())
-                        {
-                            EClassId canon_ch = state.bucket_egraphs[b].findConst(child);
-                            auto ch_sel_it = state.selected_vars[b].find(canon_ch);
-                            if (ch_sel_it != state.selected_vars[b].end())
-                            {
-                                VarId ch_sel_v = ch_sel_it->second;
-                                const Domain &ch_sel_dom = state.domains[ch_sel_v];
-                                if (ch_sel_dom.isFixed() && ch_sel_dom.fixedValue() > 0)
-                                {
-                                    uint32_t ch_en_idx = static_cast<uint32_t>(ch_sel_dom.fixedValue() - 1);
-                                    VarId child_st_v = state.start_vars[b].at(canon_ch)[ch_en_idx];
-                                    Domain child_st_dom = state.domains[child_st_v];
+            std::vector<EClassId> queue;
+            for (const auto &entry : in_degree)
+            {
+                if (entry.second == 0)
+                    queue.push_back(entry.first);
+            }
 
-                                    // start[parent] >= start[child] + 1
-                                    if (parent_st_dom.setMin(child_st_dom.getMin() + 1))
-                                    {
-                                        if (parent_st_dom.isEmpty())
-                                            return false;
-                                        state.setDomain(parent_st_v, parent_st_dom);
-                                    }
-                                }
-                            }
-                        }
+            std::vector<EClassId> topo_order;
+            size_t queue_head = 0;
+            while (queue_head < queue.size())
+            {
+                EClassId child = queue[queue_head++];
+                topo_order.push_back(child);
+                for (EClassId parent : parents[child])
+                {
+                    if (--in_degree[parent] == 0)
+                        queue.push_back(parent);
+                }
+            }
+
+            // A selected strict-precedence cycle cannot be scheduled.
+            if (topo_order.size() != active.size())
+                return false;
+
+            for (EClassId cid : topo_order)
+            {
+                VarId sel_v = state.selected_vars[b].at(cid);
+                uint32_t en_idx = static_cast<uint32_t>(state.domains[sel_v].fixedValue() - 1);
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                if (en_idx >= cls.enodes.size())
+                    continue;
+
+                VarId parent_st_v = state.start_vars[b].at(cid)[en_idx];
+                Domain parent_st_dom = state.domains[parent_st_v];
+                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                for (EClassId child : enode.getChildren())
+                {
+                    EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                    auto child_sel_it = state.selected_vars[b].find(canon_child);
+                    if (child_sel_it == state.selected_vars[b].end())
+                        continue;
+
+                    VarId child_sel_v = child_sel_it->second;
+                    const Domain &child_sel_dom = state.domains[child_sel_v];
+                    if (!child_sel_dom.isFixed() || child_sel_dom.fixedValue() <= 0)
+                        continue;
+
+                    uint32_t child_en_idx = static_cast<uint32_t>(child_sel_dom.fixedValue() - 1);
+                    auto child_start_it = state.start_vars[b].find(canon_child);
+                    if (child_start_it == state.start_vars[b].end() ||
+                        child_en_idx >= child_start_it->second.size())
+                        continue;
+
+                    Domain child_st_dom = state.domains[child_start_it->second[child_en_idx]];
+                    if (parent_st_dom.setMin(child_st_dom.getMin() + 1))
+                    {
+                        if (parent_st_dom.isEmpty())
+                            return false;
+                        state.setDomain(parent_st_v, parent_st_dom);
                     }
                 }
             }
@@ -304,6 +495,10 @@ class EngineSchedulePropagator : public Propagator
         {
             std::unordered_map<Engine, std::unordered_set<int32_t>> fixed_starts;
 
+            // First collect all slots that are already occupied.  The old
+            // implementation only used this table to detect a contradiction
+            // after both operations had been fixed, which made a blocked
+            // prefix look like a sequence of independent search failures.
             for (EClassId cid : getReachableCids(state, b))
             {
                 VarId sel_v = state.selected_vars[b].at(cid);
@@ -332,6 +527,57 @@ class EngineSchedulePropagator : public Propagator
                             }
                         }
                     }
+                }
+            }
+
+            auto isBlocked = [&](const ENode &enode, int32_t start) {
+                for (const Engine &eng : enode.getEngines())
+                {
+                    auto starts_it = fixed_starts.find(eng);
+                    if (starts_it != fixed_starts.end() && starts_it->second.count(start) != 0)
+                        return true;
+                }
+                return false;
+            };
+
+            // Start domains are intervals.  We cannot represent arbitrary
+            // holes in one Domain, but we can soundly skip every occupied
+            // slot at the lower edge in one pass.  This is exactly the case
+            // that otherwise causes min-first branching to test 90, 91, ...
+            // one node at a time.
+            for (EClassId cid : getReachableCids(state, b))
+            {
+                VarId sel_v = state.selected_vars[b].at(cid);
+                const Domain &sel_dom = state.domains[sel_v];
+                if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
+                    continue;
+
+                uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                if (en_idx >= cls.enodes.size())
+                    continue;
+
+                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                VarId st_v = state.start_vars[b].at(cid)[en_idx];
+                Domain st_dom = state.domains[st_v];
+                if (st_dom.isEmpty())
+                    return false;
+
+                if (st_dom.isFixed())
+                    continue;
+
+                int64_t candidate = st_dom.getMin();
+                const int32_t upper = st_dom.getMax();
+                while (candidate <= upper && isBlocked(enode, static_cast<int32_t>(candidate)))
+                    ++candidate;
+
+                if (candidate > upper)
+                    return false;
+
+                if (candidate > st_dom.getMin())
+                {
+                    st_dom.setMin(static_cast<int32_t>(candidate));
+                    state.setDomain(st_v, st_dom);
                 }
             }
         }
