@@ -3,6 +3,10 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#ifdef TG_PROFILE
+#include <iomanip>
+#endif
 #include <iostream>
 #include <memory>
 #include <string>
@@ -53,11 +57,17 @@ class SearchEngine
         : state(std::move(state)), selector(selector ? selector : std::make_shared<PriorityQueueSelector>()),
           brancher(brancher ? brancher : std::make_shared<HeuristicBrancher>())
     {
+#ifdef TG_PROFILE
+        next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+#endif
     }
 
     void addPropagator(std::unique_ptr<Propagator> prop)
     {
         propagators.push_back(std::move(prop));
+#ifdef TG_PROFILE
+        propagator_timings.emplace_back();
+#endif
     }
 
     bool restoreNode(const std::shared_ptr<SearchNode> &target_node)
@@ -140,12 +150,33 @@ class SearchEngine
             ++iters;
             changed = false;
             size_t marker_before = state.getTrailMarker();
-            for (auto &prop : propagators)
+            for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
             {
-                if (!prop->propagate(state))
+                auto &prop = propagators[prop_idx];
+#ifdef TG_PROFILE
+                auto propagate_start = std::chrono::steady_clock::now();
+#endif
+                bool propagated = prop->propagate(state);
+#ifdef TG_PROFILE
+                const uint64_t propagate_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - propagate_start)
+                        .count());
+                auto &timing = propagator_timings[prop_idx];
+                timing.propagate_calls++;
+                timing.propagate_ns += propagate_ns;
+                timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
+                if (!propagated)
+                    timing.contradictions++;
+                propagator_calls_since_report++;
+#endif
+                if (!propagated)
                 {
                     if (out_conflict_reason)
                         *out_conflict_reason = prop->name();
+#ifdef TG_PROFILE
+                    maybeReportPropagatorTimings();
+#endif
                     return false;
                 }
 
@@ -162,6 +193,9 @@ class SearchEngine
                             *out_conflict_reason = prop->name() + " emptied " +
                                                     state.var_infos[var_id].name;
                         }
+#ifdef TG_PROFILE
+                        maybeReportPropagatorTimings();
+#endif
                         return false;
                     }
                 }
@@ -171,10 +205,26 @@ class SearchEngine
         }
 
         out_lower_bound = 0.0f;
-        for (auto &prop : propagators)
+        for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
         {
-            out_lower_bound = std::max(out_lower_bound, prop->computeLowerBound(state));
+#ifdef TG_PROFILE
+            auto lower_bound_start = std::chrono::steady_clock::now();
+#endif
+            out_lower_bound = std::max(out_lower_bound, propagators[prop_idx]->computeLowerBound(state));
+#ifdef TG_PROFILE
+            const uint64_t lower_bound_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - lower_bound_start)
+                    .count());
+            auto &timing = propagator_timings[prop_idx];
+            timing.lower_bound_calls++;
+            timing.lower_bound_ns += lower_bound_ns;
+            timing.max_lower_bound_ns = std::max(timing.max_lower_bound_ns, lower_bound_ns);
+#endif
         }
+#ifdef TG_PROFILE
+        maybeReportPropagatorTimings();
+#endif
         return true;
     }
 
@@ -585,8 +635,81 @@ class SearchEngine
                   << all_nodes.size() << " total nodes generated). Best cost: "
                   << (incumbent_best_cost < TGConstants::INF ? std::to_string(incumbent_best_cost) : "none");
 
+#ifdef TG_PROFILE
+        reportPropagatorTimings(true);
+#endif
+
         return incumbent_best_cost < TGConstants::INF;
     }
+
+  private:
+#ifdef TG_PROFILE
+    struct PropagatorTiming
+    {
+        uint64_t propagate_calls = 0;
+        uint64_t propagate_ns = 0;
+        uint64_t max_propagate_ns = 0;
+        uint64_t contradictions = 0;
+        uint64_t lower_bound_calls = 0;
+        uint64_t lower_bound_ns = 0;
+        uint64_t max_lower_bound_ns = 0;
+    };
+
+    std::vector<PropagatorTiming> propagator_timings;
+    uint64_t propagator_calls_since_report = 0;
+    std::chrono::steady_clock::time_point next_propagator_report;
+
+    void maybeReportPropagatorTimings()
+    {
+        constexpr uint64_t report_call_period = 5000;
+        if (propagator_calls_since_report < report_call_period &&
+            std::chrono::steady_clock::now() < next_propagator_report)
+            return;
+
+        reportPropagatorTimings(false);
+    }
+
+    void reportPropagatorTimings(bool force)
+    {
+        if (!force && propagator_calls_since_report == 0)
+            return;
+
+        std::cout << "\n[SearchEngine] Propagator timing report" << (force ? " (final)" : "") << "\n";
+        std::cout << std::left << std::setw(32) << "Propagator" << std::right << std::setw(12) << "Prop (ms)"
+                  << std::setw(12) << "Prop calls" << std::setw(12) << "Prop avg (us)" << std::setw(12)
+                  << "Prop max (ms)" << std::setw(12) << "Contradictions" << std::setw(12) << "LB (ms)"
+                  << std::setw(12) << "LB calls" << std::setw(12) << "LB max (ms)" << std::setw(12) << "Total (ms)"
+                  << "\n";
+        std::cout << std::string(128, '-') << "\n";
+
+        uint64_t total_ns = 0;
+        for (size_t i = 0; i < propagators.size(); ++i)
+        {
+            const auto &timing = propagator_timings[i];
+            const double propagate_ms = timing.propagate_ns / 1.0e6;
+            const double lower_bound_ms = timing.lower_bound_ns / 1.0e6;
+            const double total_ms = propagate_ms + lower_bound_ms;
+            const double propagate_avg_us = timing.propagate_calls == 0
+                                                ? 0.0
+                                                : static_cast<double>(timing.propagate_ns) /
+                                                      static_cast<double>(timing.propagate_calls) / 1.0e3;
+            std::cout << std::left << std::setw(32) << propagators[i]->name().substr(0, 31) << std::right
+                      << std::fixed << std::setprecision(2) << std::setw(12) << propagate_ms << std::setw(12)
+                      << timing.propagate_calls << std::setw(12) << propagate_avg_us << std::setw(12)
+                      << timing.max_propagate_ns / 1.0e6 << std::setw(12) << timing.contradictions << std::setw(12)
+                      << lower_bound_ms << std::setw(12) << timing.lower_bound_calls << std::setw(12)
+                      << timing.max_lower_bound_ns / 1.0e6 << std::setw(12) << total_ms << "\n";
+            total_ns += timing.propagate_ns + timing.lower_bound_ns;
+        }
+        std::cout << std::string(128, '-') << "\n"
+                  << "Cumulative instrumented propagator time: " << std::fixed << std::setprecision(2)
+                  << total_ns / 1.0e6 << " ms\n"
+                  << std::flush;
+
+        propagator_calls_since_report = 0;
+        next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    }
+#endif
 };
 
 } // namespace plan
