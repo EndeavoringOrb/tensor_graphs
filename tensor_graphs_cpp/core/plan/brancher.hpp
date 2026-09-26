@@ -45,9 +45,17 @@ class HeuristicBrancher : public Brancher
 
         const ENodeInfo &info = state.bucket_enode_infos[bucket_idx][enode_id.value];
         // Feasibility-first ordering, inspired by the old delegate: prefer
-        // implementations with lower estimated memory pressure, then cost.
+        // implementations with lower estimated memory pressure, then the
+        // optimistic parallel DAG makespan.  Keep dp_cost as a fallback for
+        // callers that construct ENodeInfo values without the new pass.
+        float dag_cost = info.optimistic_dag_cost;
+        if (dag_cost == TGConstants::INF)
+            dag_cost = info.dp_cost;
+        const float heuristic_cost = dag_cost < TGConstants::INF ? dag_cost : info.cost;
         if (info.dp_mem < TGConstants::INF)
-            return info.dp_mem * 1.0e-6f + info.dp_cost * 1.0e-3f + info.cost;
+            return info.dp_mem * 1.0e-6f + heuristic_cost * 1.0e-3f + info.cost;
+        if (dag_cost < TGConstants::INF)
+            return dag_cost;
         return info.cost;
     }
 

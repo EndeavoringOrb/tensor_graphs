@@ -531,6 +531,367 @@ struct Planner
         }
     }
 
+    // Compute both the old subtree DP estimates and the optimistic DAG
+    // estimate used by the search brancher.  The latter intentionally uses a
+    // single best summary per e-class, so it is a heuristic rather than an
+    // exact e-graph extraction.  It is nevertheless optimistic because it
+    // ignores scheduling precedence and memory constraints.
+    void computeENodeHeuristicCosts(const EGraph &egraph, std::vector<ENodeInfo> &enodeInfos) const
+    {
+        const uint32_t num_classes = static_cast<uint32_t>(egraph.getClasses().size());
+        const uint32_t num_enodes = static_cast<uint32_t>(egraph.getENodes().size());
+
+        std::vector<float> eclass_dp_cost(num_classes, TGConstants::INF);
+        std::vector<float> eclass_dp_cp_cost(num_classes, TGConstants::INF);
+        std::vector<float> eclass_dp_mem(num_classes, TGConstants::INF);
+
+        // Leaf values seed the ordinary DP pass.  All other values are
+        // propagated below so cycles without a leaf remain infinite.
+        for (uint32_t i = 0; i < num_classes; ++i)
+        {
+            EClassId cid = egraph.findConst(EClassId{i});
+            if (cid.value != i)
+                continue;
+
+            for (ENodeId enode_id : egraph.getEClass(cid).enodes)
+            {
+                if (enode_id.value >= enodeInfos.size())
+                    continue;
+                const ENode &enode = egraph.getENode(enode_id);
+                if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
+                    continue;
+
+                const float node_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                eclass_dp_cost[i] = 0.0f;
+                eclass_dp_cp_cost[i] = 0.0f;
+                eclass_dp_mem[i] = std::min(eclass_dp_mem[i], node_size);
+                enodeInfos[enode_id.value].dp_cost = 0.0f;
+                enodeInfos[enode_id.value].dp_cp_cost = 0.0f;
+                enodeInfos[enode_id.value].dp_mem = node_size;
+            }
+        }
+
+        const uint32_t max_iters = std::max<uint32_t>(1, num_classes + num_enodes);
+        for (uint32_t iter = 0; iter < max_iters; ++iter)
+        {
+            bool changed = false;
+            for (uint32_t i = 0; i < num_enodes; ++i)
+            {
+                const ENode &enode = egraph.getENodes()[i];
+                const float cost = enodeInfos[i].cost;
+                if (cost == TGConstants::INF || std::isnan(cost))
+                    continue;
+
+                std::vector<EClassId> child_classes;
+                child_classes.reserve(enode.getChildren().size());
+                for (EClassId child : enode.getChildren())
+                    child_classes.push_back(egraph.findConst(child));
+
+                float sum_child_cost = 0.0f;
+                float max_child_cp_cost = 0.0f;
+                bool all_children_ready = true;
+                for (EClassId child : child_classes)
+                {
+                    if (child.value >= num_classes || eclass_dp_cost[child.value] == TGConstants::INF ||
+                        eclass_dp_mem[child.value] == TGConstants::INF)
+                    {
+                        all_children_ready = false;
+                        break;
+                    }
+                    sum_child_cost += eclass_dp_cost[child.value];
+                    max_child_cp_cost = std::max(max_child_cp_cost, eclass_dp_cp_cost[child.value]);
+                }
+                if (!all_children_ready)
+                    continue;
+
+                float total_mem = 0.0f;
+                if (!child_classes.empty())
+                {
+                    struct ChildMem
+                    {
+                        float peak;
+                        float output;
+                    };
+                    std::vector<ChildMem> child_mems;
+                    child_mems.reserve(child_classes.size());
+                    float sum_child_sizes = 0.0f;
+                    for (EClassId child : child_classes)
+                    {
+                        const EClass &child_class = egraph.getEClass(child);
+                        const float child_size = static_cast<float>(getSizeBytes(child_class.shape, child_class.dtype));
+                        child_mems.push_back({eclass_dp_mem[child.value], child_size});
+                        sum_child_sizes += child_size;
+                    }
+                    std::sort(child_mems.begin(), child_mems.end(), [](const ChildMem &a, const ChildMem &b) {
+                        return (a.peak - a.output) > (b.peak - b.output);
+                    });
+
+                    float peak_child_eval = 0.0f;
+                    float accumulated_outputs = 0.0f;
+                    for (const ChildMem &child_mem : child_mems)
+                    {
+                        peak_child_eval = std::max(peak_child_eval, accumulated_outputs + child_mem.peak);
+                        accumulated_outputs += child_mem.output;
+                    }
+
+                    const float output_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                    bool can_be_inplace = enodeInfos[i].is_view;
+                    if (!can_be_inplace && enode.getKernelId().value != 0 &&
+                        KernelRegistry::get().hasKernel(enode.getKernelId()))
+                    {
+                        const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
+                        for (uint32_t inplace_idx : kernel.safe_inplace_idxs)
+                        {
+                            if (inplace_idx >= enode.getChildren().size())
+                                continue;
+                            EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
+                            const EClass &child_class = egraph.getEClass(child);
+                            const float input_size = static_cast<float>(getSizeBytes(child_class.shape, child_class.dtype));
+                            if (child_class.mem_space == enode.getMemSpace() && output_size <= input_size)
+                            {
+                                can_be_inplace = true;
+                                break;
+                            }
+                        }
+                    }
+                    const float op_memory = sum_child_sizes + (can_be_inplace ? 0.0f : output_size);
+                    total_mem = std::max(peak_child_eval, op_memory);
+                }
+                else
+                {
+                    total_mem = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                }
+
+                const float total_cost = cost + sum_child_cost;
+                const float total_cp_cost = cost + max_child_cp_cost;
+                EClassId parent = egraph.findConst(egraph.getENodeEClass(ENodeId{i}));
+                if (parent.value >= num_classes)
+                    continue;
+
+                if (total_cost < enodeInfos[i].dp_cost)
+                {
+                    enodeInfos[i].dp_cost = total_cost;
+                    changed = true;
+                }
+                if (total_cp_cost < enodeInfos[i].dp_cp_cost)
+                {
+                    enodeInfos[i].dp_cp_cost = total_cp_cost;
+                    changed = true;
+                }
+                if (total_mem < enodeInfos[i].dp_mem)
+                {
+                    enodeInfos[i].dp_mem = total_mem;
+                    changed = true;
+                }
+                if (total_cost < eclass_dp_cost[parent.value])
+                {
+                    eclass_dp_cost[parent.value] = total_cost;
+                    changed = true;
+                }
+                if (total_cp_cost < eclass_dp_cp_cost[parent.value])
+                {
+                    eclass_dp_cp_cost[parent.value] = total_cp_cost;
+                    changed = true;
+                }
+                if (total_mem < eclass_dp_mem[parent.value])
+                {
+                    eclass_dp_mem[parent.value] = total_mem;
+                    changed = true;
+                }
+            }
+            if (!changed)
+                break;
+        }
+
+        struct OptimisticSummary
+        {
+            float cost = TGConstants::INF;
+            ENodeId chosen_enode = ENodeId{UINT32_MAX};
+            std::vector<uint64_t> covered_bits;
+            std::vector<ENodeId> selected_enodes;
+            std::unordered_map<Engine, float> engine_work;
+            bool valid = false;
+        };
+
+        std::vector<EClassId> canonical_classes;
+        std::vector<uint32_t> class_to_bit(num_classes, UINT32_MAX);
+        for (uint32_t i = 0; i < num_classes; ++i)
+        {
+            EClassId cid = egraph.findConst(EClassId{i});
+            if (cid.value != i)
+                continue;
+            class_to_bit[i] = static_cast<uint32_t>(canonical_classes.size());
+            canonical_classes.push_back(cid);
+        }
+
+        const uint32_t num_canonical = static_cast<uint32_t>(canonical_classes.size());
+        const uint32_t bit_words = (num_canonical + 63) >> 6;
+        const ENodeId invalid_enode{UINT32_MAX};
+        auto bit_test = [](const std::vector<uint64_t> &bits, uint32_t bit) {
+            return (bits[bit >> 6] & (1ULL << (bit & 63))) != 0;
+        };
+        auto add_bits = [](std::vector<uint64_t> &bits, uint32_t bit) {
+            bits[bit >> 6] |= 1ULL << (bit & 63);
+        };
+        auto add_enode_work = [&](std::unordered_map<Engine, float> &work, ENodeId enode_id) {
+            if (enode_id.value >= egraph.getENodes().size() || enode_id.value >= enodeInfos.size())
+                return;
+            const float cost = enodeInfos[enode_id.value].cost;
+            if (cost == TGConstants::INF || std::isnan(cost))
+                return;
+            for (const Engine &engine : egraph.getENode(enode_id).getEngines())
+                work[engine] += cost;
+        };
+        auto makespan = [](const std::unordered_map<Engine, float> &work) {
+            float result = 0.0f;
+            for (const auto &entry : work)
+                result = std::max(result, entry.second);
+            return result;
+        };
+
+        std::vector<OptimisticSummary> optimistic(num_classes);
+        for (EClassId cid : canonical_classes)
+        {
+            optimistic[cid.value].covered_bits.assign(bit_words, 0);
+            optimistic[cid.value].selected_enodes.assign(num_canonical, invalid_enode);
+        }
+
+        std::vector<std::vector<EClassId>> parent_map(num_classes);
+        for (EClassId cid : canonical_classes)
+        {
+            for (ENodeId enode_id : egraph.getEClass(cid).enodes)
+            {
+                for (EClassId child : egraph.getENode(enode_id).getChildren())
+                {
+                    EClassId canonical_child = egraph.findConst(child);
+                    if (canonical_child.value < num_classes)
+                        parent_map[canonical_child.value].push_back(cid);
+                }
+            }
+        }
+        for (auto &parents : parent_map)
+        {
+            std::sort(parents.begin(), parents.end());
+            parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
+        }
+
+        auto build_candidate = [&](EClassId cid, ENodeId enode_id, OptimisticSummary &candidate) {
+            if (enode_id.value >= enodeInfos.size() || enodeInfos[enode_id.value].cost == TGConstants::INF ||
+                std::isnan(enodeInfos[enode_id.value].cost))
+                return false;
+
+            const uint32_t class_bit = class_to_bit[cid.value];
+            if (class_bit == UINT32_MAX)
+                return false;
+
+            candidate = OptimisticSummary{};
+            candidate.covered_bits.assign(bit_words, 0);
+            candidate.selected_enodes.assign(num_canonical, invalid_enode);
+            add_bits(candidate.covered_bits, class_bit);
+            candidate.selected_enodes[class_bit] = enode_id;
+            add_enode_work(candidate.engine_work, enode_id);
+
+            std::vector<EClassId> child_classes;
+            for (EClassId child : egraph.getENode(enode_id).getChildren())
+                child_classes.push_back(egraph.findConst(child));
+            std::sort(child_classes.begin(), child_classes.end());
+            child_classes.erase(std::unique(child_classes.begin(), child_classes.end()), child_classes.end());
+
+            for (EClassId child : child_classes)
+            {
+                if (child.value >= num_classes || !optimistic[child.value].valid)
+                    return false;
+                const OptimisticSummary &child_summary = optimistic[child.value];
+                if (class_to_bit[child.value] == UINT32_MAX || bit_test(child_summary.covered_bits, class_bit))
+                    return false;
+
+                for (uint32_t word = 0; word < bit_words; ++word)
+                {
+                    uint64_t new_bits = child_summary.covered_bits[word] & ~candidate.covered_bits[word];
+                    candidate.covered_bits[word] |= new_bits;
+                    while (new_bits != 0)
+                    {
+#if defined(__GNUG__) || defined(__clang__)
+                        const uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(new_bits));
+#else
+                        uint32_t bit = 0;
+                        uint64_t remaining = new_bits;
+                        while ((remaining & 1ULL) == 0)
+                        {
+                            remaining >>= 1;
+                            ++bit;
+                        }
+#endif
+                        const uint32_t selected_bit = (word << 6) + bit;
+                        if (selected_bit >= num_canonical ||
+                            child_summary.selected_enodes[selected_bit] == invalid_enode)
+                            return false;
+                        candidate.selected_enodes[selected_bit] = child_summary.selected_enodes[selected_bit];
+                        add_enode_work(candidate.engine_work, child_summary.selected_enodes[selected_bit]);
+                        new_bits &= new_bits - 1;
+                    }
+                }
+            }
+
+            candidate.cost = makespan(candidate.engine_work);
+            candidate.chosen_enode = enode_id;
+            candidate.valid = true;
+            return true;
+        };
+
+        std::vector<EClassId> worklist = canonical_classes;
+        std::vector<EClassId> next_worklist;
+        std::vector<bool> in_queue(num_classes, true);
+        while (!worklist.empty())
+        {
+            for (EClassId cid : worklist)
+            {
+                in_queue[cid.value] = false;
+                OptimisticSummary best;
+                for (ENodeId enode_id : egraph.getEClass(cid).enodes)
+                {
+                    OptimisticSummary candidate;
+                    if (!build_candidate(cid, enode_id, candidate))
+                        continue;
+                    enodeInfos[enode_id.value].optimistic_dag_cost = candidate.cost;
+                    if (!best.valid || candidate.cost < best.cost - 1e-6f ||
+                        (std::abs(candidate.cost - best.cost) <= 1e-6f && enode_id < best.chosen_enode))
+                        best = std::move(candidate);
+                }
+
+                OptimisticSummary &current = optimistic[cid.value];
+                if (best.valid &&
+                    (!current.valid || best.cost < current.cost - 1e-6f ||
+                     (std::abs(best.cost - current.cost) <= 1e-6f && best.chosen_enode < current.chosen_enode)))
+                {
+                    current = std::move(best);
+                    for (EClassId parent : parent_map[cid.value])
+                    {
+                        if (!in_queue[parent.value])
+                        {
+                            in_queue[parent.value] = true;
+                            next_worklist.push_back(parent);
+                        }
+                    }
+                }
+            }
+            worklist.clear();
+            std::swap(worklist, next_worklist);
+        }
+
+        // Recompute every enode after the fixed point.  During propagation an
+        // enode can have been visited before one of its children improved.
+        for (EClassId cid : canonical_classes)
+        {
+            for (ENodeId enode_id : egraph.getEClass(cid).enodes)
+            {
+                OptimisticSummary candidate;
+                enodeInfos[enode_id.value].optimistic_dag_cost =
+                    build_candidate(cid, enode_id, candidate) ? candidate.cost : TGConstants::INF;
+            }
+        }
+    }
+
     std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph,
                                              const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                                              const std::unordered_set<BaseEClassId> &cachedNodes, bool strictCache)
@@ -618,6 +979,8 @@ struct Planner
         }
 
         applyDominationRules(egraph, enodeInfos, eclassToLogical);
+
+        computeENodeHeuristicCosts(egraph, enodeInfos);
 
         return enodeInfos;
     }

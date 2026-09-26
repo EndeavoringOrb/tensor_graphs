@@ -13,6 +13,9 @@ struct ENodeInfo
     float cost = TGConstants::INF;
     bool is_view = false;
     float dp_cost = TGConstants::INF;
+    // Optimistic makespan of the best deduplicated DAG rooted at this enode.
+    // Unlike dp_cost, this is the maximum work on any individual engine.
+    float optimistic_dag_cost = TGConstants::INF;
     float dp_cp_cost = TGConstants::INF;
     float rev_cp_cost = 0.0f;
     float dp_mem = TGConstants::INF;
