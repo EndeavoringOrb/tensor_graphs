@@ -642,8 +642,13 @@ class MemoryNonOverlapPropagator : public Propagator
                 }
             }
 
-            // Memory non-overlap between concurrent allocations in same MemSpace
-            // Collect fixed allocations
+            // Memory non-overlap between allocations with overlapping
+            // lifetimes in the same MemSpace.  A tensor is live until its
+            // last consumer has finished, not merely until the instruction
+            // which produces it has finished.  Treating every allocation as
+            // [start, start + 1] permits a consumer's output to overwrite an
+            // input while that input is still being read; that was the source
+            // of valid-looking plans which produced corrupted model output.
             struct AllocEntry
             {
                 EClassId cid;
@@ -654,36 +659,163 @@ class MemoryNonOverlapPropagator : public Propagator
                 uint32_t page_size;
             };
 
-            std::vector<AllocEntry> allocs;
+            std::unordered_set<EClassId> active;
+            std::unordered_map<EClassId, uint32_t> selected_enodes;
+            std::unordered_map<EClassId, bool> selected_views;
+            std::unordered_map<EClassId, std::vector<EClassId>> parents;
+
             for (EClassId cid : getReachableCids(state, b))
+            {
+                VarId sel_v = state.selected_vars[b].at(cid);
+                const Domain &sel_dom = state.domains[sel_v];
+                if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
+                    continue;
+
+                uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                if (en_idx >= cls.enodes.size())
+                    continue;
+
+                ENodeId en_id = cls.enodes[en_idx];
+                active.insert(cid);
+                selected_enodes[cid] = en_idx;
+                selected_views[cid] = en_id.value < state.bucket_enode_infos[b].size() &&
+                                       state.bucket_enode_infos[b][en_id.value].is_view;
+            }
+
+            // Build the selected dependency DAG.  Edges point from a value to
+            // the operations which consume it.
+            for (EClassId cid : active)
+            {
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                uint32_t en_idx = selected_enodes.at(cid);
+                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                for (EClassId child : enode.getChildren())
+                {
+                    EClassId canon_child = state.bucket_egraphs[b].findConst(child);
+                    if (active.count(canon_child) != 0)
+                        parents[canon_child].push_back(cid);
+                }
+            }
+
+            // Follow selected view nodes to the physical value they alias.
+            // This is deliberately local to the propagator to avoid making
+            // the search headers depend on planner.hpp.
+            auto physical_base = [&](EClassId start) {
+                EClassId current = start;
+                std::unordered_set<EClassId> visited;
+                while (visited.insert(current).second && selected_views[current])
+                {
+                    const EClass &cls = state.bucket_egraphs[b].getEClass(current);
+                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[selected_enodes.at(current)]);
+                    if (enode.getChildren().empty())
+                        break;
+                    current = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+                    if (active.count(current) == 0)
+                        break;
+                }
+                return current;
+            };
+
+            // For each physical value, collect non-view operations which
+            // consume it, walking through zero-cost view nodes.
+            std::unordered_map<EClassId, std::unordered_set<EClassId>> consumers;
+            for (EClassId child : active)
+            {
+                EClassId base = physical_base(child);
+                std::vector<EClassId> frontier;
+                std::unordered_set<EClassId> visited;
+                for (EClassId parent : parents[child])
+                    frontier.push_back(parent);
+
+                for (size_t i = 0; i < frontier.size(); ++i)
+                {
+                    EClassId parent = frontier[i];
+                    if (!visited.insert(parent).second)
+                        continue;
+                    if (selected_views[parent])
+                    {
+                        for (EClassId next : parents[parent])
+                            frontier.push_back(next);
+                    }
+                    else
+                    {
+                        consumers[base].insert(parent);
+                    }
+                }
+            }
+
+            int32_t max_finish_time = 0;
+            for (EClassId cid : active)
+            {
+                if (selected_views[cid])
+                    continue;
+                uint32_t en_idx = selected_enodes.at(cid);
+                VarId st_v = state.start_vars[b].at(cid)[en_idx];
+                if (!state.domains[st_v].isFixed())
+                    continue;
+                max_finish_time = std::max(max_finish_time, state.domains[st_v].fixedValue() + 1);
+            }
+
+            std::vector<AllocEntry> allocs;
+            for (EClassId cid : active)
             {
                 auto off_it = state.offset_vars[b].find(cid);
                 if (off_it == state.offset_vars[b].end())
                     continue;
 
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-                {
-                    uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    VarId off_v = off_it->second;
-                    VarId st_v = state.start_vars[b].at(cid)[en_idx];
+                if (selected_views[cid])
+                    continue;
 
-                    if (state.domains[off_v].isFixed() && state.domains[st_v].isFixed())
+                uint32_t en_idx = selected_enodes.at(cid);
+                VarId off_v = off_it->second;
+                VarId st_v = state.start_vars[b].at(cid)[en_idx];
+                if (!state.domains[off_v].isFixed() || !state.domains[st_v].isFixed())
+                    continue;
+
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                uint32_t page_size = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
+                if (page_size == 0)
+                    page_size = 1;
+
+                uint32_t page_offset = static_cast<uint32_t>(state.domains[off_v].fixedValue());
+                // Inputs and already-materialized values use their physical
+                // preallocated offset.  Their search offset variable exists
+                // for uniformity but is not the runtime location.
+                if (cls.base_eclass_id != BaseEClassId{})
+                {
+                    auto pre_it = state.preallocated_buffers.find(cls.base_eclass_id);
+                    if (pre_it != state.preallocated_buffers.end() && pre_it->second.offset >= 0)
                     {
-                        const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                        ENodeId en_id = cls.enodes[en_idx];
-                        bool is_view = (en_id.value < state.bucket_enode_infos[b].size()) &&
-                                       state.bucket_enode_infos[b][en_id.value].is_view;
-                        if (!is_view)
-                        {
-                            uint32_t p_size = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
-                            int32_t st = state.domains[st_v].fixedValue();
-                            allocs.push_back({cid, cls.mem_space, st, st + 1,
-                                              static_cast<uint32_t>(state.domains[off_v].fixedValue()), p_size});
-                        }
+                        uint32_t align = state.getPageAlignment(cls.mem_space);
+                        page_offset = static_cast<uint32_t>(pre_it->second.offset / align);
+                        page_size = state.bytesToPages(pre_it->second.size, cls.mem_space);
                     }
                 }
+
+                int32_t start_time = state.domains[st_v].fixedValue();
+                int32_t end_time = start_time + 1;
+                auto consumer_it = consumers.find(cid);
+                if (consumer_it == consumers.end() || consumer_it->second.empty())
+                {
+                    end_time = std::max(end_time, max_finish_time);
+                }
+                else
+                {
+                    for (EClassId consumer : consumer_it->second)
+                    {
+                        uint32_t consumer_en_idx = selected_enodes.at(consumer);
+                        VarId consumer_st_v = state.start_vars[b].at(consumer)[consumer_en_idx];
+                        if (!state.domains[consumer_st_v].isFixed())
+                        {
+                            end_time = std::max(end_time, max_finish_time);
+                            continue;
+                        }
+                        end_time = std::max(end_time, state.domains[consumer_st_v].fixedValue() + 1);
+                    }
+                }
+
+                allocs.push_back({cid, cls.mem_space, start_time, end_time, page_offset, page_size});
             }
 
             // Check non-overlap for allocations with overlapping lifetimes
@@ -701,7 +833,17 @@ class MemoryNonOverlapPropagator : public Propagator
                             bool space_overlap = !(allocs[i].page_offset + allocs[i].page_size <= allocs[j].page_offset ||
                                                    allocs[j].page_offset + allocs[j].page_size <= allocs[i].page_offset);
                             if (space_overlap)
+                            {
+                                LOG(DEBUG) << "[MemoryNonOverlapPropagator] Lifetime overlap: eclass "
+                                           << allocs[i].cid << " [" << allocs[i].start_time << ","
+                                           << allocs[i].end_time << "] and eclass " << allocs[j].cid << " ["
+                                           << allocs[j].start_time << "," << allocs[j].end_time << "] share pages "
+                                           << allocs[i].page_offset << ".."
+                                           << (allocs[i].page_offset + allocs[i].page_size) << " and "
+                                           << allocs[j].page_offset << ".."
+                                           << (allocs[j].page_offset + allocs[j].page_size);
                                 return false; // Overlap contradiction!
+                            }
                         }
                     }
                 }

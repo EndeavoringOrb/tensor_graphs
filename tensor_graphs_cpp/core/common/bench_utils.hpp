@@ -454,12 +454,18 @@ struct PreparedKernel
 
             inputBuffers[idx].allocate(binding.input_mem_spaces[idx], bytes);
 
-            if (explicitInputData && idx < explicitInputData->size() && !(*explicitInputData)[idx].empty())
+            // Benchmark records may contain control bytes captured from a
+            // different scatter slice.  Always synthesize SCATTER controls so
+            // the benchmark cannot turn stale starts/steps into an invalid
+            // write, even when inputConstants is populated.
+            bool synthesize_scatter_control = kernel.opType == OpType::SCATTER && idx >= 1 && idx <= 4;
+            if (!synthesize_scatter_control && explicitInputData && idx < explicitInputData->size() &&
+                !(*explicitInputData)[idx].empty())
             {
                 std::memcpy(inputBuffers[idx].hostData.data(), (*explicitInputData)[idx].data(),
                             std::min(bytes, (uint64_t)(*explicitInputData)[idx].size()));
             }
-            else if (idx < r.inputConstants.size() && !r.inputConstants[idx].empty() &&
+            else if (!synthesize_scatter_control && idx < r.inputConstants.size() && !r.inputConstants[idx].empty() &&
                      r.inputConstants[idx].size() == bytes)
             {
                 std::memcpy(inputBuffers[idx].hostData.data(), r.inputConstants[idx].data(), bytes);
@@ -475,7 +481,24 @@ struct PreparedKernel
                 else if (r.inputDTypes[idx] == DType::INT32)
                 {
                     int32_t *iptr = reinterpret_cast<int32_t *>(inputBuffers[idx].hostData.data());
-                    if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
+                    if (kernel.opType == OpType::SCATTER)
+                    {
+                        // SCATTER's control tensors are starts, ends, steps,
+                        // and output shape.  The generic INT32 fallback below
+                        // fills them with one, which makes a full-size update
+                        // start at coordinate 1 and write one row/column past
+                        // the output.  Use a valid identity slice instead.
+                        for (uint64_t k = 0; k < elements; ++k)
+                        {
+                            int32_t value = 1;
+                            if (idx == 1) // starts
+                                value = 0;
+                            else if (idx == 2 || idx == 4) // ends / output shape
+                                value = (k < r.outputShape.size()) ? static_cast<int32_t>(r.outputShape[k]) : 1;
+                            iptr[k] = value;
+                        }
+                    }
+                    else if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                     {
                         if (idx == 1 && r.inputShapes.size() > 0 && r.inputShapes[0].size() == r.outputShape.size() &&
                             elements == r.inputShapes[0].size())

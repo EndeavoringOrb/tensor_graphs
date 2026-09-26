@@ -377,7 +377,7 @@ struct CostModel
                 if (active_factory)
                 {
                     ref_w = computeWorkloadFromRefFactory(active_factory, r.inputShapes, r.inputDTypes,
-                                                          r.outputShape, r.outputDType, r.inputConstants);
+                                                          r.outputShape, r.outputDType, r.inputConstants, opType);
                 }
                 else
                 {
@@ -913,7 +913,8 @@ struct CostModel
         WorkloadMetrics target_w;
         if (ref_factory)
         {
-            target_w = computeWorkloadFromRefFactory(ref_factory, inShapes, inDTypes, outShape, outDType, inConstants);
+            target_w = computeWorkloadFromRefFactory(ref_factory, inShapes, inDTypes, outShape, outDType, inConstants,
+                                                     opType);
         }
         else
         {

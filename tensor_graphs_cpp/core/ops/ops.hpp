@@ -149,7 +149,8 @@ inline WorkloadMetrics computeWorkloadFromRefFactory(
     const std::vector<DType> &in_dtypes,
     const std::vector<uint32_t> &out_shape,
     DType out_dtype,
-    const std::vector<std::vector<uint8_t>> &in_constants = {});
+    const std::vector<std::vector<uint8_t>> &in_constants = {},
+    OpType reference_op = OpType::INPUT);
 
 inline WorkloadMetrics computeWorkload(OpType op, const std::vector<std::vector<uint32_t>> &inShapes,
                                        const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
@@ -159,14 +160,15 @@ inline WorkloadMetrics computeWorkload(OpType op, const std::vector<std::vector<
 {
     if (refFactory)
     {
-        return computeWorkloadFromRefFactory(refFactory, inShapes, inDTypes, outShape, outDType, inConstants);
+        return computeWorkloadFromRefFactory(refFactory, inShapes, inDTypes, outShape, outDType, inConstants, op);
     }
     if (op == OpType::FUSED && !opName.empty())
     {
         const auto *entry = ReferenceGraphRegistry::get().getFactory(opName);
         if (entry && entry->factory)
         {
-            return computeWorkloadFromRefFactory(entry->factory, inShapes, inDTypes, outShape, outDType, inConstants);
+            return computeWorkloadFromRefFactory(entry->factory, inShapes, inDTypes, outShape, outDType, inConstants,
+                                                 op);
         }
     }
     const auto &traits = getOpTraits(op);
