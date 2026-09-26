@@ -355,6 +355,34 @@ static inline void fusedProj_computeTile(const uint16_t *X_bf16, // bf16 stored 
     }
 }
 
+// The reference graph casts the BF16 storage weights to FLOAT32, but keeps
+// the activation tensor in FLOAT32. The BFDOT implementation above also
+// truncates activations to BF16, which changes logits enough to alter token
+// selection for Gemma. Keep this path numerically equivalent to the
+// reference graph while retaining the streaming storage access pattern.
+inline void fusedProj_computeTileFp32(const float *X, const uint16_t *W, float *Out, uint32_t S, uint32_t K,
+                                      uint32_t N, uint32_t n_start, uint32_t n_end)
+{
+    for (uint32_t s = 0; s < S; ++s)
+    {
+        const float *x_row = X + static_cast<uint64_t>(s) * K;
+        float *out_row = Out + static_cast<uint64_t>(s) * N;
+        for (uint32_t n = n_start; n < n_end; ++n)
+        {
+            const uint16_t *w_row = W + static_cast<uint64_t>(n - n_start) * K;
+            float sum = 0.0f;
+            for (uint32_t k = 0; k < K; ++k)
+            {
+                uint32_t bits = static_cast<uint32_t>(w_row[k]) << 16;
+                float weight;
+                std::memcpy(&weight, &bits, sizeof(float));
+                sum += x_row[k] * weight;
+            }
+            out_row[n] = sum;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Run function
 //
@@ -452,6 +480,32 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
 
         const uint64_t my_W_bytes = static_cast<uint64_t>(n_range) * K * sizeof(uint16_t);
         const uint64_t my_W_offset = fileOffset + static_cast<uint64_t>(n_start) * K * sizeof(uint16_t);
+
+        // Preserve the FLOAT32 activation semantics of the reference graph.
+        // The optimized BF16 path remains below for other callers, but this
+        // kernel must not silently change the mathematical operation.
+        if (W_total_bytes <= SMALL_W_THRESHOLD)
+        {
+            std::vector<uint16_t> w_buf(static_cast<uint64_t>(n_range) * K);
+            if (!fusedProj_readFromFileAtOffset(fd, my_W_offset, w_buf.data(), my_W_bytes))
+                std::memset(w_buf.data(), 0, static_cast<uint64_t>(my_W_bytes));
+            fusedProj_computeTileFp32(X, w_buf.data(), Out, S, K, N, n_start, n_end);
+            return;
+        }
+
+        const uint32_t chunk_rows =
+            std::max(1u, static_cast<uint32_t>(STREAM_CHUNK_BYTES / (static_cast<uint64_t>(K) * sizeof(uint16_t))));
+        std::vector<uint16_t> w_buf(static_cast<uint64_t>(chunk_rows) * K);
+        for (uint32_t chunk_start = n_start; chunk_start < n_end; chunk_start += chunk_rows)
+        {
+            uint32_t chunk_end = std::min(chunk_start + chunk_rows, n_end);
+            uint64_t chunk_off = fileOffset + static_cast<uint64_t>(chunk_start) * K * sizeof(uint16_t);
+            uint64_t chunk_bytes = static_cast<uint64_t>(chunk_end - chunk_start) * K * sizeof(uint16_t);
+            if (!fusedProj_readFromFileAtOffset(fd, chunk_off, w_buf.data(), chunk_bytes))
+                std::memset(w_buf.data(), 0, static_cast<size_t>(chunk_bytes));
+            fusedProj_computeTileFp32(X, w_buf.data(), Out, S, K, N, chunk_start, chunk_end);
+        }
+        return;
 
         if (W_total_bytes <= SMALL_W_THRESHOLD)
         {
