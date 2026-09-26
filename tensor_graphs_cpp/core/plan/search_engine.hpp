@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <array>
 #ifdef TG_PROFILE
 #include <iomanip>
 #endif
@@ -65,6 +66,8 @@ class SearchEngine
     void addPropagator(std::unique_ptr<Propagator> prop)
     {
         propagators.push_back(std::move(prop));
+        propagator_dependencies_built = false;
+        propagation_initialized = false;
 #ifdef TG_PROFILE
         propagator_timings.emplace_back();
 #endif
@@ -138,73 +141,90 @@ class SearchEngine
         if (out_conflict_reason)
             out_conflict_reason->clear();
 
-        // All propagators only shrink domains, so this is a finite monotone
-        // fixpoint computation. A small iteration cap leaves information
-        // behind (especially when Selection and TopologicalOrder interact)
-        // and makes the brancher rediscover the same contradiction one split
-        // at a time.
-        bool changed = true;
-        size_t iters = 0;
-        while (changed)
-        {
-            ++iters;
-            changed = false;
-            size_t marker_before = state.getTrailMarker();
-            for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
-            {
-                auto &prop = propagators[prop_idx];
-#ifdef TG_PROFILE
-                auto propagate_start = std::chrono::steady_clock::now();
-#endif
-                bool propagated = prop->propagate(state);
-#ifdef TG_PROFILE
-                const uint64_t propagate_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - propagate_start)
-                        .count());
-                auto &timing = propagator_timings[prop_idx];
-                timing.propagate_calls++;
-                timing.propagate_ns += propagate_ns;
-                timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
-                if (!propagated)
-                    timing.contradictions++;
-                propagator_calls_since_report++;
-#endif
-                if (!propagated)
-                {
-                    if (out_conflict_reason)
-                        *out_conflict_reason = prop->name();
-#ifdef TG_PROFILE
-                    maybeReportPropagatorTimings();
-#endif
-                    return false;
-                }
+        buildPropagatorDependencies();
 
-                // A propagator is expected to report a contradiction itself,
-                // but validate this invariant here as well. In particular,
-                // view-offset propagation can create an empty domain before a
-                // later propagator gets a chance to inspect it. SearchState
-                // maintains this set incrementally, so this is O(1) rather
-                // than a scan over every domain.
-                if (state.hasEmptyDomain())
-                {
-                    if (out_conflict_reason)
-                    {
-                        VarId empty_var = state.getEmptyDomainVar();
-                        *out_conflict_reason = prop->name() + " emptied ";
-                        if (empty_var != kInvalidVarId && empty_var < state.var_infos.size())
-                            *out_conflict_reason += state.var_infos[empty_var].name;
-                        else
-                            *out_conflict_reason += "a domain";
-                    }
-#ifdef TG_PROFILE
-                    maybeReportPropagatorTimings();
-#endif
-                    return false;
-                }
+        std::vector<size_t> worklist;
+        std::vector<uint8_t> queued(propagators.size(), 0);
+        auto enqueuePropagator = [&](size_t prop_idx) {
+            if (!queued[prop_idx])
+            {
+                queued[prop_idx] = 1;
+                worklist.push_back(prop_idx);
             }
-            if (state.getTrailMarker() > marker_before)
-                changed = true;
+        };
+        auto enqueueForVar = [&](VarId var_id) {
+            if (var_id >= state.var_infos.size())
+                return;
+            const auto &watchers = propagator_dependencies[static_cast<size_t>(state.var_infos[var_id].type)];
+            for (size_t prop_idx : watchers)
+                enqueuePropagator(prop_idx);
+        };
+
+        const std::vector<VarId> dirty_domains = state.takeDirtyDomains();
+        if (!propagation_initialized)
+        {
+            for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
+                enqueuePropagator(prop_idx);
+            propagation_initialized = true;
+        }
+        else
+        {
+            for (VarId var_id : dirty_domains)
+                enqueueForVar(var_id);
+        }
+
+        size_t worklist_head = 0;
+        while (worklist_head < worklist.size())
+        {
+            const size_t prop_idx = worklist[worklist_head++];
+            queued[prop_idx] = 0;
+            auto &prop = propagators[prop_idx];
+#ifdef TG_PROFILE
+            auto propagate_start = std::chrono::steady_clock::now();
+#endif
+            bool propagated = prop->propagate(state);
+#ifdef TG_PROFILE
+            const uint64_t propagate_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - propagate_start)
+                    .count());
+            auto &timing = propagator_timings[prop_idx];
+            timing.propagate_calls++;
+            timing.propagate_ns += propagate_ns;
+            timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
+            if (!propagated)
+                timing.contradictions++;
+            propagator_calls_since_report++;
+#endif
+            if (!propagated)
+            {
+                if (out_conflict_reason)
+                    *out_conflict_reason = prop->name();
+#ifdef TG_PROFILE
+                maybeReportPropagatorTimings();
+#endif
+                return false;
+            }
+
+            if (state.hasEmptyDomain())
+            {
+                if (out_conflict_reason)
+                {
+                    VarId empty_var = state.getEmptyDomainVar();
+                    *out_conflict_reason = prop->name() + " emptied ";
+                    if (empty_var != kInvalidVarId && empty_var < state.var_infos.size())
+                        *out_conflict_reason += state.var_infos[empty_var].name;
+                    else
+                        *out_conflict_reason += "a domain";
+                }
+#ifdef TG_PROFILE
+                maybeReportPropagatorTimings();
+#endif
+                return false;
+            }
+
+            for (VarId var_id : state.takeDirtyDomains())
+                enqueueForVar(var_id);
         }
 
         out_lower_bound = 0.0f;
@@ -231,6 +251,30 @@ class SearchEngine
         return true;
     }
 
+  private:
+    std::array<std::vector<size_t>, 4> propagator_dependencies;
+    bool propagator_dependencies_built = false;
+    bool propagation_initialized = false;
+
+    void buildPropagatorDependencies()
+    {
+        if (propagator_dependencies_built)
+            return;
+
+        for (auto &watchers : propagator_dependencies)
+            watchers.clear();
+        for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
+        {
+            for (size_t type = 0; type < propagator_dependencies.size(); ++type)
+            {
+                if (propagators[prop_idx]->watches(static_cast<VarType>(type)))
+                    propagator_dependencies[type].push_back(prop_idx);
+            }
+        }
+        propagator_dependencies_built = true;
+    }
+
+  public:
     float evaluateMakespan(const SearchState &st, uint32_t b) const
     {
         // Compute makespan for bucket b
@@ -450,9 +494,7 @@ class SearchEngine
                     if (st_it != state.start_vars[b].end())
                     {
                         for (VarId st_v : st_it->second)
-                        {
                             state.domains[st_v] = Domain::makeFixed(0);
-                        }
                     }
                 }
             }

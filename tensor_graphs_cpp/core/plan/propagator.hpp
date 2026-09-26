@@ -21,6 +21,15 @@ class Propagator
     virtual ~Propagator() = default;
     virtual std::string name() const = 0;
 
+    // Return whether this constraint can read a variable of the given type.
+    // The scheduler uses this conservative dependency information to wake
+    // only propagators whose inputs may have changed.
+    virtual bool watches(VarType type) const
+    {
+        (void)type;
+        return true;
+    }
+
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state) = 0;
 
@@ -45,6 +54,11 @@ class SelectionPropagator : public Propagator
     std::string name() const override
     {
         return "SelectionPropagator";
+    }
+
+    bool watches(VarType type) const override
+    {
+        return type == VarType::SELECTED;
     }
 
     bool propagate(SearchState &state) override
@@ -162,6 +176,11 @@ class CachePropagator : public Propagator
     std::string name() const override
     {
         return "CachePropagator";
+    }
+
+    bool watches(VarType type) const override
+    {
+        return type == VarType::SELECTED || type == VarType::CACHED;
     }
 
     bool propagate(SearchState &state) override
@@ -284,6 +303,11 @@ class TopologicalOrderPropagator : public Propagator
     std::string name() const override
     {
         return "TopologicalOrderPropagator";
+    }
+
+    bool watches(VarType type) const override
+    {
+        return type == VarType::SELECTED || type == VarType::START;
     }
 
     bool propagate(SearchState &state) override
@@ -488,6 +512,11 @@ class EngineSchedulePropagator : public Propagator
         return "EngineSchedulePropagator";
     }
 
+    bool watches(VarType type) const override
+    {
+        return type == VarType::SELECTED || type == VarType::START;
+    }
+
     bool propagate(SearchState &state) override
     {
         // Enforce: only one op can run at a time per engine
@@ -591,6 +620,11 @@ class MemoryNonOverlapPropagator : public Propagator
     std::string name() const override
     {
         return "MemoryNonOverlapPropagator";
+    }
+
+    bool watches(VarType type) const override
+    {
+        return type == VarType::SELECTED || type == VarType::START || type == VarType::OFFSET;
     }
 
     bool propagate(SearchState &state) override
@@ -938,6 +972,11 @@ class CostLowerBoundPropagator : public Propagator
     std::string name() const override
     {
         return "CostLowerBoundPropagator";
+    }
+
+    bool watches(VarType type) const override
+    {
+        return type == VarType::SELECTED;
     }
 
     void setBestCost(float c)

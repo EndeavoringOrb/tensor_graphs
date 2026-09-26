@@ -67,6 +67,11 @@ class SearchState
     // scanning every domain after each propagator invocation.
     std::unordered_set<VarId> empty_domains;
 
+    // Domain changes are consumed by SearchEngine's propagator worklist.  A
+    // set keeps repeated narrowing of one variable from creating duplicate
+    // scheduler work before the next propagation pass.
+    std::unordered_set<VarId> dirty_domains;
+
     void updateEmptyDomainIndex(VarId var_id, bool was_empty, bool is_empty)
     {
         if (was_empty == is_empty)
@@ -76,6 +81,11 @@ class SearchState
             empty_domains.insert(var_id);
         else
             empty_domains.erase(var_id);
+    }
+
+    void markDomainDirty(VarId var_id)
+    {
+        dirty_domains.insert(var_id);
     }
 
   public:
@@ -116,6 +126,7 @@ class SearchState
         domains.push_back(initial_domain);
         if (initial_domain.isEmpty())
             empty_domains.insert(id);
+        markDomainDirty(id);
         return id;
     }
 
@@ -147,6 +158,7 @@ class SearchState
             const bool was_empty = domains[entry.var_id].isEmpty();
             domains[entry.var_id] = entry.prev_domain;
             updateEmptyDomainIndex(entry.var_id, was_empty, entry.prev_domain.isEmpty());
+            markDomainDirty(entry.var_id);
             trail.pop_back();
         }
     }
@@ -159,9 +171,20 @@ class SearchState
             trail.push_back(TrailEntry{var_id, domains[var_id]});
             domains[var_id] = new_domain;
             updateEmptyDomainIndex(var_id, was_empty, new_domain.isEmpty());
+            markDomainDirty(var_id);
             return true;
         }
         return false;
+    }
+
+    std::vector<VarId> takeDirtyDomains()
+    {
+        std::vector<VarId> result;
+        result.reserve(dirty_domains.size());
+        for (VarId var_id : dirty_domains)
+            result.push_back(var_id);
+        dirty_domains.clear();
+        return result;
     }
 
     uint32_t getPageAlignment(const MemSpace &ms) const
