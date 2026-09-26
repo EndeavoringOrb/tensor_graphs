@@ -277,8 +277,10 @@ class SearchEngine
   public:
     float evaluateMakespan(const SearchState &st, uint32_t b) const
     {
-        // Compute makespan for bucket b
+        // Simulate the selected dispatch order, waiting for both data dependencies
+        // and the engines required by each operation.
         std::unordered_map<Engine, float> engine_finish;
+        std::unordered_map<EClassId, float> eclass_finish;
         std::vector<std::pair<int32_t, EClassId>> sorted_ops;
 
         const auto &cids = (b < st.reachable_cids.size() && !st.reachable_cids[b].empty())
@@ -311,9 +313,57 @@ class SearchEngine
             if (cost == TGConstants::INF)
                 cost = 1.0f;
 
-            for (const Engine &eng : enode.getEngines())
+            if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
             {
-                engine_finish[eng] += cost;
+                eclass_finish[cid] = 0.0f;
+                continue;
+            }
+
+            const bool is_view = en_id.value < st.bucket_enode_infos[b].size() &&
+                                 st.bucket_enode_infos[b][en_id.value].is_view;
+            const float duration = is_view ? 0.0f : cost;
+
+            float children_finish = 0.0f;
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = st.bucket_egraphs[b].findConst(child);
+                auto finish_it = eclass_finish.find(canon_child);
+                if (finish_it != eclass_finish.end())
+                    children_finish = std::max(children_finish, finish_it->second);
+            }
+
+            float engine_free = 0.0f;
+            const std::vector<Engine> &engines = enode.getEngines();
+            if (!is_view && engines.empty())
+            {
+                // Compiled operations without an explicit engine run on CPU.
+                auto finish_it = engine_finish.find(Engine{0, EngineType::CPU});
+                if (finish_it != engine_finish.end())
+                    engine_free = std::max(engine_free, finish_it->second);
+            }
+            else if (!is_view)
+            {
+                for (const Engine &eng : engines)
+                {
+                    auto finish_it = engine_finish.find(eng);
+                    if (finish_it != engine_finish.end())
+                        engine_free = std::max(engine_free, finish_it->second);
+                }
+            }
+
+            const float start_time = std::max(children_finish, engine_free);
+            const float finish_time = start_time + duration;
+            eclass_finish[cid] = finish_time;
+
+            if (!is_view)
+            {
+                if (engines.empty())
+                    engine_finish[Engine{0, EngineType::CPU}] = finish_time;
+                else
+                {
+                    for (const Engine &eng : engines)
+                        engine_finish[eng] = finish_time;
+                }
             }
         }
 
