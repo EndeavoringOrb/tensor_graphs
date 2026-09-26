@@ -62,6 +62,22 @@ struct TrailEntry
 
 class SearchState
 {
+  private:
+    // Kept incrementally so SearchEngine can detect contradictions without
+    // scanning every domain after each propagator invocation.
+    std::unordered_set<VarId> empty_domains;
+
+    void updateEmptyDomainIndex(VarId var_id, bool was_empty, bool is_empty)
+    {
+        if (was_empty == is_empty)
+            return;
+
+        if (is_empty)
+            empty_domains.insert(var_id);
+        else
+            empty_domains.erase(var_id);
+    }
+
   public:
     std::vector<VarInfo> var_infos;
     std::vector<Domain> domains;
@@ -98,6 +114,8 @@ class SearchState
         info.id = id;
         var_infos.push_back(std::move(info));
         domains.push_back(initial_domain);
+        if (initial_domain.isEmpty())
+            empty_domains.insert(id);
         return id;
     }
 
@@ -111,12 +129,24 @@ class SearchState
         return trail.size();
     }
 
+    bool hasEmptyDomain() const
+    {
+        return !empty_domains.empty();
+    }
+
+    VarId getEmptyDomainVar() const
+    {
+        return empty_domains.empty() ? kInvalidVarId : *empty_domains.begin();
+    }
+
     void backtrackTo(size_t marker)
     {
         while (trail.size() > marker)
         {
             const auto &entry = trail.back();
+            const bool was_empty = domains[entry.var_id].isEmpty();
             domains[entry.var_id] = entry.prev_domain;
+            updateEmptyDomainIndex(entry.var_id, was_empty, entry.prev_domain.isEmpty());
             trail.pop_back();
         }
     }
@@ -125,8 +155,10 @@ class SearchState
     {
         if (domains[var_id] != new_domain)
         {
+            const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(TrailEntry{var_id, domains[var_id]});
             domains[var_id] = new_domain;
+            updateEmptyDomainIndex(var_id, was_empty, new_domain.isEmpty());
             return true;
         }
         return false;

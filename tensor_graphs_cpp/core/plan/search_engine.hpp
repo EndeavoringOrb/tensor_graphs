@@ -183,21 +183,24 @@ class SearchEngine
                 // A propagator is expected to report a contradiction itself,
                 // but validate this invariant here as well. In particular,
                 // view-offset propagation can create an empty domain before a
-                // later propagator gets a chance to inspect it.
-                for (VarId var_id = 0; var_id < state.domains.size(); ++var_id)
+                // later propagator gets a chance to inspect it. SearchState
+                // maintains this set incrementally, so this is O(1) rather
+                // than a scan over every domain.
+                if (state.hasEmptyDomain())
                 {
-                    if (state.domains[var_id].isEmpty())
+                    if (out_conflict_reason)
                     {
-                        if (out_conflict_reason)
-                        {
-                            *out_conflict_reason = prop->name() + " emptied " +
-                                                    state.var_infos[var_id].name;
-                        }
-#ifdef TG_PROFILE
-                        maybeReportPropagatorTimings();
-#endif
-                        return false;
+                        VarId empty_var = state.getEmptyDomainVar();
+                        *out_conflict_reason = prop->name() + " emptied ";
+                        if (empty_var != kInvalidVarId && empty_var < state.var_infos.size())
+                            *out_conflict_reason += state.var_infos[empty_var].name;
+                        else
+                            *out_conflict_reason += "a domain";
                     }
+#ifdef TG_PROFILE
+                    maybeReportPropagatorTimings();
+#endif
+                    return false;
                 }
             }
             if (state.getTrailMarker() > marker_before)
