@@ -16,8 +16,9 @@ class GemmaOutputTests(unittest.TestCase):
             "gemma-3-270m",
             str(model_path),
             tensor_graphs.HeuristicSearchDelegate(),
-            max_sequence_length=32,
-            disable_caching=True
+            max_sequence_length=16,
+            compile_decode_buckets=True,
+            disable_caching=False
         )
 
         conversation_tokens = encode_text(tokenizer, "Hi, my name", is_first=True)
