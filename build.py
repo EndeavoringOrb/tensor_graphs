@@ -1583,7 +1583,7 @@ def main() -> None:
     parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
+        default="DEBUG",
         choices=[
             "DEBUG",
             "INFO",
