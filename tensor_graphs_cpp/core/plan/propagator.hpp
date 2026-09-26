@@ -657,6 +657,8 @@ class MemoryNonOverlapPropagator : public Propagator
                 int32_t end_time;
                 uint32_t page_offset;
                 uint32_t page_size;
+                VarId offset_var;
+                bool offset_fixed;
             };
 
             std::unordered_set<EClassId> active;
@@ -770,7 +772,9 @@ class MemoryNonOverlapPropagator : public Propagator
                 uint32_t en_idx = selected_enodes.at(cid);
                 VarId off_v = off_it->second;
                 VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                if (!state.domains[off_v].isFixed() || !state.domains[st_v].isFixed())
+                if (state.domains[off_v].isEmpty())
+                    return false;
+                if (!state.domains[st_v].isFixed())
                     continue;
 
                 const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
@@ -778,7 +782,11 @@ class MemoryNonOverlapPropagator : public Propagator
                 if (page_size == 0)
                     page_size = 1;
 
-                uint32_t page_offset = static_cast<uint32_t>(state.domains[off_v].fixedValue());
+                uint32_t page_offset = 0;
+                bool offset_fixed = state.domains[off_v].isFixed();
+                if (offset_fixed)
+                    page_offset = static_cast<uint32_t>(state.domains[off_v].fixedValue());
+
                 // Inputs and already-materialized values use their physical
                 // preallocated offset.  Their search offset variable exists
                 // for uniformity but is not the runtime location.
@@ -790,6 +798,7 @@ class MemoryNonOverlapPropagator : public Propagator
                         uint32_t align = state.getPageAlignment(cls.mem_space);
                         page_offset = static_cast<uint32_t>(pre_it->second.offset / align);
                         page_size = state.bytesToPages(pre_it->second.size, cls.mem_space);
+                        offset_fixed = true;
                     }
                 }
 
@@ -815,10 +824,62 @@ class MemoryNonOverlapPropagator : public Propagator
                     }
                 }
 
-                allocs.push_back({cid, cls.mem_space, start_time, end_time, page_offset, page_size});
+                allocs.push_back({cid, cls.mem_space, start_time, end_time, page_offset, page_size,
+                                  off_v, offset_fixed});
             }
 
-            // Check non-overlap for allocations with overlapping lifetimes
+            // For a fixed allocation [fixed_offset, fixed_end), a candidate
+            // allocation of size candidate_size can only avoid overlap by
+            // being entirely before it or entirely after it:
+            //
+            //   candidate_offset <= fixed_offset - candidate_size
+            //   or
+            //   candidate_offset >= fixed_end
+            //
+            // Offset domains are intervals, so when one side is impossible we
+            // can remove the whole blocked prefix/suffix in one propagation
+            // step. This avoids min-first branching through every blocked
+            // offset value.
+            auto propagateOffsetAgainstFixed = [&](const AllocEntry &fixed,
+                                                    AllocEntry &candidate) {
+                if (!fixed.offset_fixed || candidate.offset_fixed)
+                    return true;
+
+                Domain candidate_dom = state.domains[candidate.offset_var];
+                const int64_t fixed_begin = static_cast<int64_t>(fixed.page_offset);
+                const int64_t fixed_end = fixed_begin + static_cast<int64_t>(fixed.page_size);
+                const int64_t candidate_before_max =
+                    fixed_begin - static_cast<int64_t>(candidate.page_size);
+                const int64_t candidate_after_min = fixed_end;
+
+                bool changed = false;
+                if (static_cast<int64_t>(candidate_dom.getMin()) > candidate_before_max)
+                {
+                    changed = candidate_dom.setMin(static_cast<int32_t>(candidate_after_min));
+                }
+                else if (static_cast<int64_t>(candidate_dom.getMax()) < candidate_after_min)
+                {
+                    changed = candidate_dom.setMax(static_cast<int32_t>(candidate_before_max));
+                }
+
+                if (candidate_dom.isEmpty())
+                    return false;
+
+                if (changed)
+                {
+                    state.setDomain(candidate.offset_var, candidate_dom);
+                    candidate.offset_fixed = candidate_dom.isFixed();
+                    if (candidate.offset_fixed)
+                        candidate.page_offset = static_cast<uint32_t>(candidate_dom.fixedValue());
+
+                    LOG(DEBUG) << "[MemoryNonOverlapPropagator] Restricted offset domain for eclass "
+                               << candidate.cid << " against eclass " << fixed.cid << " to "
+                               << candidate_dom.toString();
+                }
+                return true;
+            };
+
+            // Check non-overlap for allocations with overlapping lifetimes.
             for (size_t i = 0; i < allocs.size(); ++i)
             {
                 for (size_t j = i + 1; j < allocs.size(); ++j)
@@ -830,19 +891,34 @@ class MemoryNonOverlapPropagator : public Propagator
                                               allocs[j].end_time <= allocs[i].start_time);
                         if (time_overlap)
                         {
-                            bool space_overlap = !(allocs[i].page_offset + allocs[i].page_size <= allocs[j].page_offset ||
-                                                   allocs[j].page_offset + allocs[j].page_size <= allocs[i].page_offset);
-                            if (space_overlap)
+                            if (allocs[i].offset_fixed && allocs[j].offset_fixed)
                             {
-                                LOG(DEBUG) << "[MemoryNonOverlapPropagator] Lifetime overlap: eclass "
-                                           << allocs[i].cid << " [" << allocs[i].start_time << ","
-                                           << allocs[i].end_time << "] and eclass " << allocs[j].cid << " ["
-                                           << allocs[j].start_time << "," << allocs[j].end_time << "] share pages "
-                                           << allocs[i].page_offset << ".."
-                                           << (allocs[i].page_offset + allocs[i].page_size) << " and "
-                                           << allocs[j].page_offset << ".."
-                                           << (allocs[j].page_offset + allocs[j].page_size);
-                                return false; // Overlap contradiction!
+                                bool space_overlap = !(allocs[i].page_offset + allocs[i].page_size <=
+                                                           allocs[j].page_offset ||
+                                                       allocs[j].page_offset + allocs[j].page_size <=
+                                                           allocs[i].page_offset);
+                                if (space_overlap)
+                                {
+                                    LOG(DEBUG) << "[MemoryNonOverlapPropagator] Lifetime overlap: eclass "
+                                               << allocs[i].cid << " [" << allocs[i].start_time << ","
+                                               << allocs[i].end_time << "] and eclass " << allocs[j].cid << " ["
+                                               << allocs[j].start_time << "," << allocs[j].end_time
+                                               << "] share pages " << allocs[i].page_offset << ".."
+                                               << (allocs[i].page_offset + allocs[i].page_size) << " and "
+                                               << allocs[j].page_offset << ".."
+                                               << (allocs[j].page_offset + allocs[j].page_size);
+                                    return false; // Overlap contradiction!
+                                }
+                            }
+                            else if (allocs[i].offset_fixed)
+                            {
+                                if (!propagateOffsetAgainstFixed(allocs[i], allocs[j]))
+                                    return false;
+                            }
+                            else if (allocs[j].offset_fixed)
+                            {
+                                if (!propagateOffsetAgainstFixed(allocs[j], allocs[i]))
+                                    return false;
                             }
                         }
                     }

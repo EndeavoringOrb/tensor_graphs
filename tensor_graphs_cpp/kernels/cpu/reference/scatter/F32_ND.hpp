@@ -7,11 +7,6 @@
 
 inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 5)
-    {
-        return false;
-    }
-
     // Ensure updates and output have the same rank.  Scatter writes into the
     // already allocated output buffer; it has no target tensor input.
     if (inputs[0].getShape().size() != output.getShape().size())

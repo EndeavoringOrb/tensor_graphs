@@ -552,6 +552,32 @@ struct PreparedKernel
                                 iptr[k] = 1;
                         }
                     }
+                    else if (kernel.opType == OpType::SUM || kernel.opName.find("Sum") != std::string::npos)
+                    {
+                        if (idx == 1)
+                        {
+                            int32_t reduction_axis = 0;
+                            if (!r.inputShapes.empty() && r.inputShapes[0].size() == r.outputShape.size())
+                            {
+                                for (uint64_t d = 0; d < r.inputShapes[0].size(); ++d)
+                                {
+                                    if (r.inputShapes[0][d] != r.outputShape[d] && r.outputShape[d] == 1)
+                                    {
+                                        reduction_axis = static_cast<int32_t>(d);
+                                        break;
+                                    }
+                                }
+                            }
+                            iptr[0] = reduction_axis;
+                            for (uint64_t k = 1; k < elements; ++k)
+                                iptr[k] = reduction_axis;
+                        }
+                        else
+                        {
+                            for (uint64_t k = 0; k < elements; ++k)
+                                iptr[k] = 0;
+                        }
+                    }
                     else
                     {
                         for (uint64_t k = 0; k < elements; ++k)

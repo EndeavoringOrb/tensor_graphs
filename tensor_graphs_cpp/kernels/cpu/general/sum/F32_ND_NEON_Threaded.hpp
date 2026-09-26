@@ -25,6 +25,10 @@ inline bool matchSumF32_ND_Threaded(const std::vector<TensorNode> &inputs, const
 
 inline void runSumF32_ND_Threaded(const KernelContext &ctx)
 {
+    if (ctx.inputs.size() < 2 || ctx.outputs.empty() || ctx.inViews.empty() || ctx.outViews.empty() ||
+        ctx.inputs[0] == nullptr || ctx.inputs[1] == nullptr || ctx.outputs[0] == nullptr)
+        return;
+
     const float *in = static_cast<const float *>(ctx.inputs[0]);
     float *out = static_cast<float *>(ctx.outputs[0]);
     const auto &shape = ctx.inViews[0].getShape();
@@ -33,6 +37,16 @@ inline void runSumF32_ND_Threaded(const KernelContext &ctx)
     int32_t axis = *static_cast<const int32_t *>(ctx.inputs[1]);
     if (axis < 0)
         axis += ndim;
+    if (axis < 0 || axis >= ndim || ctx.outViews[0].getShape().size() != shape.size())
+        return;
+
+    const auto &out_shape = ctx.outViews[0].getShape();
+    for (int32_t d = 0; d < ndim; ++d)
+    {
+        uint32_t expected = d == axis ? 1 : shape[d];
+        if (out_shape[d] != expected)
+            return;
+    }
 
     // Calculate ND strides generalized into Outer, Mid (axis), and Inner
     uint64_t outer = 1, mid = shape[axis], inner = 1;

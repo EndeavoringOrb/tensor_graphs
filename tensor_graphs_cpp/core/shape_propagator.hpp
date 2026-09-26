@@ -178,7 +178,7 @@ inline WorkloadMetrics computeWorkloadFromRefFactory(
             }
 
             LogicalId in_id = ref_graph.input(in_shapes[i], dt);
-            if (provided != nullptr)
+            if (provided != nullptr && provided->size() == expected_bytes)
             {
                 ref_graph.constantStaging[in_id] = std::make_shared<std::vector<uint8_t>>(*provided);
                 ref_graph.input_data_types[in_id] = InputDataType::CONSTANT;
@@ -190,6 +190,34 @@ inline WorkloadMetrics computeWorkloadFromRefFactory(
         if (!ref_graph.hasNode(root_id))
         {
             return op_common::defaultWorkload(in_shapes, in_dtypes, out_shape, out_dtype, 0.0);
+        }
+
+        // A reference factory may route one of its runtime inputs into a
+        // primitive's shape-control slot.  Such an input is not a constant in
+        // the execution graph, and benchmark records legitimately leave its
+        // bytes empty.  Do not let that reach Graph::getConstantInt32(): it
+        // reports an error before the workload fallback can handle it.
+        //
+        // Constants created by the factory, and valid bytes supplied by a
+        // benchmark record, are both present in constantStaging.  Missing or
+        // malformed control data means this speculative workload cannot be
+        // inferred reliably, so use the normal fallback immediately.
+        for (const auto &[node_id, node] : ref_graph.nodes)
+        {
+            for (size_t input_idx = 0; input_idx < node.child_ids.size(); ++input_idx)
+            {
+                if (!isConstant(node.opType, input_idx, node.child_ids.size()))
+                    continue;
+
+                LogicalId child_id = node.child_ids[input_idx];
+                auto staging_it = ref_graph.constantStaging.find(child_id);
+                if (staging_it == ref_graph.constantStaging.end() || !ref_graph.hasNode(child_id) ||
+                    staging_it->second->size() !=
+                        getSizeBytes(ref_graph.getNode(child_id).getShape(), ref_graph.getNode(child_id).dtype))
+                {
+                    return op_common::defaultWorkload(in_shapes, in_dtypes, out_shape, out_dtype, 0.0);
+                }
+            }
         }
 
         ShapePropagator prop;
