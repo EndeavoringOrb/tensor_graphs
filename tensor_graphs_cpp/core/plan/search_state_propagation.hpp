@@ -40,6 +40,17 @@ inline void SearchState::ensurePropagationState() const
     data.buckets.resize(buckets.size());
     data.cost.initialize(buckets.size());
 
+    data.topo_path_visited_stamp.assign(numVars(), 0);
+    data.topo_path_stamp = 0;
+    data.topo_ancestor_visited_stamp.assign(numVars(), 0);
+    data.topo_ancestor_stamp = 0;
+    data.topo_affected_stamp.assign(numVars(), 0);
+    data.topo_aff_stamp = 0;
+    data.mem_alloc_visited_stamp.assign(numVars(), 0);
+    data.mem_alloc_stamp = 0;
+    data.mem_affected_stamp.assign(numVars(), 0);
+    data.mem_prop_aff_stamp = 0;
+
     for (uint32_t b = 0; b < buckets.size(); ++b)
     {
         std::unordered_map<Engine, uint32_t> engine_indices;

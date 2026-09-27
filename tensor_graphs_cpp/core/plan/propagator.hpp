@@ -194,20 +194,45 @@ class TopologicalOrderPropagator : public Propagator
 {
     bool hasFixedPath(const SearchState &state, VarId from, VarId target) const
     {
-        std::vector<VarId> frontier{from};
-        std::unordered_set<VarId> visited;
-        for (size_t head = 0; head < frontier.size(); ++head)
+        if (from == target)
+            return true;
+        if (from == kInvalidVarId || target == kInvalidVarId)
+            return false;
+
+        auto &data = state.propagation;
+        const size_t num_vars = state.numVars();
+        if (data.topo_path_visited_stamp.size() < num_vars)
         {
-            const VarId current = frontier[head];
-            if (current == target)
-                return true;
-            if (current == kInvalidVarId || !visited.insert(current).second)
-                continue;
+            data.topo_path_visited_stamp.assign(num_vars, 0);
+            data.topo_path_stamp = 0;
+        }
+        if (++data.topo_path_stamp == 0)
+        {
+            data.topo_path_visited_stamp.assign(num_vars, 0);
+            data.topo_path_stamp = 1;
+        }
+
+        data.topo_path_frontier.clear();
+        data.topo_path_frontier.push_back(from);
+        data.topo_path_visited_stamp[from] = data.topo_path_stamp;
+
+        for (size_t head = 0; head < data.topo_path_frontier.size(); ++head)
+        {
+            const VarId current = data.topo_path_frontier[head];
             const int32_t index = state.selectedAlternative(current);
             if (index >= 0)
             {
                 const auto &children = state.propagation.alternatives[current][index].children;
-                frontier.insert(frontier.end(), children.begin(), children.end());
+                for (VarId child : children)
+                {
+                    if (child == target)
+                        return true;
+                    if (child != kInvalidVarId && data.topo_path_visited_stamp[child] != data.topo_path_stamp)
+                    {
+                        data.topo_path_visited_stamp[child] = data.topo_path_stamp;
+                        data.topo_path_frontier.push_back(child);
+                    }
+                }
             }
         }
         return false;
@@ -225,14 +250,26 @@ class TopologicalOrderPropagator : public Propagator
                 continue;
             for (VarId child : alternatives[index].children)
             {
-                const bool cycle = hasFixedPath(state, child, sel_var);
-                if (was_fixed)
+                if (child == sel_var)
                 {
-                    if (cycle)
+                    if (was_fixed)
                         return false;
+                    selection.remove(value);
+                    break;
                 }
-                else if (cycle || child == kInvalidVarId || state.domains[child].getMax() <= 0)
+                if (child == kInvalidVarId || state.domains[child].getMax() <= 0)
                 {
+                    if (!was_fixed)
+                    {
+                        selection.remove(value);
+                        break;
+                    }
+                    continue;
+                }
+                if (hasFixedPath(state, child, sel_var))
+                {
+                    if (was_fixed)
+                        return false;
                     selection.remove(value);
                     break;
                 }
@@ -273,45 +310,89 @@ class TopologicalOrderPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        const VarType type = state.var_infos[changed].type;
-        if (type != VarType::SELECTED && type != VarType::START)
-            return true;
+        if (changed != kInvalidVarId)
+        {
+            const VarType type = state.var_infos[changed].type;
+            if (type != VarType::SELECTED && type != VarType::START)
+                return true;
+        }
         state.ensurePropagationState();
-        const auto &data = state.propagation;
-        const VarId owner = data.owners[changed];
-        if (owner == kInvalidVarId)
+        auto &data = state.propagation;
+        const VarId owner = (changed != kInvalidVarId) ? data.owners[changed] : kInvalidVarId;
+        if (owner == kInvalidVarId && changed != kInvalidVarId)
             return true;
+
+        const VarType type = (changed != kInvalidVarId) ? state.var_infos[changed].type : VarType::SELECTED;
         if (type == VarType::START)
         {
             const int32_t index = state.selectedAlternative(owner);
             if (index < 0 || data.alternatives[owner][index].start_var != changed)
                 return true;
         }
-        else
+        else if (owner != kInvalidVarId)
         {
             // A new fixed edge can close a cycle only in an alternative whose
             // child reaches this node through fixed edges. Walk those ancestors
             // and inspect their possible parents, including unfixed alternatives.
-            std::vector<VarId> frontier{owner};
-            std::unordered_set<VarId> visited{owner};
-            std::unordered_set<VarId> affected{owner};
-            for (size_t head = 0; head < frontier.size(); ++head)
-                for (VarId parent : data.parents[frontier[head]])
+            const size_t num_vars = state.numVars();
+            if (data.topo_ancestor_visited_stamp.size() < num_vars)
+            {
+                data.topo_ancestor_visited_stamp.assign(num_vars, 0);
+                data.topo_ancestor_stamp = 0;
+                data.topo_affected_stamp.assign(num_vars, 0);
+                data.topo_aff_stamp = 0;
+            }
+            if (++data.topo_ancestor_stamp == 0)
+            {
+                data.topo_ancestor_visited_stamp.assign(num_vars, 0);
+                data.topo_ancestor_stamp = 1;
+            }
+            if (++data.topo_aff_stamp == 0)
+            {
+                data.topo_affected_stamp.assign(num_vars, 0);
+                data.topo_aff_stamp = 1;
+            }
+
+            data.topo_ancestor_frontier.clear();
+            data.topo_ancestor_frontier.push_back(owner);
+            data.topo_ancestor_visited_stamp[owner] = data.topo_ancestor_stamp;
+
+            data.topo_affected_vars.clear();
+            data.topo_affected_vars.push_back(owner);
+            data.topo_affected_stamp[owner] = data.topo_aff_stamp;
+
+            for (size_t head = 0; head < data.topo_ancestor_frontier.size(); ++head)
+            {
+                const VarId curr = data.topo_ancestor_frontier[head];
+                for (VarId parent : data.parents[curr])
                 {
                     if (!state.domains[parent].isFixed())
-                        affected.insert(parent);
-                    if (state.isSelectedParent(parent, frontier[head]) && visited.insert(parent).second)
-                        frontier.push_back(parent);
+                    {
+                        if (data.topo_affected_stamp[parent] != data.topo_aff_stamp)
+                        {
+                            data.topo_affected_stamp[parent] = data.topo_aff_stamp;
+                            data.topo_affected_vars.push_back(parent);
+                        }
+                    }
+                    if (state.isSelectedParent(parent, curr) && data.topo_ancestor_visited_stamp[parent] != data.topo_ancestor_stamp)
+                    {
+                        data.topo_ancestor_visited_stamp[parent] = data.topo_ancestor_stamp;
+                        data.topo_ancestor_frontier.push_back(parent);
+                    }
                 }
-            for (VarId sel_var : affected)
+            }
+            for (VarId sel_var : data.topo_affected_vars)
                 if (!pruneSelection(state, sel_var))
                     return false;
         }
-        if (!propagateStart(state, owner))
-            return false;
-        for (VarId parent : data.parents[owner])
-            if (state.isSelectedParent(parent, owner) && !propagateStart(state, parent))
+        if (owner != kInvalidVarId)
+        {
+            if (!propagateStart(state, owner))
                 return false;
+            for (VarId parent : data.parents[owner])
+                if (state.isSelectedParent(parent, owner) && !propagateStart(state, parent))
+                    return false;
+        }
         return true;
     }
 };
@@ -405,8 +486,11 @@ class MemoryNonOverlapPropagator : public Propagator
         const auto child_it = offsets.find(state.var_infos[alternative.children[0]].eclass_id);
         if (view_it == offsets.end() || child_it == offsets.end() || !state.domains[child_it->second].isFixed())
             return true;
-        Domain offset = state.domains[view_it->second];
         const int32_t value = state.domains[child_it->second].fixedValue();
+        const Domain &curr_offset = state.domains[view_it->second];
+        if (curr_offset.isFixed() && curr_offset.fixedValue() == value)
+            return true;
+        Domain offset = curr_offset;
         offset.setRange(value, value);
         if (offset.isEmpty())
             return false;
@@ -457,18 +541,35 @@ class MemoryNonOverlapPropagator : public Propagator
 
         // Follow consumers through selected views. Only this physical value's
         // lifetime is recomputed; other allocations retain their cached entries.
-        std::vector<VarId> frontier{owner};
-        std::unordered_set<VarId> visited;
+        data.mem_alloc_frontier.clear();
+        data.mem_alloc_frontier.push_back(owner);
+
+        const size_t num_vars = state.numVars();
+        if (data.mem_alloc_visited_stamp.size() < num_vars)
+        {
+            data.mem_alloc_visited_stamp.assign(num_vars, 0);
+            data.mem_alloc_stamp = 0;
+        }
+        if (++data.mem_alloc_stamp == 0)
+        {
+            data.mem_alloc_visited_stamp.assign(num_vars, 0);
+            data.mem_alloc_stamp = 1;
+        }
+        data.mem_alloc_visited_stamp[owner] = data.mem_alloc_stamp;
+
         bool has_consumer = false;
         bool open_lifetime = false;
-        for (size_t head = 0; head < frontier.size(); ++head)
-            for (VarId parent : data.parents[frontier[head]])
+        for (size_t head = 0; head < data.mem_alloc_frontier.size(); ++head)
+        {
+            const VarId curr = data.mem_alloc_frontier[head];
+            for (VarId parent : data.parents[curr])
             {
-                if (!state.isSelectedParent(parent, frontier[head]) || !visited.insert(parent).second)
+                if (!state.isSelectedParent(parent, curr) || data.mem_alloc_visited_stamp[parent] == data.mem_alloc_stamp)
                     continue;
+                data.mem_alloc_visited_stamp[parent] = data.mem_alloc_stamp;
                 const auto &consumer = data.alternatives[parent][state.selectedAlternative(parent)];
                 if (consumer.is_view)
-                    frontier.push_back(parent);
+                    data.mem_alloc_frontier.push_back(parent);
                 else
                 {
                     has_consumer = true;
@@ -478,6 +579,7 @@ class MemoryNonOverlapPropagator : public Propagator
                         open_lifetime = true;
                 }
             }
+        }
         if (!has_consumer || open_lifetime)
         {
             bucket.open_lifetimes.insert(owner);
@@ -516,55 +618,95 @@ class MemoryNonOverlapPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        if (changed != kInvalidVarId)
+        {
+            const VarType type = state.var_infos[changed].type;
+            if (type != VarType::OFFSET && type != VarType::SELECTED && type != VarType::START &&
+                state.propagation.initialized && state.propagation.memory_dirty.empty())
+                return true;
+            if (type == VarType::START && !state.domains[changed].isFixed() &&
+                state.propagation.initialized && state.propagation.memory_dirty.empty())
+                return true;
+        }
+        if (state.propagation.initialized && state.propagation.memory_dirty.empty())
+            return true;
+
         state.ensurePropagationState();
         auto &data = state.propagation;
-        std::unordered_set<VarId> affected;
+
+        const size_t num_vars = state.numVars();
+        if (data.mem_affected_stamp.size() < num_vars)
+        {
+            data.mem_affected_stamp.assign(num_vars, 0);
+            data.mem_prop_aff_stamp = 0;
+        }
+        if (++data.mem_prop_aff_stamp == 0)
+        {
+            data.mem_affected_stamp.assign(num_vars, 0);
+            data.mem_prop_aff_stamp = 1;
+        }
+
+        data.mem_affected_scratch.clear();
         auto fail = [&]() {
-            // A contradiction can interrupt initialization or a batch of
-            // repairs. Preserve all pending work for rollback and replay.
-            data.memory_dirty.insert(affected.begin(), affected.end());
+            for (VarId v : data.mem_affected_scratch)
+                data.memory_dirty.insert(v);
             return false;
         };
+
         // Offset equalities can dirty another view in the same alias chain.
         while (!data.memory_dirty.empty())
         {
             auto dirty = std::move(data.memory_dirty);
             data.memory_dirty.clear();
-            affected.insert(dirty.begin(), dirty.end());
+            for (VarId owner : dirty)
+            {
+                if (data.mem_affected_stamp[owner] != data.mem_prop_aff_stamp)
+                {
+                    data.mem_affected_stamp[owner] = data.mem_prop_aff_stamp;
+                    data.mem_affected_scratch.push_back(owner);
+                }
+            }
             for (VarId owner : dirty)
             {
                 if (!propagateView(state, owner))
                     return fail();
             }
         }
-        for (VarId owner : affected)
+        for (VarId owner : data.mem_affected_scratch)
             if (!updateAllocation(state, owner))
                 return fail();
-        for (VarId owner : affected)
+
+        for (VarId owner : data.mem_affected_scratch)
         {
             const Allocation &allocation = data.allocations[owner];
             if (!allocation.active)
                 continue;
             const auto &bucket = data.buckets[state.var_infos[owner].bucket_idx];
-            for (VarId peer : bucket.allocations.at(allocation.mem_space))
+            const auto it = bucket.allocations.find(allocation.mem_space);
+            if (it == bucket.allocations.end())
+                continue;
+            const bool alloc_fixed = allocation.offset_fixed;
+            for (VarId peer : it->second)
             {
                 if (peer == owner)
                     continue;
                 const Allocation &other = data.allocations[peer];
+                if (!alloc_fixed && !other.offset_fixed)
+                    continue;
                 if (allocation.end <= other.start || other.end <= allocation.start)
                     continue;
-                if (allocation.offset_fixed && other.offset_fixed)
+                if (alloc_fixed && other.offset_fixed)
                 {
                     if (static_cast<uint64_t>(allocation.offset) + allocation.size > other.offset &&
                         static_cast<uint64_t>(other.offset) + other.size > allocation.offset)
                         return fail();
                 }
-                else if (allocation.offset_fixed)
+                else if (alloc_fixed)
                 {
                     if (!restrictOffset(state, allocation, other))
                         return fail();
                 }
-                else if (other.offset_fixed && !restrictOffset(state, other, allocation))
+                else if (!restrictOffset(state, other, allocation))
                     return fail();
             }
         }

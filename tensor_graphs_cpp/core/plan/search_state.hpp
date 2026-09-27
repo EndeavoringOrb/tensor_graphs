@@ -398,6 +398,26 @@ struct PropagationState
     PropagationSumTree cost;
     std::vector<Allocation> allocations;
     std::unordered_set<VarId> memory_dirty;
+
+    // Scratch storage for stateless propagators
+    std::vector<uint32_t> topo_path_visited_stamp;
+    uint32_t topo_path_stamp = 0;
+    std::vector<VarId> topo_path_frontier;
+
+    std::vector<uint32_t> topo_ancestor_visited_stamp;
+    uint32_t topo_ancestor_stamp = 0;
+    std::vector<uint32_t> topo_affected_stamp;
+    uint32_t topo_aff_stamp = 0;
+    std::vector<VarId> topo_ancestor_frontier;
+    std::vector<VarId> topo_affected_vars;
+
+    std::vector<uint32_t> mem_alloc_visited_stamp;
+    uint32_t mem_alloc_stamp = 0;
+    std::vector<VarId> mem_alloc_frontier;
+
+    std::vector<uint32_t> mem_affected_stamp;
+    uint32_t mem_prop_aff_stamp = 0;
+    std::vector<VarId> mem_affected_scratch;
 };
 
 class SearchState
