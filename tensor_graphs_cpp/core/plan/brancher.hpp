@@ -17,8 +17,8 @@ namespace plan
 
 struct BranchDecision
 {
-    std::vector<std::pair<VarId, Domain>> left_delta;
-    std::vector<std::pair<VarId, Domain>> right_delta;
+    std::pair<VarId, Domain> left_delta;
+    std::pair<VarId, Domain> right_delta;
 };
 
 class Brancher
@@ -177,8 +177,8 @@ class HeuristicBrancher : public Brancher
         if (right.isEmpty())
             return false;
 
-        out_decision.left_delta.push_back({var_id, makeFixedLike(domain, preferred)});
-        out_decision.right_delta.push_back({var_id, right});
+        out_decision.left_delta = {var_id, makeFixedLike(domain, preferred)};
+        out_decision.right_delta = {var_id, right};
         return true;
     }
 
@@ -348,8 +348,8 @@ class HeuristicBrancher : public Brancher
   public:
     bool chooseBranch(const SearchState &state, BranchDecision &out_decision) override
     {
-        out_decision.left_delta.clear();
-        out_decision.right_delta.clear();
+        out_decision.left_delta = {kInvalidVarId, Domain{}};
+        out_decision.right_delta = {kInvalidVarId, Domain{}};
 
         // First satisfy selections forced by the currently selected DAG.
         if (chooseSelection(state, out_decision, true))

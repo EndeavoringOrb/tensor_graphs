@@ -1769,6 +1769,7 @@ struct Planner
         }
 
         // 2. SEARCH
+        // TODO: move to SearchState constructor
         plan::SearchState search_state;
         search_state.buckets = buckets;
         search_state.bucket_weights = bucket_weights;
@@ -1802,83 +1803,9 @@ struct Planner
             search_state.cached_vars[cand.base_eclass_id] = vid;
         }
 
-        // Variables per bucket: selected, start, offset
-        search_state.selected_vars.resize(buckets.size());
-        search_state.start_vars.resize(buckets.size());
-        search_state.offset_vars.resize(buckets.size());
-
+        // Variables per bucket: omit structurally unreachable classes entirely.
         for (uint32_t b = 0; b < buckets.size(); ++b)
-        {
-            const auto &egraph = search_state.bucket_egraphs[b];
-            EClassId root_cid = search_state.bucket_root_ids[b];
-            uint32_t total_classes = static_cast<uint32_t>(egraph.getClasses().size());
-
-            for (const auto &cls : egraph.getClasses())
-            {
-                EClassId cid = egraph.findConst(cls.id);
-                if (cid != cls.id)
-                    continue;
-
-                uint32_t n_enodes = static_cast<uint32_t>(cls.enodes.size());
-                if (n_enodes > 31)
-                {
-                    Error::throw_err("EClass " + std::to_string(cid.value) + " has " + std::to_string(n_enodes) +
-                                     " enodes, exceeding domain bitmask capacity (max 31).");
-                }
-
-                // selected_<bucket_id>_<eclass_id> in {0, 1, ..., n_enodes}
-                plan::VarInfo sel_info;
-                sel_info.type = plan::VarType::SELECTED;
-                sel_info.bucket_idx = b;
-                sel_info.eclass_id = cid;
-                sel_info.name = "selected_" + std::to_string(b) + "_" + std::to_string(cid.value);
-
-                uint32_t mask = (n_enodes > 0) ? ((1u << (n_enodes + 1)) - 1) : 1u;
-                if (cid == root_cid)
-                {
-                    mask &= ~1u; // Root must be selected
-                }
-
-                plan::VarId sel_vid = search_state.addVar(sel_info, plan::Domain::makeMask(mask));
-                search_state.selected_vars[b][cid] = sel_vid;
-
-                // start_<bucket_id>_<eclass_id>_<enode_id> in [0, len(eclasses)]
-                for (uint32_t en_idx = 0; en_idx < n_enodes; ++en_idx)
-                {
-                    plan::VarInfo st_info;
-                    st_info.type = plan::VarType::START;
-                    st_info.bucket_idx = b;
-                    st_info.eclass_id = cid;
-                    st_info.enode_idx = en_idx;
-                    st_info.name = "start_" + std::to_string(b) + "_" + std::to_string(cid.value) + "_" +
-                                   std::to_string(en_idx);
-
-                    plan::VarId st_vid = search_state.addVar(st_info, plan::Domain::makeRange(0, total_classes));
-                    search_state.start_vars[b][cid].push_back(st_vid);
-                }
-
-                // offset_<bucket_id>_<eclass_id> in [preallocated_pages, max_pages]
-                if (cls.mem_space.type != HandleType::STORAGE)
-                {
-                    plan::VarInfo off_info;
-                    off_info.type = plan::VarType::OFFSET;
-                    off_info.bucket_idx = b;
-                    off_info.eclass_id = cid;
-                    off_info.mem_space = cls.mem_space;
-                    off_info.size_bytes = getSizeBytes(cls.shape, cls.dtype);
-                    off_info.size_pages = search_state.bytesToPages(off_info.size_bytes, cls.mem_space);
-                    off_info.name = "offset_" + std::to_string(b) + "_" + std::to_string(cid.value);
-
-                    uint32_t align = search_state.getPageAlignment(cls.mem_space);
-                    uint64_t cap = search_state.getMemoryCap(cls.mem_space);
-                    uint32_t max_p = (cap > off_info.size_bytes) ? static_cast<uint32_t>((cap - off_info.size_bytes) / align) : 0;
-                    uint32_t min_p = preallocated_pages[cls.mem_space];
-
-                    plan::VarId off_vid = search_state.addVar(off_info, plan::Domain::makeRange(min_p, std::max(min_p, max_p)));
-                    search_state.offset_vars[b][cid] = off_vid;
-                }
-            }
-        }
+            search_state.addBucketVariables(b);
 
         // Set up SearchEngine with Propagators and Selector
         LOG(DEBUG) << "[Planner.planAll] Initializing SearchEngine with " << search_state.numVars()

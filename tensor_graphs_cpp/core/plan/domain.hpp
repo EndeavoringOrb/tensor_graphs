@@ -74,7 +74,7 @@ struct Domain
     {
         if (is_mask)
             return mask != 0 && (mask & (mask - 1)) == 0;
-        return min_val == max_val && min_val <= max_val;
+        return min_val == max_val;
     }
 
     int32_t fixedValue() const

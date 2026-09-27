@@ -21,17 +21,8 @@ class Propagator
     virtual ~Propagator() = default;
     virtual std::string name() const = 0;
 
-    // Return whether this constraint can read a variable of the given type.
-    // The scheduler uses this conservative dependency information to wake
-    // only propagators whose inputs may have changed.
-    virtual bool watches(VarType type) const
-    {
-        (void)type;
-        return true;
-    }
-
     // Shrinks variable domains in state. Returns false on contradiction.
-    virtual bool propagate(SearchState &state) = 0;
+    virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;
 
     // Returns a lower bound on total makespan / cost.
     virtual float computeLowerBound(const SearchState &state)
@@ -56,115 +47,56 @@ class SelectionPropagator : public Propagator
         return "SelectionPropagator";
     }
 
-    bool watches(VarType type) const override
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        return type == VarType::SELECTED;
-    }
+        VarInfo info = state.var_infos[changed];
+        if (info.type != VarType::SELECTED)
+            return true;
+        EClassId cid = info.eclass_id;
+        VarId v = state.selected_vars[info.bucket_idx].at(cid);
+        const Domain &dom = state.domains[v];
+        if (dom.isEmpty())
+            return false;
 
-    bool propagate(SearchState &state) override
-    {
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        // For each eclass that is definitely selected and fixed to enode e,
+        // all children of enode e cannot be 0.
+        if (dom.isFixed() && dom.fixedValue() > 0)
         {
-            EClassId root_id = state.bucket_root_ids[b];
-            VarId root_var = state.selected_vars[b].at(root_id);
-
-            // Constraint: root eclass must be selected (cannot be 0)
-            Domain root_dom = state.domains[root_var];
-            if (root_dom.contains(0))
+            uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
+            const EClass &cls = state.bucket_egraphs[info.bucket_idx].getEClass(cid);
+            if (en_idx < cls.enodes.size())
             {
-                root_dom.remove(0);
-                if (root_dom.isEmpty())
-                    return false;
-                state.setDomain(root_var, root_dom);
-            }
-
-            // Propagate selection implications:
-            // For each eclass that is definitely selected and fixed to enode e,
-            // all children of enode e cannot be 0.
-            for (EClassId cid : getReachableCids(state, b))
-            {
-                VarId v = state.selected_vars[b].at(cid);
-                const Domain &dom = state.domains[v];
-                if (dom.isEmpty())
-                    return false;
-
-                if (dom.isFixed() && dom.fixedValue() > 0)
+                ENodeId en_id = cls.enodes[en_idx];
+                const ENode &enode = state.bucket_egraphs[info.bucket_idx].getENode(en_id);
+                for (EClassId child : enode.getChildren())
                 {
-                    uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
-                    const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                    if (en_idx < cls.enodes.size())
+                    EClassId canon_child = state.bucket_egraphs[info.bucket_idx].findConst(child);
+                    auto ch_it = state.selected_vars[info.bucket_idx].find(canon_child);
+                    if (ch_it != state.selected_vars[info.bucket_idx].end())
                     {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                        for (EClassId child : enode.getChildren())
+                        VarId ch_v = ch_it->second;
+                        Domain ch_dom = state.domains[ch_v];
+                        if (ch_dom.contains(0))
                         {
-                            EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                            auto ch_it = state.selected_vars[b].find(canon_child);
-                            if (ch_it != state.selected_vars[b].end())
-                            {
-                                VarId ch_v = ch_it->second;
-                                Domain ch_dom = state.domains[ch_v];
-                                if (ch_dom.contains(0))
-                                {
-                                    ch_dom.remove(0);
-                                    if (ch_dom.isEmpty())
-                                        return false;
-                                    state.setDomain(ch_v, ch_dom);
-                                }
-                            }
+                            ch_dom.remove(0);
+                            if (ch_dom.isEmpty())
+                                return false;
+                            state.setDomain(ch_v, ch_dom);
                         }
                     }
                 }
             }
+        }
 
-            // An e-class is only allowed to remain selectable when some
-            // currently possible nonzero parent selection can reach it from
-            // the root. Without this support pass, every structurally
-            // reachable e-class remains in {0, 1, ...} forever, forcing the
-            // brancher to enumerate alternatives that are already outside
-            // the current hyperbox's selected DAG.
-            std::unordered_set<EClassId> potentially_reachable;
-            std::vector<EClassId> frontier = {root_id};
-            potentially_reachable.insert(root_id);
-            size_t frontier_head = 0;
-            while (frontier_head < frontier.size())
-            {
-                EClassId cid = frontier[frontier_head++];
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-
-                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
-                {
-                    int32_t value = static_cast<int32_t>(en_idx + 1);
-                    if (!sel_dom.contains(value))
-                        continue;
-
-                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                    for (EClassId child : enode.getChildren())
-                    {
-                        EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                        if (state.selected_vars[b].find(canon_child) != state.selected_vars[b].end() &&
-                            potentially_reachable.insert(canon_child).second)
-                        {
-                            frontier.push_back(canon_child);
-                        }
-                    }
-                }
-            }
-
-            for (EClassId cid : getReachableCids(state, b))
-            {
-                if (cid == root_id || potentially_reachable.count(cid) != 0)
-                    continue;
-
-                VarId sel_v = state.selected_vars[b].at(cid);
-                Domain sel_dom = state.domains[sel_v];
-                if (!sel_dom.contains(0))
-                    return false;
-                if (!sel_dom.isFixed())
-                    state.setDomain(sel_v, Domain::makeFixed(0, true));
-            }
+        std::vector<VarId> unreachable;
+        state.updateSelectionReachability(changed, unreachable);
+        for (VarId sel_v : unreachable)
+        {
+            const Domain &sel_dom = state.domains[sel_v];
+            if (!sel_dom.contains(0))
+                return false;
+            if (!sel_dom.isFixed())
+                state.setDomain(sel_v, Domain::makeFixed(0, sel_dom.is_mask));
         }
         return true;
     }
@@ -178,12 +110,7 @@ class CachePropagator : public Propagator
         return "CachePropagator";
     }
 
-    bool watches(VarType type) const override
-    {
-        return type == VarType::SELECTED || type == VarType::CACHED;
-    }
-
-    bool propagate(SearchState &state) override
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         // 1. Check CACHE and SCATTER dependencies on cached_vars
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
@@ -305,12 +232,7 @@ class TopologicalOrderPropagator : public Propagator
         return "TopologicalOrderPropagator";
     }
 
-    bool watches(VarType type) const override
-    {
-        return type == VarType::SELECTED || type == VarType::START;
-    }
-
-    bool propagate(SearchState &state) override
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
@@ -512,12 +434,7 @@ class EngineSchedulePropagator : public Propagator
         return "EngineSchedulePropagator";
     }
 
-    bool watches(VarType type) const override
-    {
-        return type == VarType::SELECTED || type == VarType::START;
-    }
-
-    bool propagate(SearchState &state) override
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         // Enforce: only one op can run at a time per engine
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
@@ -622,12 +539,7 @@ class MemoryNonOverlapPropagator : public Propagator
         return "MemoryNonOverlapPropagator";
     }
 
-    bool watches(VarType type) const override
-    {
-        return type == VarType::SELECTED || type == VarType::START || type == VarType::OFFSET;
-    }
-
-    bool propagate(SearchState &state) override
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
@@ -974,11 +886,6 @@ class CostLowerBoundPropagator : public Propagator
         return "CostLowerBoundPropagator";
     }
 
-    bool watches(VarType type) const override
-    {
-        return type == VarType::SELECTED;
-    }
-
     void setBestCost(float c)
     {
         best_cost = c;
@@ -1028,7 +935,7 @@ class CostLowerBoundPropagator : public Propagator
         return total_lb;
     }
 
-    bool propagate(SearchState &state) override
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         float lb = computeLowerBound(state);
         return lb < best_cost;

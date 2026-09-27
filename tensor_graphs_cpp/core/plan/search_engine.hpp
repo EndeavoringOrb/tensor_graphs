@@ -66,8 +66,6 @@ class SearchEngine
     void addPropagator(std::unique_ptr<Propagator> prop)
     {
         propagators.push_back(std::move(prop));
-        propagator_dependencies_built = false;
-        propagation_initialized = false;
 #ifdef TG_PROFILE
         propagator_timings.emplace_back();
 #endif
@@ -115,17 +113,15 @@ class SearchEngine
         for (int k = j; k >= 0; --k)
         {
             uint32_t nid = target_path[k];
-            for (const auto &p : all_nodes[nid]->delta)
-            {
-                state.setDomain(p.first, p.second);
-            }
+            state.setDomain(all_nodes[nid]->delta.first, all_nodes[nid]->delta.second);
             float lb = 0.0f;
             std::string conflict_reason;
-            if (!runPropagators(lb, &conflict_reason))
+            if (!runPropagators(lb, all_nodes[nid]->delta.first, &conflict_reason))
             {
                 LOG(DEBUG) << "[SearchEngine] Pruned hyperbox node " << nid
                            << " while restoring: " << conflict_reason;
                 current_node_id = (k < static_cast<int>(target_path.size()) - 1) ? target_path[k + 1] : lca;
+                state.backtrackTo(current_node_id == UINT32_MAX ? 0 : all_nodes[current_node_id]->trail_marker);
                 return false;
             }
             all_nodes[nid]->lower_bound = lb;
@@ -136,95 +132,80 @@ class SearchEngine
         return true;
     }
 
-    bool runPropagators(float &out_lower_bound, std::string *out_conflict_reason = nullptr)
+    bool runPropagators(float &out_lower_bound, VarId changed, std::string *out_conflict_reason = nullptr)
     {
         if (out_conflict_reason)
             out_conflict_reason->clear();
 
-        buildPropagatorDependencies();
-
-        std::vector<size_t> worklist;
-        std::vector<uint8_t> queued(propagators.size(), 0);
-        auto enqueuePropagator = [&](size_t prop_idx) {
-            if (!queued[prop_idx])
+        std::vector<VarId> worklist;
+        std::vector<bool> queued(state.numVars(), false);
+        auto enqueue = [&](VarId var_id) {
+            if (var_id != kInvalidVarId && !queued[var_id])
             {
-                queued[prop_idx] = 1;
-                worklist.push_back(prop_idx);
+                queued[var_id] = true;
+                worklist.push_back(var_id);
             }
         };
-        auto enqueueForVar = [&](VarId var_id) {
-            if (var_id >= state.var_infos.size())
-                return;
-            const auto &watchers = propagator_dependencies[static_cast<size_t>(state.var_infos[var_id].type)];
-            for (size_t prop_idx : watchers)
-                enqueuePropagator(prop_idx);
-        };
-
-        const std::vector<VarId> dirty_domains = state.takeDirtyDomains();
-        if (!propagation_initialized)
-        {
-            for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
-                enqueuePropagator(prop_idx);
-            propagation_initialized = true;
-        }
-        else
-        {
-            for (VarId var_id : dirty_domains)
-                enqueueForVar(var_id);
-        }
+        enqueue(changed);
+        for (VarId var_id : state.takeDirtyDomains())
+            enqueue(var_id);
 
         size_t worklist_head = 0;
         while (worklist_head < worklist.size())
         {
-            const size_t prop_idx = worklist[worklist_head++];
-            queued[prop_idx] = 0;
-            auto &prop = propagators[prop_idx];
-#ifdef TG_PROFILE
-            auto propagate_start = std::chrono::steady_clock::now();
-#endif
-            bool propagated = prop->propagate(state);
-#ifdef TG_PROFILE
-            const uint64_t propagate_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - propagate_start)
-                    .count());
-            auto &timing = propagator_timings[prop_idx];
-            timing.propagate_calls++;
-            timing.propagate_ns += propagate_ns;
-            timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
-            if (!propagated)
-                timing.contradictions++;
-            propagator_calls_since_report++;
-#endif
-            if (!propagated)
-            {
-                if (out_conflict_reason)
-                    *out_conflict_reason = prop->name();
-#ifdef TG_PROFILE
-                maybeReportPropagatorTimings();
-#endif
-                return false;
-            }
+            LOG(DEBUG) << "propagator worklist pos: " << worklist_head << "/" << worklist.size();
+            const VarId next_changed = worklist[worklist_head++];
+            queued[next_changed] = false;
 
-            if (state.hasEmptyDomain())
+            for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
             {
-                if (out_conflict_reason)
+                auto &prop = propagators[prop_idx];
+#ifdef TG_PROFILE
+                auto propagate_start = std::chrono::steady_clock::now();
+#endif
+                bool propagated = prop->propagate(state, next_changed, worklist);
+#ifdef TG_PROFILE
+                const uint64_t propagate_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - propagate_start)
+                        .count());
+                auto &timing = propagator_timings[prop_idx];
+                timing.propagate_calls++;
+                timing.propagate_ns += propagate_ns;
+                timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
+                if (!propagated)
+                    timing.contradictions++;
+                propagator_calls_since_report++;
+#endif
+                if (!propagated)
                 {
-                    VarId empty_var = state.getEmptyDomainVar();
-                    *out_conflict_reason = prop->name() + " emptied ";
-                    if (empty_var != kInvalidVarId && empty_var < state.var_infos.size())
-                        *out_conflict_reason += state.var_infos[empty_var].name;
-                    else
-                        *out_conflict_reason += "a domain";
-                }
+                    if (out_conflict_reason)
+                        *out_conflict_reason = prop->name();
 #ifdef TG_PROFILE
-                maybeReportPropagatorTimings();
+                    maybeReportPropagatorTimings();
 #endif
-                return false;
-            }
+                    return false;
+                }
 
-            for (VarId var_id : state.takeDirtyDomains())
-                enqueueForVar(var_id);
+                if (state.hasEmptyDomain())
+                {
+                    if (out_conflict_reason)
+                    {
+                        VarId empty_var = state.getEmptyDomainVar();
+                        *out_conflict_reason = prop->name() + " emptied ";
+                        if (empty_var != kInvalidVarId && empty_var < state.var_infos.size())
+                            *out_conflict_reason += state.var_infos[empty_var].name;
+                        else
+                            *out_conflict_reason += "a domain";
+                    }
+#ifdef TG_PROFILE
+                    maybeReportPropagatorTimings();
+#endif
+                    return false;
+                }
+                for (VarId var_id : state.takeDirtyDomains())
+                    enqueue(var_id);
+            }
         }
 
         out_lower_bound = 0.0f;
@@ -249,29 +230,6 @@ class SearchEngine
         maybeReportPropagatorTimings();
 #endif
         return true;
-    }
-
-  private:
-    std::array<std::vector<size_t>, 4> propagator_dependencies;
-    bool propagator_dependencies_built = false;
-    bool propagation_initialized = false;
-
-    void buildPropagatorDependencies()
-    {
-        if (propagator_dependencies_built)
-            return;
-
-        for (auto &watchers : propagator_dependencies)
-            watchers.clear();
-        for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
-        {
-            for (size_t type = 0; type < propagator_dependencies.size(); ++type)
-            {
-                if (propagators[prop_idx]->watches(static_cast<VarType>(type)))
-                    propagator_dependencies[type].push_back(prop_idx);
-            }
-        }
-        propagator_dependencies_built = true;
     }
 
   public:
@@ -492,83 +450,13 @@ class SearchEngine
                    << ", buckets=" << state.buckets.size()
                    << ", timeout=" << timeout_seconds << "s";
 
-        // 0. Initial structural reachability from root across all buckets
-        state.reachable_cids.clear();
-        state.reachable_cids.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
-            EClassId root_id = state.bucket_root_ids[b];
-            std::unordered_set<EClassId> reachable;
-            std::vector<EClassId> frontier = {root_id};
-            reachable.insert(root_id);
-
-            while (!frontier.empty())
-            {
-                EClassId curr_cid = frontier.back();
-                frontier.pop_back();
-
-                const EClass &cls = state.bucket_egraphs[b].getEClass(curr_cid);
-                for (ENodeId en_id : cls.enodes)
-                {
-                    const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                    for (EClassId ch : enode.getChildren())
-                    {
-                        EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
-                        if (reachable.insert(canon_ch).second)
-                        {
-                            frontier.push_back(canon_ch);
-                        }
-                    }
-                }
-            }
-
-            for (EClassId cid : reachable)
-            {
-                state.reachable_cids[b].push_back(cid);
-            }
-
-            for (const auto &pair : state.selected_vars[b])
-            {
-                EClassId cid = pair.first;
-                if (reachable.find(cid) == reachable.end())
-                {
-                    VarId v = pair.second;
-                    state.domains[v] = Domain::makeFixed(0);
-
-                    auto off_it = state.offset_vars[b].find(cid);
-                    if (off_it != state.offset_vars[b].end())
-                    {
-                        state.domains[off_it->second] = Domain::makeFixed(0);
-                    }
-                    auto st_it = state.start_vars[b].find(cid);
-                    if (st_it != state.start_vars[b].end())
-                    {
-                        for (VarId st_v : st_it->second)
-                            state.domains[st_v] = Domain::makeFixed(0);
-                    }
-                }
-            }
-        }
-
         // 1. Root node
-        auto root_node = std::make_shared<SearchNode>(0, UINT32_MAX, std::vector<std::pair<VarId, Domain>>{}, 0.0f,
+        auto root_node = std::make_shared<SearchNode>(0, UINT32_MAX, std::make_pair(kInvalidVarId, Domain{}), 0.0f,
                                                       0.0f, 0);
         all_nodes.push_back(root_node);
         current_node_id = 0;
 
-        float root_lb = 0.0f;
-        std::string root_conflict;
-        if (!runPropagators(root_lb, &root_conflict))
-        {
-            LOG(WARNING) << "[SearchEngine] Root hyperbox pruned during initial propagation: "
-                         << root_conflict;
-            return false;
-        }
-
-        LOG(DEBUG) << "[SearchEngine] Initial root propagation succeeded: root LB=" << root_lb;
-
-        root_node->lower_bound = root_lb;
-        root_node->priority = root_lb;
+        root_node->priority = root_node->lower_bound;
         root_node->trail_marker = state.getTrailMarker();
         selector->push(root_node);
 
@@ -595,7 +483,7 @@ class SearchEngine
                 continue;
 
             iterations++;
-            if (iterations == 1 || iterations % 50 == 0 || iterations >= 1345)
+            if (iterations < 50 || iterations % 50 == 0)
             {
                 LOG(DEBUG) << "[SearchEngine] Iter " << iterations
                            << " | Queue: " << selector->size()
@@ -659,44 +547,31 @@ class SearchEngine
                 continue;
             }
 
-            if (iterations <= 25 || iterations % 50 == 0 || iterations >= 1345)
+            if (iterations <= 25 || iterations % 50 == 0)
             {
-                if (decision.left_delta.size() == 1)
-                {
-                    VarId branch_var = decision.left_delta[0].first;
-                    LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": branching on var " << branch_var
-                               << " (" << state.var_infos[branch_var].name << ") [dom: " << state.domains[branch_var].toString()
-                               << "] -> Left: " << decision.left_delta[0].second.toString()
-                               << ", Right: " << (decision.right_delta.empty() ? "{}" : decision.right_delta[0].second.toString());
-                }
-                else
-                {
-                    LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": bulk assigning "
-                               << decision.left_delta.size() << " variables (start times & memory offsets)";
-                }
+                VarId branch_var = decision.left_delta.first;
+                LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": branching on var " << branch_var
+                            << " (" << state.var_infos[branch_var].name << ") [dom: " << state.domains[branch_var].toString()
+                            << "] -> Left: " << decision.left_delta.second.toString()
+                            << ", Right: " << decision.right_delta.second.toString();
             }
 
             // 1. Create Right Child (lazy alternative, pushed to queue without upfront propagation)
-            if (!decision.right_delta.empty())
-            {
-                uint32_t right_id = static_cast<uint32_t>(all_nodes.size());
-                float right_lb = node->lower_bound;
-                float right_prio = right_lb + 1.0f;
-                auto right_node = std::make_shared<SearchNode>(
-                    right_id, node->id, decision.right_delta, right_lb,
-                    right_prio, node->depth + 1);
-                all_nodes.push_back(right_node);
-                selector->push(right_node);
-            }
+            uint32_t right_id = static_cast<uint32_t>(all_nodes.size());
+            float right_lb = node->lower_bound;
+            float right_prio = right_lb + 1.0f;
+            auto right_node = std::make_shared<SearchNode>(
+                right_id, node->id, decision.right_delta, right_lb,
+                right_prio, node->depth + 1);
+            all_nodes.push_back(right_node);
+            selector->push(right_node);
 
             // 2. Create Left Child (dive immediately in place!)
-            for (const auto &p : decision.left_delta)
-            {
-                state.setDomain(p.first, p.second);
-            }
+            // TODO: should it go back to the selector to choose once left/right are added instead of always choosing left? 
+            state.setDomain(decision.left_delta.first, decision.left_delta.second);
             float left_lb = 0.0f;
             std::string left_conflict;
-            bool left_ok = runPropagators(left_lb, &left_conflict);
+            bool left_ok = runPropagators(left_lb, decision.left_delta.first, &left_conflict);
             if (left_ok && left_lb < incumbent_best_cost)
             {
                 uint32_t left_id = static_cast<uint32_t>(all_nodes.size());

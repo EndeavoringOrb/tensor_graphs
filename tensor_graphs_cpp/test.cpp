@@ -10,6 +10,7 @@
 #include "tests/input_hashcons.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
+#include "tests/selection_reachability.hpp"
 #include "tests/shape_propagation.hpp"
 #include "tests/storage_output_regression.hpp"
 #include "tests/view_bufferize_regression.hpp"
@@ -22,6 +23,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
     parser.add_flag({"--view-reg"}, "Run only view and bufferize regression tests.");
+    parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -37,6 +39,11 @@ int main(int argc, char *argv[])
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--selection-reachability"))
+    {
+        runSelectionReachabilityTests();
+        return 0;
+    }
     if (parser.get_flag("--cuda-sync"))
     {
         runCudaSyncRegressionTests();
@@ -53,6 +60,7 @@ int main(int argc, char *argv[])
     {
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
+        runSelectionReachabilityTests();
         runShapePropagationTests();
         runInputHashconsTests();
         testStorageOutputMatching();
