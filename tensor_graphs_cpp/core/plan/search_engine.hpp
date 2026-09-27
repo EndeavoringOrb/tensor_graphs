@@ -151,9 +151,13 @@ class SearchEngine
             enqueue(var_id);
 
         size_t worklist_head = 0;
+        auto preservePendingWork = [&]() {
+            for (size_t i = worklist_head - 1; i < worklist.size(); ++i)
+                state.schedulePropagation(worklist[i]);
+        };
         while (worklist_head < worklist.size())
         {
-            LOG(DEBUG) << "propagator worklist pos: " << worklist_head << "/" << worklist.size();
+            // LOG(DEBUG) << "propagator worklist pos: " << worklist_head << "/" << worklist.size();
             const VarId next_changed = worklist[worklist_head++];
             queued[next_changed] = false;
 
@@ -179,6 +183,7 @@ class SearchEngine
 #endif
                 if (!propagated)
                 {
+                    preservePendingWork();
                     if (out_conflict_reason)
                         *out_conflict_reason = prop->name();
 #ifdef TG_PROFILE
@@ -189,6 +194,7 @@ class SearchEngine
 
                 if (state.hasEmptyDomain())
                 {
+                    preservePendingWork();
                     if (out_conflict_reason)
                     {
                         VarId empty_var = state.getEmptyDomainVar();
@@ -229,6 +235,14 @@ class SearchEngine
 #ifdef TG_PROFILE
         maybeReportPropagatorTimings();
 #endif
+        // An incumbent can improve without changing a domain (for example
+        // after restoring an already-propagated node).
+        if (out_lower_bound >= state.best_cost)
+        {
+            if (out_conflict_reason)
+                *out_conflict_reason = "CostLowerBoundPropagator";
+            return false;
+        }
         return true;
     }
 
@@ -537,12 +551,7 @@ class SearchEngine
 
                     LOG(INFO) << "[SearchEngine] New best cost: " << incumbent_best_cost
                               << " at iteration " << iterations;
-                    for (auto &prop : propagators)
-                    {
-                        auto *clb = dynamic_cast<CostLowerBoundPropagator *>(prop.get());
-                        if (clb)
-                            clb->setBestCost(incumbent_best_cost);
-                    }
+                    state.best_cost = incumbent_best_cost;
                 }
                 continue;
             }

@@ -104,428 +104,284 @@ class SelectionPropagator : public Propagator
 
 class CachePropagator : public Propagator
 {
-  public:
-    std::string name() const override
+    bool propagateSelection(SearchState &state, VarId sel_var)
     {
-        return "CachePropagator";
+        const auto &data = state.propagation;
+        const VarId cache_var = data.cache_vars[sel_var];
+        if (cache_var == kInvalidVarId)
+            return true;
+        Domain selection = state.domains[sel_var];
+        const auto &alternatives = data.alternatives[sel_var];
+        for (uint32_t index = 0; index < alternatives.size(); ++index)
+        {
+            const int32_t value = static_cast<int32_t>(index + 1);
+            const OpType op_type = alternatives[index].op_type;
+            if (!selection.contains(value) || (op_type != OpType::CACHE && op_type != OpType::SCATTER))
+                continue;
+            const Domain cache_domain = state.domains[cache_var];
+            if (cache_domain.isFixed() && cache_domain.fixedValue() == 0)
+            {
+                selection.remove(value);
+                if (selection.isEmpty())
+                    return false;
+                state.setDomain(sel_var, selection);
+            }
+            else if (op_type == OpType::CACHE && selection.isFixed())
+            {
+                Domain required = cache_domain;
+                required.remove(0);
+                if (required.isEmpty())
+                    return false;
+                state.setDomain(cache_var, required);
+            }
+        }
+        return true;
     }
+
+  public:
+    std::string name() const override { return "CachePropagator"; }
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        // 1. Check CACHE and SCATTER dependencies on cached_vars
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        const VarType type = state.var_infos[changed].type;
+        if (type != VarType::CACHED && type != VarType::SELECTED)
+            return true;
+        state.ensurePropagationState();
+        auto &data = state.propagation;
+        if (type == VarType::SELECTED)
         {
-            for (EClassId cid : getReachableCids(state, b))
-            {
-                VarId v = state.selected_vars[b].at(cid);
-                Domain dom = state.domains[v];
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-
-                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
-                {
-                    int32_t val = static_cast<int32_t>(en_idx + 1);
-                    if (dom.contains(val))
-                    {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-
-                        if (enode.getOpType() == OpType::CACHE)
-                        {
-                            BaseEClassId base_id = cls.base_eclass_id;
-                            auto c_it = state.cached_vars.find(base_id);
-                            if (c_it != state.cached_vars.end())
-                            {
-                                VarId cv = c_it->second;
-                                // If not cached, cannot choose CACHE enode
-                                if (state.domains[cv].isFixed() && state.domains[cv].fixedValue() == 0)
-                                {
-                                    dom.remove(val);
-                                    if (dom.isEmpty())
-                                        return false;
-                                    state.setDomain(v, dom);
-                                }
-                                else if (dom.isFixed() && dom.fixedValue() == val)
-                                {
-                                    // Definitely selected CACHE enode -> must be cached
-                                    Domain c_dom = state.domains[cv];
-                                    c_dom.remove(0);
-                                    if (c_dom.isEmpty())
-                                        return false;
-                                    state.setDomain(cv, c_dom);
-                                }
-                            }
-                        }
-                        else if (enode.getOpType() == OpType::SCATTER)
-                        {
-                            BaseEClassId base_id = cls.base_eclass_id;
-                            auto c_it = state.cached_vars.find(base_id);
-                            if (c_it != state.cached_vars.end())
-                            {
-                                VarId cv = c_it->second;
-                                if (state.domains[cv].isFixed() && state.domains[cv].fixedValue() == 0)
-                                {
-                                    dom.remove(val);
-                                    if (dom.isEmpty())
-                                        return false;
-                                    state.setDomain(v, dom);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Cache memory budget per MemSpace
-        std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
-        for (const auto &cand : state.candidates)
-        {
-            auto c_it = state.cached_vars.find(cand.base_eclass_id);
-            if (c_it != state.cached_vars.end())
-            {
-                VarId cv = c_it->second;
-                if (state.domains[cv].isFixed() && state.domains[cv].fixedValue() == 1)
-                {
-                    fixed_cache_bytes[cand.mem_space] += cand.size_bytes;
-                }
-            }
-        }
-
-        for (const auto &pair : fixed_cache_bytes)
-        {
-            uint64_t cap = state.getMemoryCap(pair.first);
-            if (pair.second > cap)
+            if (!propagateSelection(state, changed))
                 return false;
         }
+        else
+            for (VarId user : data.cache_users[changed])
+                if (!propagateSelection(state, user))
+                    return false;
 
-        // Prune candidates that would exceed cap
-        for (const auto &cand : state.candidates)
+        // A cache fixed to zero changes its users, but cannot consume budget.
+        // Revisit a memory pool only when its total changed (or on initialization).
+        auto spaces = std::move(data.cache_budget_dirty);
+        data.cache_budget_dirty.clear();
+        auto fail = [&]() {
+            data.cache_budget_dirty.insert(spaces.begin(), spaces.end());
+            return false;
+        };
+        for (const MemSpace &space : spaces)
         {
-            auto c_it = state.cached_vars.find(cand.base_eclass_id);
-            if (c_it != state.cached_vars.end())
+            const uint64_t used = data.fixed_cache_bytes[space];
+            const uint64_t cap = state.getMemoryCap(space);
+            if (used > cap)
+                return fail();
+            for (uint32_t index : data.candidates_by_space.at(space))
             {
-                VarId cv = c_it->second;
-                Domain c_dom = state.domains[cv];
-                if (!c_dom.isFixed() && c_dom.contains(1))
+                const auto &candidate = state.candidates[index];
+                const VarId cache_var = state.cached_vars.at(candidate.base_eclass_id);
+                Domain domain = state.domains[cache_var];
+                if (!domain.isFixed() && domain.contains(1) && candidate.size_bytes > cap - used)
                 {
-                    uint64_t cap = state.getMemoryCap(cand.mem_space);
-                    if (fixed_cache_bytes[cand.mem_space] + cand.size_bytes > cap)
-                    {
-                        c_dom.remove(1);
-                        if (c_dom.isEmpty())
-                            return false;
-                        state.setDomain(cv, c_dom);
-                    }
+                    domain.remove(1);
+                    if (domain.isEmpty())
+                        return fail();
+                    state.setDomain(cache_var, domain);
                 }
             }
         }
-
         return true;
     }
 };
 
 class TopologicalOrderPropagator : public Propagator
 {
-  public:
-    std::string name() const override
+    bool hasFixedPath(const SearchState &state, VarId from, VarId target) const
     {
-        return "TopologicalOrderPropagator";
+        std::vector<VarId> frontier{from};
+        std::unordered_set<VarId> visited;
+        for (size_t head = 0; head < frontier.size(); ++head)
+        {
+            const VarId current = frontier[head];
+            if (current == target)
+                return true;
+            if (current == kInvalidVarId || !visited.insert(current).second)
+                continue;
+            const int32_t index = state.selectedAlternative(current);
+            if (index >= 0)
+            {
+                const auto &children = state.propagation.alternatives[current][index].children;
+                frontier.insert(frontier.end(), children.begin(), children.end());
+            }
+        }
+        return false;
     }
 
-    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    bool pruneSelection(SearchState &state, VarId sel_var)
     {
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        Domain selection = state.domains[sel_var];
+        const bool was_fixed = selection.isFixed();
+        const auto &alternatives = state.propagation.alternatives[sel_var];
+        for (uint32_t index = 0; index < alternatives.size(); ++index)
         {
-            const auto &reachable = getReachableCids(state, b);
-
-            auto has_fixed_path = [&](EClassId from, EClassId target) {
-                std::vector<EClassId> frontier = {from};
-                std::unordered_set<EClassId> visited;
-                visited.insert(from);
-
-                for (size_t i = 0; i < frontier.size(); ++i)
-                {
-                    EClassId cid = frontier[i];
-                    if (cid == target)
-                        return true;
-
-                    auto sel_it = state.selected_vars[b].find(cid);
-                    if (sel_it == state.selected_vars[b].end())
-                        continue;
-
-                    const Domain &selection = state.domains[sel_it->second];
-                    if (!selection.isFixed() || selection.fixedValue() <= 0)
-                        continue;
-
-                    uint32_t enode_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
-                    const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                    if (enode_idx >= cls.enodes.size())
-                        continue;
-
-                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[enode_idx]);
-                    for (EClassId child : enode.getChildren())
-                    {
-                        EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                        if (visited.insert(canon_child).second)
-                            frontier.push_back(canon_child);
-                    }
-                }
-                return false;
-            };
-
-            // Remove enodes that would immediately create a cycle with the
-            // already fixed selected graph. This makes the brancher's first
-            // choice topologically meaningful instead of waiting for a full
-            // selection assignment to discover the cycle.
-            for (EClassId cid : reachable)
+            const int32_t value = static_cast<int32_t>(index + 1);
+            if (!selection.contains(value))
+                continue;
+            for (VarId child : alternatives[index].children)
             {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                Domain sel_dom = state.domains[sel_v];
-                if (sel_dom.isFixed())
-                    continue;
-
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                bool changed = false;
-                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+                const bool cycle = hasFixedPath(state, child, sel_var);
+                if (was_fixed)
                 {
-                    int32_t value = static_cast<int32_t>(en_idx + 1);
-                    if (!sel_dom.contains(value))
-                        continue;
-
-                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                    bool incompatible = false;
-                    for (EClassId child : enode.getChildren())
-                    {
-                        EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                        auto child_it = state.selected_vars[b].find(canon_child);
-                        if (canon_child == cid || child_it == state.selected_vars[b].end() ||
-                            state.domains[child_it->second].getMax() <= 0 ||
-                            has_fixed_path(canon_child, cid))
-                        {
-                            incompatible = true;
-                            break;
-                        }
-                    }
-
-                    if (incompatible)
-                        changed = sel_dom.remove(value) || changed;
-                }
-
-                if (changed)
-                {
-                    if (sel_dom.isEmpty())
+                    if (cycle)
                         return false;
-                    state.setDomain(sel_v, sel_dom);
                 }
-            }
-
-            std::unordered_set<EClassId> active;
-            std::unordered_map<EClassId, int> in_degree;
-            std::unordered_map<EClassId, std::vector<EClassId>> parents;
-
-            for (EClassId cid : reachable)
-            {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
+                else if (cycle || child == kInvalidVarId || state.domains[child].getMax() <= 0)
                 {
-                    active.insert(cid);
-                    in_degree[cid] = 0;
-                }
-            }
-
-            // Build the selected DAG. The previous implementation walked
-            // reachable e-classes in hash-derived order, so a long dependency
-            // chain could require many outer propagation rounds before a
-            // lower bound reached its consumer.
-            for (EClassId cid : active)
-            {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                uint32_t en_idx = static_cast<uint32_t>(state.domains[sel_v].fixedValue() - 1);
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                if (en_idx >= cls.enodes.size())
-                    continue;
-
-                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                std::unordered_set<EClassId> unique_children;
-                for (EClassId child : enode.getChildren())
-                {
-                    EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                    if (active.count(canon_child) != 0 && unique_children.insert(canon_child).second)
-                    {
-                        ++in_degree[cid];
-                        parents[canon_child].push_back(cid);
-                    }
-                }
-            }
-
-            std::vector<EClassId> queue;
-            for (const auto &entry : in_degree)
-            {
-                if (entry.second == 0)
-                    queue.push_back(entry.first);
-            }
-
-            std::vector<EClassId> topo_order;
-            size_t queue_head = 0;
-            while (queue_head < queue.size())
-            {
-                EClassId child = queue[queue_head++];
-                topo_order.push_back(child);
-                for (EClassId parent : parents[child])
-                {
-                    if (--in_degree[parent] == 0)
-                        queue.push_back(parent);
-                }
-            }
-
-            // A selected strict-precedence cycle cannot be scheduled.
-            if (topo_order.size() != active.size())
-                return false;
-
-            for (EClassId cid : topo_order)
-            {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                uint32_t en_idx = static_cast<uint32_t>(state.domains[sel_v].fixedValue() - 1);
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                if (en_idx >= cls.enodes.size())
-                    continue;
-
-                VarId parent_st_v = state.start_vars[b].at(cid)[en_idx];
-                Domain parent_st_dom = state.domains[parent_st_v];
-                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                for (EClassId child : enode.getChildren())
-                {
-                    EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                    auto child_sel_it = state.selected_vars[b].find(canon_child);
-                    if (child_sel_it == state.selected_vars[b].end())
-                        continue;
-
-                    VarId child_sel_v = child_sel_it->second;
-                    const Domain &child_sel_dom = state.domains[child_sel_v];
-                    if (!child_sel_dom.isFixed() || child_sel_dom.fixedValue() <= 0)
-                        continue;
-
-                    uint32_t child_en_idx = static_cast<uint32_t>(child_sel_dom.fixedValue() - 1);
-                    auto child_start_it = state.start_vars[b].find(canon_child);
-                    if (child_start_it == state.start_vars[b].end() ||
-                        child_en_idx >= child_start_it->second.size())
-                        continue;
-
-                    Domain child_st_dom = state.domains[child_start_it->second[child_en_idx]];
-                    if (parent_st_dom.setMin(child_st_dom.getMin() + 1))
-                    {
-                        if (parent_st_dom.isEmpty())
-                            return false;
-                        state.setDomain(parent_st_v, parent_st_dom);
-                    }
+                    selection.remove(value);
+                    break;
                 }
             }
         }
+        if (selection.isEmpty())
+            return false;
+        state.setDomain(sel_var, selection);
+        return true;
+    }
+
+    bool propagateStart(SearchState &state, VarId sel_var)
+    {
+        const int32_t index = state.selectedAlternative(sel_var);
+        if (index < 0)
+            return true;
+        const auto &alternative = state.propagation.alternatives[sel_var][index];
+        if (alternative.start_var == kInvalidVarId)
+            return true;
+        Domain start = state.domains[alternative.start_var];
+        for (VarId child : alternative.children)
+        {
+            const int32_t child_index = state.selectedAlternative(child);
+            if (child_index < 0)
+                continue;
+            const VarId child_start = state.propagation.alternatives[child][child_index].start_var;
+            if (child_start != kInvalidVarId)
+                start.setMin(state.domains[child_start].getMin() + 1);
+        }
+        if (start.isEmpty())
+            return false;
+        state.setDomain(alternative.start_var, start);
+        return true;
+    }
+
+  public:
+    std::string name() const override { return "TopologicalOrderPropagator"; }
+
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    {
+        const VarType type = state.var_infos[changed].type;
+        if (type != VarType::SELECTED && type != VarType::START)
+            return true;
+        state.ensurePropagationState();
+        const auto &data = state.propagation;
+        const VarId owner = data.owners[changed];
+        if (owner == kInvalidVarId)
+            return true;
+        if (type == VarType::START)
+        {
+            const int32_t index = state.selectedAlternative(owner);
+            if (index < 0 || data.alternatives[owner][index].start_var != changed)
+                return true;
+        }
+        else
+        {
+            // A new fixed edge can close a cycle only in an alternative whose
+            // child reaches this node through fixed edges. Walk those ancestors
+            // and inspect their possible parents, including unfixed alternatives.
+            std::vector<VarId> frontier{owner};
+            std::unordered_set<VarId> visited{owner};
+            std::unordered_set<VarId> affected{owner};
+            for (size_t head = 0; head < frontier.size(); ++head)
+                for (VarId parent : data.parents[frontier[head]])
+                {
+                    if (!state.domains[parent].isFixed())
+                        affected.insert(parent);
+                    if (state.isSelectedParent(parent, frontier[head]) && visited.insert(parent).second)
+                        frontier.push_back(parent);
+                }
+            for (VarId sel_var : affected)
+                if (!pruneSelection(state, sel_var))
+                    return false;
+        }
+        if (!propagateStart(state, owner))
+            return false;
+        for (VarId parent : data.parents[owner])
+            if (state.isSelectedParent(parent, owner) && !propagateStart(state, parent))
+                return false;
         return true;
     }
 };
 
 class EngineSchedulePropagator : public Propagator
 {
-  public:
-    std::string name() const override
+    bool propagateStart(SearchState &state, VarId start_var)
     {
-        return "EngineSchedulePropagator";
+        const auto &data = state.propagation;
+        const VarId owner = data.owners[start_var];
+        const int32_t index = state.selectedAlternative(owner);
+        const auto &alternative = data.alternatives[owner][index];
+        Domain start = state.domains[start_var];
+        if (start.isEmpty())
+            return false;
+        if (start.isFixed())
+        {
+            for (const auto &[engine_idx, slot] : alternative.engine_slots)
+                if (data.engines[engine_idx].fixed_starts.at(start.fixedValue()) > 1)
+                    return false;
+            return true;
+        }
+        int64_t candidate = start.getMin();
+        while (candidate <= start.getMax())
+        {
+            bool blocked = false;
+            for (const auto &[engine_idx, slot] : alternative.engine_slots)
+                blocked |= data.engines[engine_idx].fixed_starts.count(static_cast<int32_t>(candidate)) != 0;
+            if (!blocked)
+                break;
+            ++candidate;
+        }
+        if (candidate > start.getMax())
+            return false;
+        start.setMin(static_cast<int32_t>(candidate));
+        state.setDomain(start_var, start);
+        return true;
     }
+
+  public:
+    std::string name() const override { return "EngineSchedulePropagator"; }
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        // Enforce: only one op can run at a time per engine
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        const VarType type = state.var_infos[changed].type;
+        if (type != VarType::SELECTED && type != VarType::START)
+            return true;
+        state.ensurePropagationState();
+        const auto &data = state.propagation;
+        const VarId owner = data.owners[changed];
+        const int32_t index = state.selectedAlternative(owner);
+        if (index < 0)
+            return true;
+        const auto &alternative = data.alternatives[owner][index];
+        const VarId start_var = alternative.start_var;
+        if (start_var == kInvalidVarId || (type == VarType::START && start_var != changed))
+            return true;
+        if (!propagateStart(state, start_var))
+            return false;
+        if (state.domains[start_var].isFixed())
         {
-            std::unordered_map<Engine, std::unordered_set<int32_t>> fixed_starts;
-
-            // First collect all slots that are already occupied.  The old
-            // implementation only used this table to detect a contradiction
-            // after both operations had been fixed, which made a blocked
-            // prefix look like a sequence of independent search failures.
-            for (EClassId cid : getReachableCids(state, b))
+            std::unordered_set<VarId> peers;
+            for (const auto &[engine_idx, slot] : alternative.engine_slots)
             {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-                {
-                    uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                    if (en_idx < cls.enodes.size())
-                    {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                        VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                        const Domain &st_dom = state.domains[st_v];
-
-                        if (st_dom.isFixed())
-                        {
-                            int32_t st_val = st_dom.fixedValue();
-                            for (const Engine &eng : enode.getEngines())
-                            {
-                                if (!fixed_starts[eng].insert(st_val).second)
-                                {
-                                    // Engine conflict: two ops assigned exact same start time
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                }
+                const auto &starts = data.engines[engine_idx].active_starts;
+                peers.insert(starts.begin(), starts.end());
             }
-
-            auto isBlocked = [&](const ENode &enode, int32_t start) {
-                for (const Engine &eng : enode.getEngines())
-                {
-                    auto starts_it = fixed_starts.find(eng);
-                    if (starts_it != fixed_starts.end() && starts_it->second.count(start) != 0)
-                        return true;
-                }
-                return false;
-            };
-
-            // Start domains are intervals.  We cannot represent arbitrary
-            // holes in one Domain, but we can soundly skip every occupied
-            // slot at the lower edge in one pass.  This is exactly the case
-            // that otherwise causes min-first branching to test 90, 91, ...
-            // one node at a time.
-            for (EClassId cid : getReachableCids(state, b))
-            {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
-                    continue;
-
-                uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                if (en_idx >= cls.enodes.size())
-                    continue;
-
-                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                Domain st_dom = state.domains[st_v];
-                if (st_dom.isEmpty())
+            for (VarId peer : peers)
+                if (!propagateStart(state, peer))
                     return false;
-
-                if (st_dom.isFixed())
-                    continue;
-
-                int64_t candidate = st_dom.getMin();
-                const int32_t upper = st_dom.getMax();
-                while (candidate <= upper && isBlocked(enode, static_cast<int32_t>(candidate)))
-                    ++candidate;
-
-                if (candidate > upper)
-                    return false;
-
-                if (candidate > st_dom.getMin())
-                {
-                    st_dom.setMin(static_cast<int32_t>(candidate));
-                    state.setDomain(st_v, st_dom);
-                }
-            }
         }
         return true;
     }
@@ -533,342 +389,183 @@ class EngineSchedulePropagator : public Propagator
 
 class MemoryNonOverlapPropagator : public Propagator
 {
-  public:
-    std::string name() const override
+    using Allocation = PropagationState::Allocation;
+
+    bool propagateView(SearchState &state, VarId owner)
     {
-        return "MemoryNonOverlapPropagator";
+        const int32_t index = state.selectedAlternative(owner);
+        if (index < 0)
+            return true;
+        const auto &alternative = state.propagation.alternatives[owner][index];
+        if (!alternative.is_view || alternative.children.empty() || alternative.children[0] == kInvalidVarId)
+            return true;
+        const auto &info = state.var_infos[owner];
+        const auto &offsets = state.offset_vars[info.bucket_idx];
+        const auto view_it = offsets.find(info.eclass_id);
+        const auto child_it = offsets.find(state.var_infos[alternative.children[0]].eclass_id);
+        if (view_it == offsets.end() || child_it == offsets.end() || !state.domains[child_it->second].isFixed())
+            return true;
+        Domain offset = state.domains[view_it->second];
+        const int32_t value = state.domains[child_it->second].fixedValue();
+        offset.setRange(value, value);
+        if (offset.isEmpty())
+            return false;
+        state.setDomain(view_it->second, offset);
+        return true;
     }
+
+    bool updateAllocation(SearchState &state, VarId owner)
+    {
+        auto &data = state.propagation;
+        const VarInfo &info = state.var_infos[owner];
+        const uint32_t b = info.bucket_idx;
+        auto &bucket = data.buckets[b];
+        auto &allocation = data.allocations[owner];
+        if (allocation.active)
+            bucket.allocations[allocation.mem_space].erase(owner);
+        bucket.open_lifetimes.erase(owner);
+        allocation = Allocation{};
+        const int32_t index = state.selectedAlternative(owner);
+        if (index < 0)
+            return true;
+        const auto &alternative = data.alternatives[owner][index];
+        const auto off_it = state.offset_vars[b].find(info.eclass_id);
+        if (alternative.is_view || off_it == state.offset_vars[b].end())
+            return true;
+        const Domain &offset = state.domains[off_it->second];
+        if (offset.isEmpty())
+            return false;
+        if (alternative.start_var == kInvalidVarId || !state.domains[alternative.start_var].isFixed())
+            return true;
+        const EClass &cls = state.bucket_egraphs[b].getEClass(info.eclass_id);
+        allocation.active = true;
+        allocation.offset_var = off_it->second;
+        allocation.mem_space = cls.mem_space;
+        allocation.size = std::max(1u, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
+        allocation.offset_fixed = offset.isFixed();
+        if (offset.isFixed())
+            allocation.offset = static_cast<uint32_t>(offset.fixedValue());
+        const auto pre_it = state.preallocated_buffers.find(cls.base_eclass_id);
+        if (cls.base_eclass_id != BaseEClassId{} && pre_it != state.preallocated_buffers.end() && pre_it->second.offset >= 0)
+        {
+            allocation.offset = static_cast<uint32_t>(pre_it->second.offset / state.getPageAlignment(cls.mem_space));
+            allocation.size = state.bytesToPages(pre_it->second.size, cls.mem_space);
+            allocation.offset_fixed = true;
+        }
+        allocation.start = state.domains[alternative.start_var].fixedValue();
+        allocation.end = allocation.start + 1;
+
+        // Follow consumers through selected views. Only this physical value's
+        // lifetime is recomputed; other allocations retain their cached entries.
+        std::vector<VarId> frontier{owner};
+        std::unordered_set<VarId> visited;
+        bool has_consumer = false;
+        bool open_lifetime = false;
+        for (size_t head = 0; head < frontier.size(); ++head)
+            for (VarId parent : data.parents[frontier[head]])
+            {
+                if (!state.isSelectedParent(parent, frontier[head]) || !visited.insert(parent).second)
+                    continue;
+                const auto &consumer = data.alternatives[parent][state.selectedAlternative(parent)];
+                if (consumer.is_view)
+                    frontier.push_back(parent);
+                else
+                {
+                    has_consumer = true;
+                    if (consumer.start_var != kInvalidVarId && state.domains[consumer.start_var].isFixed())
+                        allocation.end = std::max(allocation.end, state.domains[consumer.start_var].fixedValue() + 1);
+                    else
+                        open_lifetime = true;
+                }
+            }
+        if (!has_consumer || open_lifetime)
+        {
+            bucket.open_lifetimes.insert(owner);
+            if (!bucket.finish_times.empty())
+                allocation.end = std::max(allocation.end, *bucket.finish_times.rbegin());
+        }
+        bucket.allocations[cls.mem_space].insert(owner);
+        return true;
+    }
+
+    bool restrictOffset(SearchState &state, const Allocation &fixed, const Allocation &candidate)
+    {
+        Domain offset = state.domains[candidate.offset_var];
+        const int64_t before_max = static_cast<int64_t>(fixed.offset) - candidate.size;
+        const int64_t after_min = static_cast<int64_t>(fixed.offset) + fixed.size;
+        if (offset.getMin() > before_max)
+        {
+            if (after_min > INT32_MAX)
+                return false;
+            offset.setMin(static_cast<int32_t>(after_min));
+        }
+        else if (offset.getMax() < after_min)
+        {
+            if (before_max < INT32_MIN)
+                return false;
+            offset.setMax(static_cast<int32_t>(before_max));
+        }
+        if (offset.isEmpty())
+            return false;
+        state.setDomain(candidate.offset_var, offset);
+        return true;
+    }
+
+  public:
+    std::string name() const override { return "MemoryNonOverlapPropagator"; }
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        state.ensurePropagationState();
+        auto &data = state.propagation;
+        std::unordered_set<VarId> affected;
+        auto fail = [&]() {
+            // A contradiction can interrupt initialization or a batch of
+            // repairs. Preserve all pending work for rollback and replay.
+            data.memory_dirty.insert(affected.begin(), affected.end());
+            return false;
+        };
+        // Offset equalities can dirty another view in the same alias chain.
+        while (!data.memory_dirty.empty())
         {
-            // Propagate view offsets
-            for (EClassId cid : getReachableCids(state, b))
+            auto dirty = std::move(data.memory_dirty);
+            data.memory_dirty.clear();
+            affected.insert(dirty.begin(), dirty.end());
+            for (VarId owner : dirty)
             {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-                {
-                    uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                    if (en_idx < cls.enodes.size())
-                    {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        bool is_view = (en_id.value < state.bucket_enode_infos[b].size()) &&
-                                       state.bucket_enode_infos[b][en_id.value].is_view;
-
-                        if (is_view)
-                        {
-                            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                            if (!enode.getChildren().empty())
-                            {
-                                EClassId child_cid = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
-                                auto off_view_it = state.offset_vars[b].find(cid);
-                                auto off_ch_it = state.offset_vars[b].find(child_cid);
-
-                                if (off_view_it != state.offset_vars[b].end() &&
-                                    off_ch_it != state.offset_vars[b].end())
-                                {
-                                    VarId view_off_v = off_view_it->second;
-                                    VarId ch_off_v = off_ch_it->second;
-                                    Domain view_dom = state.domains[view_off_v];
-                                    Domain ch_dom = state.domains[ch_off_v];
-
-                                    // View offset is aligned with child offset
-                                    if (ch_dom.isFixed())
-                                    {
-                                        view_dom.setRange(ch_dom.fixedValue(), ch_dom.fixedValue());
-                                        state.setDomain(view_off_v, view_dom);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                if (!propagateView(state, owner))
+                    return fail();
             }
-
-            // Memory non-overlap between allocations with overlapping
-            // lifetimes in the same MemSpace.  A tensor is live until its
-            // last consumer has finished, not merely until the instruction
-            // which produces it has finished.  Treating every allocation as
-            // [start, start + 1] permits a consumer's output to overwrite an
-            // input while that input is still being read; that was the source
-            // of valid-looking plans which produced corrupted model output.
-            struct AllocEntry
+        }
+        for (VarId owner : affected)
+            if (!updateAllocation(state, owner))
+                return fail();
+        for (VarId owner : affected)
+        {
+            const Allocation &allocation = data.allocations[owner];
+            if (!allocation.active)
+                continue;
+            const auto &bucket = data.buckets[state.var_infos[owner].bucket_idx];
+            for (VarId peer : bucket.allocations.at(allocation.mem_space))
             {
-                EClassId cid;
-                MemSpace ms;
-                int32_t start_time;
-                int32_t end_time;
-                uint32_t page_offset;
-                uint32_t page_size;
-                VarId offset_var;
-                bool offset_fixed;
-            };
-
-            std::unordered_set<EClassId> active;
-            std::unordered_map<EClassId, uint32_t> selected_enodes;
-            std::unordered_map<EClassId, bool> selected_views;
-            std::unordered_map<EClassId, std::vector<EClassId>> parents;
-
-            for (EClassId cid : getReachableCids(state, b))
-            {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
+                if (peer == owner)
                     continue;
-
-                uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                if (en_idx >= cls.enodes.size())
+                const Allocation &other = data.allocations[peer];
+                if (allocation.end <= other.start || other.end <= allocation.start)
                     continue;
-
-                ENodeId en_id = cls.enodes[en_idx];
-                active.insert(cid);
-                selected_enodes[cid] = en_idx;
-                selected_views[cid] = en_id.value < state.bucket_enode_infos[b].size() &&
-                                       state.bucket_enode_infos[b][en_id.value].is_view;
-            }
-
-            // Build the selected dependency DAG.  Edges point from a value to
-            // the operations which consume it.
-            for (EClassId cid : active)
-            {
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                uint32_t en_idx = selected_enodes.at(cid);
-                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                for (EClassId child : enode.getChildren())
+                if (allocation.offset_fixed && other.offset_fixed)
                 {
-                    EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                    if (active.count(canon_child) != 0)
-                        parents[canon_child].push_back(cid);
+                    if (static_cast<uint64_t>(allocation.offset) + allocation.size > other.offset &&
+                        static_cast<uint64_t>(other.offset) + other.size > allocation.offset)
+                        return fail();
                 }
-            }
-
-            // Follow selected view nodes to the physical value they alias.
-            // This is deliberately local to the propagator to avoid making
-            // the search headers depend on planner.hpp.
-            auto physical_base = [&](EClassId start) {
-                EClassId current = start;
-                std::unordered_set<EClassId> visited;
-                while (visited.insert(current).second && selected_views[current])
+                else if (allocation.offset_fixed)
                 {
-                    const EClass &cls = state.bucket_egraphs[b].getEClass(current);
-                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[selected_enodes.at(current)]);
-                    if (enode.getChildren().empty())
-                        break;
-                    current = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
-                    if (active.count(current) == 0)
-                        break;
+                    if (!restrictOffset(state, allocation, other))
+                        return fail();
                 }
-                return current;
-            };
-
-            // For each physical value, collect non-view operations which
-            // consume it, walking through zero-cost view nodes.
-            std::unordered_map<EClassId, std::unordered_set<EClassId>> consumers;
-            for (EClassId child : active)
-            {
-                EClassId base = physical_base(child);
-                std::vector<EClassId> frontier;
-                std::unordered_set<EClassId> visited;
-                for (EClassId parent : parents[child])
-                    frontier.push_back(parent);
-
-                for (size_t i = 0; i < frontier.size(); ++i)
-                {
-                    EClassId parent = frontier[i];
-                    if (!visited.insert(parent).second)
-                        continue;
-                    if (selected_views[parent])
-                    {
-                        for (EClassId next : parents[parent])
-                            frontier.push_back(next);
-                    }
-                    else
-                    {
-                        consumers[base].insert(parent);
-                    }
-                }
-            }
-
-            int32_t max_finish_time = 0;
-            for (EClassId cid : active)
-            {
-                if (selected_views[cid])
-                    continue;
-                uint32_t en_idx = selected_enodes.at(cid);
-                VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                if (!state.domains[st_v].isFixed())
-                    continue;
-                max_finish_time = std::max(max_finish_time, state.domains[st_v].fixedValue() + 1);
-            }
-
-            std::vector<AllocEntry> allocs;
-            for (EClassId cid : active)
-            {
-                auto off_it = state.offset_vars[b].find(cid);
-                if (off_it == state.offset_vars[b].end())
-                    continue;
-
-                if (selected_views[cid])
-                    continue;
-
-                uint32_t en_idx = selected_enodes.at(cid);
-                VarId off_v = off_it->second;
-                VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                if (state.domains[off_v].isEmpty())
-                    return false;
-                if (!state.domains[st_v].isFixed())
-                    continue;
-
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                uint32_t page_size = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
-                if (page_size == 0)
-                    page_size = 1;
-
-                uint32_t page_offset = 0;
-                bool offset_fixed = state.domains[off_v].isFixed();
-                if (offset_fixed)
-                    page_offset = static_cast<uint32_t>(state.domains[off_v].fixedValue());
-
-                // Inputs and already-materialized values use their physical
-                // preallocated offset.  Their search offset variable exists
-                // for uniformity but is not the runtime location.
-                if (cls.base_eclass_id != BaseEClassId{})
-                {
-                    auto pre_it = state.preallocated_buffers.find(cls.base_eclass_id);
-                    if (pre_it != state.preallocated_buffers.end() && pre_it->second.offset >= 0)
-                    {
-                        uint32_t align = state.getPageAlignment(cls.mem_space);
-                        page_offset = static_cast<uint32_t>(pre_it->second.offset / align);
-                        page_size = state.bytesToPages(pre_it->second.size, cls.mem_space);
-                        offset_fixed = true;
-                    }
-                }
-
-                int32_t start_time = state.domains[st_v].fixedValue();
-                int32_t end_time = start_time + 1;
-                auto consumer_it = consumers.find(cid);
-                if (consumer_it == consumers.end() || consumer_it->second.empty())
-                {
-                    end_time = std::max(end_time, max_finish_time);
-                }
-                else
-                {
-                    for (EClassId consumer : consumer_it->second)
-                    {
-                        uint32_t consumer_en_idx = selected_enodes.at(consumer);
-                        VarId consumer_st_v = state.start_vars[b].at(consumer)[consumer_en_idx];
-                        if (!state.domains[consumer_st_v].isFixed())
-                        {
-                            end_time = std::max(end_time, max_finish_time);
-                            continue;
-                        }
-                        end_time = std::max(end_time, state.domains[consumer_st_v].fixedValue() + 1);
-                    }
-                }
-
-                allocs.push_back({cid, cls.mem_space, start_time, end_time, page_offset, page_size,
-                                  off_v, offset_fixed});
-            }
-
-            // For a fixed allocation [fixed_offset, fixed_end), a candidate
-            // allocation of size candidate_size can only avoid overlap by
-            // being entirely before it or entirely after it:
-            //
-            //   candidate_offset <= fixed_offset - candidate_size
-            //   or
-            //   candidate_offset >= fixed_end
-            //
-            // Offset domains are intervals, so when one side is impossible we
-            // can remove the whole blocked prefix/suffix in one propagation
-            // step. This avoids min-first branching through every blocked
-            // offset value.
-            auto propagateOffsetAgainstFixed = [&](const AllocEntry &fixed,
-                                                    AllocEntry &candidate) {
-                if (!fixed.offset_fixed || candidate.offset_fixed)
-                    return true;
-
-                Domain candidate_dom = state.domains[candidate.offset_var];
-                const int64_t fixed_begin = static_cast<int64_t>(fixed.page_offset);
-                const int64_t fixed_end = fixed_begin + static_cast<int64_t>(fixed.page_size);
-                const int64_t candidate_before_max =
-                    fixed_begin - static_cast<int64_t>(candidate.page_size);
-                const int64_t candidate_after_min = fixed_end;
-
-                bool changed = false;
-                if (static_cast<int64_t>(candidate_dom.getMin()) > candidate_before_max)
-                {
-                    changed = candidate_dom.setMin(static_cast<int32_t>(candidate_after_min));
-                }
-                else if (static_cast<int64_t>(candidate_dom.getMax()) < candidate_after_min)
-                {
-                    changed = candidate_dom.setMax(static_cast<int32_t>(candidate_before_max));
-                }
-
-                if (candidate_dom.isEmpty())
-                    return false;
-
-                if (changed)
-                {
-                    state.setDomain(candidate.offset_var, candidate_dom);
-                    candidate.offset_fixed = candidate_dom.isFixed();
-                    if (candidate.offset_fixed)
-                        candidate.page_offset = static_cast<uint32_t>(candidate_dom.fixedValue());
-
-                    LOG(DEBUG) << "[MemoryNonOverlapPropagator] Restricted offset domain for eclass "
-                               << candidate.cid << " against eclass " << fixed.cid << " to "
-                               << candidate_dom.toString();
-                }
-                return true;
-            };
-
-            // Check non-overlap for allocations with overlapping lifetimes.
-            for (size_t i = 0; i < allocs.size(); ++i)
-            {
-                for (size_t j = i + 1; j < allocs.size(); ++j)
-                {
-                    if (allocs[i].ms == allocs[j].ms)
-                    {
-                        // Overlapping lifetime check
-                        bool time_overlap = !(allocs[i].end_time <= allocs[j].start_time ||
-                                              allocs[j].end_time <= allocs[i].start_time);
-                        if (time_overlap)
-                        {
-                            if (allocs[i].offset_fixed && allocs[j].offset_fixed)
-                            {
-                                bool space_overlap = !(allocs[i].page_offset + allocs[i].page_size <=
-                                                           allocs[j].page_offset ||
-                                                       allocs[j].page_offset + allocs[j].page_size <=
-                                                           allocs[i].page_offset);
-                                if (space_overlap)
-                                {
-                                    LOG(DEBUG) << "[MemoryNonOverlapPropagator] Lifetime overlap: eclass "
-                                               << allocs[i].cid << " [" << allocs[i].start_time << ","
-                                               << allocs[i].end_time << "] and eclass " << allocs[j].cid << " ["
-                                               << allocs[j].start_time << "," << allocs[j].end_time
-                                               << "] share pages " << allocs[i].page_offset << ".."
-                                               << (allocs[i].page_offset + allocs[i].page_size) << " and "
-                                               << allocs[j].page_offset << ".."
-                                               << (allocs[j].page_offset + allocs[j].page_size);
-                                    return false; // Overlap contradiction!
-                                }
-                            }
-                            else if (allocs[i].offset_fixed)
-                            {
-                                if (!propagateOffsetAgainstFixed(allocs[i], allocs[j]))
-                                    return false;
-                            }
-                            else if (allocs[j].offset_fixed)
-                            {
-                                if (!propagateOffsetAgainstFixed(allocs[j], allocs[i]))
-                                    return false;
-                            }
-                        }
-                    }
-                }
+                else if (other.offset_fixed && !restrictOffset(state, other, allocation))
+                    return fail();
             }
         }
         return true;
@@ -877,68 +574,17 @@ class MemoryNonOverlapPropagator : public Propagator
 
 class CostLowerBoundPropagator : public Propagator
 {
-  private:
-    float best_cost = TGConstants::INF;
-
   public:
-    std::string name() const override
-    {
-        return "CostLowerBoundPropagator";
-    }
-
-    void setBestCost(float c)
-    {
-        best_cost = c;
-    }
+    std::string name() const override { return "CostLowerBoundPropagator"; }
 
     float computeLowerBound(const SearchState &state) override
     {
-        float total_lb = 0.0f;
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
-            float w = (b < state.bucket_weights.size()) ? state.bucket_weights[b] : 1.0f;
-            if (w <= 0.0f)
-                continue;
-
-            std::unordered_map<Engine, float> engine_work;
-            for (EClassId cid : getReachableCids(state, b))
-            {
-                VarId sel_v = state.selected_vars[b].at(cid);
-                const Domain &sel_dom = state.domains[sel_v];
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-
-                if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-                {
-                    uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    if (en_idx < cls.enodes.size())
-                    {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                        float c = 0.0f;
-                        if (en_id.value < state.bucket_enode_infos[b].size())
-                            c = state.bucket_enode_infos[b][en_id.value].cost;
-                        if (c > 0.0f && c < TGConstants::INF)
-                        {
-                            for (const Engine &eng : enode.getEngines())
-                                engine_work[eng] += c;
-                        }
-                    }
-                }
-            }
-
-            float bucket_lb = 0.0f;
-            for (const auto &pair : engine_work)
-                bucket_lb = std::max(bucket_lb, pair.second);
-
-            total_lb += w * bucket_lb;
-        }
-        return total_lb;
+        return state.costLowerBound();
     }
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        float lb = computeLowerBound(state);
-        return lb < best_cost;
+        return computeLowerBound(state) < state.best_cost;
     }
 };
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -312,6 +313,93 @@ struct ReachabilityTrailEntry
 
 using TrailEntry = std::variant<DomainTrailEntry, ReachabilityTrailEntry>;
 
+// Point updates recompute sums in a stable order. Undoing a domain therefore
+// restores the exact bound, without floating-point add/subtract drift.
+struct PropagationSumTree
+{
+    size_t leaf_count = 1;
+    std::vector<double> sums;
+
+    void initialize(size_t count)
+    {
+        while (leaf_count < count)
+            leaf_count *= 2;
+        sums.assign(2 * leaf_count, 0.0);
+    }
+
+    void set(size_t index, double value)
+    {
+        index += leaf_count;
+        sums[index] = value;
+        while (index > 1)
+        {
+            index /= 2;
+            sums[index] = sums[2 * index] + sums[2 * index + 1];
+        }
+    }
+
+    double total() const { return sums.empty() ? 0.0 : sums[1]; }
+};
+
+struct PropagationState
+{
+    struct Alternative
+    {
+        VarId start_var = kInvalidVarId;
+        std::vector<VarId> children;
+        std::vector<std::pair<uint32_t, uint32_t>> engine_slots;
+        bool is_view = false;
+        OpType op_type = OpType::INPUT;
+        float cost = 0.0f;
+    };
+
+    struct EngineUsage
+    {
+        uint32_t bucket_idx = 0;
+        uint32_t slot_count = 0;
+        std::unordered_set<VarId> active_starts;
+        std::unordered_map<int32_t, uint32_t> fixed_starts;
+        PropagationSumTree work;
+    };
+
+    struct Allocation
+    {
+        bool active = false;
+        bool offset_fixed = false;
+        int32_t start = 0;
+        int32_t end = 0;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+        VarId offset_var = kInvalidVarId;
+        MemSpace mem_space;
+    };
+
+    struct BucketData
+    {
+        std::multiset<double> engine_bounds;
+        std::multiset<int32_t> finish_times;
+        std::unordered_set<VarId> open_lifetimes;
+        std::unordered_map<MemSpace, std::unordered_set<VarId>> allocations;
+    };
+
+    bool initialized = false;
+    std::vector<VarId> owners;
+    std::vector<std::vector<Alternative>> alternatives;
+    std::vector<std::vector<VarId>> parents;
+    std::vector<std::vector<VarId>> view_neighbors;
+    std::vector<VarId> cache_vars;
+    std::vector<std::vector<VarId>> cache_users;
+    std::vector<std::vector<uint32_t>> cache_candidates;
+    std::unordered_map<MemSpace, std::vector<uint32_t>> candidates_by_space;
+    std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
+    std::unordered_set<MemSpace> cache_budget_dirty;
+    std::vector<EngineUsage> engines;
+    std::vector<BucketData> buckets;
+    PropagationSumTree cost;
+    std::vector<Allocation> allocations;
+    std::unordered_set<VarId> memory_dirty;
+};
+
 class SearchState
 {
   private:
@@ -372,10 +460,24 @@ class SearchState
     std::unordered_map<MemSpace, uint32_t> preallocated_pages;
     std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
 
+    // The graph, metadata, capacities and weights are immutable after the first
+    // propagation. All derived data is owned by this state, including in copies.
+    mutable PropagationState propagation;
+    // The incumbent is global to this search, so backtracking must retain it.
+    float best_cost = TGConstants::INF;
+
+    void ensurePropagationState() const;
+    void updatePropagationContribution(VarId var_id, bool add) const;
+    void markMemoryAffected(VarId var_id) const;
+    int32_t selectedAlternative(VarId sel_var) const;
+    bool isSelectedParent(VarId parent, VarId child) const;
+    float costLowerBound() const;
+
     SearchState() = default;
 
     VarId addVar(VarInfo info, const Domain &initial_domain)
     {
+        assert(!propagation.initialized);
         VarId id = static_cast<VarId>(var_infos.size());
         info.id = id;
         var_infos.push_back(std::move(info));
@@ -493,8 +595,12 @@ class SearchState
         {
             if (const auto *entry = std::get_if<DomainTrailEntry>(&trail.back()))
             {
+                updatePropagationContribution(entry->var_id, false);
+                markMemoryAffected(entry->var_id);
                 const bool was_empty = domains[entry->var_id].isEmpty();
                 domains[entry->var_id] = entry->prev_domain;
+                updatePropagationContribution(entry->var_id, true);
+                markMemoryAffected(entry->var_id);
                 updateEmptyDomainIndex(entry->var_id, was_empty, entry->prev_domain.isEmpty());
                 markDomainDirty(entry->var_id);
             }
@@ -516,9 +622,13 @@ class SearchState
     {
         if (domains[var_id] != new_domain)
         {
+            updatePropagationContribution(var_id, false);
+            markMemoryAffected(var_id);
             const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
             domains[var_id] = new_domain;
+            updatePropagationContribution(var_id, true);
+            markMemoryAffected(var_id);
             updateEmptyDomainIndex(var_id, was_empty, new_domain.isEmpty());
             markDomainDirty(var_id);
             return true;
@@ -558,6 +668,11 @@ class SearchState
         return result;
     }
 
+    void schedulePropagation(VarId var_id)
+    {
+        markDomainDirty(var_id);
+    }
+
     uint32_t getPageAlignment(const MemSpace &ms) const
     {
         auto it = page_alignments.find(ms);
@@ -578,3 +693,5 @@ class SearchState
 };
 
 } // namespace plan
+
+#include "core/plan/search_state_propagation.hpp"

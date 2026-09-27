@@ -8,6 +8,7 @@
 #include "tests/cuda_sync_regression.hpp"
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
+#include "tests/incremental_propagators.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/selection_reachability.hpp"
@@ -24,6 +25,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
     parser.add_flag({"--view-reg"}, "Run only view and bufferize regression tests.");
     parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
+    parser.add_flag({"--incremental-propagators"}, "Run only incremental propagator equivalence tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -39,6 +41,11 @@ int main(int argc, char *argv[])
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--incremental-propagators"))
+    {
+        runIncrementalPropagatorTests();
+        return 0;
+    }
     if (parser.get_flag("--selection-reachability"))
     {
         runSelectionReachabilityTests();
@@ -61,6 +68,7 @@ int main(int argc, char *argv[])
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
         runSelectionReachabilityTests();
+        runIncrementalPropagatorTests();
         runShapePropagationTests();
         runInputHashconsTests();
         testStorageOutputMatching();
