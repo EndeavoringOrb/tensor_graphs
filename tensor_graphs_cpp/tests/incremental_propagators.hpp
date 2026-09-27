@@ -20,7 +20,7 @@ enum Checks : uint32_t
 inline void require(bool condition, const std::string &message)
 {
     if (!condition)
-        throw std::runtime_error(message);
+        Error::throw_err(message);
 }
 
 struct AlternativeSpec
