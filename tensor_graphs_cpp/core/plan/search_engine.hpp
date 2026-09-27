@@ -470,6 +470,11 @@ class SearchEngine
         all_nodes.push_back(root_node);
         current_node_id = 0;
 
+        if (incumbent_best_cost < TGConstants::INF)
+        {
+            selector->setIncumbent(incumbent_best_cost);
+        }
+
         root_node->priority = root_node->lower_bound;
         root_node->trail_marker = state.getTrailMarker();
         selector->push(root_node);
@@ -538,6 +543,7 @@ class SearchEngine
                 if (total_cost < incumbent_best_cost)
                 {
                     incumbent_best_cost = total_cost;
+                    selector->setIncumbent(incumbent_best_cost);
                     incumbent_extractions = extractSolution(state);
 
                     incumbent_cached_nodes.clear();

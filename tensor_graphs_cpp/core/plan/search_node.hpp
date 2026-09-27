@@ -34,12 +34,27 @@ struct SearchNode
 
 struct SearchNodeCompare
 {
+    bool has_incumbent = false;
+
+    SearchNodeCompare() = default;
+    explicit SearchNodeCompare(bool has_incumbent) : has_incumbent(has_incumbent) {}
+
     bool operator()(const std::shared_ptr<SearchNode> &a, const std::shared_ptr<SearchNode> &b) const
     {
-        // Min-heap: smaller priority comes first. If priorities match, deeper node comes first (dive).
-        if (a->priority != b->priority)
+        if (!has_incumbent)
+        {
+            // Dive phase: deepest first. If priorities match, break tie by lower priority (e.g. Left over Right).
+            if (a->depth != b->depth)
+                return a->depth < b->depth;
             return a->priority > b->priority;
-        return a->depth < b->depth;
+        }
+        else
+        {
+            // Optimization phase: smaller priority comes first. If priorities match, deeper node comes first.
+            if (a->priority != b->priority)
+                return a->priority > b->priority;
+            return a->depth < b->depth;
+        }
     }
 };
 
