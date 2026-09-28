@@ -1815,12 +1815,7 @@ struct Planner
         auto brancher_impl = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
         plan::SearchEngine engine(std::move(search_state), selector, brancher_impl);
-        engine.addPropagator(std::make_unique<plan::SelectionPropagator>());
-        engine.addPropagator(std::make_unique<plan::CachePropagator>());
-        engine.addPropagator(std::make_unique<plan::TopologicalOrderPropagator>());
-        engine.addPropagator(std::make_unique<plan::EngineSchedulePropagator>());
-        engine.addPropagator(std::make_unique<plan::MemoryNonOverlapPropagator>());
-        engine.addPropagator(std::make_unique<plan::CostLowerBoundPropagator>());
+        plan::addAllPropagators(engine);
 
         LOG(DEBUG) << "[Planner.planAll] Launching SearchEngine solve (minCompileSeconds=" << minCompileSeconds << "s)...";
         bool solved = engine.solve(minCompileSeconds);

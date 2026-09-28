@@ -59,7 +59,8 @@ class SearchEngine
           brancher(brancher ? brancher : std::make_shared<HeuristicBrancher>())
     {
 #ifdef TG_PROFILE
-        next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        search_start_time = std::chrono::steady_clock::now();
+        next_propagator_report = search_start_time + std::chrono::seconds(2);
 #endif
     }
 
@@ -458,6 +459,10 @@ class SearchEngine
     bool solve(float timeout_seconds = 0.0f)
     {
         TimeoutChecker timer(timeout_seconds);
+#ifdef TG_PROFILE
+        search_start_time = std::chrono::steady_clock::now();
+        next_propagator_report = search_start_time + std::chrono::seconds(2);
+#endif
 
         LOG(DEBUG) << "[SearchEngine] Starting solve: num_vars=" << state.numVars()
                    << ", candidates=" << state.candidates.size()
@@ -643,12 +648,11 @@ class SearchEngine
     std::vector<PropagatorTiming> propagator_timings;
     uint64_t propagator_calls_since_report = 0;
     std::chrono::steady_clock::time_point next_propagator_report;
+    std::chrono::steady_clock::time_point search_start_time;
 
     void maybeReportPropagatorTimings()
     {
-        constexpr uint64_t report_call_period = 5000;
-        if (propagator_calls_since_report < report_call_period &&
-            std::chrono::steady_clock::now() < next_propagator_report)
+        if (std::chrono::steady_clock::now() < next_propagator_report)
             return;
 
         reportPropagatorTimings(false);
@@ -659,15 +663,40 @@ class SearchEngine
         if (!force && propagator_calls_since_report == 0)
             return;
 
-        std::cout << "\n[SearchEngine] Propagator timing report" << (force ? " (final)" : "") << "\n";
-        std::cout << std::left << std::setw(32) << "Propagator" << std::right << std::setw(12) << "Prop (ms)"
-                  << std::setw(12) << "Prop calls" << std::setw(12) << "Prop avg (us)" << std::setw(12)
-                  << "Prop max (ms)" << std::setw(12) << "Contradictions" << std::setw(12) << "LB (ms)"
-                  << std::setw(12) << "LB calls" << std::setw(12) << "LB max (ms)" << std::setw(12) << "Total (ms)"
-                  << "\n";
-        std::cout << std::string(128, '-') << "\n";
+        const auto now = std::chrono::steady_clock::now();
+        const double search_elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+            now - search_start_time).count();
 
         uint64_t total_ns = 0;
+        for (size_t i = 0; i < propagators.size(); ++i)
+        {
+            total_ns += propagator_timings[i].propagate_ns + propagator_timings[i].lower_bound_ns;
+        }
+        const double total_prop_ms = total_ns / 1.0e6;
+        const double total_pct_search = (search_elapsed_ms > 0.0)
+                                            ? (total_prop_ms / search_elapsed_ms) * 100.0
+                                            : 0.0;
+        const double other_search_ms = std::max(0.0, search_elapsed_ms - total_prop_ms);
+        const double other_pct_search = (search_elapsed_ms > 0.0)
+                                            ? (other_search_ms / search_elapsed_ms) * 100.0
+                                            : 0.0;
+
+        std::cout << "\n[SearchEngine] Propagator timing report" << (force ? " (final)" : "") << "\n";
+        std::cout << std::left << std::setw(32) << "Propagator" << std::right
+                  << std::setw(12) << "Prop (ms)"
+                  << std::setw(12) << "Prop calls"
+                  << std::setw(14) << "Prop avg (us)"
+                  << std::setw(14) << "Prop max (ms)"
+                  << std::setw(15) << "Contradictions"
+                  << std::setw(10) << "LB (ms)"
+                  << std::setw(10) << "LB calls"
+                  << std::setw(12) << "LB max (ms)"
+                  << std::setw(12) << "Total (ms)"
+                  << std::setw(10) << "% Search"
+                  << std::setw(10) << "% Prop"
+                  << "\n";
+        std::cout << std::string(151, '-') << "\n";
+
         for (size_t i = 0; i < propagators.size(); ++i)
         {
             const auto &timing = propagator_timings[i];
@@ -678,21 +707,38 @@ class SearchEngine
                                                 ? 0.0
                                                 : static_cast<double>(timing.propagate_ns) /
                                                       static_cast<double>(timing.propagate_calls) / 1.0e3;
+            const double pct_search = (search_elapsed_ms > 0.0)
+                                          ? (total_ms / search_elapsed_ms) * 100.0
+                                          : 0.0;
+            const double pct_prop = (total_prop_ms > 0.0)
+                                        ? (total_ms / total_prop_ms) * 100.0
+                                        : 0.0;
             std::cout << std::left << std::setw(32) << propagators[i]->name().substr(0, 31) << std::right
-                      << std::fixed << std::setprecision(2) << std::setw(12) << propagate_ms << std::setw(12)
-                      << timing.propagate_calls << std::setw(12) << propagate_avg_us << std::setw(12)
-                      << timing.max_propagate_ns / 1.0e6 << std::setw(12) << timing.contradictions << std::setw(12)
-                      << lower_bound_ms << std::setw(12) << timing.lower_bound_calls << std::setw(12)
-                      << timing.max_lower_bound_ns / 1.0e6 << std::setw(12) << total_ms << "\n";
-            total_ns += timing.propagate_ns + timing.lower_bound_ns;
+                      << std::fixed << std::setprecision(2)
+                      << std::setw(12) << propagate_ms
+                      << std::setw(12) << timing.propagate_calls
+                      << std::setw(14) << propagate_avg_us
+                      << std::setw(14) << timing.max_propagate_ns / 1.0e6
+                      << std::setw(15) << timing.contradictions
+                      << std::setw(10) << lower_bound_ms
+                      << std::setw(10) << timing.lower_bound_calls
+                      << std::setw(12) << timing.max_lower_bound_ns / 1.0e6
+                      << std::setw(12) << total_ms
+                      << std::setw(9) << pct_search << "%"
+                      << std::setw(9) << pct_prop << "%"
+                      << "\n";
         }
-        std::cout << std::string(128, '-') << "\n"
-                  << "Cumulative instrumented propagator time: " << std::fixed << std::setprecision(2)
-                  << total_ns / 1.0e6 << " ms\n"
+        std::cout << std::string(151, '-') << "\n";
+        std::cout << std::fixed << std::setprecision(2)
+                  << "Total Search Elapsed Time:            " << std::setw(10) << search_elapsed_ms << " ms\n"
+                  << "Cumulative Propagator Time:          " << std::setw(10) << total_prop_ms << " ms ("
+                  << total_pct_search << "% of total search time)\n"
+                  << "Rest of Search (branching, queue...): " << std::setw(10) << other_search_ms << " ms ("
+                  << other_pct_search << "% of total search time)\n"
                   << std::flush;
 
         propagator_calls_since_report = 0;
-        next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     }
 #endif
 };

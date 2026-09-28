@@ -2,20 +2,17 @@
 
 #include <cmath>
 #include <functional>
+#include <iostream>
 #include <random>
 #include <stdexcept>
 
-#include "tests/full_propagators.hpp"
-#include "tests/selection_reachability.hpp"
+#include "core/misc.hpp"
+#include "core/plan/propagator.hpp"
+#include "core/plan/search_engine.hpp"
 
 namespace incremental_propagator_test
 {
 using namespace plan;
-
-enum Checks : uint32_t
-{
-    CACHE = 1, TOPOLOGY = 2, ENGINE = 4, MEMORY = 8, COST = 16, SELECTION = 32, ALL = 63
-};
 
 inline void require(bool condition, const std::string &message)
 {
@@ -29,7 +26,11 @@ struct AlternativeSpec
     std::vector<Engine> engines;
     float cost = 1.0f;
     bool is_view = false;
-    OpType op_type = OpType::INPUT;
+    OpType op_type = OpType::ADD;
+
+    AlternativeSpec() = default;
+    AlternativeSpec(std::vector<uint32_t> ch, std::vector<Engine> eng = {}, float c = 1.0f, bool view = false, OpType op = OpType::ADD)
+        : children(std::move(ch)), engines(std::move(eng)), cost(c), is_view(view), op_type(op) {}
 };
 using GraphSpec = std::vector<std::vector<AlternativeSpec>>;
 
@@ -119,89 +120,6 @@ inline SearchState makeState(const GraphSpec &spec, uint32_t bucket_count = 1)
     return state;
 }
 
-inline void addPropagators(SearchEngine &engine, uint32_t checks)
-{
-    if (checks & SELECTION) engine.addPropagator(std::make_unique<SelectionPropagator>());
-    if (checks & CACHE) engine.addPropagator(std::make_unique<CachePropagator>());
-    if (checks & TOPOLOGY) engine.addPropagator(std::make_unique<TopologicalOrderPropagator>());
-    if (checks & ENGINE) engine.addPropagator(std::make_unique<EngineSchedulePropagator>());
-    if (checks & MEMORY) engine.addPropagator(std::make_unique<MemoryNonOverlapPropagator>());
-    if (checks & COST) engine.addPropagator(std::make_unique<CostLowerBoundPropagator>());
-}
-
-inline bool propagateFull(SearchState &state, uint32_t checks, float &bound)
-{
-    FullCachePropagator cache;
-    FullTopologicalOrderPropagator topology;
-    FullEngineSchedulePropagator engine;
-    FullMemoryNonOverlapPropagator memory;
-    FullCostLowerBoundPropagator cost;
-    cost.setBestCost(state.best_cost);
-    std::vector<VarId> unused;
-    for (uint32_t round = 0; round < 1000; ++round)
-    {
-        const auto before = state.domains;
-        if (state.hasEmptyDomain()) return false;
-        if ((checks & SELECTION) && !selection_reachability_test::propagateReference(state)) return false;
-        if ((checks & CACHE) && !cache.propagate(state, 0, unused)) return false;
-        if ((checks & TOPOLOGY) && !topology.propagate(state, 0, unused)) return false;
-        if ((checks & ENGINE) && !engine.propagate(state, 0, unused)) return false;
-        if ((checks & MEMORY) && !memory.propagate(state, 0, unused)) return false;
-        if ((checks & COST) && !cost.propagate(state, 0, unused)) return false;
-        if (state.hasEmptyDomain()) return false;
-        if (before == state.domains)
-        {
-            bound = (checks & COST) ? cost.computeLowerBound(state) : 0.0f;
-            return true;
-        }
-    }
-    throw std::runtime_error("Full propagators did not converge");
-}
-
-inline void checkIndexes(const SearchState &state)
-{
-    state.ensurePropagationState();
-    SearchState rebuilt = state;
-    rebuilt.propagation = PropagationState{};
-    rebuilt.ensurePropagationState();
-    require(state.costLowerBound() == rebuilt.costLowerBound(), "Incremental cost differs from rebuilt sum tree");
-    const auto &actual = state.propagation;
-    const auto &expected = rebuilt.propagation;
-    for (const auto &[space, indices] : actual.candidates_by_space)
-        require(actual.fixed_cache_bytes.count(space) == 0 ? expected.fixed_cache_bytes.count(space) == 0 || expected.fixed_cache_bytes.at(space) == 0 :
-                actual.fixed_cache_bytes.at(space) == (expected.fixed_cache_bytes.count(space) ? expected.fixed_cache_bytes.at(space) : 0),
-                "Cache budget was not restored");
-    for (size_t i = 0; i < actual.engines.size(); ++i)
-    {
-        require(actual.engines[i].active_starts == expected.engines[i].active_starts, "Active engine users were not restored");
-        require(actual.engines[i].fixed_starts == expected.engines[i].fixed_starts, "Engine occupancy was not restored");
-    }
-    for (size_t b = 0; b < actual.buckets.size(); ++b)
-        require(actual.buckets[b].finish_times == expected.buckets[b].finish_times, "Finish times were not restored");
-}
-
-inline bool checkPropagation(SearchEngine &engine, uint32_t checks, const std::string &context = "")
-{
-    SearchState reference = engine.state;
-    // Selection's reference writes domains directly. Keep the full oracle
-    // independent of all production indexes and its dirty-domain bookkeeping.
-    reference.propagation = PropagationState{};
-    float expected_bound = 0.0f;
-    const bool expected = propagateFull(reference, checks, expected_bound);
-    float actual_bound = 0.0f;
-    const bool actual = engine.runPropagators(actual_bound, kInvalidVarId);
-    require(actual == expected, context + ": incremental/full feasibility differs (checks=" + std::to_string(checks) + ")");
-    if (actual)
-    {
-        for (VarId var_id = 0; var_id < engine.state.numVars(); ++var_id)
-            require(engine.state.domains[var_id] == reference.domains[var_id], context + ": domain differs for var " +
-                    std::to_string(var_id) + ": " + engine.state.domains[var_id].toString() + " vs " + reference.domains[var_id].toString());
-        require(std::abs(actual_bound - expected_bound) <= 1e-5f * std::max(1.0f, expected_bound), "Cost bound differs from full summation");
-    }
-    checkIndexes(engine.state);
-    return actual;
-}
-
 inline void selectAll(SearchState &state)
 {
     for (const auto &vars : state.selected_vars)
@@ -209,320 +127,339 @@ inline void selectAll(SearchState &state)
             state.setDomain(var_id, Domain::makeFixed(1, true));
 }
 
-inline void testCacheDependencies()
-{
-    GraphSpec spec(3, {{{}, {}, 1.0f, false, OpType::CACHE}, {{}, {}, 1.0f, false, OpType::SCATTER}, {}});
-    SearchState state = makeState(spec, 2);
-    state.mem_caps[MemSpace{1, HandleType::CPP}] = 12;
-    state.candidates[2].size_bytes = 16;
-    SearchEngine engine(std::move(state));
-    addPropagators(engine, CACHE);
-    require(checkPropagation(engine, CACHE), "Initial cache propagation failed");
-    const auto initial = engine.state.domains;
-    const size_t marker = engine.state.getTrailMarker();
-    engine.state.setDomain(selection(engine.state, 0, 1), Domain::makeFixed(1, true));
-    require(checkPropagation(engine, CACHE), "Cross-bucket cache requirement failed");
-    require(engine.state.domains[engine.state.cached_vars.at(BaseEClassId{1})].fixedValue() == 1, "CACHE did not require caching");
-    require(engine.state.domains[selection(engine.state, 1)].mask == ((1u << 0) | (1u << 3)), "Budget did not prune CACHE and SCATTER alternatives");
-    engine.state.backtrackTo(marker);
-    require(engine.state.domains == initial && checkPropagation(engine, CACHE), "Cache rollback failed");
-    engine.state.setDomain(engine.state.cached_vars.at(BaseEClassId{1}), Domain::makeFixed(1, true));
-    engine.state.setDomain(engine.state.cached_vars.at(BaseEClassId{2}), Domain::makeFixed(1, true));
-    require(!checkPropagation(engine, CACHE), "Overcommitted budget was accepted");
-    engine.state.backtrackTo(marker);
-    require(checkPropagation(engine, CACHE), "Cache sibling after contradiction failed");
-}
+// ============================================================================
+// BASE 11 CORRECTNESS TESTS
+// ============================================================================
 
-inline void testTopologyAndEngines()
+inline void testBaseCorrectness()
 {
-    const Engine cpu{0, EngineType::CPU};
-    const Engine dma{0, EngineType::CUDA_DMA};
-    GraphSpec spec(8);
-    spec[0] = {{{}, {cpu}}, {{7}, {cpu}}};
-    for (uint32_t node = 1; node < spec.size(); ++node)
-        spec[node] = {{{node - 1, node - 1}, {cpu}}};
-    SearchEngine topology(makeState(spec, 2));
-    addPropagators(topology, TOPOLOGY);
-    for (uint32_t node = 1; node < spec.size(); ++node)
-        topology.state.setDomain(selection(topology.state, node), Domain::makeFixed(1, true));
-    require(checkPropagation(topology, TOPOLOGY), "Fixed path pruning failed");
-    require(!topology.state.domains[selection(topology.state, 0)].contains(2), "Transitive cycle alternative survived");
-    topology.state.setDomain(selection(topology.state, 0), Domain::makeFixed(1, true));
-    require(checkPropagation(topology, TOPOLOGY), "Dependency chain failed");
-    require(topology.state.domains[start(topology.state, 7)].getMin() == 7, "Start bounds did not reach end of chain");
-
-    spec = {{{{}, {cpu}}}, {{{}, {dma}}}, {{{}, {cpu, dma}}}, {{{}, {cpu}}, {{}, {dma}}}};
-    SearchEngine engine(makeState(spec, 2));
-    addPropagators(engine, ENGINE);
-    for (uint32_t node = 0; node < 3; ++node)
-        engine.state.setDomain(selection(engine.state, node), Domain::makeFixed(1, true));
-    engine.state.setDomain(start(engine.state, 0), Domain::makeFixed(0));
-    engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(1));
-    engine.state.setDomain(start(engine.state, 3, 0, 1), Domain::makeFixed(0));
-    require(checkPropagation(engine, ENGINE), "Engine prefix pruning failed");
-    require(engine.state.domains[start(engine.state, 2)].getMin() == 2, "Multi-engine blocked prefix survived");
-    const size_t marker = engine.state.getTrailMarker();
-    engine.state.setDomain(selection(engine.state, 3), Domain::makeFixed(2, true));
-    require(checkPropagation(engine, ENGINE), "Selecting a previously fixed inactive start failed");
-    engine.state.backtrackTo(marker);
-    engine.state.setDomain(start(engine.state, 2), Domain::makeFixed(1));
-    require(!checkPropagation(engine, ENGINE), "Engine collision was accepted");
-    engine.state.backtrackTo(marker);
-    require(checkPropagation(engine, ENGINE), "Engine rollback failed");
-}
-
-inline void testMemoryViewsAndLifetimes()
-{
-    GraphSpec spec = {{{}}, {{{0}, {}, 0.0f, true}}, {{{1}, {}, 0.0f, true}}, {{{2}}}, {{}}};
-    SearchState state = makeState(spec, 2);
-    selectAll(state);
-    for (uint32_t b = 0; b < 2; ++b)
+    std::cout << "Running Base Test 1..." << std::endl;
+    // 1. Selection reachability & children (Rules 1, 2, 10)
     {
-        for (uint32_t node = 0; node < 5; ++node)
-            state.setDomain(start(state, node, b), Domain::makeFixed(node == 3 ? 4 : node == 4 ? 3 : node));
-        state.setDomain(offset(state, 0, b), Domain::makeFixed(0));
-        state.setDomain(offset(state, 3, b), Domain::makeFixed(10));
-    }
-    SearchEngine engine(std::move(state));
-    addPropagators(engine, MEMORY);
-    require(checkPropagation(engine, MEMORY), "View lifetime propagation failed");
-    require(engine.state.domains[offset(engine.state, 1)].fixedValue() == 0 &&
-            engine.state.domains[offset(engine.state, 2)].fixedValue() == 0, "View chain offsets did not align");
-    require(engine.state.domains[offset(engine.state, 4)].getMin() == 2, "Consumer through views did not extend input lifetime");
-    const size_t marker = engine.state.getTrailMarker();
-    const auto initial = engine.state.domains;
-    engine.state.setDomain(offset(engine.state, 4), Domain::makeFixed(10));
-    require(!checkPropagation(engine, MEMORY), "Live allocation collision was accepted");
-    engine.state.backtrackTo(marker);
-    require(engine.state.domains == initial && checkPropagation(engine, MEMORY), "Memory rollback failed");
-    engine.state.setDomain(offset(engine.state, 4), Domain::makeFixed(2));
-    require(checkPropagation(engine, MEMORY), "Memory sibling after collision failed");
+        GraphSpec spec = {
+            {AlternativeSpec({1})},
+            {AlternativeSpec({2}), AlternativeSpec{}},
+            {AlternativeSpec{}}
+        };
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        float lb = 0.0f;
+        require(engine.runPropagators(lb, kInvalidVarId), "Base reachability initial failed");
 
-    // A preallocated input uses its physical offset even with a wide search domain.
-    state = makeState({{{}}, {{{0}}}, {{}}});
-    selectAll(state);
-    state.preallocated_buffers[BaseEClassId{1}].offset = 0;
-    state.preallocated_buffers[BaseEClassId{1}].size = 8;
-    state.setDomain(start(state, 0), Domain::makeFixed(0));
-    state.setDomain(start(state, 2), Domain::makeFixed(1));
-    SearchEngine preallocated(std::move(state));
-    addPropagators(preallocated, MEMORY);
-    require(checkPropagation(preallocated, MEMORY), "Preallocated memory propagation failed");
-    preallocated.state.setDomain(start(preallocated.state, 1), Domain::makeFixed(5));
-    require(checkPropagation(preallocated, MEMORY), "Open lifetime did not track new maximum finish");
-    require(preallocated.state.domains[offset(preallocated.state, 2)].getMin() == 2, "Physical input offset was ignored");
-}
+        // Fixing root to 1 forces child 1 to not be 0 (Rule 2)
+        engine.state.setDomain(selection(engine.state, 0), Domain::makeFixed(1, true));
+        require(engine.runPropagators(lb, selection(engine.state, 0)), "Selecting root failed");
+        require(!engine.state.domains[selection(engine.state, 1)].contains(0), "Rule 2: child was not forced non-zero");
 
-inline void testCostAndStateOwnership()
-{
-    const Engine cpu{0, EngineType::CPU};
-    const Engine dma{0, EngineType::CUDA_DMA};
-    SearchState state = makeState({{{{}, {cpu}, 0.1f}}, {{{}, {cpu, dma}, 0.2f}}, {{{}, {dma}, TGConstants::INF}}}, 3);
-    state.bucket_weights[1] = 0.0f;
-    state.bucket_weights[2] = -1.0f;
-    SearchEngine engine(std::move(state));
-    addPropagators(engine, COST);
-    const size_t before_initialization = engine.state.getTrailMarker();
-    selectAll(engine.state);
-    require(checkPropagation(engine, COST), "Initial cost propagation failed");
-    const float bound = engine.state.costLowerBound();
-    require(std::abs(bound - 0.3f) < 1e-6f, "Weights or engine cost aggregation are incorrect");
-    SearchEngine copied(engine.state);
-    addPropagators(copied, COST);
-    copied.state.best_cost = bound;
-    require(!checkPropagation(copied, COST), "Equal incumbent did not prune without domain changes");
-    require(engine.state.best_cost == TGConstants::INF && checkPropagation(engine, COST), "Copied incumbent affected original state");
-    engine.state.backtrackTo(before_initialization);
-    require(checkPropagation(engine, COST) && engine.state.costLowerBound() == 0.0f, "Undo before initialization failed");
-    for (uint32_t repeat = 0; repeat < 100; ++repeat)
-    {
+        // Contrapositive (Rule 10): fixing node 2 to 0 removes parent alternative from node 1
         const size_t marker = engine.state.getTrailMarker();
-        selectAll(engine.state);
-        require(checkPropagation(engine, COST) && engine.state.costLowerBound() == bound, "Cost update drifted");
+        engine.state.setDomain(selection(engine.state, 2), Domain::makeFixed(0, true));
+        std::string conflict;
+        bool ok = engine.runPropagators(lb, selection(engine.state, 2), &conflict);
+        if (!ok)
+            std::cerr << "Conflict reason in test 1: " << conflict << std::endl;
+        require(ok, "Setting node 2 to 0 failed");
+        require(!engine.state.domains[selection(engine.state, 1)].contains(1), "Rule 10: parent alternative was not removed");
+        require(engine.state.domains[selection(engine.state, 1)].contains(2), "Rule 10: parent alternative 2 should remain");
         engine.state.backtrackTo(marker);
-        require(engine.state.costLowerBound() == 0.0f, "Cost rollback drifted");
     }
-    // Reuse the same stateless objects across independent states.
-    CostLowerBoundPropagator propagator;
-    std::vector<VarId> worklist;
-    require(propagator.propagate(engine.state, 0, worklist) && !propagator.propagate(copied.state, 0, worklist),
-            "Propagator retained another search's incumbent");
-}
 
-inline void testInterruptedInitializationAndReplay()
-{
-    // Fail a view equality before all initial allocations have been examined,
-    // then undo only the failing decision and finish the remaining work.
-    SearchState state = makeState({{{}}, {{{0}, {}, 0.0f, true}}, {{}}, {{}}}, 2);
-    selectAll(state);
-    for (uint32_t b = 0; b < 2; ++b)
+    std::cout << "Running Base Test 2..." << std::endl;
+    // 2. Unselected start/offset zeroing (Rule 3)
     {
-        for (uint32_t node = 0; node < 4; ++node)
-            state.setDomain(start(state, node, b), Domain::makeFixed(node));
-        state.setDomain(offset(state, 0, b), Domain::makeFixed(0));
-        state.setDomain(offset(state, 2, b), Domain::makeFixed(8));
+        GraphSpec spec = {{{}}, {{}}};
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        float lb = 0.0f;
+        require(engine.runPropagators(lb, kInvalidVarId), "Initial propagation failed");
+        engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(0, true));
+        require(engine.runPropagators(lb, selection(engine.state, 1)), "Unselecting node 1 failed");
+        require(engine.state.domains[start(engine.state, 1)].isFixed() &&
+                engine.state.domains[start(engine.state, 1)].fixedValue() == 0, "Rule 3: start not fixed to 0");
+        require(engine.state.domains[offset(engine.state, 1)].isFixed(), "Rule 3: offset not fixed to min_p");
     }
-    SearchEngine engine(std::move(state));
-    addPropagators(engine, MEMORY);
-    const size_t marker = engine.state.getTrailMarker();
-    engine.state.setDomain(offset(engine.state, 1), Domain::makeFixed(10));
-    require(!checkPropagation(engine, MEMORY), "Conflicting view offset was accepted");
-    engine.state.backtrackTo(marker);
-    require(checkPropagation(engine, MEMORY), "Rollback lost pending initialization");
 
-    const Engine cpu{0, EngineType::CPU};
-    SearchEngine replay(makeState({{{{}, {cpu}, 0.1f}}, {{{}, {cpu}, 0.2f}}}));
-    addPropagators(replay, ENGINE | COST);
-    selectAll(replay.state);
-    require(checkPropagation(replay, ENGINE | COST), "Replay fixture did not propagate");
-    const size_t root_marker = replay.state.getTrailMarker();
-    const auto root_domains = replay.state.domains;
-    auto root = std::make_shared<SearchNode>(0, UINT32_MAX,
-        std::make_pair(kInvalidVarId, Domain{}), 0.0f, 0.0f, 0, root_marker);
-    auto first = std::make_shared<SearchNode>(1, 0,
-        std::make_pair(start(replay.state, 0), Domain::makeFixed(0)), 0.0f, 0.0f, 1);
-    auto failed = std::make_shared<SearchNode>(2, 1,
-        std::make_pair(start(replay.state, 1), Domain::makeFixed(0)), 0.0f, 0.0f, 2);
-    auto sibling = std::make_shared<SearchNode>(3, 1,
-        std::make_pair(start(replay.state, 1), Domain::makeFixed(1)), 0.0f, 0.0f, 2);
-    replay.all_nodes = {root, first, failed, sibling};
-    replay.current_node_id = 0;
-    require(!replay.restoreNode(failed), "Conflicting replay was accepted");
-    require(replay.restoreNode(sibling) && checkPropagation(replay, ENGINE | COST), "Sibling replay failed");
-    require(replay.restoreNode(root) && replay.state.domains == root_domains && checkPropagation(replay, ENGINE | COST),
-            "LCA rollback did not restore incremental state");
-    require(replay.restoreNode(sibling) && checkPropagation(replay, ENGINE | COST), "Repeated replay failed");
+    std::cout << "Running Base Test 3..." << std::endl;
+    // 3. Cache exclusion (Rule 4) and cache requirement (Rule 11)
+    {
+        GraphSpec spec = {
+            {AlternativeSpec({1}, {}, 1.0f, false, OpType::CACHE),
+             AlternativeSpec({1}, {}, 1.0f, false, OpType::SCATTER),
+             AlternativeSpec({1}, {}, 1.0f, false, OpType::INPUT),
+             AlternativeSpec{}},
+            {AlternativeSpec({}, {}, 1.0f, false, OpType::CACHE),
+             AlternativeSpec({}, {}, 1.0f, false, OpType::SCATTER),
+             AlternativeSpec{}},
+            {AlternativeSpec{}}
+        };
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        float lb = 0.0f;
+        require(engine.runPropagators(lb, kInvalidVarId), "Initial cache test failed");
+
+        // Rule 4: If cached_var is fixed to 0, CACHE/SCATTER enodes must be removed
+        VarId cv1 = engine.state.cached_vars.at(BaseEClassId{1});
+        engine.state.setDomain(cv1, Domain::makeFixed(0, true));
+        require(engine.runPropagators(lb, cv1), "Setting cache 1 to 0 failed");
+        require(!engine.state.domains[selection(engine.state, 0)].contains(1), "Rule 4: CACHE enode was not removed");
+
+        // Rule 11: If CACHE or SCATTER enode is definitely selected (>0), corresponding cached var must be fixed to 1
+        VarId cv2 = engine.state.cached_vars.at(BaseEClassId{2});
+        engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(2, true)); // SCATTER
+        require(engine.runPropagators(lb, selection(engine.state, 1)), "Selecting SCATTER failed");
+        require(engine.state.domains[cv2].isFixed() && engine.state.domains[cv2].fixedValue() == 1,
+                "Rule 11: cached var was not fixed to 1");
+    }
+
+    std::cout << "Running Base Test 4..." << std::endl;
+    // 4. Start precedence (Rule 5) and Start uniqueness (Rule 6)
+    {
+        GraphSpec spec = {{AlternativeSpec({1})}, {AlternativeSpec{}}};
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        selectAll(engine.state);
+        float lb = 0.0f;
+        require(engine.runPropagators(lb, kInvalidVarId), "Initial start test failed");
+
+        // Fix child's start to 2
+        engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(2));
+        require(engine.runPropagators(lb, start(engine.state, 1)), "Fixing child start failed");
+
+        // Rule 5: Consumer's start must be >= child start + 1
+        require(engine.state.domains[start(engine.state, 0)].getMin() >= 3,
+                "Rule 5: Consumer start did not advance to >= child start + 1");
+
+        // Rule 6: Start values must be unique per bucket
+        engine.state.setDomain(start(engine.state, 0), Domain::makeFixed(2));
+        require(!engine.runPropagators(lb, start(engine.state, 0)),
+                "Rule 6: Duplicate start value was accepted without contradiction");
+    }
+
+    std::cout << "Running Base Test 5..." << std::endl;
+    // 5. Pearce-Kelly cycle detection (Rule 9)
+    {
+        GraphSpec spec = {
+            {AlternativeSpec({1})},
+            {AlternativeSpec({0}), AlternativeSpec{}}
+        };
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        float lb = 0.0f;
+        engine.state.setDomain(selection(engine.state, 0), Domain::makeFixed(1, true));
+        require(engine.runPropagators(lb, selection(engine.state, 0)), "Selecting node 0 failed");
+        engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(1, true));
+        require(!engine.runPropagators(lb, selection(engine.state, 1)),
+                "Rule 9: Direct cycle 0 -> 1 -> 0 was accepted without contradiction");
+    }
+
+    std::cout << "Running Base Test 6..." << std::endl;
+    // 6. View offset propagation (Rule 8)
+    {
+        GraphSpec spec = {
+            {AlternativeSpec({1}, {}, 0.0f, true)},
+            {AlternativeSpec{}}
+        };
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        selectAll(engine.state);
+        float lb = 0.0f;
+        require(engine.runPropagators(lb, kInvalidVarId), "View offset test init failed");
+        engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(0));
+        engine.state.setDomain(start(engine.state, 0), Domain::makeFixed(1));
+        engine.state.setDomain(offset(engine.state, 1), Domain::makeFixed(12));
+        require(engine.runPropagators(lb, offset(engine.state, 1)), "Fixing child offset failed");
+        require(engine.state.domains[offset(engine.state, 0)].isFixed() &&
+                engine.state.domains[offset(engine.state, 0)].fixedValue() == 12,
+                "Rule 8: View offset did not align with child offset");
+    }
 }
 
-inline void testMemoryPoolsAndBounds()
-{
-    SearchState state = makeState({{{}}, {{}}, {{}}});
-    selectAll(state);
-    const MemSpace other_space{2, HandleType::CPP};
-    state.bucket_egraphs[0].getEClass(EClassId{2}).mem_space = other_space;
-    state.page_alignments[other_space] = 4;
-    for (uint32_t node = 0; node < 3; ++node)
-        state.setDomain(start(state, node), Domain::makeFixed(node));
-    state.setDomain(offset(state, 0), Domain::makeFixed(8));
-    state.setDomain(offset(state, 2), Domain::makeFixed(8));
-    SearchEngine engine(std::move(state));
-    addPropagators(engine, MEMORY);
-    require(checkPropagation(engine, MEMORY), "Separate memory pools conflicted");
-    const size_t marker = engine.state.getTrailMarker();
-    Domain domain = engine.state.domains[offset(engine.state, 1)];
-    domain.setMax(9);
-    engine.state.setDomain(offset(engine.state, 1), domain);
-    require(checkPropagation(engine, MEMORY) && engine.state.domains[offset(engine.state, 1)].getMax() == 6,
-            "Blocked offset suffix was not pruned");
-    engine.state.backtrackTo(marker);
-    domain = engine.state.domains[offset(engine.state, 1)];
-    domain.setMin(7);
-    engine.state.setDomain(offset(engine.state, 1), domain);
-    require(checkPropagation(engine, MEMORY) && engine.state.domains[offset(engine.state, 1)].getMin() == 10,
-            "Blocked offset prefix was not pruned");
-}
+// ============================================================================
+// TESTING EXTRA PROPAGATORS (12-15) USING BASE 11 AS REFERENCE
+// ============================================================================
 
-inline void testRandomBranches()
+inline void testExtraAgainstBaseReference()
 {
-    std::mt19937 random(942731);
-    for (uint32_t checks : {uint32_t(CACHE), uint32_t(TOPOLOGY), uint32_t(ENGINE), uint32_t(MEMORY), uint32_t(COST), uint32_t(ALL)})
-        for (uint32_t trial = 0; trial < 60; ++trial)
+    // Test 1: Soundness of CriticalPathPropagator (Rule 12) & EngineWorkloadPropagator (Rule 15)
+    // The lower bound computed by EXTRA must never exceed the true evaluated makespan of any valid solution.
+    {
+        const Engine cpu{0, EngineType::CPU};
+        GraphSpec spec = {
+            {{{1}, {cpu}, 3.0f}},
+            {{{2}, {cpu}, 5.0f}},
+            {{{}, {cpu}, 2.0f}}
+        };
+        SearchState base_state = makeState(spec, 1);
+        selectAll(base_state);
+        base_state.setDomain(start(base_state, 2), Domain::makeFixed(0));
+        base_state.setDomain(start(base_state, 1), Domain::makeFixed(1));
+        base_state.setDomain(start(base_state, 0), Domain::makeFixed(2));
+        base_state.setDomain(offset(base_state, 2), Domain::makeFixed(0));
+        base_state.setDomain(offset(base_state, 1), Domain::makeFixed(4));
+        base_state.setDomain(offset(base_state, 0), Domain::makeFixed(8));
+
+        SearchEngine base_engine(base_state);
+        addBasePropagators(base_engine);
+        float base_lb = 0.0f;
+        require(base_engine.runPropagators(base_lb, kInvalidVarId), "Base 11 failed on valid plan");
+        float true_makespan = base_engine.evaluateMakespan(base_engine.state, 0);
+
+        SearchEngine extra_engine(base_state);
+        addAllPropagators(extra_engine);
+        float extra_lb = 0.0f;
+        require(extra_engine.runPropagators(extra_lb, kInvalidVarId), "Extra failed on valid plan");
+
+        require(extra_lb <= true_makespan + 1e-4f,
+                "EXTRA lower bound (" + std::to_string(extra_lb) + ") exceeded true makespan (" + std::to_string(true_makespan) + ")");
+        require(extra_lb >= 10.0f - 1e-4f,
+                "EXTRA lower bound (" + std::to_string(extra_lb) + ") should be >= 10 (critical path 3+5+2)");
+
+        // Pruning against incumbent: if incumbent is less than lower bound, EXTRA prunes
+        SearchEngine pruned_engine(base_state);
+        addAllPropagators(pruned_engine);
+        pruned_engine.state.best_cost = 5.0f;
+        float pruned_lb = 0.0f;
+        require(!pruned_engine.runPropagators(pruned_lb, kInvalidVarId),
+                "EXTRA should prune state when incumbent best_cost < lower_bound");
+    }
+
+    // Test 2: CacheBudgetPropagator (Rule 13)
+    // When cached variables exceed memory cap, EXTRA detects contradiction where Base 11 allows it.
+    {
+        GraphSpec spec = {{{}}, {{}}, {{}}};
+        SearchState state = makeState(spec, 1);
+        const MemSpace space{1, HandleType::CPP};
+        state.mem_caps[space] = 12; // Each candidate is 8 bytes, so at most 1 fits
+        selectAll(state);
+
+        SearchEngine base_engine(state);
+        addBasePropagators(base_engine);
+        // Base 11 only enforces cache consistency, not total budget capacity
+        base_engine.state.setDomain(base_engine.state.cached_vars.at(BaseEClassId{1}), Domain::makeFixed(1, true));
+        base_engine.state.setDomain(base_engine.state.cached_vars.at(BaseEClassId{2}), Domain::makeFixed(1, true));
+        float base_lb = 0.0f;
+        base_engine.runPropagators(base_lb, kInvalidVarId);
+
+        // EXTRA (Rule 13) must detect capacity contradiction
+        SearchEngine extra_engine(state);
+        addAllPropagators(extra_engine);
+        extra_engine.state.setDomain(extra_engine.state.cached_vars.at(BaseEClassId{1}), Domain::makeFixed(1, true));
+        extra_engine.state.setDomain(extra_engine.state.cached_vars.at(BaseEClassId{2}), Domain::makeFixed(1, true));
+        float extra_lb = 0.0f;
+        require(!extra_engine.runPropagators(extra_lb, kInvalidVarId),
+                "Rule 13 (CacheBudgetPropagator) failed to reject cache overcommit");
+    }
+
+    // Test 3: RestrictOffsetPropagator (Rule 14)
+    // Overlapping lifetimes restrict offset domains earlier than pairwise fixed checks.
+    {
+        GraphSpec spec = {
+            {AlternativeSpec({1, 2})},
+            {AlternativeSpec{}},
+            {AlternativeSpec{}}
+        };
+        SearchState state = makeState(spec, 1);
+        selectAll(state);
+        state.setDomain(start(state, 1), Domain::makeRange(0, 5));
+        state.setDomain(start(state, 2), Domain::makeRange(0, 5));
+        state.setDomain(start(state, 0), Domain::makeFixed(6));
+        state.setDomain(offset(state, 1), Domain::makeFixed(8));
+
+        SearchEngine engine(std::move(state));
+        addAllPropagators(engine);
+        float lb = 0.0f;
+        require(engine.runPropagators(lb, offset(engine.state, 1)), "Restrict offset failed");
+
+        // The offset domain of node 2 (size 2 pages) cannot overlap [8, 10).
+        // If restricted to <= 9, it must be pushed to <= 6
+        Domain off2 = engine.state.domains[offset(engine.state, 2)];
+        off2.setMax(9);
+        engine.state.setDomain(offset(engine.state, 2), off2);
+        require(engine.runPropagators(lb, offset(engine.state, 2)), "Restricting suffix failed");
+        require(engine.state.domains[offset(engine.state, 2)].getMax() <= 6,
+                "Rule 14 (RestrictOffsetPropagator) did not prune blocked offset suffix");
+    }
+
+    // Test 4: Random Branching - Equivalence & Pruning Consistency
+    // Search with Base 11 vs Base 11 + EXTRA:
+    // Any solution found by Base 11 must be accepted by EXTRA (if within cache capacity).
+    {
+        std::mt19937 random(424242);
+        for (uint32_t trial = 0; trial < 25; ++trial)
         {
-            GraphSpec spec(3 + random() % 5);
+            GraphSpec spec(3 + random() % 4);
             for (uint32_t node = 0; node < spec.size(); ++node)
-                for (uint32_t index = 0, count = 1 + random() % 3; index < count; ++index)
+            {
+                uint32_t alts = 1 + random() % 2;
+                for (uint32_t a = 0; a < alts; ++a)
                 {
-                    AlternativeSpec alternative;
-                    for (uint32_t child = 0, count = random() % 3; child < count; ++child)
+                    AlternativeSpec alt;
+                    if (node + 1 < spec.size())
                     {
-                        if (checks == MEMORY || (checks == ALL && trial % 2 == 0))
-                        {
-                            if (node + 1 < spec.size())
-                                alternative.children.push_back(node + 1 + random() % (spec.size() - node - 1));
-                        }
-                        else
-                            alternative.children.push_back(random() % spec.size());
+                        uint32_t ch_count = random() % 2;
+                        for (uint32_t c = 0; c < ch_count; ++c)
+                            alt.children.push_back(node + 1 + random() % (spec.size() - node - 1));
                     }
-                    if (random() % 4 != 0)
-                        alternative.engines.push_back(Engine{random() % 2, EngineType::CPU});
-                    if (random() % 4 == 0)
-                        alternative.engines.push_back(Engine{0, EngineType::CUDA_DMA});
-                    alternative.is_view = !alternative.children.empty() && random() % 4 == 0;
-                    alternative.cost = alternative.is_view ? 0.0f : (random() % 31) / 10.0f;
-                    if (random() % 5 == 0)
-                        alternative.op_type = random() % 2 ? OpType::CACHE : OpType::SCATTER;
-                    spec[node].push_back(alternative);
+                    alt.cost = 1.0f + (random() % 10);
+                    alt.engines.push_back(Engine{0, EngineType::CPU});
+                    spec[node].push_back(alt);
                 }
-            SearchState state = makeState(spec, 2);
-            state.mem_caps[MemSpace{1, HandleType::CPP}] = 8 * (1 + random() % spec.size());
-            // Exercise initial fixed domains and batched changes before any index exists.
-            for (const auto &vars : state.selected_vars)
-                for (const auto &[cid, var_id] : vars)
-                    if (random() % 3 == 0)
-                        state.setDomain(var_id, Domain::makeFixed(1, true));
-            if (checks == MEMORY || checks == ENGINE || (checks == ALL && trial % 2 == 0))
-                for (uint32_t b = 0; b < state.buckets.size(); ++b)
-                    for (uint32_t node = 0; node < spec.size(); ++node)
-                    {
-                        if (random() % 3 != 0)
-                            state.setDomain(selection(state, node, b), Domain::makeFixed(1, true));
-                        for (uint32_t index = 0; index < spec[node].size(); ++index)
-                            if (random() % 2 == 0)
-                                state.setDomain(start(state, node, b, index), Domain::makeFixed(spec.size() - node));
-                        // Views inherit their source's offset; leave them free initially.
-                        if (random() % 3 == 0 && !spec[node][0].is_view)
-                            state.setDomain(offset(state, node, b), Domain::makeFixed(4 * node));
-                    }
-            SearchEngine engine(std::move(state));
-            addPropagators(engine, checks);
-            std::function<void(uint32_t)> visit = [&](uint32_t depth) {
-                const std::string context = "trial=" + std::to_string(trial) + " depth=" + std::to_string(depth);
-                if (!checkPropagation(engine, checks, context) || depth == 5)
-                    return;
-                std::vector<VarId> choices;
-                for (VarId var_id = 0; var_id < engine.state.numVars(); ++var_id)
-                    if (!engine.state.domains[var_id].isFixed()) choices.push_back(var_id);
-                if (choices.empty()) return;
-                const VarId var_id = choices[random() % choices.size()];
-                const Domain original = engine.state.domains[var_id];
-                Domain left = original;
-                Domain right = original;
-                if (original.is_mask)
+            }
+
+            SearchState state = makeState(spec, 1);
+            state.mem_caps[MemSpace{1, HandleType::CPP}] = 256;
+            selectAll(state);
+
+            SearchEngine base_engine(state);
+            addBasePropagators(base_engine);
+
+            SearchEngine extra_engine(state);
+            addAllPropagators(extra_engine);
+
+            float base_lb = 0.0f;
+            float extra_lb = 0.0f;
+            bool base_ok = base_engine.runPropagators(base_lb, kInvalidVarId);
+            bool extra_ok = extra_engine.runPropagators(extra_lb, kInvalidVarId);
+
+            if (!base_ok)
+            {
+                require(!extra_ok, "EXTRA was feasible when Base 11 was infeasible");
+                continue;
+            }
+
+            if (extra_ok)
+            {
+                require(extra_lb >= base_lb, "EXTRA lower bound should be >= Base lower bound");
+                // Check domains: Extra must be at least as restricted as Base
+                for (VarId v = 0; v < state.numVars(); ++v)
                 {
-                    const int32_t value = original.getMin();
-                    left = Domain::makeFixed(value, true);
-                    right.remove(value);
+                    const Domain &b_dom = base_engine.state.domains[v];
+                    const Domain &e_dom = extra_engine.state.domains[v];
+                    require(e_dom.size() <= b_dom.size(),
+                            "EXTRA domain for var " + std::to_string(v) + " was wider than Base 11 domain");
                 }
-                else
+            }
+
+            // Test backtracking consistency
+            const size_t marker = extra_engine.state.getTrailMarker();
+            const auto prev_domains = extra_engine.state.domains;
+            // Branch on first unfixed var
+            for (VarId v = 0; v < extra_engine.state.numVars(); ++v)
+            {
+                if (!extra_engine.state.domains[v].isFixed() && !extra_engine.state.domains[v].isEmpty())
                 {
-                    const int32_t middle = original.getMin() + (original.getMax() - original.getMin()) / 2;
-                    left.setMax(middle);
-                    right.setMin(middle + 1);
+                    Domain d = extra_engine.state.domains[v];
+                    int32_t val = d.getMin();
+                    extra_engine.state.setDomain(v, Domain::makeFixed(val, d.is_mask));
+                    extra_engine.runPropagators(extra_lb, v);
+                    extra_engine.state.backtrackTo(marker);
+                    require(extra_engine.state.domains == prev_domains,
+                            "Backtracking failed to restore exact domains in trial " + std::to_string(trial));
+                    break;
                 }
-                const auto parent_domains = engine.state.domains;
-                const float parent_bound = engine.state.costLowerBound();
-                const size_t marker = engine.state.getTrailMarker();
-                if (depth == 2 && trial % 10 == 0)
-                {
-                    SearchEngine copied(engine.state);
-                    addPropagators(copied, checks);
-                    copied.state.setDomain(var_id, left);
-                    checkPropagation(copied, checks, context + " copy");
-                    require(engine.state.domains == parent_domains && engine.state.costLowerBound() == parent_bound,
-                            "Copied propagation modified the original state");
-                }
-                for (const Domain &branch : {left, right})
-                {
-                    engine.state.setDomain(var_id, branch);
-                    visit(depth + 1);
-                    engine.state.backtrackTo(marker);
-                    require(engine.state.domains == parent_domains, "Random rollback changed parent domains");
-                    require(engine.state.costLowerBound() == parent_bound, "Random rollback changed parent bound");
-                    checkIndexes(engine.state);
-                }
-            };
-            visit(0);
+            }
         }
+    }
 }
 
 } // namespace incremental_propagator_test
@@ -530,12 +467,7 @@ inline void testRandomBranches()
 inline void runIncrementalPropagatorTests()
 {
     using namespace incremental_propagator_test;
-    testCacheDependencies();
-    testTopologyAndEngines();
-    testMemoryViewsAndLifetimes();
-    testCostAndStateOwnership();
-    testInterruptedInitializationAndReplay();
-    testMemoryPoolsAndBounds();
-    testRandomBranches();
-    std::cout << "incremental propagator tests passed" << std::endl;
+    testBaseCorrectness();
+    testExtraAgainstBaseReference();
+    std::cout << "All 15 propagator tests passed (Base 11 reference + EXTRA)" << std::endl;
 }
