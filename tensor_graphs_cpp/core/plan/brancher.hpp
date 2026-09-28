@@ -1,12 +1,16 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "core/types.hpp"
 #include "core/logging.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/enode_info.hpp"
@@ -27,6 +31,10 @@ class Brancher
     virtual ~Brancher() = default;
 
     virtual bool chooseBranch(const SearchState &state, BranchDecision &out_decision) = 0;
+
+#ifdef TG_PROFILE
+    virtual void reportBrancherTiming() const {}
+#endif
 };
 
 class HeuristicBrancher : public Brancher
@@ -59,8 +67,8 @@ class HeuristicBrancher : public Brancher
         return info.cost;
     }
 
-    static int32_t preferredENode(const SearchState &state, uint32_t bucket_idx, EClassId cid,
-                                  const Domain &domain)
+    int32_t preferredENode(const SearchState &state, uint32_t bucket_idx, EClassId cid,
+                           const Domain &domain) const
     {
         const EClass &cls = state.bucket_egraphs[bucket_idx].getEClass(cid);
         int32_t best_value = domain.getMin();
@@ -105,16 +113,30 @@ class HeuristicBrancher : public Brancher
     // Selected edges point from a child e-class to its parent. Following
     // fixed selections therefore tells us whether adding a candidate edge
     // would close a precedence cycle.
-    static bool hasSelectedPath(const SearchState &state, uint32_t bucket_idx,
-                                EClassId from, EClassId target)
+    bool hasSelectedPath(const SearchState &state, uint32_t bucket_idx,
+                         EClassId from, EClassId target) const
     {
-        std::vector<EClassId> frontier = {from};
-        std::unordered_set<EClassId> visited;
-        visited.insert(from);
+        if (from == target)
+            return true;
 
-        for (size_t i = 0; i < frontier.size(); ++i)
+        const size_t num_classes = state.bucket_egraphs[bucket_idx].classes.size();
+        if (path_visited_epoch.size() < num_classes)
+            path_visited_epoch.resize(num_classes, 0);
+
+        ++current_path_visited_epoch;
+        if (current_path_visited_epoch == 0)
         {
-            EClassId cid = frontier[i];
+            std::fill(path_visited_epoch.begin(), path_visited_epoch.end(), 0);
+            current_path_visited_epoch = 1;
+        }
+
+        path_frontier.clear();
+        path_frontier.push_back(from);
+        path_visited_epoch[from.value] = current_path_visited_epoch;
+
+        for (size_t i = 0; i < path_frontier.size(); ++i)
+        {
+            EClassId cid = path_frontier[i];
             if (cid == target)
                 return true;
 
@@ -135,15 +157,18 @@ class HeuristicBrancher : public Brancher
             for (EClassId child : enode.getChildren())
             {
                 EClassId canon_child = state.bucket_egraphs[bucket_idx].findConst(child);
-                if (visited.insert(canon_child).second)
-                    frontier.push_back(canon_child);
+                if (path_visited_epoch[canon_child.value] != current_path_visited_epoch)
+                {
+                    path_visited_epoch[canon_child.value] = current_path_visited_epoch;
+                    path_frontier.push_back(canon_child);
+                }
             }
         }
         return false;
     }
 
-    static bool candidateIsTopologicallyCompatible(const SearchState &state, uint32_t bucket_idx,
-                                                   EClassId cid, uint32_t enode_idx)
+    bool candidateIsTopologicallyCompatible(const SearchState &state, uint32_t bucket_idx,
+                                            EClassId cid, uint32_t enode_idx) const
     {
         const EClass &cls = state.bucket_egraphs[bucket_idx].getEClass(cid);
         if (enode_idx >= cls.enodes.size())
@@ -185,9 +210,13 @@ class HeuristicBrancher : public Brancher
     static EClassId resolveBaseClass(const SearchState &state, uint32_t b, EClassId cid)
     {
         EClassId curr = cid;
-        std::unordered_set<EClassId> visited;
-        while (visited.insert(curr).second)
+        uint32_t steps = 0;
+        while (true)
         {
+            if (++steps > 32)
+            {
+                Error::throw_err("resolveBaseClass exceeded maximum depth of 32 steps (view cycle detected)");
+            }
             auto sel_it = state.selected_vars[b].find(curr);
             if (sel_it == state.selected_vars[b].end())
                 break;
@@ -216,40 +245,84 @@ class HeuristicBrancher : public Brancher
         return resolveBaseClass(state, b, view_cand) == state.bucket_egraphs[b].findConst(base);
     }
 
-    static std::vector<EClassId> getEClassReaders(const SearchState &state, uint32_t b, EClassId target)
+    struct Obstacle
     {
-        EClassId canon_target = state.bucket_egraphs[b].findConst(target);
-        std::vector<EClassId> readers;
-        for (const auto &pair : state.selected_vars[b])
-        {
-            EClassId cand = pair.first;
-            if (cand == target)
-                continue;
-            const Domain &dom = state.domains[pair.second];
-            if (dom.isFixed() && dom.fixedValue() == 0)
-                continue;
-            uint32_t en_idx = (dom.isFixed() && dom.fixedValue() > 0) ? static_cast<uint32_t>(dom.fixedValue() - 1) : 0;
-            const EClass &cls = state.bucket_egraphs[b].getEClass(cand);
-            if (en_idx >= cls.enodes.size())
-                continue;
-            ENodeId en_id = cls.enodes[en_idx];
-            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-            for (EClassId ch : enode.getChildren())
-            {
-                EClassId base_ch = resolveBaseClass(state, b, ch);
-                if (state.bucket_egraphs[b].findConst(base_ch) == canon_target)
-                {
-                    readers.push_back(cand);
-                    break;
-                }
-            }
-        }
-        return readers;
-    }
+        uint32_t start;
+        uint32_t end;
+    };
 
-    static int32_t preferredOffset(const SearchState &state, uint32_t b, EClassId cid,
-                                   const Domain &offset_domain)
+    // Reusable scratch members for HeuristicBrancher
+    mutable std::vector<uint32_t> path_visited_epoch;
+    mutable uint32_t current_path_visited_epoch = 1;
+    mutable std::vector<EClassId> path_frontier;
+
+    mutable std::vector<Obstacle> offset_obstacles;
+    mutable std::vector<int32_t> offset_eclass_start;
+    mutable std::vector<int32_t> offset_eclass_end;
+    mutable std::vector<EClassId> offset_base_cids;
+    mutable std::vector<uint8_t> offset_is_input_or_cache;
+
+    mutable std::vector<EClassId> sched_active;
+    mutable std::vector<uint32_t> sched_is_active_epoch;
+    mutable uint32_t current_sched_active_epoch = 1;
+    mutable std::vector<int> sched_in_degree;
+    mutable std::vector<std::vector<EClassId>> sched_parents;
+    mutable std::vector<EClassId> sched_queue;
+    mutable std::vector<EClassId> sched_topo_order;
+    mutable std::vector<uint32_t> sched_child_seen_epoch;
+    mutable uint32_t current_sched_child_seen_epoch = 1;
+
+#ifdef TG_PROFILE
+    struct BrancherTiming
     {
+        uint64_t total_calls = 0;
+        uint64_t total_ns = 0;
+        uint64_t selection_ns = 0;
+        uint64_t cache_ns = 0;
+        uint64_t sched_topo_ns = 0;
+        uint64_t sched_start_ns = 0;
+        uint64_t sched_offset_ns = 0;
+        uint64_t preferred_offset_ns = 0;
+        uint64_t preferred_offset_calls = 0;
+    };
+    mutable BrancherTiming brancher_timing;
+
+    void reportBrancherTiming() const override
+    {
+        const double total_ms = brancher_timing.total_ns / 1.0e6;
+        const double sel_ms = brancher_timing.selection_ns / 1.0e6;
+        const double cache_ms = brancher_timing.cache_ns / 1.0e6;
+        const double topo_ms = brancher_timing.sched_topo_ns / 1.0e6;
+        const double start_ms = brancher_timing.sched_start_ns / 1.0e6;
+        const double offset_ms = brancher_timing.sched_offset_ns / 1.0e6;
+        const double pref_ms = brancher_timing.preferred_offset_ns / 1.0e6;
+
+        std::cout << "\n[SearchEngine] Brancher Timing Breakdown:\n"
+                  << "  Total chooseBranch:        " << std::fixed << std::setprecision(2)
+                  << std::setw(10) << total_ms << " ms (" << brancher_timing.total_calls << " calls)\n"
+                  << "    chooseSelection:         " << std::setw(10) << sel_ms << " ms ("
+                  << (total_ms > 0 ? (sel_ms / total_ms * 100.0) : 0.0) << "%)\n"
+                  << "    chooseCache:             " << std::setw(10) << cache_ms << " ms ("
+                  << (total_ms > 0 ? (cache_ms / total_ms * 100.0) : 0.0) << "%)\n"
+                  << "    chooseSchedule TopoSort: " << std::setw(10) << topo_ms << " ms ("
+                  << (total_ms > 0 ? (topo_ms / total_ms * 100.0) : 0.0) << "%)\n"
+                  << "    chooseSchedule Starts:   " << std::setw(10) << start_ms << " ms ("
+                  << (total_ms > 0 ? (start_ms / total_ms * 100.0) : 0.0) << "%)\n"
+                  << "    chooseSchedule Offsets:  " << std::setw(10) << offset_ms << " ms ("
+                  << (total_ms > 0 ? (offset_ms / total_ms * 100.0) : 0.0) << "%)\n"
+                  << "      preferredOffset calls: " << brancher_timing.preferred_offset_calls
+                  << " taking " << pref_ms << " ms\n"
+                  << std::flush;
+    }
+#endif
+
+    int32_t preferredOffset(const SearchState &state, uint32_t b, EClassId cid,
+                            const Domain &offset_domain) const
+    {
+#ifdef TG_PROFILE
+        auto pref_start = std::chrono::steady_clock::now();
+        brancher_timing.preferred_offset_calls++;
+#endif
         const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
         uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
         uint32_t curr_size = (psize == 0) ? 1 : psize;
@@ -263,71 +336,26 @@ class HeuristicBrancher : public Brancher
                 const Domain &base_dom = state.domains[base_off_it->second];
                 if (base_dom.isFixed() && offset_domain.contains(base_dom.fixedValue()))
                 {
+#ifdef TG_PROFILE
+                    brancher_timing.preferred_offset_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - pref_start).count());
+#endif
                     return base_dom.fixedValue();
                 }
             }
         }
 
-        int32_t curr_start = 0;
-        int32_t curr_end = std::numeric_limits<int32_t>::max();
-        bool is_curr_root = (b < state.bucket_root_ids.size() &&
-                             state.bucket_egraphs[b].findConst(cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
-
-        auto sel_it = state.selected_vars[b].find(cid);
-        uint32_t en_idx = 0;
-        bool is_curr_input_or_cache = (cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(cls.base_eclass_id));
-        if (sel_it != state.selected_vars[b].end())
+        const size_t num_classes = state.bucket_egraphs[b].classes.size();
+        if (offset_base_cids.size() < num_classes)
         {
-            const Domain &sel_dom = state.domains[sel_it->second];
-            if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-                en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-            if (en_idx < cls.enodes.size())
-            {
-                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
-                    is_curr_input_or_cache = true;
-            }
+            offset_base_cids.resize(num_classes);
+            offset_is_input_or_cache.resize(num_classes, 0);
+            offset_eclass_start.resize(num_classes, 0);
+            offset_eclass_end.resize(num_classes, 0);
         }
 
-        if (!is_curr_input_or_cache && !is_curr_root)
-        {
-            auto st_it = state.start_vars[b].find(cid);
-            if (st_it != state.start_vars[b].end() && en_idx < st_it->second.size())
-            {
-                const Domain &st_dom = state.domains[st_it->second[en_idx]];
-                if (st_dom.isFixed())
-                    curr_start = st_dom.fixedValue();
-            }
-            curr_end = curr_start + 1;
-            auto readers = getEClassReaders(state, b, cid);
-            for (EClassId r_cid : readers)
-            {
-                auto r_sel_it = state.selected_vars[b].find(r_cid);
-                if (r_sel_it == state.selected_vars[b].end())
-                    continue;
-                const Domain &r_sel_dom = state.domains[r_sel_it->second];
-                if (!r_sel_dom.isFixed() || r_sel_dom.fixedValue() <= 0)
-                    continue;
-                uint32_t r_en = static_cast<uint32_t>(r_sel_dom.fixedValue() - 1);
-                auto r_st_it = state.start_vars[b].find(r_cid);
-                if (r_st_it != state.start_vars[b].end() && r_en < r_st_it->second.size())
-                {
-                    const Domain &r_st_dom = state.domains[r_st_it->second[r_en]];
-                    if (r_st_dom.isFixed())
-                        curr_end = std::max(curr_end, r_st_dom.fixedValue() + 1);
-                    else
-                        curr_end = std::max(curr_end, r_st_dom.getMax() + 1);
-                }
-            }
-        }
-
-        struct Obstacle
-        {
-            uint32_t start;
-            uint32_t end;
-        };
-        std::vector<Obstacle> obstacles;
-
+        offset_obstacles.clear();
         for (const auto &pair : state.preallocated_buffers)
         {
             if (pair.second.mem_space == cls.mem_space)
@@ -335,10 +363,91 @@ class HeuristicBrancher : public Brancher
                 uint32_t align = state.getPageAlignment(cls.mem_space);
                 uint32_t start_p = static_cast<uint32_t>(pair.second.offset / align);
                 uint32_t end_p = static_cast<uint32_t>((pair.second.offset + pair.second.size + align - 1) / align);
-                obstacles.push_back({start_p, end_p});
+                offset_obstacles.push_back({start_p, end_p});
             }
         }
 
+        // Pass 1: compute base_cid, start, and initial end for each candidate eclass
+        for (const auto &pair : state.selected_vars[b])
+        {
+            EClassId cand = pair.first;
+            EClassId cand_base = state.bucket_egraphs[b].findConst(resolveBaseClass(state, b, cand));
+            offset_base_cids[cand.value] = cand_base;
+
+            const EClass &c_cls = state.bucket_egraphs[b].getEClass(cand);
+            bool is_input_or_cache = (c_cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(c_cls.base_eclass_id));
+            const Domain &sel_dom = state.domains[pair.second];
+            uint32_t en_idx = (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
+                                  ? static_cast<uint32_t>(sel_dom.fixedValue() - 1)
+                                  : 0;
+            if (en_idx < c_cls.enodes.size())
+            {
+                const ENode &enode = state.bucket_egraphs[b].getENode(c_cls.enodes[en_idx]);
+                if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+                    is_input_or_cache = true;
+            }
+            offset_is_input_or_cache[cand.value] = is_input_or_cache ? 1 : 0;
+
+            bool is_root = (b < state.bucket_root_ids.size() &&
+                            state.bucket_egraphs[b].findConst(cand) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
+
+            int32_t st_val = 0;
+            if (!is_input_or_cache && !is_root)
+            {
+                auto st_it = state.start_vars[b].find(cand);
+                if (st_it != state.start_vars[b].end() && en_idx < st_it->second.size())
+                {
+                    const Domain &st_dom = state.domains[st_it->second[en_idx]];
+                    if (st_dom.isFixed())
+                        st_val = st_dom.fixedValue();
+                }
+            }
+            offset_eclass_start[cand.value] = st_val;
+            offset_eclass_end[cand.value] = (is_input_or_cache || is_root)
+                                               ? std::numeric_limits<int32_t>::max()
+                                               : (st_val + 1);
+        }
+
+        // Pass 2: propagate reader finish times to the base class of their inputs
+        for (const auto &pair : state.selected_vars[b])
+        {
+            EClassId r_cid = pair.first;
+            const Domain &r_sel_dom = state.domains[pair.second];
+            if (!r_sel_dom.isFixed() || r_sel_dom.fixedValue() <= 0)
+                continue;
+
+            uint32_t r_en = static_cast<uint32_t>(r_sel_dom.fixedValue() - 1);
+            const EClass &r_cls = state.bucket_egraphs[b].getEClass(r_cid);
+            if (r_en >= r_cls.enodes.size())
+                continue;
+
+            int32_t r_finish = 1;
+            auto r_st_it = state.start_vars[b].find(r_cid);
+            if (r_st_it != state.start_vars[b].end() && r_en < r_st_it->second.size())
+            {
+                const Domain &r_st_dom = state.domains[r_st_it->second[r_en]];
+                r_finish = r_st_dom.isFixed() ? (r_st_dom.fixedValue() + 1) : (r_st_dom.getMax() + 1);
+            }
+
+            const ENode &r_enode = state.bucket_egraphs[b].getENode(r_cls.enodes[r_en]);
+            for (EClassId ch : r_enode.getChildren())
+            {
+                EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
+                auto it = state.selected_vars[b].find(canon_ch);
+                EClassId base_ch = (it != state.selected_vars[b].end()) ? offset_base_cids[canon_ch.value] : canon_ch;
+                if (base_ch != r_cid && offset_eclass_end[base_ch.value] != std::numeric_limits<int32_t>::max())
+                {
+                    offset_eclass_end[base_ch.value] = std::max(offset_eclass_end[base_ch.value], r_finish);
+                }
+            }
+        }
+
+        const bool is_curr_input_or_cache = offset_is_input_or_cache[cid.value];
+        const int32_t curr_start = offset_eclass_start[cid.value];
+        const EClassId canon_base_cid = offset_base_cids[cid.value];
+        const int32_t curr_end = offset_eclass_end[canon_base_cid.value];
+
+        // Pass 3: collect obstacles from fixed offset variables
         for (const auto &pair : state.selected_vars[b])
         {
             EClassId other_cid = pair.first;
@@ -348,6 +457,7 @@ class HeuristicBrancher : public Brancher
             auto off_it = state.offset_vars[b].find(other_cid);
             if (off_it == state.offset_vars[b].end())
                 continue;
+
             const Domain &off_dom = state.domains[off_it->second];
             if (!off_dom.isFixed())
                 continue;
@@ -360,56 +470,12 @@ class HeuristicBrancher : public Brancher
             if (other_cls.mem_space != cls.mem_space)
                 continue;
 
-            if (isViewOf(state, b, cid, other_cid) || isViewOf(state, b, other_cid, cid) ||
-                (base_cid != cid && base_cid == resolveBaseClass(state, b, other_cid)))
+            if (canon_base_cid == offset_base_cids[other_cid.value])
                 continue;
 
-            uint32_t o_en = (other_sel_dom.isFixed() && other_sel_dom.fixedValue() > 0)
-                                ? static_cast<uint32_t>(other_sel_dom.fixedValue() - 1)
-                                : 0;
-            bool is_other_input_or_cache = (other_cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(other_cls.base_eclass_id));
-            if (o_en < other_cls.enodes.size())
-            {
-                const ENode &o_enode = state.bucket_egraphs[b].getENode(other_cls.enodes[o_en]);
-                if (o_enode.getOpType() == OpType::INPUT || o_enode.getOpType() == OpType::CACHE)
-                    is_other_input_or_cache = true;
-            }
-            bool is_other_root = (b < state.bucket_root_ids.size() &&
-                                  state.bucket_egraphs[b].findConst(other_cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
-
-            int32_t other_start = 0;
-            int32_t other_end = std::numeric_limits<int32_t>::max();
-            if (!is_other_input_or_cache && !is_other_root)
-            {
-                auto o_st_it = state.start_vars[b].find(other_cid);
-                if (o_st_it != state.start_vars[b].end() && o_en < o_st_it->second.size())
-                {
-                    const Domain &o_st_dom = state.domains[o_st_it->second[o_en]];
-                    if (o_st_dom.isFixed())
-                        other_start = o_st_dom.fixedValue();
-                }
-                other_end = other_start + 1;
-                auto other_readers = getEClassReaders(state, b, other_cid);
-                for (EClassId r_cid : other_readers)
-                {
-                    auto r_sel_it = state.selected_vars[b].find(r_cid);
-                    if (r_sel_it == state.selected_vars[b].end())
-                        continue;
-                    const Domain &r_sel_dom = state.domains[r_sel_it->second];
-                    if (!r_sel_dom.isFixed() || r_sel_dom.fixedValue() <= 0)
-                        continue;
-                    uint32_t r_en_idx = static_cast<uint32_t>(r_sel_dom.fixedValue() - 1);
-                    auto r_st_it = state.start_vars[b].find(r_cid);
-                    if (r_st_it != state.start_vars[b].end() && r_en_idx < r_st_it->second.size())
-                    {
-                        const Domain &r_st_dom = state.domains[r_st_it->second[r_en_idx]];
-                        if (r_st_dom.isFixed())
-                            other_end = std::max(other_end, r_st_dom.fixedValue() + 1);
-                        else
-                            other_end = std::max(other_end, r_st_dom.getMax() + 1);
-                    }
-                }
-            }
+            bool is_other_input_or_cache = offset_is_input_or_cache[other_cid.value];
+            int32_t other_start = offset_eclass_start[other_cid.value];
+            int32_t other_end = offset_eclass_end[other_cid.value];
 
             bool overlap = (is_curr_input_or_cache || is_other_input_or_cache ||
                             std::max(curr_start, other_start) < std::min(curr_end, other_end));
@@ -419,10 +485,10 @@ class HeuristicBrancher : public Brancher
             uint32_t o_psize = state.bytesToPages(getSizeBytes(other_cls.shape, other_cls.dtype), other_cls.mem_space);
             uint32_t other_size = (o_psize == 0) ? 1 : o_psize;
             uint32_t o_offset = static_cast<uint32_t>(off_dom.fixedValue());
-            obstacles.push_back({o_offset, o_offset + other_size});
+            offset_obstacles.push_back({o_offset, o_offset + other_size});
         }
 
-        std::sort(obstacles.begin(), obstacles.end(), [](const Obstacle &a, const Obstacle &b) {
+        std::sort(offset_obstacles.begin(), offset_obstacles.end(), [](const Obstacle &a, const Obstacle &b) {
             return a.start < b.start;
         });
 
@@ -431,7 +497,7 @@ class HeuristicBrancher : public Brancher
         while (pushed)
         {
             pushed = false;
-            for (const auto &obs : obstacles)
+            for (const auto &obs : offset_obstacles)
             {
                 if (p < obs.end && p + curr_size > obs.start)
                 {
@@ -441,10 +507,15 @@ class HeuristicBrancher : public Brancher
             }
         }
 
-        if (p <= static_cast<uint32_t>(offset_domain.getMax()))
-            return static_cast<int32_t>(p);
-
-        return offset_domain.getMin();
+        int32_t result = (p <= static_cast<uint32_t>(offset_domain.getMax()))
+                             ? static_cast<int32_t>(p)
+                             : offset_domain.getMin();
+#ifdef TG_PROFILE
+        brancher_timing.preferred_offset_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - pref_start).count());
+#endif
+        return result;
     }
 
     static bool setOffsetDecision(const Domain &domain, int32_t preferred,
@@ -469,6 +540,7 @@ class HeuristicBrancher : public Brancher
     bool chooseSelection(const SearchState &state, BranchDecision &out_decision,
                          bool required_only) const
     {
+        static const std::vector<EClassId> empty_cids;
         VarId best_var = kInvalidVarId;
         uint32_t best_bucket = 0;
         EClassId best_cid;
@@ -476,8 +548,7 @@ class HeuristicBrancher : public Brancher
 
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b]
-                                                                  : std::vector<EClassId>{};
+            const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b] : empty_cids;
             for (EClassId cid : cids)
             {
                 auto sel_it = state.selected_vars[b].find(cid);
@@ -531,14 +602,30 @@ class HeuristicBrancher : public Brancher
 
     bool chooseSchedule(const SearchState &state, BranchDecision &out_decision) const
     {
+        static const std::vector<EClassId> empty_cids;
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            std::unordered_set<EClassId> active;
-            std::unordered_map<EClassId, int> in_degree;
-            std::unordered_map<EClassId, std::vector<EClassId>> parents;
+#ifdef TG_PROFILE
+            auto topo_start = std::chrono::steady_clock::now();
+#endif
+            const size_t num_classes = state.bucket_egraphs[b].classes.size();
+            if (sched_is_active_epoch.size() < num_classes)
+            {
+                sched_is_active_epoch.resize(num_classes, 0);
+                sched_in_degree.resize(num_classes, 0);
+                sched_parents.resize(num_classes);
+                sched_child_seen_epoch.resize(num_classes, 0);
+            }
 
-            const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b]
-                                                                  : std::vector<EClassId>{};
+            sched_active.clear();
+            ++current_sched_active_epoch;
+            if (current_sched_active_epoch == 0)
+            {
+                std::fill(sched_is_active_epoch.begin(), sched_is_active_epoch.end(), 0);
+                current_sched_active_epoch = 1;
+            }
+
+            const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b] : empty_cids;
             for (EClassId cid : cids)
             {
                 auto sel_it = state.selected_vars[b].find(cid);
@@ -549,11 +636,13 @@ class HeuristicBrancher : public Brancher
                 if (!selection.isFixed() || selection.fixedValue() <= 0)
                     continue;
 
-                active.insert(cid);
-                in_degree[cid] = 0;
+                sched_active.push_back(cid);
+                sched_is_active_epoch[cid.value] = current_sched_active_epoch;
+                sched_in_degree[cid.value] = 0;
+                sched_parents[cid.value].clear();
             }
 
-            for (EClassId cid : active)
+            for (EClassId cid : sched_active)
             {
                 const Domain &selection = state.domains[state.selected_vars[b].at(cid)];
                 uint32_t enode_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
@@ -561,46 +650,63 @@ class HeuristicBrancher : public Brancher
                 if (enode_idx >= cls.enodes.size())
                     continue;
 
-                std::unordered_set<EClassId> unique_children;
+                ++current_sched_child_seen_epoch;
+                if (current_sched_child_seen_epoch == 0)
+                {
+                    std::fill(sched_child_seen_epoch.begin(), sched_child_seen_epoch.end(), 0);
+                    current_sched_child_seen_epoch = 1;
+                }
+
                 const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[enode_idx]);
                 for (EClassId child : enode.getChildren())
                 {
                     EClassId canon_child = state.bucket_egraphs[b].findConst(child);
-                    if (active.count(canon_child) != 0 && unique_children.insert(canon_child).second)
+                    if (sched_is_active_epoch[canon_child.value] == current_sched_active_epoch &&
+                        sched_child_seen_epoch[canon_child.value] != current_sched_child_seen_epoch)
                     {
-                        ++in_degree[cid];
-                        parents[canon_child].push_back(cid);
+                        sched_child_seen_epoch[canon_child.value] = current_sched_child_seen_epoch;
+                        ++sched_in_degree[cid.value];
+                        sched_parents[canon_child.value].push_back(cid);
                     }
                 }
             }
 
-            std::vector<EClassId> queue;
-            for (const auto &entry : in_degree)
+            sched_queue.clear();
+            for (EClassId cid : sched_active)
             {
-                if (entry.second == 0)
-                    queue.push_back(entry.first);
+                if (sched_in_degree[cid.value] == 0)
+                    sched_queue.push_back(cid);
             }
 
-            std::vector<EClassId> topo_order;
+            sched_topo_order.clear();
             size_t queue_head = 0;
-            while (queue_head < queue.size())
+            while (queue_head < sched_queue.size())
             {
-                EClassId child = queue[queue_head++];
-                topo_order.push_back(child);
-                for (EClassId parent : parents[child])
+                EClassId child = sched_queue[queue_head++];
+                sched_topo_order.push_back(child);
+                for (EClassId parent : sched_parents[child.value])
                 {
-                    if (--in_degree[parent] == 0)
-                        queue.push_back(parent);
+                    if (--sched_in_degree[parent.value] == 0)
+                        sched_queue.push_back(parent);
                 }
             }
 
-            if (topo_order.size() != active.size())
+#ifdef TG_PROFILE
+            brancher_timing.sched_topo_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - topo_start).count());
+#endif
+
+            if (sched_topo_order.size() != sched_active.size())
                 continue;
 
+#ifdef TG_PROFILE
+            auto start_vars_begin = std::chrono::steady_clock::now();
+#endif
             // Assign starts in dependency order: children first, then their
             // consumers. This makes the preferred branch a valid topological
             // scheduling attempt instead of a split chosen by domain size.
-            for (EClassId cid : topo_order)
+            for (EClassId cid : sched_topo_order)
             {
                 const Domain &selection = state.domains[state.selected_vars[b].at(cid)];
                 uint32_t enode_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
@@ -611,10 +717,23 @@ class HeuristicBrancher : public Brancher
                 VarId start_var = start_it->second[enode_idx];
                 const Domain &start_domain = state.domains[start_var];
                 if (!start_domain.isFixed())
+                {
+#ifdef TG_PROFILE
+                    brancher_timing.sched_start_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start_vars_begin).count());
+#endif
                     return setBinaryDecision(start_domain, start_domain.getMin(), out_decision, start_var);
+                }
             }
+#ifdef TG_PROFILE
+            brancher_timing.sched_start_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start_vars_begin).count());
+            auto offset_vars_begin = std::chrono::steady_clock::now();
+#endif
 
-            for (EClassId cid : topo_order)
+            for (EClassId cid : sched_topo_order)
             {
                 auto offset_it = state.offset_vars[b].find(cid);
                 if (offset_it != state.offset_vars[b].end())
@@ -624,10 +743,20 @@ class HeuristicBrancher : public Brancher
                     if (!offset_domain.isFixed())
                     {
                         int32_t preferred = preferredOffset(state, b, cid, offset_domain);
+#ifdef TG_PROFILE
+                        brancher_timing.sched_offset_ns += static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - offset_vars_begin).count());
+#endif
                         return setOffsetDecision(offset_domain, preferred, out_decision, offset_var);
                     }
                 }
             }
+#ifdef TG_PROFILE
+            brancher_timing.sched_offset_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - offset_vars_begin).count());
+#endif
         }
         return false;
     }
@@ -635,28 +764,90 @@ class HeuristicBrancher : public Brancher
   public:
     bool chooseBranch(const SearchState &state, BranchDecision &out_decision) override
     {
+#ifdef TG_PROFILE
+        auto total_start = std::chrono::steady_clock::now();
+        brancher_timing.total_calls++;
+#endif
         out_decision.left_delta = {kInvalidVarId, Domain{}};
         out_decision.right_delta = {kInvalidVarId, Domain{}};
 
+#ifdef TG_PROFILE
+        auto sel_start = std::chrono::steady_clock::now();
+#endif
         // First satisfy selections forced by the currently selected DAG.
         if (chooseSelection(state, out_decision, true))
+        {
+#ifdef TG_PROFILE
+            auto now = std::chrono::steady_clock::now();
+            brancher_timing.selection_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - sel_start).count());
+            brancher_timing.total_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - total_start).count());
+#endif
             return true;
+        }
+#ifdef TG_PROFILE
+        brancher_timing.selection_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - sel_start).count());
+        auto cache_start = std::chrono::steady_clock::now();
+#endif
 
         if (chooseCache(state, out_decision))
+        {
+#ifdef TG_PROFILE
+            auto now = std::chrono::steady_clock::now();
+            brancher_timing.cache_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - cache_start).count());
+            brancher_timing.total_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - total_start).count());
+#endif
             return true;
+        }
+#ifdef TG_PROFILE
+        brancher_timing.cache_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - cache_start).count());
+#endif
 
         // Schedule and allocate one active operation at a time. This keeps
         // start/offset variables in the same hyperbox search instead of
         // manufacturing a complete heuristic assignment in one delta.
         if (chooseSchedule(state, out_decision))
+        {
+#ifdef TG_PROFILE
+            brancher_timing.total_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - total_start).count());
+#endif
             return true;
+        }
 
+#ifdef TG_PROFILE
+        auto opt_sel_start = std::chrono::steady_clock::now();
+#endif
         // Only after the currently selected DAG has a cache/schedule attempt
         // do we branch optional support. The branch remains complete, but a
         // promising selected DAG can now reach a full feasible leaf without
         // first fixing every potentially reachable e-class in the e-graph.
         if (chooseSelection(state, out_decision, false))
+        {
+#ifdef TG_PROFILE
+            auto now = std::chrono::steady_clock::now();
+            brancher_timing.selection_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - opt_sel_start).count());
+            brancher_timing.total_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - total_start).count());
+#endif
             return true;
+        }
+#ifdef TG_PROFILE
+        auto now = std::chrono::steady_clock::now();
+        brancher_timing.selection_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - opt_sel_start).count());
+        brancher_timing.total_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - total_start).count());
+#endif
 
         LOG(DEBUG) << "[HeuristicBrancher] No unfixed relevant variable remains; leaf reached.";
         return false;

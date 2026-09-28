@@ -427,10 +427,10 @@ class SearchState
     // scanning every domain after each propagator invocation.
     std::unordered_set<VarId> empty_domains;
 
-    // Domain changes are consumed by SearchEngine's propagator worklist.  A
-    // set keeps repeated narrowing of one variable from creating duplicate
-    // scheduler work before the next propagation pass.
-    std::unordered_set<VarId> dirty_domains;
+    // Domain changes are consumed by SearchEngine's propagator worklist.
+    std::vector<VarId> dirty_domains;
+    std::vector<uint32_t> var_dirty_epoch;
+    uint32_t current_dirty_epoch = 1;
 
     // Mutable propagation data belongs to the state so separate searches and
     // copied states can share a stateless SelectionPropagator.
@@ -449,7 +449,13 @@ class SearchState
 
     void markDomainDirty(VarId var_id)
     {
-        dirty_domains.insert(var_id);
+        if (var_id >= var_dirty_epoch.size())
+            var_dirty_epoch.resize(var_infos.size() > var_id ? var_infos.size() : var_id + 1, 0);
+        if (var_dirty_epoch[var_id] != current_dirty_epoch)
+        {
+            var_dirty_epoch[var_id] = current_dirty_epoch;
+            dirty_domains.push_back(var_id);
+        }
     }
 
   public:
@@ -678,13 +684,32 @@ class SearchState
         reachability.update(node_idx, domains[changed], unreachable);
     }
 
+    template <typename F>
+    void consumeDirtyDomains(F &&func)
+    {
+        if (dirty_domains.empty())
+            return;
+        for (VarId var_id : dirty_domains)
+            func(var_id);
+        dirty_domains.clear();
+        ++current_dirty_epoch;
+        if (current_dirty_epoch == 0)
+        {
+            std::fill(var_dirty_epoch.begin(), var_dirty_epoch.end(), 0);
+            current_dirty_epoch = 1;
+        }
+    }
+
     std::vector<VarId> takeDirtyDomains()
     {
-        std::vector<VarId> result;
-        result.reserve(dirty_domains.size());
-        for (VarId var_id : dirty_domains)
-            result.push_back(var_id);
+        std::vector<VarId> result = dirty_domains;
         dirty_domains.clear();
+        ++current_dirty_epoch;
+        if (current_dirty_epoch == 0)
+        {
+            std::fill(var_dirty_epoch.begin(), var_dirty_epoch.end(), 0);
+            current_dirty_epoch = 1;
+        }
         return result;
     }
 

@@ -49,6 +49,12 @@ class SearchEngine
     std::vector<std::shared_ptr<SearchNode>> all_nodes;
     uint32_t current_node_id = UINT32_MAX;
 
+    std::vector<VarId> prop_worklist;
+    std::vector<uint32_t> prop_queued_epoch;
+    uint32_t current_prop_epoch = 1;
+    std::vector<uint32_t> restore_current_path;
+    std::vector<uint32_t> restore_target_path;
+
     float incumbent_best_cost = TGConstants::INF;
     std::vector<ExtractionResult> incumbent_extractions;
     std::unordered_set<BaseEClassId> incumbent_cached_nodes;
@@ -77,31 +83,35 @@ class SearchEngine
         if (current_node_id == target_node->id)
             return true;
 
+#ifdef TG_PROFILE
+        search_timing.restore_node_calls++;
+        auto lca_start = std::chrono::steady_clock::now();
+#endif
         // Path from current_node up to root
-        std::vector<uint32_t> current_path;
+        restore_current_path.clear();
         uint32_t curr = current_node_id;
         while (curr != UINT32_MAX)
         {
-            current_path.push_back(curr);
+            restore_current_path.push_back(curr);
             curr = all_nodes[curr]->parent_id;
         }
 
         // Path from target_node up to root
-        std::vector<uint32_t> target_path;
+        restore_target_path.clear();
         uint32_t tgt = target_node->id;
         while (tgt != UINT32_MAX)
         {
-            target_path.push_back(tgt);
+            restore_target_path.push_back(tgt);
             tgt = all_nodes[tgt]->parent_id;
         }
 
         // Find Lowest Common Ancestor (LCA)
-        int i = static_cast<int>(current_path.size()) - 1;
-        int j = static_cast<int>(target_path.size()) - 1;
+        int i = static_cast<int>(restore_current_path.size()) - 1;
+        int j = static_cast<int>(restore_target_path.size()) - 1;
         uint32_t lca = UINT32_MAX;
-        while (i >= 0 && j >= 0 && current_path[i] == target_path[j])
+        while (i >= 0 && j >= 0 && restore_current_path[i] == restore_target_path[j])
         {
-            lca = current_path[i];
+            lca = restore_current_path[i];
             i--;
             j--;
         }
@@ -109,20 +119,41 @@ class SearchEngine
         // Backtrack to LCA's trail marker
         size_t lca_marker = (lca != UINT32_MAX) ? all_nodes[lca]->trail_marker : 0;
         state.backtrackTo(lca_marker);
+#ifdef TG_PROFILE
+        search_timing.restore_node_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - lca_start).count());
+#endif
 
         // Play decisions and propagate from child of LCA down to target_node
         for (int k = j; k >= 0; --k)
         {
-            uint32_t nid = target_path[k];
+            uint32_t nid = restore_target_path[k];
+#ifdef TG_PROFILE
+            auto set_start = std::chrono::steady_clock::now();
+#endif
             state.setDomain(all_nodes[nid]->delta.first, all_nodes[nid]->delta.second);
+#ifdef TG_PROFILE
+            search_timing.restore_node_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - set_start).count());
+#endif
             float lb = 0.0f;
             std::string conflict_reason;
             if (!runPropagators(lb, all_nodes[nid]->delta.first, &conflict_reason))
             {
+#ifdef TG_PROFILE
+                auto bt_start = std::chrono::steady_clock::now();
+#endif
                 LOG(DEBUG) << "[SearchEngine] Pruned hyperbox node " << nid
                            << " while restoring: " << conflict_reason;
-                current_node_id = (k < static_cast<int>(target_path.size()) - 1) ? target_path[k + 1] : lca;
+                current_node_id = (k < static_cast<int>(restore_target_path.size()) - 1) ? restore_target_path[k + 1] : lca;
                 state.backtrackTo(current_node_id == UINT32_MAX ? 0 : all_nodes[current_node_id]->trail_marker);
+#ifdef TG_PROFILE
+                search_timing.restore_node_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - bt_start).count());
+#endif
                 return false;
             }
             all_nodes[nid]->lower_bound = lb;
@@ -138,29 +169,50 @@ class SearchEngine
         if (out_conflict_reason)
             out_conflict_reason->clear();
 
-        std::vector<VarId> worklist;
-        std::vector<bool> queued(state.numVars(), false);
+#ifdef TG_PROFILE
+        auto run_prop_start = std::chrono::steady_clock::now();
+        uint64_t prop_and_lb_ns_in_call = 0;
+        auto record_prop_overhead = [&]() {
+            uint64_t total_call_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - run_prop_start).count());
+            if (total_call_ns > prop_and_lb_ns_in_call)
+                search_timing.run_prop_overhead_ns += (total_call_ns - prop_and_lb_ns_in_call);
+        };
+#endif
+
+        if (prop_queued_epoch.size() < state.numVars())
+            prop_queued_epoch.resize(state.numVars(), 0);
+
+        prop_worklist.clear();
+        ++current_prop_epoch;
+        if (current_prop_epoch == 0)
+        {
+            std::fill(prop_queued_epoch.begin(), prop_queued_epoch.end(), 0);
+            current_prop_epoch = 1;
+        }
+
         auto enqueue = [&](VarId var_id) {
-            if (var_id != kInvalidVarId && !queued[var_id])
+            if (var_id != kInvalidVarId && prop_queued_epoch[var_id] != current_prop_epoch)
             {
-                queued[var_id] = true;
-                worklist.push_back(var_id);
+                prop_queued_epoch[var_id] = current_prop_epoch;
+                prop_worklist.push_back(var_id);
             }
         };
+
         enqueue(changed);
-        for (VarId var_id : state.takeDirtyDomains())
-            enqueue(var_id);
+        state.consumeDirtyDomains(enqueue);
 
         size_t worklist_head = 0;
         auto preservePendingWork = [&]() {
-            for (size_t i = worklist_head - 1; i < worklist.size(); ++i)
-                state.schedulePropagation(worklist[i]);
+            for (size_t i = worklist_head - 1; i < prop_worklist.size(); ++i)
+                state.schedulePropagation(prop_worklist[i]);
         };
-        while (worklist_head < worklist.size())
+        while (worklist_head < prop_worklist.size())
         {
-            // LOG(DEBUG) << "propagator worklist pos: " << worklist_head << "/" << worklist.size();
-            const VarId next_changed = worklist[worklist_head++];
-            queued[next_changed] = false;
+            // LOG(DEBUG) << "propagator worklist pos: " << worklist_head << "/" << prop_worklist.size();
+            const VarId next_changed = prop_worklist[worklist_head++];
+            prop_queued_epoch[next_changed] = 0;
 
             for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
             {
@@ -168,7 +220,7 @@ class SearchEngine
 #ifdef TG_PROFILE
                 auto propagate_start = std::chrono::steady_clock::now();
 #endif
-                bool propagated = prop->propagate(state, next_changed, worklist);
+                bool propagated = prop->propagate(state, next_changed, prop_worklist);
 #ifdef TG_PROFILE
                 const uint64_t propagate_ns = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -181,6 +233,7 @@ class SearchEngine
                 if (!propagated)
                     timing.contradictions++;
                 propagator_calls_since_report++;
+                prop_and_lb_ns_in_call += propagate_ns;
 #endif
                 if (!propagated)
                 {
@@ -188,6 +241,7 @@ class SearchEngine
                     if (out_conflict_reason)
                         *out_conflict_reason = prop->name();
 #ifdef TG_PROFILE
+                    record_prop_overhead();
                     maybeReportPropagatorTimings();
 #endif
                     return false;
@@ -206,12 +260,12 @@ class SearchEngine
                             *out_conflict_reason += "a domain";
                     }
 #ifdef TG_PROFILE
+                    record_prop_overhead();
                     maybeReportPropagatorTimings();
 #endif
                     return false;
                 }
-                for (VarId var_id : state.takeDirtyDomains())
-                    enqueue(var_id);
+                state.consumeDirtyDomains(enqueue);
             }
         }
 
@@ -231,9 +285,11 @@ class SearchEngine
             timing.lower_bound_calls++;
             timing.lower_bound_ns += lower_bound_ns;
             timing.max_lower_bound_ns = std::max(timing.max_lower_bound_ns, lower_bound_ns);
+            prop_and_lb_ns_in_call += lower_bound_ns;
 #endif
         }
 #ifdef TG_PROFILE
+        record_prop_overhead();
         maybeReportPropagatorTimings();
 #endif
         // An incumbent can improve without changing a domain (for example
@@ -482,7 +538,18 @@ class SearchEngine
 
         root_node->priority = root_node->lower_bound;
         root_node->trail_marker = state.getTrailMarker();
+#ifdef TG_PROFILE
+        {
+            auto push_start = std::chrono::steady_clock::now();
+            selector->push(root_node);
+            search_timing.queue_push_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - push_start).count());
+            search_timing.queue_push_calls++;
+        }
+#else
         selector->push(root_node);
+#endif
 
         uint32_t iterations = 0;
         while (!selector->empty())
@@ -502,7 +569,16 @@ class SearchEngine
                 break;
             }
 
+#ifdef TG_PROFILE
+            auto pop_start = std::chrono::steady_clock::now();
             auto node = selector->pop();
+            search_timing.queue_pop_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - pop_start).count());
+            search_timing.queue_pop_calls++;
+#else
+            auto node = selector->pop();
+#endif
             if (!node || node->lower_bound >= incumbent_best_cost)
                 continue;
 
@@ -530,17 +606,34 @@ class SearchEngine
 
             // Check if branching is needed or all variables are fixed
             BranchDecision decision;
+#ifdef TG_PROFILE
+            auto branch_start = std::chrono::steady_clock::now();
             bool can_branch = brancher->chooseBranch(state, decision);
+            search_timing.choose_branch_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - branch_start).count());
+#else
+            bool can_branch = brancher->chooseBranch(state, decision);
+#endif
 
             if (!can_branch)
             {
                 // Leaf reached: evaluate complete plan
+#ifdef TG_PROFILE
+                auto leaf_start = std::chrono::steady_clock::now();
+#endif
                 float total_cost = 0.0f;
                 for (uint32_t b = 0; b < state.buckets.size(); ++b)
                 {
                     float w = (b < state.bucket_weights.size()) ? state.bucket_weights[b] : 1.0f;
                     total_cost += w * evaluateMakespan(state, b);
                 }
+#ifdef TG_PROFILE
+                search_timing.leaf_eval_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - leaf_start).count());
+                search_timing.leaf_eval_calls++;
+#endif
 
                 LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": Leaf reached at depth " << node->depth
                            << ", evaluated total cost=" << total_cost;
@@ -584,7 +677,18 @@ class SearchEngine
                 right_id, node->id, decision.right_delta, right_lb,
                 right_prio, node->depth + 1);
             all_nodes.push_back(right_node);
+#ifdef TG_PROFILE
+            {
+                auto push_start = std::chrono::steady_clock::now();
+                selector->push(right_node);
+                search_timing.queue_push_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - push_start).count());
+                search_timing.queue_push_calls++;
+            }
+#else
             selector->push(right_node);
+#endif
 
             // 2. Create Left Child (dive immediately in place!)
             // TODO: should it go back to the selector to choose once left/right are added instead of always choosing left? 
@@ -601,7 +705,18 @@ class SearchEngine
                     left_prio, node->depth + 1, state.getTrailMarker());
                 all_nodes.push_back(left_node);
                 current_node_id = left_id; // Current state stays at left_node!
+#ifdef TG_PROFILE
+                {
+                    auto push_start = std::chrono::steady_clock::now();
+                    selector->push(left_node);
+                    search_timing.queue_push_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - push_start).count());
+                    search_timing.queue_push_calls++;
+                }
+#else
                 selector->push(left_node);
+#endif
             }
             else
             {
@@ -645,7 +760,22 @@ class SearchEngine
         uint64_t max_lower_bound_ns = 0;
     };
 
+    struct SearchTimingBreakdown
+    {
+        uint64_t choose_branch_ns = 0;
+        uint64_t restore_node_ns = 0;
+        uint64_t restore_node_calls = 0;
+        uint64_t queue_pop_ns = 0;
+        uint64_t queue_pop_calls = 0;
+        uint64_t queue_push_ns = 0;
+        uint64_t queue_push_calls = 0;
+        uint64_t leaf_eval_ns = 0;
+        uint64_t leaf_eval_calls = 0;
+        uint64_t run_prop_overhead_ns = 0;
+    };
+
     std::vector<PropagatorTiming> propagator_timings;
+    SearchTimingBreakdown search_timing;
     uint64_t propagator_calls_since_report = 0;
     std::chrono::steady_clock::time_point next_propagator_report;
     std::chrono::steady_clock::time_point search_start_time;
@@ -734,8 +864,52 @@ class SearchEngine
                   << "Cumulative Propagator Time:          " << std::setw(10) << total_prop_ms << " ms ("
                   << total_pct_search << "% of total search time)\n"
                   << "Rest of Search (branching, queue...): " << std::setw(10) << other_search_ms << " ms ("
-                  << other_pct_search << "% of total search time)\n"
-                  << std::flush;
+                  << other_pct_search << "% of total search time)\n";
+
+        const double choose_branch_ms = search_timing.choose_branch_ns / 1.0e6;
+        const double restore_node_ms = search_timing.restore_node_ns / 1.0e6;
+        const double run_prop_overhead_ms = search_timing.run_prop_overhead_ns / 1.0e6;
+        const double queue_pop_ms = search_timing.queue_pop_ns / 1.0e6;
+        const double queue_push_ms = search_timing.queue_push_ns / 1.0e6;
+        const double leaf_eval_ms = search_timing.leaf_eval_ns / 1.0e6;
+        const double queue_total_ms = queue_pop_ms + queue_push_ms;
+        const double accounted_other_ms = choose_branch_ms + restore_node_ms + run_prop_overhead_ms + queue_total_ms + leaf_eval_ms;
+        const double remaining_other_ms = std::max(0.0, other_search_ms - accounted_other_ms);
+
+        std::cout << "\n[SearchEngine] Non-Propagator Timing Breakdown:\n";
+        std::cout << std::left << std::setw(32) << "Component" << std::right
+                  << std::setw(12) << "Time (ms)"
+                  << std::setw(12) << "Calls"
+                  << std::setw(14) << "% Search"
+                  << std::setw(14) << "% Rest"
+                  << "\n";
+        std::cout << std::string(84, '-') << "\n";
+
+        auto print_component = [&](const std::string &name, double ms, uint64_t calls) {
+            const double pct_search = (search_elapsed_ms > 0.0) ? (ms / search_elapsed_ms) * 100.0 : 0.0;
+            const double pct_rest = (other_search_ms > 0.0) ? (ms / other_search_ms) * 100.0 : 0.0;
+            std::cout << std::left << std::setw(32) << name << std::right
+                      << std::fixed << std::setprecision(2)
+                      << std::setw(12) << ms
+                      << std::setw(12) << calls
+                      << std::setw(13) << pct_search << "%"
+                      << std::setw(13) << pct_rest << "%"
+                      << "\n";
+        };
+
+        print_component("chooseBranch", choose_branch_ms, 0);
+        print_component("restoreNode", restore_node_ms, search_timing.restore_node_calls);
+        print_component("runPropagators Overhead", run_prop_overhead_ms, 0);
+        print_component("Queue Pop", queue_pop_ms, search_timing.queue_pop_calls);
+        print_component("Queue Push", queue_push_ms, search_timing.queue_push_calls);
+        print_component("Leaf Evaluation", leaf_eval_ms, search_timing.leaf_eval_calls);
+        print_component("Other / Engine Overhead", remaining_other_ms, 0);
+        std::cout << std::string(84, '-') << "\n";
+
+        if (brancher)
+            brancher->reportBrancherTiming();
+
+        std::cout << std::flush;
 
         propagator_calls_since_report = 0;
         next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(15);

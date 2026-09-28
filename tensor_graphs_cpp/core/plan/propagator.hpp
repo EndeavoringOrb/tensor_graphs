@@ -630,6 +630,26 @@ class WriteAfterReadPropagator : public Propagator
         bool is_root;
     };
 
+    struct EClassScheduleInfo
+    {
+        bool is_active = false;
+        bool is_view = false;
+        bool is_input_or_cache = false;
+        bool is_root = false;
+        EClassId view_parent{UINT32_MAX};
+        EClassId base_cid{UINT32_MAX};
+        uint32_t en_idx = 0;
+        ENodeId en_id{UINT32_MAX};
+        int32_t start_max = -1;
+        int32_t max_reader_start_max = -1;
+        std::vector<EClassId> readers;
+    };
+
+    mutable std::vector<EClassScheduleInfo> class_info;
+    mutable std::vector<EClassId> active_cids;
+    mutable std::vector<EClassId> touched_cids;
+    static inline const std::vector<EClassId> empty_readers{};
+
     bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
                   bool require_fixed_offset = true) const
     {
@@ -714,77 +734,166 @@ class WriteAfterReadPropagator : public Propagator
         return getAlloc(state, b, cid, out, true);
     }
 
-    bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand) const
+    void buildBucketInfo(const SearchState &state, uint32_t b) const
     {
-        EClassId curr = view_cand;
-        std::unordered_set<EClassId> visited;
-        while (visited.insert(curr).second && curr != base)
-        {
-            auto sel_it = state.selected_vars[b].find(curr);
-            if (sel_it == state.selected_vars[b].end())
-                break;
-            const Domain &dom = state.domains[sel_it->second];
-            if (!dom.isFixed() || dom.fixedValue() <= 0)
-                break;
-            uint32_t en_idx = dom.fixedValue() - 1;
-            const EClass &cls = state.bucket_egraphs[b].getEClass(curr);
-            if (en_idx >= cls.enodes.size())
-                break;
-            ENodeId en_id = cls.enodes[en_idx];
-            bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
-                           state.bucket_enode_infos[b][en_id.value].is_view;
-            if (!is_view)
-                break;
-            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-            if (enode.getChildren().empty())
-                break;
-            curr = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
-        }
-        return curr == base;
-    }
+        const size_t num_classes = state.bucket_egraphs[b].classes.size();
+        if (class_info.size() < num_classes)
+            class_info.resize(num_classes);
 
-    std::unordered_set<EClassId> getAllReaders(const SearchState &state, uint32_t b, EClassId base) const
-    {
-        std::vector<EClassId> all_aliases = {base};
-        std::unordered_set<EClassId> visited_aliases = {base};
-        for (size_t i = 0; i < all_aliases.size(); ++i)
+        for (EClassId cid : touched_cids)
         {
-            EClassId target = all_aliases[i];
-            for (const auto &pair : state.selected_vars[b])
+            if (cid.value < class_info.size())
             {
-                EClassId cand = pair.first;
-                if (visited_aliases.count(cand) != 0)
-                    continue;
-                const Domain &dom = state.domains[pair.second];
-                if (!dom.isFixed() || dom.fixedValue() <= 0)
-                    continue;
-                uint32_t en_idx = dom.fixedValue() - 1;
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cand);
-                if (en_idx >= cls.enodes.size())
-                    continue;
-                ENodeId en_id = cls.enodes[en_idx];
-                bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
-                               state.bucket_enode_infos[b][en_id.value].is_view;
-                if (is_view)
+                auto &info = class_info[cid.value];
+                info.is_active = false;
+                info.is_view = false;
+                info.is_input_or_cache = false;
+                info.is_root = false;
+                info.view_parent = EClassId{UINT32_MAX};
+                info.base_cid = EClassId{UINT32_MAX};
+                info.start_max = -1;
+                info.max_reader_start_max = -1;
+                info.readers.clear();
+            }
+        }
+        touched_cids.clear();
+        active_cids.clear();
+
+        for (const auto &pair : state.selected_vars[b])
+        {
+            EClassId cid = pair.first;
+            if (cid.value >= class_info.size())
+                continue;
+
+            const Domain &sel_dom = state.domains[pair.second];
+            if (sel_dom.isFixed() && sel_dom.fixedValue() == 0)
+                continue;
+
+            uint32_t en_idx = 0;
+            if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
+            {
+                en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
+            }
+            else
+            {
+                int32_t single_val = -1;
+                for (int32_t v = 1; v <= 31; ++v)
                 {
-                    const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                    if (!enode.getChildren().empty() &&
-                        state.bucket_egraphs[b].findConst(enode.getChildren()[0]) == target)
+                    if (sel_dom.contains(v))
                     {
-                        visited_aliases.insert(cand);
-                        all_aliases.push_back(cand);
+                        if (single_val != -1)
+                        {
+                            single_val = -1;
+                            break;
+                        }
+                        single_val = v;
+                    }
+                }
+                if (single_val <= 0)
+                    continue;
+                en_idx = static_cast<uint32_t>(single_val - 1);
+            }
+
+            const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+            if (en_idx >= cls.enodes.size())
+                continue;
+            ENodeId en_id = cls.enodes[en_idx];
+            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+
+            auto &info = class_info[cid.value];
+            info.is_active = true;
+            info.en_idx = en_idx;
+            info.en_id = en_id;
+            info.is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                           state.bucket_enode_infos[b][en_id.value].is_view;
+            info.is_input_or_cache = (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE ||
+                                     (cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(cls.base_eclass_id)));
+            info.is_root = (b < state.bucket_root_ids.size() &&
+                           state.bucket_egraphs[b].findConst(cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
+
+            if (info.is_view && !enode.getChildren().empty())
+            {
+                info.view_parent = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+            }
+            else
+            {
+                info.view_parent = EClassId{UINT32_MAX};
+            }
+
+            info.start_max = -1;
+            auto st_it = state.start_vars[b].find(cid);
+            if (st_it != state.start_vars[b].end())
+            {
+                for (uint32_t c_en = 0; c_en < st_it->second.size(); ++c_en)
+                {
+                    if (sel_dom.contains(c_en + 1))
+                    {
+                        int32_t mx = state.domains[st_it->second[c_en]].getMax();
+                        if (mx > info.start_max)
+                            info.start_max = mx;
                     }
                 }
             }
+
+            info.max_reader_start_max = -1;
+            info.readers.clear();
+            active_cids.push_back(cid);
+            touched_cids.push_back(cid);
         }
 
-        std::unordered_set<EClassId> readers;
+        // Resolve base_cid for each active eclass
+        for (EClassId cid : active_cids)
+        {
+            EClassId curr = cid;
+            int step = 0;
+            for (; step < 32; ++step)
+            {
+                if (curr.value >= class_info.size() || !class_info[curr.value].is_active || !class_info[curr.value].is_view)
+                    break;
+                EClassId p = class_info[curr.value].view_parent;
+                if (p.value == UINT32_MAX)
+                    break;
+                curr = p;
+            }
+            if (step >= 32)
+            {
+                Error::throw_err("WriteAfterReadPropagator::buildBucketInfo: view chain for base_cid exceeded 32 steps");
+            }
+            class_info[cid.value].base_cid = curr;
+        }
+
+        // Connect readers by examining children of each candidate
         for (const auto &pair : state.selected_vars[b])
         {
             EClassId cand = pair.first;
             const Domain &dom = state.domains[pair.second];
             if (dom.isFixed() && dom.fixedValue() == 0)
                 continue;
+
+            int32_t cand_st_max = -1;
+            auto st_it = state.start_vars[b].find(cand);
+            if (st_it != state.start_vars[b].end())
+            {
+                for (uint32_t c_en = 0; c_en < st_it->second.size(); ++c_en)
+                {
+                    if (dom.contains(c_en + 1))
+                    {
+                        int32_t mx = state.domains[st_it->second[c_en]].getMax();
+                        if (mx > cand_st_max)
+                            cand_st_max = mx;
+                    }
+                }
+            }
+
+            if (cand.value < class_info.size())
+            {
+                if (!class_info[cand.value].is_active && class_info[cand.value].start_max == -1)
+                {
+                    touched_cids.push_back(cand);
+                }
+                class_info[cand.value].start_max = cand_st_max;
+            }
+
             const EClass &cls = state.bucket_egraphs[b].getEClass(cand);
             for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
             {
@@ -794,15 +903,85 @@ class WriteAfterReadPropagator : public Propagator
                 const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
                 for (EClassId ch : enode.getChildren())
                 {
-                    if (visited_aliases.count(state.bucket_egraphs[b].findConst(ch)) != 0)
+                    EClassId curr = state.bucket_egraphs[b].findConst(ch);
+                    int step = 0;
+                    for (; step < 32; ++step)
                     {
-                        readers.insert(cand);
-                        break;
+                        if (curr.value >= class_info.size() || !class_info[curr.value].is_active)
+                            break;
+                        auto &target_info = class_info[curr.value];
+                        target_info.readers.push_back(cand);
+                        if (cand_st_max > target_info.max_reader_start_max)
+                            target_info.max_reader_start_max = cand_st_max;
+                        if (!target_info.is_view || target_info.view_parent.value == UINT32_MAX)
+                            break;
+                        curr = target_info.view_parent;
+                    }
+                    if (step >= 32)
+                    {
+                        Error::throw_err("WriteAfterReadPropagator::buildBucketInfo: view chain for readers exceeded 32 steps");
                     }
                 }
             }
         }
-        return readers;
+
+        // Deduplicate readers for each active eclass
+        for (EClassId cid : active_cids)
+        {
+            auto &r = class_info[cid.value].readers;
+            if (r.size() > 1)
+            {
+                std::sort(r.begin(), r.end(), [](EClassId x, EClassId y) { return x.value < y.value; });
+                r.erase(std::unique(r.begin(), r.end()), r.end());
+            }
+        }
+    }
+
+    bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand) const
+    {
+        if (base == view_cand)
+            return true;
+        EClassId curr = view_cand;
+        int step = 0;
+        for (; step < 32 && curr != base; ++step)
+        {
+            if (curr.value < class_info.size() && class_info[curr.value].is_active)
+            {
+                if (!class_info[curr.value].is_view)
+                    return false;
+                EClassId p = class_info[curr.value].view_parent;
+                if (p.value == UINT32_MAX)
+                    return false;
+                curr = p;
+                continue;
+            }
+            auto sel_it = state.selected_vars[b].find(curr);
+            if (sel_it == state.selected_vars[b].end())
+                return false;
+            const Domain &dom = state.domains[sel_it->second];
+            if (!dom.isFixed() || dom.fixedValue() <= 0)
+                return false;
+            uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
+            const EClass &cls = state.bucket_egraphs[b].getEClass(curr);
+            if (en_idx >= cls.enodes.size())
+                return false;
+            ENodeId en_id = cls.enodes[en_idx];
+            bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                           state.bucket_enode_infos[b][en_id.value].is_view;
+            if (!is_view)
+                return false;
+            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+            if (enode.getChildren().empty())
+                return false;
+            curr = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+        }
+        if (curr == base)
+            return true;
+        if (step >= 32)
+        {
+            Error::throw_err("WriteAfterReadPropagator::isViewOf: view chain exceeded 32 steps (possible cycle or excessively deep view)");
+        }
+        return false;
     }
 
     bool canShare(const SearchState &state, FixedAlloc A, FixedAlloc B) const
@@ -825,8 +1004,20 @@ class WriteAfterReadPropagator : public Propagator
         if (A.is_input_or_cache || A.is_root || B.is_input_or_cache || B.is_root)
             return false;
 
-        auto readers_A = getAllReaders(state, A.bucket_idx, A.cid);
-        bool b_is_reader = readers_A.count(B.cid) != 0;
+        int32_t a_max_reader = (A.cid.value < class_info.size() && class_info[A.cid.value].is_active)
+                                   ? class_info[A.cid.value].max_reader_start_max
+                                   : -1;
+
+        // Fast temporal non-overlap check:
+        // If B starts strictly after all readers of A, they cannot overlap in time.
+        if (B.start > a_max_reader)
+            return true;
+
+        const auto &readers_A = (A.cid.value < class_info.size() && class_info[A.cid.value].is_active)
+                                    ? class_info[A.cid.value].readers
+                                    : empty_readers;
+        bool b_is_reader = std::binary_search(readers_A.begin(), readers_A.end(), B.cid,
+                                              [](EClassId x, EClassId y) { return x.value < y.value; });
 
         if (b_is_reader)
         {
@@ -834,9 +1025,9 @@ class WriteAfterReadPropagator : public Propagator
             const EClass &b_cls = state.bucket_egraphs[B.bucket_idx].getEClass(B.cid);
             const ENode &b_enode = state.bucket_egraphs[B.bucket_idx].getENode(b_cls.enodes[B.en_idx]);
             KernelId b_kid = b_enode.getKernelId();
-            std::vector<uint32_t> safe_inplace;
-            if (b_kid.value != 0 && KernelRegistry::get().hasKernel(b_kid))
-                safe_inplace = KernelRegistry::get().getKernel(b_kid).safe_inplace_idxs;
+            if (b_kid.value == 0 || !KernelRegistry::get().hasKernel(b_kid))
+                return false;
+            const auto &safe_inplace = KernelRegistry::get().getKernel(b_kid).safe_inplace_idxs;
 
             bool found_safe = false;
             for (size_t in_idx = 0; in_idx < b_enode.getChildren().size(); ++in_idx)
@@ -871,32 +1062,23 @@ class WriteAfterReadPropagator : public Propagator
                 }
             }
         }
+        else
+        {
+            // B is not a reader of A, but B.start <= a_max_reader.
+            // B overlaps in time with A's readers -> cannot share buffer.
+            return false;
+        }
 
         // - for every reader C = R(A)/B, we need B.start > C.start
         for (EClassId c_cid : readers_A)
         {
             if (c_cid == B.cid)
                 continue;
-            auto c_sel_it = state.selected_vars[A.bucket_idx].find(c_cid);
-            if (c_sel_it == state.selected_vars[A.bucket_idx].end())
-                continue;
-            const Domain &c_sel_dom = state.domains[c_sel_it->second];
-            if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
-                continue;
-
-            auto c_st_it = state.start_vars[A.bucket_idx].find(c_cid);
-            if (c_st_it == state.start_vars[A.bucket_idx].end())
-                continue;
-
-            for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
-            {
-                if (!c_sel_dom.contains(c_en + 1))
-                    continue;
-                VarId c_st_v = c_st_it->second[c_en];
-                const Domain &c_st_dom = state.domains[c_st_v];
-                if (B.start <= c_st_dom.getMax())
-                    return false;
-            }
+            int32_t c_st_max = (c_cid.value < class_info.size())
+                                   ? class_info[c_cid.value].start_max
+                                   : -1;
+            if (B.start <= c_st_max)
+                return false;
         }
         return true;
     }
@@ -914,7 +1096,9 @@ class WriteAfterReadPropagator : public Propagator
         if (A.start > B.start)
             std::swap(A, B);
 
-        auto readers_A = getAllReaders(state, A.bucket_idx, A.cid);
+        const auto &readers_A = (A.cid.value < class_info.size() && class_info[A.cid.value].is_active)
+                                    ? class_info[A.cid.value].readers
+                                    : empty_readers;
         // - for every reader C = R(A)/B, B.setMin(reader.start.getMin + 1), C.setMax(start_B - 1)
         for (EClassId c_cid : readers_A)
         {
@@ -1040,6 +1224,8 @@ class WriteAfterReadPropagator : public Propagator
             if (type == VarType::START && !curr_offset_fixed)
                 return true;
 
+            buildBucketInfo(state, b);
+
             bool pushed = true;
             while (pushed)
             {
@@ -1054,6 +1240,22 @@ class WriteAfterReadPropagator : public Propagator
                         continue;
                     if (curr.mem_space != other.mem_space)
                         continue;
+
+                    // Temporal non-overlap filter
+                    FixedAlloc earlier = curr;
+                    FixedAlloc later = other;
+                    if (earlier.start > later.start)
+                        std::swap(earlier, later);
+                    if (earlier.start < later.start &&
+                        !earlier.is_input_or_cache && !earlier.is_root &&
+                        !later.is_input_or_cache && !later.is_root)
+                    {
+                        int32_t e_max_reader = (earlier.cid.value < class_info.size() && class_info[earlier.cid.value].is_active)
+                                                   ? class_info[earlier.cid.value].max_reader_start_max
+                                                   : -1;
+                        if (later.start > e_max_reader)
+                            continue;
+                    }
 
                     if (!canShare(state, curr, other))
                     {
@@ -1089,6 +1291,27 @@ class WriteAfterReadPropagator : public Propagator
                     bool other_offset_fixed = state.domains[other.offset_var].isFixed();
                     if (!other_offset_fixed)
                     {
+                        // Temporal non-overlap filter
+                        FixedAlloc earlier = curr;
+                        FixedAlloc later = other;
+                        if (earlier.start > later.start)
+                            std::swap(earlier, later);
+                        if (earlier.start < later.start &&
+                            !earlier.is_input_or_cache && !earlier.is_root &&
+                            !later.is_input_or_cache && !later.is_root)
+                        {
+                            int32_t e_max_reader = (earlier.cid.value < class_info.size() && class_info[earlier.cid.value].is_active)
+                                                       ? class_info[earlier.cid.value].max_reader_start_max
+                                                       : -1;
+                            if (later.start > e_max_reader)
+                                continue;
+                        }
+
+                        // Memory domain filter: if other is already placed after curr in memory
+                        const Domain &other_dom = state.domains[other.offset_var];
+                        if (other_dom.getMin() >= static_cast<int32_t>(curr.offset + curr.size))
+                            continue;
+
                         if (!canShare(state, curr, other))
                         {
                             bool other_pushed = false;
@@ -1103,6 +1326,7 @@ class WriteAfterReadPropagator : public Propagator
         {
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
+                buildBucketInfo(state, b);
                 std::vector<FixedAlloc> fixed_allocs;
                 std::vector<FixedAlloc> all_allocs;
                 for (const auto &pair : state.selected_vars[b])
@@ -1128,6 +1352,21 @@ class WriteAfterReadPropagator : public Propagator
                                 continue;
                             if (target.mem_space != fixed.mem_space)
                                 continue;
+
+                            FixedAlloc earlier = target;
+                            FixedAlloc later = fixed;
+                            if (earlier.start > later.start)
+                                std::swap(earlier, later);
+                            if (earlier.start < later.start &&
+                                !earlier.is_input_or_cache && !earlier.is_root &&
+                                !later.is_input_or_cache && !later.is_root)
+                            {
+                                int32_t e_max_reader = (earlier.cid.value < class_info.size() && class_info[earlier.cid.value].is_active)
+                                                           ? class_info[earlier.cid.value].max_reader_start_max
+                                                           : -1;
+                                if (later.start > e_max_reader)
+                                    continue;
+                            }
 
                             if (!canShare(state, target, fixed))
                             {
