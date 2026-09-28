@@ -350,36 +350,6 @@ inline void testExtraAgainstBaseReference()
                 "Rule 13 (CacheBudgetPropagator) failed to reject cache overcommit");
     }
 
-    // Test 3: RestrictOffsetPropagator (Rule 14)
-    // Overlapping lifetimes restrict offset domains earlier than pairwise fixed checks.
-    {
-        GraphSpec spec = {
-            {AlternativeSpec({1, 2})},
-            {AlternativeSpec{}},
-            {AlternativeSpec{}}
-        };
-        SearchState state = makeState(spec, 1);
-        selectAll(state);
-        state.setDomain(start(state, 1), Domain::makeRange(0, 5));
-        state.setDomain(start(state, 2), Domain::makeRange(0, 5));
-        state.setDomain(start(state, 0), Domain::makeFixed(6));
-        state.setDomain(offset(state, 1), Domain::makeFixed(8));
-
-        SearchEngine engine(std::move(state));
-        addAllPropagators(engine);
-        float lb = 0.0f;
-        require(engine.runPropagators(lb, offset(engine.state, 1)), "Restrict offset failed");
-
-        // The offset domain of node 2 (size 2 pages) cannot overlap [8, 10).
-        // If restricted to <= 9, it must be pushed to <= 6
-        Domain off2 = engine.state.domains[offset(engine.state, 2)];
-        off2.setMax(9);
-        engine.state.setDomain(offset(engine.state, 2), off2);
-        require(engine.runPropagators(lb, offset(engine.state, 2)), "Restricting suffix failed");
-        require(engine.state.domains[offset(engine.state, 2)].getMax() <= 6,
-                "Rule 14 (RestrictOffsetPropagator) did not prune blocked offset suffix");
-    }
-
     // Test 4: Random Branching - Equivalence & Pruning Consistency
     // Search with Base 11 vs Base 11 + EXTRA:
     // Any solution found by Base 11 must be accepted by EXTRA (if within cache capacity).

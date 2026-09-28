@@ -24,6 +24,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
     parser.add_flag({"--view-reg"}, "Run only view and bufferize regression tests.");
+    parser.add_flag({"--const-view"}, "Run only constant and view regression tests.");
     parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
     parser.add_flag({"--incremental-propagators"}, "Run only incremental propagator equivalence tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
@@ -60,6 +61,12 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--view-reg"))
     {
         runViewBufferizeRegressionTests();
+        return 0;
+    }
+
+    if (parser.get_flag("--const-view"))
+    {
+        runConstantViewRegressionTests();
         return 0;
     }
 

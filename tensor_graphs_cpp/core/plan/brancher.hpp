@@ -182,6 +182,290 @@ class HeuristicBrancher : public Brancher
         return true;
     }
 
+    static EClassId resolveBaseClass(const SearchState &state, uint32_t b, EClassId cid)
+    {
+        EClassId curr = cid;
+        std::unordered_set<EClassId> visited;
+        while (visited.insert(curr).second)
+        {
+            auto sel_it = state.selected_vars[b].find(curr);
+            if (sel_it == state.selected_vars[b].end())
+                break;
+            const Domain &dom = state.domains[sel_it->second];
+            if (!dom.isFixed() || dom.fixedValue() <= 0)
+                break;
+            uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
+            const EClass &cls = state.bucket_egraphs[b].getEClass(curr);
+            if (en_idx >= cls.enodes.size())
+                break;
+            ENodeId en_id = cls.enodes[en_idx];
+            bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                           state.bucket_enode_infos[b][en_id.value].is_view;
+            if (!is_view)
+                break;
+            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+            if (enode.getChildren().empty())
+                break;
+            curr = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+        }
+        return curr;
+    }
+
+    static bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand)
+    {
+        return resolveBaseClass(state, b, view_cand) == state.bucket_egraphs[b].findConst(base);
+    }
+
+    static std::vector<EClassId> getEClassReaders(const SearchState &state, uint32_t b, EClassId target)
+    {
+        EClassId canon_target = state.bucket_egraphs[b].findConst(target);
+        std::vector<EClassId> readers;
+        for (const auto &pair : state.selected_vars[b])
+        {
+            EClassId cand = pair.first;
+            if (cand == target)
+                continue;
+            const Domain &dom = state.domains[pair.second];
+            if (dom.isFixed() && dom.fixedValue() == 0)
+                continue;
+            uint32_t en_idx = (dom.isFixed() && dom.fixedValue() > 0) ? static_cast<uint32_t>(dom.fixedValue() - 1) : 0;
+            const EClass &cls = state.bucket_egraphs[b].getEClass(cand);
+            if (en_idx >= cls.enodes.size())
+                continue;
+            ENodeId en_id = cls.enodes[en_idx];
+            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+            for (EClassId ch : enode.getChildren())
+            {
+                EClassId base_ch = resolveBaseClass(state, b, ch);
+                if (state.bucket_egraphs[b].findConst(base_ch) == canon_target)
+                {
+                    readers.push_back(cand);
+                    break;
+                }
+            }
+        }
+        return readers;
+    }
+
+    static int32_t preferredOffset(const SearchState &state, uint32_t b, EClassId cid,
+                                   const Domain &offset_domain)
+    {
+        const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+        uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
+        uint32_t curr_size = (psize == 0) ? 1 : psize;
+
+        EClassId base_cid = resolveBaseClass(state, b, cid);
+        if (base_cid != cid)
+        {
+            auto base_off_it = state.offset_vars[b].find(base_cid);
+            if (base_off_it != state.offset_vars[b].end())
+            {
+                const Domain &base_dom = state.domains[base_off_it->second];
+                if (base_dom.isFixed() && offset_domain.contains(base_dom.fixedValue()))
+                {
+                    return base_dom.fixedValue();
+                }
+            }
+        }
+
+        int32_t curr_start = 0;
+        int32_t curr_end = std::numeric_limits<int32_t>::max();
+        bool is_curr_root = (b < state.bucket_root_ids.size() &&
+                             state.bucket_egraphs[b].findConst(cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
+
+        auto sel_it = state.selected_vars[b].find(cid);
+        uint32_t en_idx = 0;
+        bool is_curr_input_or_cache = (cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(cls.base_eclass_id));
+        if (sel_it != state.selected_vars[b].end())
+        {
+            const Domain &sel_dom = state.domains[sel_it->second];
+            if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
+                en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
+            if (en_idx < cls.enodes.size())
+            {
+                const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+                    is_curr_input_or_cache = true;
+            }
+        }
+
+        if (!is_curr_input_or_cache && !is_curr_root)
+        {
+            auto st_it = state.start_vars[b].find(cid);
+            if (st_it != state.start_vars[b].end() && en_idx < st_it->second.size())
+            {
+                const Domain &st_dom = state.domains[st_it->second[en_idx]];
+                if (st_dom.isFixed())
+                    curr_start = st_dom.fixedValue();
+            }
+            curr_end = curr_start + 1;
+            auto readers = getEClassReaders(state, b, cid);
+            for (EClassId r_cid : readers)
+            {
+                auto r_sel_it = state.selected_vars[b].find(r_cid);
+                if (r_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &r_sel_dom = state.domains[r_sel_it->second];
+                if (!r_sel_dom.isFixed() || r_sel_dom.fixedValue() <= 0)
+                    continue;
+                uint32_t r_en = static_cast<uint32_t>(r_sel_dom.fixedValue() - 1);
+                auto r_st_it = state.start_vars[b].find(r_cid);
+                if (r_st_it != state.start_vars[b].end() && r_en < r_st_it->second.size())
+                {
+                    const Domain &r_st_dom = state.domains[r_st_it->second[r_en]];
+                    if (r_st_dom.isFixed())
+                        curr_end = std::max(curr_end, r_st_dom.fixedValue() + 1);
+                    else
+                        curr_end = std::max(curr_end, r_st_dom.getMax() + 1);
+                }
+            }
+        }
+
+        struct Obstacle
+        {
+            uint32_t start;
+            uint32_t end;
+        };
+        std::vector<Obstacle> obstacles;
+
+        for (const auto &pair : state.preallocated_buffers)
+        {
+            if (pair.second.mem_space == cls.mem_space)
+            {
+                uint32_t align = state.getPageAlignment(cls.mem_space);
+                uint32_t start_p = static_cast<uint32_t>(pair.second.offset / align);
+                uint32_t end_p = static_cast<uint32_t>((pair.second.offset + pair.second.size + align - 1) / align);
+                obstacles.push_back({start_p, end_p});
+            }
+        }
+
+        for (const auto &pair : state.selected_vars[b])
+        {
+            EClassId other_cid = pair.first;
+            if (other_cid == cid)
+                continue;
+
+            auto off_it = state.offset_vars[b].find(other_cid);
+            if (off_it == state.offset_vars[b].end())
+                continue;
+            const Domain &off_dom = state.domains[off_it->second];
+            if (!off_dom.isFixed())
+                continue;
+
+            const Domain &other_sel_dom = state.domains[pair.second];
+            if (other_sel_dom.isFixed() && other_sel_dom.fixedValue() == 0)
+                continue;
+
+            const EClass &other_cls = state.bucket_egraphs[b].getEClass(other_cid);
+            if (other_cls.mem_space != cls.mem_space)
+                continue;
+
+            if (isViewOf(state, b, cid, other_cid) || isViewOf(state, b, other_cid, cid) ||
+                (base_cid != cid && base_cid == resolveBaseClass(state, b, other_cid)))
+                continue;
+
+            uint32_t o_en = (other_sel_dom.isFixed() && other_sel_dom.fixedValue() > 0)
+                                ? static_cast<uint32_t>(other_sel_dom.fixedValue() - 1)
+                                : 0;
+            bool is_other_input_or_cache = (other_cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(other_cls.base_eclass_id));
+            if (o_en < other_cls.enodes.size())
+            {
+                const ENode &o_enode = state.bucket_egraphs[b].getENode(other_cls.enodes[o_en]);
+                if (o_enode.getOpType() == OpType::INPUT || o_enode.getOpType() == OpType::CACHE)
+                    is_other_input_or_cache = true;
+            }
+            bool is_other_root = (b < state.bucket_root_ids.size() &&
+                                  state.bucket_egraphs[b].findConst(other_cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
+
+            int32_t other_start = 0;
+            int32_t other_end = std::numeric_limits<int32_t>::max();
+            if (!is_other_input_or_cache && !is_other_root)
+            {
+                auto o_st_it = state.start_vars[b].find(other_cid);
+                if (o_st_it != state.start_vars[b].end() && o_en < o_st_it->second.size())
+                {
+                    const Domain &o_st_dom = state.domains[o_st_it->second[o_en]];
+                    if (o_st_dom.isFixed())
+                        other_start = o_st_dom.fixedValue();
+                }
+                other_end = other_start + 1;
+                auto other_readers = getEClassReaders(state, b, other_cid);
+                for (EClassId r_cid : other_readers)
+                {
+                    auto r_sel_it = state.selected_vars[b].find(r_cid);
+                    if (r_sel_it == state.selected_vars[b].end())
+                        continue;
+                    const Domain &r_sel_dom = state.domains[r_sel_it->second];
+                    if (!r_sel_dom.isFixed() || r_sel_dom.fixedValue() <= 0)
+                        continue;
+                    uint32_t r_en_idx = static_cast<uint32_t>(r_sel_dom.fixedValue() - 1);
+                    auto r_st_it = state.start_vars[b].find(r_cid);
+                    if (r_st_it != state.start_vars[b].end() && r_en_idx < r_st_it->second.size())
+                    {
+                        const Domain &r_st_dom = state.domains[r_st_it->second[r_en_idx]];
+                        if (r_st_dom.isFixed())
+                            other_end = std::max(other_end, r_st_dom.fixedValue() + 1);
+                        else
+                            other_end = std::max(other_end, r_st_dom.getMax() + 1);
+                    }
+                }
+            }
+
+            bool overlap = (is_curr_input_or_cache || is_other_input_or_cache ||
+                            std::max(curr_start, other_start) < std::min(curr_end, other_end));
+            if (!overlap)
+                continue;
+
+            uint32_t o_psize = state.bytesToPages(getSizeBytes(other_cls.shape, other_cls.dtype), other_cls.mem_space);
+            uint32_t other_size = (o_psize == 0) ? 1 : o_psize;
+            uint32_t o_offset = static_cast<uint32_t>(off_dom.fixedValue());
+            obstacles.push_back({o_offset, o_offset + other_size});
+        }
+
+        std::sort(obstacles.begin(), obstacles.end(), [](const Obstacle &a, const Obstacle &b) {
+            return a.start < b.start;
+        });
+
+        uint32_t p = static_cast<uint32_t>(offset_domain.getMin());
+        bool pushed = true;
+        while (pushed)
+        {
+            pushed = false;
+            for (const auto &obs : obstacles)
+            {
+                if (p < obs.end && p + curr_size > obs.start)
+                {
+                    p = obs.end;
+                    pushed = true;
+                }
+            }
+        }
+
+        if (p <= static_cast<uint32_t>(offset_domain.getMax()))
+            return static_cast<int32_t>(p);
+
+        return offset_domain.getMin();
+    }
+
+    static bool setOffsetDecision(const Domain &domain, int32_t preferred,
+                                  BranchDecision &out_decision, VarId var_id)
+    {
+        if (domain.isFixed() || domain.isEmpty() || !domain.contains(preferred))
+            return false;
+
+        out_decision.left_delta = {var_id, Domain::makeFixed(preferred, false)};
+        if (preferred + 1 <= domain.getMax())
+        {
+            out_decision.right_delta = {var_id, Domain::makeRange(preferred + 1, domain.getMax())};
+        }
+        else
+        {
+            Domain right = without(domain, preferred);
+            out_decision.right_delta = {var_id, right};
+        }
+        return true;
+    }
+
     bool chooseSelection(const SearchState &state, BranchDecision &out_decision,
                          bool required_only) const
     {
@@ -338,7 +622,10 @@ class HeuristicBrancher : public Brancher
                     VarId offset_var = offset_it->second;
                     const Domain &offset_domain = state.domains[offset_var];
                     if (!offset_domain.isFixed())
-                        return setBinaryDecision(offset_domain, offset_domain.getMin(), out_decision, offset_var);
+                    {
+                        int32_t preferred = preferredOffset(state, b, cid, offset_domain);
+                        return setOffsetDecision(offset_domain, preferred, out_decision, offset_var);
+                    }
                 }
             }
         }
