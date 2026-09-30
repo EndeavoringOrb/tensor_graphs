@@ -374,7 +374,7 @@ struct Planner
     {
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo, &costModel};
         std::vector<std::unique_ptr<Rule>> rules;
-        rules.emplace_back(makeProfiledRewriteRule<FusionRule>());
+        rules.emplace_back(makeProfiledRewriteRule<FusionRule>(settings.disable_fusion));
         rules.emplace_back(makeProfiledRewriteRule<DotSplitRule>());
         rules.emplace_back(makeProfiledRewriteRule<RemoveContiguous>());
         rules.emplace_back(makeProfiledRewriteRule<RemoveCopyChains>());
@@ -1021,6 +1021,7 @@ struct Planner
             }
         }
 
+        std::unordered_map<EClassId, EClassId> contiguousInputs;
         for (LogicalId nodeId : topo)
         {
             const TensorNode &node = graph.getNode(nodeId);
@@ -1060,8 +1061,91 @@ struct Planner
 
             if (refs.empty())
             {
-                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " +
-                                 toString(e_class_id));
+                std::stringstream details;
+                details << "[Planner.initBaseEGraph] couldn't find any kernels to init EClass "
+                        << toString(e_class_id) << "\n"
+                        << "No registered kernel matched this node under the planner's current constraints.\n"
+                        << "Node details:\n"
+                        << "  Logical ID: " << nodeId.value << "\n"
+                        << "  Op type:    " << toString(node.opType) << "\n"
+                        << "  Op name:    " << (node.opName.empty() ? "N/A" : node.opName) << "\n"
+                        << "  Debug origin: " << (node.debugOrigin.empty() ? "N/A" : node.debugOrigin) << "\n"
+                        << "  Output dtype: " << toString(node.dtype) << "\n"
+                        << "  Output shape: " << toString(node.getShape()) << "\n"
+                        << "  Output strides: " << toString(node.strides) << "\n"
+                        << "  Inputs (" << inputs.size() << "):\n";
+
+                for (size_t i = 0; i < inputs.size(); ++i)
+                {
+                    details << "    [" << i << "] Logical ID: " << node.child_ids[i].value << "\n"
+                            << "        Op type: " << toString(inputs[i].opType) << "\n"
+                            << "        Op name: " << (inputs[i].opName.empty() ? "N/A" : inputs[i].opName)
+                            << "\n"
+                            << "        Debug origin: "
+                            << (inputs[i].debugOrigin.empty() ? "N/A" : inputs[i].debugOrigin) << "\n"
+                            << "        Dtype: " << toString(inputs[i].dtype) << "\n"
+                            << "        Shape: " << toString(inputs[i].getShape()) << "\n"
+                            << "        Strides: " << toString(inputs[i].strides) << "\n"
+                            << "        Memory space: " << toString(input_mem_spaces[i]) << "\n";
+                }
+
+                const auto &registered_kernels = KernelRegistry::get().getAllKernels();
+                size_t same_op_kernel_count = 0;
+                for (const auto &[kernel_id, kernel] : registered_kernels)
+                {
+                    if (kernel.opType != node.opType || kernel.opName != node.opName)
+                        continue;
+
+                    ++same_op_kernel_count;
+                    details << "Registered kernel candidate " << toString(kernel_id) << ":\n"
+                            << "  Name: " << kernel.getName() << "\n"
+                            << "  Input count: " << kernel.min_num_inputs << ".." << kernel.max_num_inputs << "\n"
+                            << "  Reference kernel: " << (kernel.isReference ? "true" : "false") << "\n"
+                            << "  Output memory space: " << toString(kernel.output_mem_space) << "\n"
+                            << "  Required engines: [";
+                    for (size_t i = 0; i < kernel.engines.size(); ++i)
+                    {
+                        if (i > 0)
+                            details << ", ";
+                        details << toString(kernel.engines[i]);
+                    }
+                    details << "]\n  Dtypes: [";
+                    for (size_t i = 0; i < kernel.dtypes.size(); ++i)
+                    {
+                        if (i > 0)
+                            details << ", ";
+                        details << toString(kernel.dtypes[i]);
+                    }
+                    details << "]\n  Required input memory spaces: [";
+                    for (size_t i = 0; i < kernel.input_mem_spaces.size(); ++i)
+                    {
+                        if (i > 0)
+                            details << ", ";
+                        details << toString(kernel.input_mem_spaces[i]);
+                    }
+                    details << "]\n  Requires contiguous inputs: [";
+                    for (size_t i = 0; i < kernel.requiresContiguous.size(); ++i)
+                    {
+                        if (i > 0)
+                            details << ", ";
+                        details << (kernel.requiresContiguous[i] ? "true" : "false");
+                    }
+                    details << "]\n";
+                }
+                if (same_op_kernel_count == 0)
+                    details << "Registered kernel candidates for this exact op type/name: none\n";
+
+                details << "Kernel matching constraints:\n"
+                        << "  Output memory space: " << toString(ram) << "\n"
+                        << "  Required engines: [" << toString(cpu) << "]\n"
+                        << "  Reference kernels only: true\n"
+                        << "  Ignore output memory space: false\n"
+                        << "  Ignore input memory spaces: " << (ignore_in_ms ? "true" : "false") << "\n"
+                        << "  Ignore engines: false\n"
+                        << "  Ignore input contiguity: true\n"
+                        << "Full node graph context:\n"
+                        << toString(node, graph);
+                Error::throw_err(details.str());
             }
 
             for (KernelId uid : refs)
@@ -1072,6 +1156,34 @@ struct Planner
                 {
                     children.push_back(baseState.egraph.findConst(baseState.nodeToEClass[pid]));
                 }
+
+                for (size_t input_idx = 0; input_idx < children.size(); ++input_idx)
+                {
+                    if (kernel.requiresContiguous.empty())
+                        continue;
+
+                    const size_t rule_idx = std::min(input_idx, kernel.requiresContiguous.size() - 1);
+                    if (!kernel.requiresContiguous[rule_idx] || isContiguous(inputs[input_idx]))
+                        continue;
+
+                    const EClassId source_class = baseState.egraph.findConst(children[input_idx]);
+                    auto contiguous_it = contiguousInputs.find(source_class);
+                    if (contiguous_it == contiguousInputs.end())
+                    {
+                        const auto &source = baseState.egraph.getEClass(source_class);
+                        const auto source_shape = source.shape;
+                        const DType source_dtype = source.dtype;
+                        EClassId contiguous_class = addOpToEGraph(
+                            baseState.egraph, OpType::CONTIGUOUS, {source_class}, source_shape,
+                            calcContiguousStrides(source_shape), source_dtype, ram, EClassId(), SourceLocation::current(),
+                            "Planner.initBaseEGraph input for " + toString(node.opType) + " logical ID " +
+                                std::to_string(nodeId.value));
+                        contiguous_it = contiguousInputs.emplace(source_class, contiguous_class).first;
+                    }
+
+                    children[input_idx] = contiguous_it->second;
+                }
+
                 ENode enode = ENode(uid, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype,
                                     ram, {cpu}, "", 0, node.debugOrigin);
                 baseState.egraph.addENode(e_class_id, enode);
@@ -1318,14 +1430,56 @@ struct Planner
                 protectedEClasses.insert(eclassId);
         }
 
-        const bool dirtyInjected =
-            injectInputPartialPaths(result.egraph, graph, bucket.inputDirtyRegions, cachedNodes, result.nodeToEClass,
-                                    result.eclassToLogical);
-        const bool neededInjected = injectOutputPartialPaths(result.egraph, graph, rootId, bucket.outputNeededRegion,
-                                                             cachedNodes, result.nodeToEClass, result.eclassToLogical);
+        auto isFullRegion = [](const Region &region, const std::vector<uint32_t> &shape) {
+            if (region.region.size() != shape.size())
+                return false;
+            for (size_t d = 0; d < shape.size(); ++d)
+            {
+                if (region.region[d].start != 0 || region.region[d].stop != shape[d])
+                    return false;
+            }
+            return true;
+        };
 
-        if (doSaturate && settings.do_saturate && (!base_state_has_base_ids || dirtyInjected || neededInjected))
-            saturate(result.egraph, protectedEClasses, result.eclassToLogical, true, false, repo);
+        bool hasPartialInputRegion = false;
+        for (const auto &inputPair : bucket.inputDirtyRegions)
+        {
+            if (!graph.hasNode(inputPair.first))
+                continue;
+            const auto shape = graph.getNode(inputPair.first).getShape();
+            for (const Region &region : inputPair.second)
+            {
+                if (!isFullRegion(region, shape))
+                {
+                    hasPartialInputRegion = true;
+                    break;
+                }
+            }
+            if (hasPartialInputRegion)
+                break;
+        }
+        bool hasPartialOutputRegion = false;
+        const auto outputShape = graph.getNode(rootId).getShape();
+        for (const Region &region : bucket.outputNeededRegion)
+        {
+            if (!isFullRegion(region, outputShape))
+            {
+                hasPartialOutputRegion = true;
+                break;
+            }
+        }
+
+        const bool dirtyInjected = hasPartialInputRegion &&
+                                   injectInputPartialPaths(result.egraph, graph, bucket.inputDirtyRegions, cachedNodes,
+                                                           result.nodeToEClass, result.eclassToLogical);
+        const bool neededInjected = hasPartialOutputRegion &&
+                                    injectOutputPartialPaths(result.egraph, graph, rootId,
+                                                             bucket.outputNeededRegion, cachedNodes,
+                                                             result.nodeToEClass, result.eclassToLogical);
+
+        if (doSaturate && settings.do_saturate)
+            saturate(result.egraph, protectedEClasses, result.eclassToLogical, dirtyInjected || neededInjected,
+                     false, repo);
 
         std::unordered_map<EClassId, LogicalId> canonicalLogical;
         for (const auto &kv : result.eclassToLogical)
@@ -1673,9 +1827,20 @@ struct Planner
             }
         }
 
-        // Cache candidate discovery across saturated egraphs
+        // Cache candidate discovery across saturated egraphs.  Cache choices
+        // only help weighted partial buckets; the zero-weight full bucket is
+        // the initialization path and must compute every value itself.
         std::vector<CacheCandidate> candidates;
-        if (!settings.disable_caching)
+        bool has_weighted_partial_bucket = false;
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+        {
+            if (b != full_idx && bucket_weights[b] > 0.0f)
+            {
+                has_weighted_partial_bucket = true;
+                break;
+            }
+        }
+        if (!settings.disable_caching && has_weighted_partial_bucket)
         {
             std::unordered_map<LogicalId, uint32_t> user_counts;
             for (const auto &pair : graph.nodes)
@@ -1691,10 +1856,12 @@ struct Planner
                     continue;
 
                 bool clean_in_any = false;
-                for (const auto &bstate : bucket_states)
+                for (uint32_t b = 0; b < bucket_states.size(); ++b)
                 {
-                    EClassId bid = bstate.egraph.findEClassByBaseId(cls.base_eclass_id);
-                    if (bid != EClassId{} && bstate.cleanEClasses.count(bid))
+                    if (b == full_idx || bucket_weights[b] <= 0.0f)
+                        continue;
+                    EClassId bid = bucket_states[b].egraph.findEClassByBaseId(cls.base_eclass_id);
+                    if (bid != EClassId{} && bucket_states[b].cleanEClasses.count(bid))
                     {
                         clean_in_any = true;
                         break;
@@ -1720,8 +1887,11 @@ struct Planner
 
         // Add CACHE enodes to bucket egraphs for clean candidates
         Engine cpu = Engine{0, EngineType::CPU};
-        for (auto &bstate : bucket_states)
+        for (uint32_t b = 0; b < bucket_states.size(); ++b)
         {
+            if (b == full_idx || bucket_weights[b] <= 0.0f)
+                continue;
+            auto &bstate = bucket_states[b];
             for (const auto &cand : candidates)
             {
                 EClassId cid = bstate.egraph.findEClassByBaseId(cand.base_eclass_id);

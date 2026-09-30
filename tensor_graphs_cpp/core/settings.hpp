@@ -29,10 +29,12 @@ struct Settings
 
     // Engine, Session, & Planner parameters
     bool disable_caching = false;
+    bool disable_compilation_caching = false;
     bool log_cost_calls = true;
     float min_compile_seconds = 0.0f;
     uint32_t num_threads = 0;
     bool do_saturate = true;
+    bool disable_fusion = false;
     bool reference_only = false;
     bool only_plan = false;
     bool compile_decode_buckets = false;
@@ -109,6 +111,9 @@ struct Settings
             if (root.contains("disable_caching") && root["disable_caching"].is_boolean())
                 disable_caching = root["disable_caching"].get<bool>();
 
+            if (root.contains("disable_compilation_caching") && root["disable_compilation_caching"].is_boolean())
+                disable_compilation_caching = root["disable_compilation_caching"].get<bool>();
+
             if (root.contains("log_cost_calls") && root["log_cost_calls"].is_boolean())
                 log_cost_calls = root["log_cost_calls"].get<bool>();
 
@@ -167,9 +172,11 @@ struct Settings
     void add_to_argparser(ArgParser &parser) const
     {
         parser.add_option({"--settings"}, "Path to settings.json configuration file.", settings_json_path);
-        parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
+        parser.add_flag({"--disable-node-caching"}, "Disable dirty region session caching.");
+        parser.add_flag({"--disable-compilation-caching"}, "Disable compiled-session cache file reads and writes.");
         parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
+        parser.add_flag({"--disable-fusion"}, "Disable multi-operation fusion patterns.");
         parser.add_flag({"--use-ortools"}, "Use Google OR-Tools CP-SAT model for optimization.");
         parser.add_flag({"--use-ortools-full"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools.");
         parser.add_flag({"--use-ortools-lns"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools LNS.");
@@ -197,14 +204,20 @@ struct Settings
             load_from_json(settings_json_path);
         }
 
-        if (parser.get_flag("--disable-caching"))
+        if (parser.get_flag("--disable-node-caching"))
             disable_caching = true;
+
+        if (parser.get_flag("--disable-compilation-caching"))
+            disable_compilation_caching = true;
 
         if (parser.get_flag("--only-plan"))
             only_plan = true;
 
         if (parser.get_flag("--fold-weights"))
             fold_weights = true;
+
+        if (parser.get_flag("--disable-fusion"))
+            disable_fusion = true;
 
         if (parser.get_flag("--use-ortools"))
             use_ortools = true;

@@ -291,6 +291,10 @@ class LLMSession
     uint32_t vocab_size = 0;
     uint32_t max_seq_len = 128;
     std::vector<uint32_t> prev_tokens;
+    Debug::ReferenceVerifier referenceVerifier;
+    std::string referenceFile;
+    std::string compareReferenceFile;
+    bool runFullGraph = false;
 
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
@@ -298,8 +302,13 @@ class LLMSession
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
                 uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
-                double max_time_seconds = 0.0, bool use_ortools_lns = false)
+               double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
+                const std::string &write_refs = "", const std::string &compare_refs = "",
+                bool disable_compilation_caching = false)
     {
+        referenceFile = write_refs;
+        compareReferenceFile = compare_refs;
+        runFullGraph = !referenceFile.empty() || !compareReferenceFile.empty();
         max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
         {
@@ -351,13 +360,30 @@ class LLMSession
             std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : ""));
             actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
+        if (!referenceFile.empty())
+            actual_cache += disable_fusion ? ".no-fusion-reference-write" : ".reference-write";
+        else if (disable_fusion)
+            actual_cache += ".no-fusion-all";
+        else if (!compareReferenceFile.empty())
+            actual_cache += ".reference-compare";
+        actual_cache += disable_caching ? ".no-dirty-cache" : ".dirty-cache";
 
-        session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, act_brancher, log_cost_calls);
+        session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(),
+                                            disable_caching,
+                                            min_compile_time, act_brancher, log_cost_calls,
+                                            "benchmarks/records.bin", disable_compilation_caching);
         session->settings.use_ortools = use_ortools;
         session->settings.use_ortools_full = use_ortools_full;
         session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
+        session->settings.disable_fusion = disable_fusion;
+        KernelRegistry::get().setReferenceOnly(disable_fusion || !referenceFile.empty() || !compareReferenceFile.empty());
+
+        if ((!referenceFile.empty() || !compareReferenceFile.empty()) &&
+            !referenceVerifier.init(referenceFile, compareReferenceFile))
+        {
+            throw std::runtime_error("Failed to initialize reference tensor verifier");
+        }
 
         if (compile_decode_buckets)
         {
@@ -380,7 +406,7 @@ class LLMSession
             session->setBucketWeights(bucket_weights);
         }
 
-        session->compile(true);
+        session->compile();
     }
 
     int32_t generate_step(const std::vector<uint32_t> &tokens)
@@ -433,7 +459,14 @@ class LLMSession
         b.inputDirtyRegions = {{inputIdsId, dirty_regions}};
         b.outputNeededRegion = {outR};
 
-        const float *device_output = static_cast<const float *>(session->run(b));
+        auto debugCallback = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx,
+                                 const void *data) {
+            referenceVerifier.verify(logicalId, kernel_name, ctx, data, g.get());
+        };
+        const bool verifyTensors = !referenceFile.empty() || !compareReferenceFile.empty();
+        const float *device_output = static_cast<const float *>(session->run(
+            runFullGraph ? Bucket{} : b, verifyTensors ? Debug::Callback(debugCallback) : Debug::Callback{},
+            !runFullGraph));
 
         std::vector<float> host_output;
 #ifdef TG_USE_CUDA
@@ -492,8 +525,8 @@ class Krea2Session
                  uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
                  std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
                   const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
-                  bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0,
-                  bool use_ortools_lns = false)
+                 bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0,
+                  bool use_ortools_lns = false, bool disable_compilation_caching = false)
         : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
     {
         if (threads > 0)
@@ -567,7 +600,8 @@ class Krea2Session
         }
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, act_brancher, log_cost_calls);
+                                            min_compile_time, act_brancher, log_cost_calls,
+                                            "benchmarks/records.bin", disable_compilation_caching);
         session->settings.use_ortools_full = use_ortools_full;
         session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
@@ -818,7 +852,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("use_ortools_full", &Settings::use_ortools_full)
         .def_readwrite("use_ortools_lns", &Settings::use_ortools_lns)
         .def_readwrite("cpu_only", &Settings::cpu_only)
-        .def_readwrite("disable_caching", &Settings::disable_caching)
+        .def_readwrite("disable_node_caching", &Settings::disable_caching)
+        .def_readwrite("disable_compilation_caching", &Settings::disable_compilation_caching)
         .def_readwrite("only_plan", &Settings::only_plan)
         .def_readwrite("min_compile_seconds", &Settings::min_compile_seconds)
         .def_readwrite("num_threads", &Settings::num_threads)
@@ -826,18 +861,21 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<Session>(m, "Session")
         .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
-                          bool disable_caching, bool use_ortools, bool use_ortools_full, bool use_ortools_lns) {
+                          bool disable_node_caching, bool use_ortools, bool use_ortools_full, bool use_ortools_lns,
+                          bool disable_compilation_caching) {
             Settings settings = Settings::get_default();
             settings.use_ortools = use_ortools;
             settings.use_ortools_full = use_ortools_full;
             settings.use_ortools_lns = use_ortools_lns;
-            settings.disable_caching = disable_caching;
+            settings.disable_caching = disable_node_caching;
+            settings.disable_compilation_caching = disable_compilation_caching;
             if (!cache_file.empty())
                 settings.cache_file = cache_file;
             return std::make_unique<Session>(g, mem, root_id, settings);
         }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
-            py::arg("disable_caching") = false, py::arg("use_ortools") = false,
-            py::arg("use_ortools_full") = false, py::arg("use_ortools_lns") = false)
+            py::arg("disable_node_caching") = false, py::arg("use_ortools") = false,
+            py::arg("use_ortools_full") = false, py::arg("use_ortools_lns") = false,
+            py::arg("disable_compilation_caching") = false)
         .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
                               const std::vector<Region> &outNeeded, float weight) {
             s.addBucket(inDirty, outNeeded, weight);
@@ -923,25 +961,29 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
-                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool>(),
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
+                      bool, const std::string &, const std::string &, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
+             py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
              py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
              py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
-             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false)
+             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
+             py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
+             py::arg("disable_compilation_caching") = false)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
                       uint32_t, float, std::shared_ptr<plan::Brancher>, float, const std::string &, bool, uint32_t,
-                      bool, bool, double, bool>(),
+                      bool, bool, double, bool, bool>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
              py::arg("mu") = 1.15f, py::arg("brancher") = nullptr, py::arg("min_compile_time") = 0.0f,
-             py::arg("cache_file") = "", py::arg("disable_caching") = false, py::arg("threads") = 0,
+             py::arg("cache_file") = "", py::arg("disable_node_caching") = false, py::arg("threads") = 0,
              py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
-             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false)
+             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
+             py::arg("disable_compilation_caching") = false)
         .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
              py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),

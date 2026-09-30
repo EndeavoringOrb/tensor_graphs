@@ -81,6 +81,7 @@ struct Session
     TGStore *repo;
     std::unique_ptr<TGStore> owned_repo;
     bool disableCaching = false;
+    bool disableCompilationCaching = false;
     float minCompileSeconds = 0.0f;
     std::shared_ptr<plan::Brancher> brancher = nullptr;
     bool logCostCalls = false;
@@ -174,7 +175,7 @@ struct Session
 
     void persistCache() const
     {
-        if (cachePath.empty())
+        if (disableCompilationCaching || cachePath.empty())
             return;
         ensureOutputDirectories();
         std::ofstream file(cachePath, std::ios::trunc | std::ios::binary);
@@ -243,6 +244,7 @@ struct Session
             std::shared_ptr<plan::Brancher> _brancher = nullptr)
         : graph(g), memManager(mem), rootId(root), settings(_settings), isPlanned(false), isCompiled(false),
           cachePath(_settings.cache_file), nBucketSizes(0), repo(_repo), disableCaching(_settings.disable_caching),
+          disableCompilationCaching(_settings.disable_compilation_caching),
           minCompileSeconds(_settings.min_compile_seconds),
           brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()),
           logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
@@ -255,9 +257,10 @@ struct Session
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             TGStore *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
             std::shared_ptr<plan::Brancher> _brancher = nullptr, bool _logCostCalls = true,
-            const std::string &_recordsPath = "benchmarks/records.bin")
+            const std::string &_recordsPath = "benchmarks/records.bin", bool _disableCompilationCaching = false)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
+          disableCompilationCaching(_disableCompilationCaching),
           minCompileSeconds(_minCompileSeconds),
           brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()), logCostCalls(_logCostCalls),
           costModel(_logCostCalls, _recordsPath)
@@ -265,6 +268,7 @@ struct Session
         settings = Settings::get_default();
         settings.cache_file = cacheFile;
         settings.disable_caching = _disableCaching;
+        settings.disable_compilation_caching = _disableCompilationCaching;
         settings.min_compile_seconds = _minCompileSeconds;
         settings.log_cost_calls = _logCostCalls;
         if (!_recordsPath.empty())
@@ -1009,7 +1013,7 @@ struct Session
 
     void loadCache()
     {
-        if (cachePath.empty())
+        if (disableCompilationCaching || cachePath.empty())
             return;
 
         CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/true);

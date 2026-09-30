@@ -442,7 +442,7 @@ struct FusionRule : public Rule
             }
             pattern.rootId = entry.factory(pattern.variables, pattern.graph);
 
-            if (disableFusion && pattern.graph.nodes.size() > entry.min_num_inputs + 1)
+            if (disableFusion)
             {
                 continue;
             }

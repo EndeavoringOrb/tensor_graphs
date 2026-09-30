@@ -175,7 +175,8 @@ struct CompiledSession
 
 // Build (or rebuild) the graph + session for the given image dimensions.
 static void build_session(CompiledSession &cs, MemoryManager &mem, int width, int height,
-                          const std::string &weights_path, bool disable_caching = false)
+                          const std::string &weights_path, bool disable_caching = false,
+                          bool disable_compilation_caching = false)
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
@@ -198,7 +199,9 @@ static void build_session(CompiledSession &cs, MemoryManager &mem, int width, in
     std::string cache_file =
         "dirty_region_caches/jina-v5-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";
 
-    cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id, cache_file, 0, &repo, disable_caching);
+    cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id, cache_file, 0, &repo, disable_caching,
+                                           0.0f, nullptr, true, "benchmarks/records.bin",
+                                           disable_compilation_caching);
 
     // Register a bucket where ONLY the image input is dirty (all weights are
     // clean/static)
@@ -321,7 +324,8 @@ int main(int argc, char *argv[])
 {
     ArgParser parser("embed", "Embed an image using Jina embeddings.");
     parser.add_flag({"--server"}, "Run in shared-memory server mode.");
-    parser.add_flag({"--disable-caching"}, "Disable dirty region caching.");
+    parser.add_flag({"--disable-node-caching"}, "Disable dirty region caching.");
+    parser.add_flag({"--disable-compilation-caching"}, "Disable compiled-session cache file reads and writes.");
     parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
     parser.add_positional("image_path", "Path to input image file (optional in server mode).");
@@ -332,7 +336,8 @@ int main(int argc, char *argv[])
     }
 
     bool is_server = parser.get_flag("--server");
-    bool disable_caching = parser.get_flag("--disable-caching");
+    bool disable_caching = parser.get_flag("--disable-node-caching");
+    bool disable_compilation_caching = parser.get_flag("--disable-compilation-caching");
     std::string write_refs = parser.get_option("--write-refs");
     std::string compare_refs = parser.get_option("--compare-refs");
     std::string image_path = parser.get_positional("image_path");
@@ -471,7 +476,8 @@ int main(int argc, char *argv[])
                     }
 
                     std::cout << "[Server] Building graph for " << width << "x" << height << "..." << std::endl;
-                    build_session(cs, mem, width, height, WEIGHTS_PATH, disable_caching);
+                    build_session(cs, mem, width, height, WEIGHTS_PATH, disable_caching,
+                                  disable_compilation_caching);
                     std::cout << "[Server] Graph ready (" << cs.cfg->num_patches << " patches, " << cs.cfg->num_merged
                               << " merged tokens, " << cs.cfg->text_seq_len << " text tokens)" << std::endl;
                 }
@@ -605,7 +611,8 @@ int main(int argc, char *argv[])
         // Build graph for this image's dimensions (build_session also
         // pre-allocates cs.norm_image and cs.patch_input for reuse).
         CompiledSession cs;
-        build_session(cs, mem, final_w, final_h, WEIGHTS_PATH, disable_caching);
+        build_session(cs, mem, final_w, final_h, WEIGHTS_PATH, disable_caching,
+                      disable_compilation_caching);
 
         // Normalize in-place into cs.norm_image
         normalize_image_inplace(resized_data, final_w, final_h, 3, cs.norm_image);

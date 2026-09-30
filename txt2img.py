@@ -112,9 +112,14 @@ def main():
     parser.add_argument("--max-time-seconds", type=float, default=None,
                         help="Maximum time in seconds for the OR-Tools solver")
     parser.add_argument(
-        "--disable-caching",
+        "--disable-node-caching",
         action="store_true",
         help="Disable dirty region session caching",
+    )
+    parser.add_argument(
+        "--disable-compilation-caching",
+        action="store_true",
+        help="Disable compiled-session cache file reads and writes",
     )
     parser.add_argument(
         "--use-ortools-full",
@@ -251,7 +256,8 @@ def main():
         mu=args.mu,
         delegate=delegate,
         min_compile_time=args.min_compile_time,
-        disable_caching=args.disable_caching,
+        disable_node_caching=args.disable_node_caching,
+        disable_compilation_caching=args.disable_compilation_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
         use_ortools_full=args.use_ortools_full,

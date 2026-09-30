@@ -9,6 +9,7 @@
 #include "tests/fused.hpp"
 #include "tests/input_hashcons.hpp"
 #include "tests/incremental_propagators.hpp"
+#include "tests/planner_structure.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/selection_reachability.hpp"
@@ -27,6 +28,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--const-view"}, "Run only constant and view regression tests.");
     parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
     parser.add_flag({"--incremental-propagators"}, "Run only incremental propagator equivalence tests.");
+    parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -42,6 +44,11 @@ int main(int argc, char *argv[])
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--planner-structure"))
+    {
+        runPlannerStructureTests();
+        return 0;
+    }
     if (parser.get_flag("--incremental-propagators"))
     {
         runIncrementalPropagatorTests();
@@ -74,6 +81,7 @@ int main(int argc, char *argv[])
     {
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
+        runPlannerStructureTests();
         runSelectionReachabilityTests();
         runIncrementalPropagatorTests();
         runShapePropagationTests();

@@ -80,9 +80,31 @@ def main():
         help="Compile decode buckets in addition to the single full bucket",
     )
     parser.add_argument(
-        "--disable-caching",
+        "--disable-node-caching",
         action="store_true",
         help="Disable dirty region session caching",
+    )
+    parser.add_argument(
+        "--disable-compilation-caching",
+        action="store_true",
+        help="Disable compiled-session cache file reads and writes",
+    )
+    parser.add_argument(
+        "--disable-fusion",
+        action="store_true",
+        help="Disable multi-operation fusion patterns",
+    )
+    parser.add_argument(
+        "--write-refs",
+        type=str,
+        default="",
+        help="Write intermediate tensors to this reference file",
+    )
+    parser.add_argument(
+        "--compare-refs",
+        type=str,
+        default="",
+        help="Compare intermediate tensors with this reference file",
     )
     parser.add_argument(
         "--use-ortools",
@@ -172,7 +194,8 @@ def main():
         min_compile_time=args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
         cache_file=args.cache_file,
-        disable_caching=args.disable_caching,
+        disable_node_caching=args.disable_node_caching,
+        disable_compilation_caching=args.disable_compilation_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
         max_sequence_length=args.seq_len,
@@ -180,6 +203,9 @@ def main():
         use_ortools_full=args.use_ortools_full,
         max_time_seconds=args.max_time_seconds or 0.0,
         use_ortools_lns=args.use_ortools_lns,
+        disable_fusion=args.disable_fusion,
+        write_refs=args.write_refs,
+        compare_refs=args.compare_refs,
     )
 
     print(f"Loading tokenizer for {args.model}...")
