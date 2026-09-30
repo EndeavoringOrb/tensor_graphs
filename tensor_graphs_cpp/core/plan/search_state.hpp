@@ -343,6 +343,47 @@ struct PropagationSumTree
 
 struct PropagationState
 {
+    struct StartPrecedenceParent
+    {
+        EClassId parent_cid;
+        uint32_t en_idx = 0;
+        VarId selection_var = kInvalidVarId;
+        VarId start_var = kInvalidVarId;
+        bool is_view = false;
+    };
+
+    struct StartPrecedenceBucket
+    {
+        std::unordered_map<EClassId, std::vector<StartPrecedenceParent>> parents;
+        std::vector<uint32_t> visited_stamp;
+        uint32_t stamp = 0;
+        std::vector<EClassId> frontier;
+    };
+
+    struct WriteAfterReadClassInfo
+    {
+        bool is_active = false;
+        bool is_view = false;
+        bool is_input_or_cache = false;
+        bool is_root = false;
+        EClassId view_parent{UINT32_MAX};
+        EClassId base_cid{UINT32_MAX};
+        uint32_t en_idx = 0;
+        ENodeId en_id{UINT32_MAX};
+        int32_t start_max = -1;
+        int32_t max_reader_start_max = -1;
+        std::vector<EClassId> readers;
+    };
+
+    struct WriteAfterReadBucket
+    {
+        bool dirty = true;
+        std::vector<WriteAfterReadClassInfo> class_info;
+        std::vector<std::vector<EClassId>> temporal_overlaps;
+        std::vector<EClassId> active_cids;
+        std::vector<EClassId> touched_cids;
+    };
+
     struct Alternative
     {
         VarId start_var = kInvalidVarId;
@@ -395,6 +436,8 @@ struct PropagationState
     std::unordered_set<MemSpace> cache_budget_dirty;
     std::vector<EngineUsage> engines;
     std::vector<BucketData> buckets;
+    std::vector<StartPrecedenceBucket> start_precedence;
+    std::vector<WriteAfterReadBucket> write_after_read;
     PropagationSumTree cost;
     std::vector<Allocation> allocations;
     std::unordered_set<VarId> memory_dirty;
@@ -456,6 +499,17 @@ class SearchState
             var_dirty_epoch[var_id] = current_dirty_epoch;
             dirty_domains.push_back(var_id);
         }
+    }
+
+    void invalidateWriteAfterRead(VarId var_id)
+    {
+        if (!propagation.initialized)
+            return;
+        const VarInfo &info = var_infos[var_id];
+        if (info.type != VarType::SELECTED && info.type != VarType::START)
+            return;
+        if (info.bucket_idx < propagation.write_after_read.size())
+            propagation.write_after_read[info.bucket_idx].dirty = true;
     }
 
   public:
@@ -625,6 +679,7 @@ class SearchState
                 markMemoryAffected(entry->var_id);
                 const bool was_empty = domains[entry->var_id].isEmpty();
                 domains[entry->var_id] = entry->prev_domain;
+                invalidateWriteAfterRead(entry->var_id);
                 updatePropagationContribution(entry->var_id, true);
                 markMemoryAffected(entry->var_id);
                 updateEmptyDomainIndex(entry->var_id, was_empty, entry->prev_domain.isEmpty());
@@ -653,6 +708,7 @@ class SearchState
             const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
             domains[var_id] = new_domain;
+            invalidateWriteAfterRead(var_id);
             updatePropagationContribution(var_id, true);
             markMemoryAffected(var_id);
             updateEmptyDomainIndex(var_id, was_empty, new_domain.isEmpty());

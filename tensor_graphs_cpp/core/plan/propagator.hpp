@@ -373,94 +373,68 @@ class CacheExclusionPropagator : public Propagator
 // consumers (including through views) starts setMin(changed start + 1)
 class StartPrecedencePropagator : public Propagator
 {
-    struct ParentInfo
-    {
-        EClassId parent_cid;
-        uint32_t en_idx;
-    };
-    std::vector<std::unordered_map<EClassId, std::vector<ParentInfo>>> bucket_parents;
-    bool parents_initialized = false;
+    bool fixed_starts_only;
 
-    void ensureParents(const SearchState &state)
+    bool propagateStart(SearchState &state, uint32_t b, EClassId cid, int32_t min_start)
     {
-        if (parents_initialized)
-            return;
-        bucket_parents.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        auto &precedence = state.propagation.start_precedence[b];
+        ++precedence.stamp;
+        if (precedence.stamp == 0)
         {
-            for (const auto &pair : state.selected_vars[b])
-            {
-                EClassId p_cid = pair.first;
-                const EClass &cls = state.bucket_egraphs[b].getEClass(p_cid);
-                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
-                {
-                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-                    for (EClassId ch : enode.getChildren())
-                    {
-                        EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
-                        bucket_parents[b][canon_ch].push_back(ParentInfo{p_cid, en_idx});
-                    }
-                }
-            }
+            std::fill(precedence.visited_stamp.begin(), precedence.visited_stamp.end(), 0);
+            precedence.stamp = 1;
         }
-        parents_initialized = true;
-    }
-
-    bool propagateStart(SearchState &state, uint32_t b, EClassId cid, uint32_t en_idx, int32_t min_start)
-    {
-        ensureParents(state);
+        const uint32_t stamp = precedence.stamp;
         int32_t required_consumer_start = min_start + 1;
-        std::vector<EClassId> frontier = {cid};
-        std::unordered_set<EClassId> visited = {cid};
+        auto &frontier = precedence.frontier;
+        frontier.clear();
+        frontier.push_back(cid);
+        precedence.visited_stamp[cid.value] = stamp;
 
         for (size_t head = 0; head < frontier.size(); ++head)
         {
             EClassId current = frontier[head];
-            auto it = bucket_parents[b].find(current);
-            if (it == bucket_parents[b].end())
+            auto it = precedence.parents.find(current);
+            if (it == precedence.parents.end())
                 continue;
 
             for (const auto &p_info : it->second)
             {
                 EClassId p_cid = p_info.parent_cid;
                 uint32_t p_en_idx = p_info.en_idx;
-
-                auto sel_it = state.selected_vars[b].find(p_cid);
-                if (sel_it == state.selected_vars[b].end())
+                if (p_info.selection_var == kInvalidVarId || p_info.start_var == kInvalidVarId)
                     continue;
-                VarId p_sel_v = sel_it->second;
+                VarId p_sel_v = p_info.selection_var;
                 const Domain &p_sel_dom = state.domains[p_sel_v];
                 if (!p_sel_dom.contains(static_cast<int32_t>(p_en_idx + 1)))
                     continue;
 
-                auto st_it = state.start_vars[b].find(p_cid);
-                if (st_it == state.start_vars[b].end() || p_en_idx >= st_it->second.size())
-                    continue;
-
-                VarId p_st_v = st_it->second[p_en_idx];
-                Domain p_st_dom = state.domains[p_st_v];
-                if (p_st_dom.setMin(required_consumer_start))
+                VarId p_st_v = p_info.start_var;
+                const Domain &current_start_domain = state.domains[p_st_v];
+                if (current_start_domain.isEmpty() || current_start_domain.getMin() < required_consumer_start)
                 {
-                    if (p_st_dom.isEmpty())
+                    Domain p_st_dom = current_start_domain;
+                    if (p_st_dom.setMin(required_consumer_start))
                     {
-                        if (p_sel_dom.isFixed())
-                            return false;
-                        Domain new_sel_dom = p_sel_dom;
-                        new_sel_dom.remove(static_cast<int32_t>(p_en_idx + 1));
-                        if (new_sel_dom.isEmpty())
-                            return false;
-                        state.setDomain(p_sel_v, new_sel_dom);
-                    }
-                    else
-                    {
-                        state.setDomain(p_st_v, p_st_dom);
+                        if (p_st_dom.isEmpty())
+                        {
+                            if (p_sel_dom.isFixed())
+                                return false;
+                            Domain new_sel_dom = p_sel_dom;
+                            new_sel_dom.remove(static_cast<int32_t>(p_en_idx + 1));
+                            if (new_sel_dom.isEmpty())
+                                return false;
+                            state.setDomain(p_sel_v, new_sel_dom);
+                        }
+                        else
+                        {
+                            state.setDomain(p_st_v, p_st_dom);
+                        }
                     }
                 }
-                ENodeId p_en_id = state.bucket_egraphs[b].getEClass(p_cid).enodes[p_en_idx];
-                bool is_view = p_en_id.value < state.bucket_enode_infos[b].size() &&
-                               state.bucket_enode_infos[b][p_en_id.value].is_view;
-                if (is_view && visited.insert(p_cid).second)
+                if (p_info.is_view && precedence.visited_stamp[p_cid.value] != stamp)
                 {
+                    precedence.visited_stamp[p_cid.value] = stamp;
                     frontier.push_back(p_cid);
                 }
             }
@@ -469,6 +443,11 @@ class StartPrecedencePropagator : public Propagator
     }
 
   public:
+    explicit StartPrecedencePropagator(bool fixed_starts_only = true)
+        : fixed_starts_only(fixed_starts_only)
+    {
+    }
+
     std::string name() const override
     {
         return "StartPrecedencePropagator";
@@ -476,9 +455,12 @@ class StartPrecedencePropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
             if (state.var_infos[changed].type != VarType::START)
+                return true;
+            if (fixed_starts_only && !state.domains[changed].isFixed())
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
@@ -487,7 +469,7 @@ class StartPrecedencePropagator : public Propagator
             const Domain &sel_dom = state.domains[sel_v];
             if (!sel_dom.isFixed() || sel_dom.fixedValue() != static_cast<int32_t>(en_idx + 1))
                 return true;
-            return propagateStart(state, b, cid, en_idx, state.domains[changed].getMin());
+            return propagateStart(state, b, cid, state.domains[changed].getMin());
         }
         else
         {
@@ -502,7 +484,9 @@ class StartPrecedencePropagator : public Propagator
                     {
                         uint32_t en_idx = sel_dom.fixedValue() - 1;
                         VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                        if (!propagateStart(state, b, cid, en_idx, state.domains[st_v].getMin()))
+                        if (fixed_starts_only && !state.domains[st_v].isFixed())
+                            continue;
+                        if (!propagateStart(state, b, cid, state.domains[st_v].getMin()))
                             return false;
                     }
                 }
@@ -630,24 +614,6 @@ class WriteAfterReadPropagator : public Propagator
         bool is_root;
     };
 
-    struct EClassScheduleInfo
-    {
-        bool is_active = false;
-        bool is_view = false;
-        bool is_input_or_cache = false;
-        bool is_root = false;
-        EClassId view_parent{UINT32_MAX};
-        EClassId base_cid{UINT32_MAX};
-        uint32_t en_idx = 0;
-        ENodeId en_id{UINT32_MAX};
-        int32_t start_max = -1;
-        int32_t max_reader_start_max = -1;
-        std::vector<EClassId> readers;
-    };
-
-    mutable std::vector<EClassScheduleInfo> class_info;
-    mutable std::vector<EClassId> active_cids;
-    mutable std::vector<EClassId> touched_cids;
     static inline const std::vector<EClassId> empty_readers{};
 
     bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
@@ -736,9 +702,16 @@ class WriteAfterReadPropagator : public Propagator
 
     void buildBucketInfo(const SearchState &state, uint32_t b) const
     {
+        auto &schedule = state.propagation.write_after_read[b];
+        if (!schedule.dirty)
+            return;
+        auto &class_info = schedule.class_info;
+        auto &active_cids = schedule.active_cids;
+        auto &touched_cids = schedule.touched_cids;
         const size_t num_classes = state.bucket_egraphs[b].classes.size();
         if (class_info.size() < num_classes)
             class_info.resize(num_classes);
+        schedule.temporal_overlaps.assign(num_classes, {});
 
         for (EClassId cid : touched_cids)
         {
@@ -935,10 +908,55 @@ class WriteAfterReadPropagator : public Propagator
                 r.erase(std::unique(r.begin(), r.end()), r.end());
             }
         }
+
+        // Cache the pairs that can still overlap in time. Every allocation
+        // considered by getAlloc has a fixed start, so an unresolved start is
+        // conservatively retained here.
+        for (size_t i = 0; i < active_cids.size(); ++i)
+        {
+            const EClassId a_cid = active_cids[i];
+            const auto &a_info = class_info[a_cid.value];
+            const auto a_st_it = state.start_vars[b].find(a_cid);
+            const bool a_start_fixed = a_st_it != state.start_vars[b].end() &&
+                                       a_info.en_idx < a_st_it->second.size() &&
+                                       state.domains[a_st_it->second[a_info.en_idx]].isFixed();
+            const int32_t a_start = a_start_fixed
+                                        ? state.domains[a_st_it->second[a_info.en_idx]].fixedValue()
+                                        : 0;
+            for (size_t j = i + 1; j < active_cids.size(); ++j)
+            {
+                const EClassId b_cid = active_cids[j];
+                const auto &b_info = class_info[b_cid.value];
+                const auto b_st_it = state.start_vars[b].find(b_cid);
+                const bool b_start_fixed = b_st_it != state.start_vars[b].end() &&
+                                           b_info.en_idx < b_st_it->second.size() &&
+                                           state.domains[b_st_it->second[b_info.en_idx]].isFixed();
+
+                bool overlaps = true;
+                if (a_start_fixed && b_start_fixed &&
+                    !a_info.is_input_or_cache && !a_info.is_root &&
+                    !b_info.is_input_or_cache && !b_info.is_root)
+                {
+                    const bool a_is_earlier = a_start < state.domains[b_st_it->second[b_info.en_idx]].fixedValue();
+                    const bool b_is_earlier = state.domains[b_st_it->second[b_info.en_idx]].fixedValue() < a_start;
+                    if (a_is_earlier)
+                        overlaps = state.domains[b_st_it->second[b_info.en_idx]].fixedValue() <= a_info.max_reader_start_max;
+                    else if (b_is_earlier)
+                        overlaps = a_start <= b_info.max_reader_start_max;
+                }
+                if (overlaps)
+                {
+                    schedule.temporal_overlaps[a_cid.value].push_back(b_cid);
+                    schedule.temporal_overlaps[b_cid.value].push_back(a_cid);
+                }
+            }
+        }
+        schedule.dirty = false;
     }
 
     bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand) const
     {
+        const auto &class_info = state.propagation.write_after_read[b].class_info;
         if (base == view_cand)
             return true;
         EClassId curr = view_cand;
@@ -986,6 +1004,7 @@ class WriteAfterReadPropagator : public Propagator
 
     bool canShare(const SearchState &state, FixedAlloc A, FixedAlloc B) const
     {
+        const auto &class_info = state.propagation.write_after_read[A.bucket_idx].class_info;
         // - if both A and B are views, return true. ignore
         if (A.is_view && B.is_view)
             return true;
@@ -1085,6 +1104,7 @@ class WriteAfterReadPropagator : public Propagator
 
     bool checkPair(SearchState &state, FixedAlloc A, FixedAlloc B, std::vector<VarId> &worklist)
     {
+        const auto &class_info = state.propagation.write_after_read[A.bucket_idx].class_info;
         if (!canShare(state, A, B))
             return false;
 
@@ -1209,6 +1229,7 @@ class WriteAfterReadPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
             VarType type = state.var_infos[changed].type;
@@ -1225,14 +1246,14 @@ class WriteAfterReadPropagator : public Propagator
                 return true;
 
             buildBucketInfo(state, b);
+            const auto &temporal_overlaps = state.propagation.write_after_read[b].temporal_overlaps;
 
             bool pushed = true;
             while (pushed)
             {
                 pushed = false;
-                for (const auto &pair : state.selected_vars[b])
+                for (EClassId other_cid : temporal_overlaps[cid.value])
                 {
-                    EClassId other_cid = pair.first;
                     if (other_cid == cid)
                         continue;
                     FixedAlloc other;
@@ -1240,22 +1261,6 @@ class WriteAfterReadPropagator : public Propagator
                         continue;
                     if (curr.mem_space != other.mem_space)
                         continue;
-
-                    // Temporal non-overlap filter
-                    FixedAlloc earlier = curr;
-                    FixedAlloc later = other;
-                    if (earlier.start > later.start)
-                        std::swap(earlier, later);
-                    if (earlier.start < later.start &&
-                        !earlier.is_input_or_cache && !earlier.is_root &&
-                        !later.is_input_or_cache && !later.is_root)
-                    {
-                        int32_t e_max_reader = (earlier.cid.value < class_info.size() && class_info[earlier.cid.value].is_active)
-                                                   ? class_info[earlier.cid.value].max_reader_start_max
-                                                   : -1;
-                        if (later.start > e_max_reader)
-                            continue;
-                    }
 
                     if (!canShare(state, curr, other))
                     {
@@ -1277,9 +1282,8 @@ class WriteAfterReadPropagator : public Propagator
 
             if (curr_offset_fixed)
             {
-                for (const auto &pair : state.selected_vars[b])
+                for (EClassId other_cid : temporal_overlaps[cid.value])
                 {
-                    EClassId other_cid = pair.first;
                     if (other_cid == cid)
                         continue;
                     FixedAlloc other;
@@ -1291,22 +1295,6 @@ class WriteAfterReadPropagator : public Propagator
                     bool other_offset_fixed = state.domains[other.offset_var].isFixed();
                     if (!other_offset_fixed)
                     {
-                        // Temporal non-overlap filter
-                        FixedAlloc earlier = curr;
-                        FixedAlloc later = other;
-                        if (earlier.start > later.start)
-                            std::swap(earlier, later);
-                        if (earlier.start < later.start &&
-                            !earlier.is_input_or_cache && !earlier.is_root &&
-                            !later.is_input_or_cache && !later.is_root)
-                        {
-                            int32_t e_max_reader = (earlier.cid.value < class_info.size() && class_info[earlier.cid.value].is_active)
-                                                       ? class_info[earlier.cid.value].max_reader_start_max
-                                                       : -1;
-                            if (later.start > e_max_reader)
-                                continue;
-                        }
-
                         // Memory domain filter: if other is already placed after curr in memory
                         const Domain &other_dom = state.domains[other.offset_var];
                         if (other_dom.getMin() >= static_cast<int32_t>(curr.offset + curr.size))
@@ -1327,8 +1315,10 @@ class WriteAfterReadPropagator : public Propagator
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 buildBucketInfo(state, b);
+                const auto &temporal_overlaps = state.propagation.write_after_read[b].temporal_overlaps;
                 std::vector<FixedAlloc> fixed_allocs;
                 std::vector<FixedAlloc> all_allocs;
+                std::vector<int32_t> fixed_alloc_index(state.bucket_egraphs[b].classes.size(), -1);
                 for (const auto &pair : state.selected_vars[b])
                 {
                     FixedAlloc a;
@@ -1336,7 +1326,10 @@ class WriteAfterReadPropagator : public Propagator
                     {
                         all_allocs.push_back(a);
                         if (state.domains[a.offset_var].isFixed())
+                        {
+                            fixed_alloc_index[a.cid.value] = static_cast<int32_t>(fixed_allocs.size());
                             fixed_allocs.push_back(a);
+                        }
                     }
                 }
 
@@ -1346,27 +1339,15 @@ class WriteAfterReadPropagator : public Propagator
                     while (pushed)
                     {
                         pushed = false;
-                        for (const auto &fixed : fixed_allocs)
+                        for (EClassId fixed_cid : temporal_overlaps[target.cid.value])
                         {
+                            if (fixed_cid.value >= fixed_alloc_index.size() || fixed_alloc_index[fixed_cid.value] < 0)
+                                continue;
+                            const FixedAlloc &fixed = fixed_allocs[fixed_alloc_index[fixed_cid.value]];
                             if (target.cid == fixed.cid)
                                 continue;
                             if (target.mem_space != fixed.mem_space)
                                 continue;
-
-                            FixedAlloc earlier = target;
-                            FixedAlloc later = fixed;
-                            if (earlier.start > later.start)
-                                std::swap(earlier, later);
-                            if (earlier.start < later.start &&
-                                !earlier.is_input_or_cache && !earlier.is_root &&
-                                !later.is_input_or_cache && !later.is_root)
-                            {
-                                int32_t e_max_reader = (earlier.cid.value < class_info.size() && class_info[earlier.cid.value].is_active)
-                                                           ? class_info[earlier.cid.value].max_reader_start_max
-                                                           : -1;
-                                if (later.start > e_max_reader)
-                                    continue;
-                            }
 
                             if (!canShare(state, target, fixed))
                             {
@@ -2141,14 +2122,14 @@ class SelectionPropagator : public Propagator
 // ============================================================================
 
 template <typename EngineT>
-inline void addBasePropagators(EngineT &engine)
+inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = true)
 {
     engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
     engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     engine.addPropagator(std::make_unique<UnselectedStartOffsetPropagator>());
     engine.addPropagator(std::make_unique<CacheExclusionPropagator>());
-    engine.addPropagator(std::make_unique<StartPrecedencePropagator>());
-    engine.addPropagator(std::make_unique<StartUniquePropagator>());
+    engine.addPropagator(std::make_unique<StartPrecedencePropagator>(fixed_starts_only));
+    // engine.addPropagator(std::make_unique<StartUniquePropagator>());
     engine.addPropagator(std::make_unique<WriteAfterReadPropagator>());
     engine.addPropagator(std::make_unique<ViewOffsetPropagator>());
     engine.addPropagator(std::make_unique<PearceKellyCyclePropagator>());
@@ -2165,9 +2146,9 @@ inline void addExtraPropagators(EngineT &engine)
 }
 
 template <typename EngineT>
-inline void addAllPropagators(EngineT &engine)
+inline void addAllPropagators(EngineT &engine, bool fixed_starts_only = true)
 {
-    addBasePropagators(engine);
+    addBasePropagators(engine, fixed_starts_only);
     addExtraPropagators(engine);
 }
 

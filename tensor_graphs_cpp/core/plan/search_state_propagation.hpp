@@ -38,6 +38,8 @@ inline void SearchState::ensurePropagationState() const
     data.cache_candidates.resize(numVars());
     data.allocations.resize(numVars());
     data.buckets.resize(buckets.size());
+    data.start_precedence.resize(buckets.size());
+    data.write_after_read.resize(buckets.size());
     data.cost.initialize(buckets.size());
 
     data.topo_path_visited_stamp.assign(numVars(), 0);
@@ -54,6 +56,9 @@ inline void SearchState::ensurePropagationState() const
     for (uint32_t b = 0; b < buckets.size(); ++b)
     {
         std::unordered_map<Engine, uint32_t> engine_indices;
+        auto &precedence = data.start_precedence[b];
+        precedence.visited_stamp.assign(bucket_egraphs[b].classes.size(), 0);
+        precedence.frontier.reserve(bucket_egraphs[b].classes.size());
         for (EClassId cid : reachable_cids[b])
         {
             const VarId sel_var = selected_vars[b].at(cid);
@@ -89,7 +94,8 @@ inline void SearchState::ensurePropagationState() const
                 }
                 for (EClassId child : enode.getChildren())
                 {
-                    const auto child_it = selected_vars[b].find(bucket_egraphs[b].findConst(child));
+                    const EClassId canonical_child = bucket_egraphs[b].findConst(child);
+                    const auto child_it = selected_vars[b].find(canonical_child);
                     const VarId child_var = child_it == selected_vars[b].end() ? kInvalidVarId : child_it->second;
                     alternative.children.push_back(child_var);
                     if (child_var == kInvalidVarId)
@@ -115,6 +121,32 @@ inline void SearchState::ensurePropagationState() const
                 data.alternatives[sel_var].push_back(std::move(alternative));
             }
             data.memory_dirty.insert(sel_var);
+        }
+        // Preserve the selected_vars iteration order used by the original
+        // StartPrecedencePropagator parent cache.
+        for (const auto &pair : selected_vars[b])
+        {
+            const EClassId parent_cid = pair.first;
+            const VarId selection_var = pair.second;
+            const EClass &cls = bucket_egraphs[b].getEClass(parent_cid);
+            const auto start_it = start_vars[b].find(parent_cid);
+            for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+            {
+                const ENodeId en_id = cls.enodes[en_idx];
+                const ENode &enode = bucket_egraphs[b].getENode(en_id);
+                const VarId start_var = start_it != start_vars[b].end() && en_idx < start_it->second.size()
+                                            ? start_it->second[en_idx]
+                                            : kInvalidVarId;
+                const bool is_view = en_id.value < bucket_enode_infos[b].size() &&
+                                     bucket_enode_infos[b][en_id.value].is_view;
+                const PropagationState::StartPrecedenceParent parent_info{
+                    parent_cid, en_idx, selection_var, start_var, is_view};
+                for (EClassId child : enode.getChildren())
+                {
+                    const EClassId canonical_child = bucket_egraphs[b].findConst(child);
+                    precedence.parents[canonical_child].push_back(parent_info);
+                }
+            }
         }
     }
     for (auto *lists : {&data.parents, &data.view_neighbors})
