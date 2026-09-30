@@ -373,48 +373,6 @@ class ReferenceVerifier
             refInFile.seekg(entry.fileOffset, std::ios::beg);
             refInFile.read(reinterpret_cast<char *>(refData.data()), entry.numElements * sizeof(float));
 
-            // A partial-path scatter only defines its updated region. Keep the
-            // comparison focused on those elements; the rest of the output
-            // buffer can contain unrelated or uninitialized values.
-            if (opName == "SCATTER" && ctx.inputs.size() >= 4 && ctx.inViews.size() >= 4 &&
-                ctx.inputs[1] != nullptr && ctx.inputs[3] != nullptr && !ctx.inViews[0].getShape().empty())
-            {
-                const auto &outShape = view.getShape();
-                const auto &updateShape = ctx.inViews[0].getShape();
-                const auto *starts = static_cast<const int32_t *>(ctx.inputs[1]);
-                const auto *steps = static_cast<const int32_t *>(ctx.inputs[3]);
-                if (outShape.size() == updateShape.size() && outShape.size() == ctx.inViews[1].getShape()[0])
-                {
-                    std::vector<uint64_t> outStrides(outShape.size(), 1);
-                    for (size_t d = outShape.size(); d-- > 1;)
-                        outStrides[d - 1] = outStrides[d] * outShape[d];
-
-                    for (uint64_t updateIndex = 0; updateIndex < countElements(ctx.inViews[0]); ++updateIndex)
-                    {
-                        uint64_t remaining = updateIndex;
-                        uint64_t outputIndex = 0;
-                        bool valid = true;
-                        for (size_t d = updateShape.size(); d-- > 0;)
-                        {
-                            uint32_t coordinate = remaining % updateShape[d];
-                            remaining /= updateShape[d];
-                            int64_t start = starts[d];
-                            if (start < 0)
-                                start += outShape[d];
-                            int64_t target = start + static_cast<int64_t>(coordinate) * steps[d];
-                            if (target < 0 || target >= static_cast<int64_t>(outShape[d]))
-                            {
-                                valid = false;
-                                break;
-                            }
-                            outputIndex += static_cast<uint64_t>(target) * outStrides[d];
-                        }
-                        if (valid && outputIndex < refData.size() && outputIndex < optData.size())
-                            refData[outputIndex] = optData[outputIndex];
-                    }
-                }
-            }
-
             for (uint64_t i = 0; i < refData.size(); ++i)
             {
                 float diff = std::abs(refData[i] - optData[i]);

@@ -177,6 +177,7 @@ struct Settings
         parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
         parser.add_flag({"--disable-fusion"}, "Disable multi-operation fusion patterns.");
+        parser.add_flag({"--ref-only"}, "Restrict kernel selection to reference implementations.");
         parser.add_flag({"--use-ortools"}, "Use Google OR-Tools CP-SAT model for optimization.");
         parser.add_flag({"--use-ortools-full"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools.");
         parser.add_flag({"--use-ortools-lns"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools LNS.");
@@ -218,6 +219,9 @@ struct Settings
 
         if (parser.get_flag("--disable-fusion"))
             disable_fusion = true;
+
+        if (parser.get_flag("--ref-only"))
+            reference_only = true;
 
         if (parser.get_flag("--use-ortools"))
             use_ortools = true;

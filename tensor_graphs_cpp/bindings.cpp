@@ -303,8 +303,8 @@ class LLMSession
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
                 uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
                double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
-                const std::string &write_refs = "", const std::string &compare_refs = "",
-                bool disable_compilation_caching = false)
+               const std::string &write_refs = "", const std::string &compare_refs = "",
+                bool disable_compilation_caching = false, bool ref_only = false)
     {
         referenceFile = write_refs;
         compareReferenceFile = compare_refs;
@@ -377,7 +377,7 @@ class LLMSession
         session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
         session->settings.disable_fusion = disable_fusion;
-        KernelRegistry::get().setReferenceOnly(disable_fusion || !referenceFile.empty() || !compareReferenceFile.empty());
+        KernelRegistry::get().setReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
 
         if ((!referenceFile.empty() || !compareReferenceFile.empty()) &&
             !referenceVerifier.init(referenceFile, compareReferenceFile))
@@ -962,7 +962,7 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
                       const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
-                      bool, const std::string &, const std::string &, bool>(),
+                      bool, const std::string &, const std::string &, bool, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
@@ -970,7 +970,7 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
              py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
              py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
-             py::arg("disable_compilation_caching") = false)
+             py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

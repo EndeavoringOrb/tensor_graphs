@@ -127,6 +127,7 @@ class ArgParser
         return name == "--disable-node-caching" || name == "--disable-compilation-caching" ||
                name == "--only-plan" || name == "--help" || name == "-h" ||
                name == "--list" || name == "-l" || name == "--no-records" || name == "--skip-fused" ||
+               name == "--disable-fusion" || name == "--ref-only" ||
                name == "--server";
     }
 

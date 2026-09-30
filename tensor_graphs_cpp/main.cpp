@@ -234,7 +234,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    bool refOnly = !settings.write_refs.empty();
+    bool refOnly = settings.reference_only || !settings.write_refs.empty();
     bool doSaturate = settings.write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
