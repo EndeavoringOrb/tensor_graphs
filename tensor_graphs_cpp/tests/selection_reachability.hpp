@@ -129,8 +129,7 @@ inline bool checkPropagation(SearchEngine &engine)
 {
     SearchState reference = engine.state;
     const bool expected = propagateReference(reference);
-    float lower_bound = 0.0f;
-    const bool actual = engine.runPropagators(lower_bound, kInvalidVarId);
+    const bool actual = engine.runPropagators(kInvalidVarId);
     require(actual == expected, "Incremental reachability disagrees with BFS on feasibility");
     if (actual)
         require(engine.state.domains == reference.domains, "Incremental reachability disagrees with BFS on domains");
@@ -186,7 +185,8 @@ inline void testStructuralVariables()
     }
 
     SearchEngine engine(std::move(state));
-    engine.addPropagator(std::make_unique<SelectionPropagator>());
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     require(checkPropagation(engine), "Compact state failed initial propagation");
     const size_t marker = engine.state.getTrailMarker();
     const auto initial_domains = engine.state.domains;
@@ -234,7 +234,8 @@ inline void testRepairsAndUndo()
     const auto vars = addBucket(state, spec);
     const auto other_vars = addBucket(state, spec);
     SearchEngine engine(std::move(state));
-    engine.addPropagator(std::make_unique<SelectionPropagator>());
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     require(checkPropagation(engine), "Initial reachability failed");
     const auto initial_domains = engine.state.domains;
     const size_t marker = engine.state.getTrailMarker();
@@ -262,7 +263,8 @@ inline void testRepairsAndUndo()
 
     // A sibling chooses the direct path; a copied state must own independent undo data.
     SearchEngine copied(engine.state);
-    copied.addPropagator(std::make_unique<SelectionPropagator>());
+    copied.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    copied.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     copied.state.setDomain(vars[0], Domain::makeFixed(1, true));
     require(checkPropagation(copied), "Copied state lost its tree");
     require(engine.state.domains == initial_domains, "Copied reachability modified the original state");
@@ -281,7 +283,8 @@ inline void testInitializationAndWorklist()
     SearchState state;
     const auto vars = addBucket(state, {{{1}, {}}, {{2}}, {{}}});
     SearchEngine engine(std::move(state));
-    engine.addPropagator(std::make_unique<SelectionPropagator>());
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     const auto initial_domains = engine.state.domains;
     const size_t marker = engine.state.getTrailMarker();
     engine.state.setDomain(vars[0], Domain::makeFixed(1, true));
@@ -313,7 +316,8 @@ inline void testRandomBranches()
         SearchState state;
         addBucket(state, spec);
         SearchEngine engine(std::move(state));
-        engine.addPropagator(std::make_unique<SelectionPropagator>());
+        engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
         std::function<void(uint32_t)> visit = [&](uint32_t depth) {
             if (!checkPropagation(engine) || depth == 5)
                 return;
@@ -351,7 +355,8 @@ inline void testSearchNodeRestore()
     SearchState state;
     const auto vars = addBucket(state, {{{1}, {2}, {}}, {{}, {2}}, {{1}, {}}});
     SearchEngine engine(std::move(state));
-    engine.addPropagator(std::make_unique<SelectionPropagator>());
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     engine.state.setDomain(vars[1], Domain::makeFixed(1, true));
     require(checkPropagation(engine), "Required node should initially be reachable");
     const size_t marker = engine.state.getTrailMarker();

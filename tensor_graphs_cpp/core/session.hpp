@@ -280,6 +280,9 @@ struct Session
 
     void ensureFullBucket()
     {
+        ShapePropagator prop;
+        prop.inferShapeRecursive(rootId, graph);
+        
         Bucket bucket;
         bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
         std::vector<LogicalId> inputNodeIds = collectInputNodeIds();
@@ -316,9 +319,6 @@ struct Session
         ensureOutputDirectories();
         costModel.setLogging(logCostCalls);
         costModel.load(recordsPath);
-
-        ShapePropagator prop;
-        prop.inferShapeRecursive(rootId, graph);
 
         ensureFullBucket();
         if (!settings.bucket_weights.empty())

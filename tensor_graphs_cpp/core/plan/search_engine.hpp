@@ -138,9 +138,8 @@ class SearchEngine
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - set_start).count());
 #endif
-            float lb = 0.0f;
             std::string conflict_reason;
-            if (!runPropagators(lb, all_nodes[nid]->delta.first, &conflict_reason))
+            if (!runPropagators(all_nodes[nid]->delta.first, &conflict_reason))
             {
 #ifdef TG_PROFILE
                 auto bt_start = std::chrono::steady_clock::now();
@@ -156,7 +155,7 @@ class SearchEngine
 #endif
                 return false;
             }
-            all_nodes[nid]->lower_bound = lb;
+            all_nodes[nid]->lower_bound = state.lower_bound;
             all_nodes[nid]->trail_marker = state.getTrailMarker();
         }
 
@@ -164,7 +163,7 @@ class SearchEngine
         return true;
     }
 
-    bool runPropagators(float &out_lower_bound, VarId changed, std::string *out_conflict_reason = nullptr)
+    bool runPropagators(VarId changed, std::string *out_conflict_reason = nullptr)
     {
         if (out_conflict_reason)
             out_conflict_reason->clear();
@@ -269,32 +268,13 @@ class SearchEngine
             }
         }
 
-        out_lower_bound = 0.0f;
-        for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
-        {
-#ifdef TG_PROFILE
-            auto lower_bound_start = std::chrono::steady_clock::now();
-#endif
-            out_lower_bound = std::max(out_lower_bound, propagators[prop_idx]->computeLowerBound(state));
-#ifdef TG_PROFILE
-            const uint64_t lower_bound_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - lower_bound_start)
-                    .count());
-            auto &timing = propagator_timings[prop_idx];
-            timing.lower_bound_calls++;
-            timing.lower_bound_ns += lower_bound_ns;
-            timing.max_lower_bound_ns = std::max(timing.max_lower_bound_ns, lower_bound_ns);
-            prop_and_lb_ns_in_call += lower_bound_ns;
-#endif
-        }
 #ifdef TG_PROFILE
         record_prop_overhead();
         maybeReportPropagatorTimings();
 #endif
         // An incumbent can improve without changing a domain (for example
         // after restoring an already-propagated node).
-        if (out_lower_bound >= state.best_cost)
+        if (state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
         {
             if (out_conflict_reason)
                 *out_conflict_reason = "CostLowerBoundPropagator";
@@ -693,9 +673,9 @@ class SearchEngine
             // 2. Create Left Child (dive immediately in place!)
             // TODO: should it go back to the selector to choose once left/right are added instead of always choosing left? 
             state.setDomain(decision.left_delta.first, decision.left_delta.second);
-            float left_lb = 0.0f;
             std::string left_conflict;
-            bool left_ok = runPropagators(left_lb, decision.left_delta.first, &left_conflict);
+            bool left_ok = runPropagators(decision.left_delta.first, &left_conflict);
+            const float left_lb = state.lower_bound;
             if (left_ok && left_lb < incumbent_best_cost)
             {
                 uint32_t left_id = static_cast<uint32_t>(all_nodes.size());

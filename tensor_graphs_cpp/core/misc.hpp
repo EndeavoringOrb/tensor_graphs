@@ -146,6 +146,21 @@ inline std::string toString(const Region &reg)
         const Dim &dim = reg.region[i];
         ss << "(" << dim.start << ", " << dim.stop << ")";
     }
+    ss << "]";
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<Region> &regions)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < regions.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << toString(regions[i]);
+    }
+    ss << "]";
     return ss.str();
 }
 

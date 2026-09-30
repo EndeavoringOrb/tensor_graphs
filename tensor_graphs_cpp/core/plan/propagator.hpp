@@ -27,12 +27,6 @@ class Propagator
 
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;
-
-    // Returns a lower bound on total makespan / cost.
-    virtual float computeLowerBound(const SearchState &state)
-    {
-        return 0.0f;
-    }
 };
 
 // ============================================================================
@@ -1837,9 +1831,7 @@ class CacheRequirementPropagator : public Propagator
 // EXTRA PROPAGATORS (12 - 15)
 // ============================================================================
 
-// 12. if VarType::SELECTED, update dynamic programming bottom up critical path cp = cost +
-// max(children cp), lower_bound = max(critical_path, lower_bound), if lower_bound > incumbent
-// return false
+// 12. Maintain the per-bucket critical path lower bound after selection changes.
 class CriticalPathPropagator : public Propagator
 {
     float computeBucketCriticalPath(const SearchState &state, uint32_t b) const
@@ -1939,34 +1931,40 @@ class CriticalPathPropagator : public Propagator
         return getCp(root);
     }
 
+    void initialize(SearchState &state) const
+    {
+        state.bucket_critical_path_lower_bounds.assign(state.buckets.size(), 0.0f);
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+            state.bucket_critical_path_lower_bounds[b] = computeBucketCriticalPath(state, b);
+        state.critical_path_lower_bound_initialized = true;
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+            state.updateLowerBoundBucket(b);
+    }
+
   public:
     std::string name() const override
     {
         return "CriticalPathPropagator";
     }
 
-    float computeLowerBound(const SearchState &state) override
-    {
-        float total_lb = 0.0f;
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
-            float w = (b < state.bucket_weights.size()) ? state.bucket_weights[b] : 1.0f;
-            if (w > 0.0f)
-            {
-                total_lb += w * computeBucketCriticalPath(state, b);
-            }
-        }
-        return total_lb;
-    }
-
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         if (state.best_cost == TGConstants::INF)
             return true;
+        if (!state.critical_path_lower_bound_initialized)
+            initialize(state);
         if (changed != kInvalidVarId && state.var_infos[changed].type != VarType::SELECTED)
             return true;
-        float lb = computeLowerBound(state);
-        return lb < state.best_cost;
+        if (changed != kInvalidVarId)
+        {
+            const uint32_t bucket_idx = state.var_infos[changed].bucket_idx;
+            if (bucket_idx < state.bucket_critical_path_lower_bounds.size())
+            {
+                state.bucket_critical_path_lower_bounds[bucket_idx] = computeBucketCriticalPath(state, bucket_idx);
+                state.updateLowerBoundBucket(bucket_idx);
+            }
+        }
+        return true;
     }
 };
 
@@ -2030,8 +2028,7 @@ class CacheBudgetPropagator : public Propagator
     }
 };
 
-// 15. if VarType::SELECTED, update per engine workload, lower_bound = max(lower_bound,
-// engine_workload) for engine_workload in workloads
+// 15. Maintain cached per-engine workloads and their per-bucket lower bound.
 class EngineWorkloadPropagator : public Propagator
 {
   public:
@@ -2040,80 +2037,89 @@ class EngineWorkloadPropagator : public Propagator
         return "EngineWorkloadPropagator";
     }
 
-    float computeLowerBound(const SearchState &state) override
+  private:
+    void initialize(SearchState &state) const
     {
-        float total_lb = 0.0f;
+        state.engine_work.assign(state.buckets.size(), {});
+        state.selected_engine_work.assign(state.numVars(), {});
+        state.bucket_engine_work_lower_bounds.assign(state.buckets.size(), 0.0f);
+        state.engine_work_initialized = true;
+        for (VarId var_id = 0; var_id < state.numVars(); ++var_id)
+        {
+            if (state.var_infos[var_id].type == VarType::SELECTED)
+                updateSelectedWork(state, var_id);
+        }
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            float w = (b < state.bucket_weights.size()) ? state.bucket_weights[b] : 1.0f;
-            if (w <= 0.0f)
-                continue;
-
-            std::unordered_map<Engine, float> engine_work;
-            for (const auto &pair : state.selected_vars[b])
-            {
-                EClassId cid = pair.first;
-                VarId sel_v = pair.second;
-                const Domain &sel_dom = state.domains[sel_v];
-                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-
-                if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-                {
-                    uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
-                    if (en_idx < cls.enodes.size())
-                    {
-                        ENodeId en_id = cls.enodes[en_idx];
-                        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                        float c = (en_id.value < state.bucket_enode_infos[b].size())
-                                      ? state.bucket_enode_infos[b][en_id.value].cost
-                                      : 0.0f;
-                        if (c > 0.0f && c < TGConstants::INF &&
-                            enode.getOpType() != OpType::INPUT &&
-                            enode.getOpType() != OpType::CACHE)
-                        {
-                            for (const Engine &eng : enode.getEngines())
-                                engine_work[eng] += c;
-                        }
-                    }
-                }
-            }
-
-            float bucket_lb = 0.0f;
-            for (const auto &pair : engine_work)
-                bucket_lb = std::max(bucket_lb, pair.second);
-
-            total_lb += w * bucket_lb;
+            state.bucket_engine_work_lower_bounds[b] = bucketEngineWorkLowerBound(state.engine_work[b]);
+            state.updateLowerBoundBucket(b);
         }
-        return total_lb;
     }
 
+  public:
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
         if (state.best_cost == TGConstants::INF)
             return true;
+        if (!state.engine_work_initialized)
+            initialize(state);
         if (changed != kInvalidVarId && state.var_infos[changed].type != VarType::SELECTED)
             return true;
-        float lb = computeLowerBound(state);
-        return lb < state.best_cost;
-    }
-};
-
-// Aliases for compatibility
-class SelectionPropagator : public Propagator
-{
-    SelectionReachabilityPropagator reachability;
-    SelectionChildrenPropagator children;
-
-  public:
-    std::string name() const override
-    {
-        return "SelectionPropagator";
+        if (changed != kInvalidVarId && state.engine_work_initialized)
+        {
+            const uint32_t bucket_idx = state.var_infos[changed].bucket_idx;
+            updateSelectedWork(state, changed);
+            state.bucket_engine_work_lower_bounds[bucket_idx] = bucketEngineWorkLowerBound(state.engine_work[bucket_idx]);
+            state.updateLowerBoundBucket(bucket_idx);
+        }
+        return true;
     }
 
-    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+  private:
+    static float bucketEngineWorkLowerBound(const std::unordered_map<Engine, float> &engine_work)
     {
-        return reachability.propagate(state, changed, worklist) &&
-               children.propagate(state, changed, worklist);
+        float bound = 0.0f;
+        for (const auto &entry : engine_work)
+            bound = std::max(bound, entry.second);
+        return bound;
+    }
+
+    static void updateSelectedWork(SearchState &state, VarId var_id)
+    {
+        const uint32_t bucket_idx = state.var_infos[var_id].bucket_idx;
+        auto &bucket_work = state.engine_work[bucket_idx];
+        auto &cached_work = state.selected_engine_work[var_id];
+        for (const auto &entry : cached_work)
+        {
+            bucket_work[entry.first] -= entry.second;
+            if (bucket_work[entry.first] <= 1.0e-6f)
+                bucket_work.erase(entry.first);
+        }
+        cached_work.clear();
+
+        const Domain &sel_dom = state.domains[var_id];
+        if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
+            return;
+        auto selected = state.selected_vars[bucket_idx].find(state.var_infos[var_id].eclass_id);
+        if (selected == state.selected_vars[bucket_idx].end())
+            return;
+        const EClass &cls = state.bucket_egraphs[bucket_idx].getEClass(selected->first);
+        const uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
+        if (en_idx >= cls.enodes.size())
+            return;
+        ENodeId en_id = cls.enodes[en_idx];
+        const ENode &enode = state.bucket_egraphs[bucket_idx].getENode(en_id);
+        const float cost = en_id.value < state.bucket_enode_infos[bucket_idx].size()
+                               ? state.bucket_enode_infos[bucket_idx][en_id.value].cost
+                               : 0.0f;
+        if (cost <= 0.0f || cost >= TGConstants::INF || enode.getOpType() == OpType::INPUT ||
+            enode.getOpType() == OpType::CACHE)
+            return;
+        for (const Engine &engine : enode.getEngines())
+        {
+            bucket_work[engine] += cost;
+            cached_work[engine] += cost;
+        }
     }
 };
 

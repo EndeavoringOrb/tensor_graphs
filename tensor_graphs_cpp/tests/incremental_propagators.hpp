@@ -143,19 +143,18 @@ inline void testBaseCorrectness()
         };
         SearchEngine engine(makeState(spec, 1));
         addBasePropagators(engine);
-        float lb = 0.0f;
-        require(engine.runPropagators(lb, kInvalidVarId), "Base reachability initial failed");
+        require(engine.runPropagators(kInvalidVarId), "Base reachability initial failed");
 
         // Fixing root to 1 forces child 1 to not be 0 (Rule 2)
         engine.state.setDomain(selection(engine.state, 0), Domain::makeFixed(1, true));
-        require(engine.runPropagators(lb, selection(engine.state, 0)), "Selecting root failed");
+        require(engine.runPropagators(selection(engine.state, 0)), "Selecting root failed");
         require(!engine.state.domains[selection(engine.state, 1)].contains(0), "Rule 2: child was not forced non-zero");
 
         // Contrapositive (Rule 10): fixing node 2 to 0 removes parent alternative from node 1
         const size_t marker = engine.state.getTrailMarker();
         engine.state.setDomain(selection(engine.state, 2), Domain::makeFixed(0, true));
         std::string conflict;
-        bool ok = engine.runPropagators(lb, selection(engine.state, 2), &conflict);
+        bool ok = engine.runPropagators(selection(engine.state, 2), &conflict);
         if (!ok)
             std::cerr << "Conflict reason in test 1: " << conflict << std::endl;
         require(ok, "Setting node 2 to 0 failed");
@@ -170,10 +169,9 @@ inline void testBaseCorrectness()
         GraphSpec spec = {{{}}, {{}}};
         SearchEngine engine(makeState(spec, 1));
         addBasePropagators(engine);
-        float lb = 0.0f;
-        require(engine.runPropagators(lb, kInvalidVarId), "Initial propagation failed");
+        require(engine.runPropagators(kInvalidVarId), "Initial propagation failed");
         engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(0, true));
-        require(engine.runPropagators(lb, selection(engine.state, 1)), "Unselecting node 1 failed");
+        require(engine.runPropagators(selection(engine.state, 1)), "Unselecting node 1 failed");
         require(engine.state.domains[start(engine.state, 1)].isFixed() &&
                 engine.state.domains[start(engine.state, 1)].fixedValue() == 0, "Rule 3: start not fixed to 0");
         require(engine.state.domains[offset(engine.state, 1)].isFixed(), "Rule 3: offset not fixed to min_p");
@@ -194,19 +192,18 @@ inline void testBaseCorrectness()
         };
         SearchEngine engine(makeState(spec, 1));
         addBasePropagators(engine);
-        float lb = 0.0f;
-        require(engine.runPropagators(lb, kInvalidVarId), "Initial cache test failed");
+        require(engine.runPropagators(kInvalidVarId), "Initial cache test failed");
 
         // Rule 4: If cached_var is fixed to 0, CACHE/SCATTER enodes must be removed
         VarId cv1 = engine.state.cached_vars.at(BaseEClassId{1});
         engine.state.setDomain(cv1, Domain::makeFixed(0, true));
-        require(engine.runPropagators(lb, cv1), "Setting cache 1 to 0 failed");
+        require(engine.runPropagators(cv1), "Setting cache 1 to 0 failed");
         require(!engine.state.domains[selection(engine.state, 0)].contains(1), "Rule 4: CACHE enode was not removed");
 
         // Rule 11: If CACHE or SCATTER enode is definitely selected (>0), corresponding cached var must be fixed to 1
         VarId cv2 = engine.state.cached_vars.at(BaseEClassId{2});
         engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(2, true)); // SCATTER
-        require(engine.runPropagators(lb, selection(engine.state, 1)), "Selecting SCATTER failed");
+        require(engine.runPropagators(selection(engine.state, 1)), "Selecting SCATTER failed");
         require(engine.state.domains[cv2].isFixed() && engine.state.domains[cv2].fixedValue() == 1,
                 "Rule 11: cached var was not fixed to 1");
     }
@@ -218,12 +215,11 @@ inline void testBaseCorrectness()
         SearchEngine engine(makeState(spec, 1));
         addBasePropagators(engine);
         selectAll(engine.state);
-        float lb = 0.0f;
-        require(engine.runPropagators(lb, kInvalidVarId), "Initial start test failed");
+        require(engine.runPropagators(kInvalidVarId), "Initial start test failed");
 
         // Fix child's start to 2
         engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(2));
-        require(engine.runPropagators(lb, start(engine.state, 1)), "Fixing child start failed");
+        require(engine.runPropagators(start(engine.state, 1)), "Fixing child start failed");
 
         // Rule 5: Consumer's start must be >= child start + 1
         require(engine.state.domains[start(engine.state, 0)].getMin() >= 3,
@@ -231,7 +227,7 @@ inline void testBaseCorrectness()
 
         // Rule 6: Start values must be unique per bucket
         engine.state.setDomain(start(engine.state, 0), Domain::makeFixed(2));
-        require(!engine.runPropagators(lb, start(engine.state, 0)),
+        require(!engine.runPropagators(start(engine.state, 0)),
                 "Rule 6: Duplicate start value was accepted without contradiction");
     }
 
@@ -244,11 +240,10 @@ inline void testBaseCorrectness()
         };
         SearchEngine engine(makeState(spec, 1));
         addBasePropagators(engine);
-        float lb = 0.0f;
         engine.state.setDomain(selection(engine.state, 0), Domain::makeFixed(1, true));
-        require(engine.runPropagators(lb, selection(engine.state, 0)), "Selecting node 0 failed");
+        require(engine.runPropagators(selection(engine.state, 0)), "Selecting node 0 failed");
         engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(1, true));
-        require(!engine.runPropagators(lb, selection(engine.state, 1)),
+        require(!engine.runPropagators(selection(engine.state, 1)),
                 "Rule 9: Direct cycle 0 -> 1 -> 0 was accepted without contradiction");
     }
 
@@ -262,12 +257,11 @@ inline void testBaseCorrectness()
         SearchEngine engine(makeState(spec, 1));
         addBasePropagators(engine);
         selectAll(engine.state);
-        float lb = 0.0f;
-        require(engine.runPropagators(lb, kInvalidVarId), "View offset test init failed");
+        require(engine.runPropagators(kInvalidVarId), "View offset test init failed");
         engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(0));
         engine.state.setDomain(start(engine.state, 0), Domain::makeFixed(1));
         engine.state.setDomain(offset(engine.state, 1), Domain::makeFixed(12));
-        require(engine.runPropagators(lb, offset(engine.state, 1)), "Fixing child offset failed");
+        require(engine.runPropagators(offset(engine.state, 1)), "Fixing child offset failed");
         require(engine.state.domains[offset(engine.state, 0)].isFixed() &&
                 engine.state.domains[offset(engine.state, 0)].fixedValue() == 12,
                 "Rule 8: View offset did not align with child offset");
@@ -280,6 +274,10 @@ inline void testBaseCorrectness()
 
 inline void testExtraAgainstBaseReference()
 {
+    auto setIncumbent = [](SearchEngine &engine, float best_cost) {
+        engine.state.best_cost = best_cost;
+    };
+
     // Test 1: Soundness of CriticalPathPropagator (Rule 12) & EngineWorkloadPropagator (Rule 15)
     // The lower bound computed by EXTRA must never exceed the true evaluated makespan of any valid solution.
     {
@@ -300,14 +298,14 @@ inline void testExtraAgainstBaseReference()
 
         SearchEngine base_engine(base_state);
         addBasePropagators(base_engine);
-        float base_lb = 0.0f;
-        require(base_engine.runPropagators(base_lb, kInvalidVarId), "Base 11 failed on valid plan");
+        require(base_engine.runPropagators(kInvalidVarId), "Base 11 failed on valid plan");
         float true_makespan = base_engine.evaluateMakespan(base_engine.state, 0);
 
         SearchEngine extra_engine(base_state);
         addAllPropagators(extra_engine);
-        float extra_lb = 0.0f;
-        require(extra_engine.runPropagators(extra_lb, kInvalidVarId), "Extra failed on valid plan");
+        setIncumbent(extra_engine, 100.0f);
+        require(extra_engine.runPropagators(kInvalidVarId), "Extra failed on valid plan");
+        const float extra_lb = extra_engine.state.lower_bound;
 
         require(extra_lb <= true_makespan + 1e-4f,
                 "EXTRA lower bound (" + std::to_string(extra_lb) + ") exceeded true makespan (" + std::to_string(true_makespan) + ")");
@@ -317,9 +315,8 @@ inline void testExtraAgainstBaseReference()
         // Pruning against incumbent: if incumbent is less than lower bound, EXTRA prunes
         SearchEngine pruned_engine(base_state);
         addAllPropagators(pruned_engine);
-        pruned_engine.state.best_cost = 5.0f;
-        float pruned_lb = 0.0f;
-        require(!pruned_engine.runPropagators(pruned_lb, kInvalidVarId),
+        setIncumbent(pruned_engine, 5.0f);
+        require(!pruned_engine.runPropagators(kInvalidVarId),
                 "EXTRA should prune state when incumbent best_cost < lower_bound");
     }
 
@@ -337,16 +334,14 @@ inline void testExtraAgainstBaseReference()
         // Base 11 only enforces cache consistency, not total budget capacity
         base_engine.state.setDomain(base_engine.state.cached_vars.at(BaseEClassId{1}), Domain::makeFixed(1, true));
         base_engine.state.setDomain(base_engine.state.cached_vars.at(BaseEClassId{2}), Domain::makeFixed(1, true));
-        float base_lb = 0.0f;
-        base_engine.runPropagators(base_lb, kInvalidVarId);
+        base_engine.runPropagators(kInvalidVarId);
 
         // EXTRA (Rule 13) must detect capacity contradiction
         SearchEngine extra_engine(state);
         addAllPropagators(extra_engine);
         extra_engine.state.setDomain(extra_engine.state.cached_vars.at(BaseEClassId{1}), Domain::makeFixed(1, true));
         extra_engine.state.setDomain(extra_engine.state.cached_vars.at(BaseEClassId{2}), Domain::makeFixed(1, true));
-        float extra_lb = 0.0f;
-        require(!extra_engine.runPropagators(extra_lb, kInvalidVarId),
+        require(!extra_engine.runPropagators(kInvalidVarId),
                 "Rule 13 (CacheBudgetPropagator) failed to reject cache overcommit");
     }
 
@@ -385,11 +380,10 @@ inline void testExtraAgainstBaseReference()
 
             SearchEngine extra_engine(state);
             addAllPropagators(extra_engine);
+            setIncumbent(extra_engine, 1.0e6f);
 
-            float base_lb = 0.0f;
-            float extra_lb = 0.0f;
-            bool base_ok = base_engine.runPropagators(base_lb, kInvalidVarId);
-            bool extra_ok = extra_engine.runPropagators(extra_lb, kInvalidVarId);
+            bool base_ok = base_engine.runPropagators(kInvalidVarId);
+            bool extra_ok = extra_engine.runPropagators(kInvalidVarId);
 
             if (!base_ok)
             {
@@ -399,7 +393,8 @@ inline void testExtraAgainstBaseReference()
 
             if (extra_ok)
             {
-                require(extra_lb >= base_lb, "EXTRA lower bound should be >= Base lower bound");
+                require(extra_engine.state.lower_bound >= base_engine.state.lower_bound,
+                        "EXTRA lower bound should be >= Base lower bound");
                 // Check domains: Extra must be at least as restricted as Base
                 for (VarId v = 0; v < state.numVars(); ++v)
                 {
@@ -421,7 +416,7 @@ inline void testExtraAgainstBaseReference()
                     Domain d = extra_engine.state.domains[v];
                     int32_t val = d.getMin();
                     extra_engine.state.setDomain(v, Domain::makeFixed(val, d.is_mask));
-                    extra_engine.runPropagators(extra_lb, v);
+                    extra_engine.runPropagators(v);
                     extra_engine.state.backtrackTo(marker);
                     require(extra_engine.state.domains == prev_domains,
                             "Backtracking failed to restore exact domains in trial " + std::to_string(trial));

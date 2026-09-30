@@ -9,3 +9,4 @@ conventions
 verification:
 do not use `--no-lint` when building
 `python -m tests.test_gemma_output`
+to debug correctness issues, if you have some configuration that works (i.e. without caching or full bucket only) you can use utils/compare_reference_tensors.py along with --write-refs, --compare-refs

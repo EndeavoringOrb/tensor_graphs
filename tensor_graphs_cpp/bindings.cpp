@@ -405,7 +405,11 @@ class LLMSession
 
         if (compile_no_weights_bucket)
         {
+            ShapePropagator prop;
+            prop.inferShapeRecursive(logitsId, *g);
+
             Bucket bucket;
+            bucket.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
             bucket.outputNeededRegion = makeFull(g->getNode(logitsId).getShape());
             session->addBucket(bucket.inputDirtyRegions, bucket.outputNeededRegion);
         }
