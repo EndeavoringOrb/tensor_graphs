@@ -1170,12 +1170,10 @@ struct Planner
                     auto contiguous_it = contiguousInputs.find(source_class);
                     if (contiguous_it == contiguousInputs.end())
                     {
-                        const auto &source = baseState.egraph.getEClass(source_class);
-                        const auto source_shape = source.shape;
-                        const DType source_dtype = source.dtype;
+                        const auto source = baseState.egraph.getEClass(source_class);
                         EClassId contiguous_class = addOpToEGraph(
-                            baseState.egraph, OpType::CONTIGUOUS, {source_class}, source_shape,
-                            calcContiguousStrides(source_shape), source_dtype, ram, EClassId(), SourceLocation::current(),
+                            baseState.egraph, OpType::CONTIGUOUS, {source_class}, source.shape,
+                            calcContiguousStrides(source.shape), source.dtype, ram, EClassId(), SourceLocation::current(),
                             "Planner.initBaseEGraph input for " + toString(node.opType) + " logical ID " +
                                 std::to_string(nodeId.value));
                         contiguous_it = contiguousInputs.emplace(source_class, contiguous_class).first;

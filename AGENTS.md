@@ -5,3 +5,7 @@ conventions
 - class: PascalCase
 - function: camelCase
 - variable: snake_case
+
+verification:
+do not use `--no-lint` when building
+`python -m tests.test_gemma_output`
