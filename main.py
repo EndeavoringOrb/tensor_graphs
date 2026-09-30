@@ -80,6 +80,11 @@ def main():
         help="Compile decode buckets in addition to the single full bucket",
     )
     parser.add_argument(
+        "--compile-no-weights-bucket",
+        action="store_true",
+        help="Compile a full-output bucket with no dirty inputs, and run with fully dirty inputs/output",
+    )
+    parser.add_argument(
         "--disable-node-caching",
         action="store_true",
         help="Disable dirty region session caching",
@@ -193,6 +198,7 @@ def main():
         delegate,
         min_compile_time=args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
+        compile_no_weights_bucket=args.compile_no_weights_bucket,
         cache_file=args.cache_file,
         disable_node_caching=args.disable_node_caching,
         disable_compilation_caching=args.disable_compilation_caching,
