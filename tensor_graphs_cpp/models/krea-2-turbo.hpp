@@ -618,15 +618,6 @@ class Krea2TurboModel
         return unpatchify_latents(v_patches);
     }
 
-    LogicalId build_graph(LogicalId latent_id, LogicalId timestep_id, LogicalId text_id)
-    {
-        LogicalId all_text = g.fill(1.0f, {1, cfg.text_seq_len});
-        LogicalId txt_tokens = text_fusion(text_id, all_text);
-        auto [cos_node, sin_node] = compute_rope_3d(cfg.text_seq_len, cfg.grid_h, cfg.grid_w, cfg.head_dim);
-        LogicalId all_attention = g.fill(1.0f, {1, cfg.total_seq_len});
-        return predict_velocity_step(latent_id, timestep_id, txt_tokens, cos_node, sin_node, all_attention);
-    }
-
     LogicalId build_unrolled_dit(LogicalId initial_latent, LogicalId text_embeddings, LogicalId token_mask,
                                  uint32_t steps = 8, float mu = 1.15f)
     {

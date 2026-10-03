@@ -34,18 +34,6 @@ inline ModelGraphRoots build_qwen_graph(Graph &g, MemoryManager &mem, const std:
     return {{qwen.build_graph(inputIdsId)}, {inputIdsId}};
 }
 
-inline ModelGraphRoots build_krea2_graph(Graph &g, MemoryManager &mem, const std::string &model_path,
-                                         uint32_t height = 1024, uint32_t width = 1024, uint32_t text_seq_len = 128)
-{
-    Krea2TurboConfig cfg(height, width, text_seq_len);
-    LogicalId latentId = g.input({1, cfg.latent_channels, cfg.latent_h, cfg.latent_w}, DType::FLOAT32);
-    LogicalId timestepId = g.input({1}, DType::FLOAT32);
-    LogicalId textId = g.input({1, cfg.text_seq_len, cfg.text_num_layers, cfg.text_dim}, DType::FLOAT32);
-    Krea2TurboModel model(cfg, g, mem, model_path);
-    LogicalId velocityOut = model.build_graph(latentId, timestepId, textId);
-    return {{velocityOut}, {latentId, timestepId, textId}};
-}
-
 inline ModelGraphRoots build_krea2_vae_graph(Graph &g, MemoryManager &mem, const std::string &model_path,
                                              uint32_t height = 1024, uint32_t width = 1024)
 {

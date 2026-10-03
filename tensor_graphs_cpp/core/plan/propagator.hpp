@@ -1842,6 +1842,37 @@ class PearceKellyCyclePropagator : public Propagator
         return true;
     }
 
+    bool filterEClassDomain(SearchState &state, uint32_t b, EClassId cid, VarId sel_var)
+    {
+        Domain dom = state.domains[sel_var];
+        if (dom.isEmpty())
+            return false;
+
+        const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+        bool modified = false;
+
+        for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+        {
+            int32_t val = static_cast<int32_t>(en_idx + 1);
+            if (dom.contains(val))
+            {
+                if (!checkIncrementalCycle(state, b, cid, en_idx))
+                {
+                    dom.remove(val);
+                    modified = true;
+                }
+            }
+        }
+
+        if (modified)
+        {
+            if (dom.isEmpty())
+                return false;
+            state.setDomain(sel_var, dom);
+        }
+        return true;
+    }
+
   public:
     std::string name() const override
     {
@@ -1854,12 +1885,34 @@ class PearceKellyCyclePropagator : public Propagator
         {
             if (state.var_infos[changed].type != VarType::SELECTED)
                 return true;
+
+            uint32_t b = state.var_infos[changed].bucket_idx;
+            EClassId cid = state.var_infos[changed].eclass_id;
+
+            if (!filterEClassDomain(state, b, cid, changed))
+                return false;
+
             const Domain &dom = state.domains[changed];
-            if (!dom.isFixed() || dom.fixedValue() <= 0)
-                return true;
-            return checkIncrementalCycle(state, state.var_infos[changed].bucket_idx,
-                                         state.var_infos[changed].eclass_id,
-                                         static_cast<uint32_t>(dom.fixedValue() - 1));
+            if (dom.isFixed() && dom.fixedValue() > 0)
+            {
+                uint32_t en_idx = static_cast<uint32_t>(dom.fixedValue() - 1);
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                if (en_idx < cls.enodes.size())
+                {
+                    const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+                    for (EClassId ch : enode.getChildren())
+                    {
+                        EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
+                        auto ch_it = state.selected_vars[b].find(canon_ch);
+                        if (ch_it != state.selected_vars[b].end())
+                        {
+                            if (!filterEClassDomain(state, b, canon_ch, ch_it->second))
+                                return false;
+                        }
+                    }
+                }
+            }
+            return true;
         }
         else
         {
