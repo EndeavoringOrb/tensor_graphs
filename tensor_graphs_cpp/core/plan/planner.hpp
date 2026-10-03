@@ -1875,8 +1875,18 @@ struct Planner
                 if (clean_in_any || runtime_input)
                 {
                     uint32_t n_users = (log_it != full_state.eclassToLogical.end()) ? user_counts[log_it->second] : 0;
+                    uint64_t max_cand_bytes = getSizeBytes(cls.shape, cls.dtype);
+                    for (uint32_t b = 0; b < bucket_states.size(); ++b)
+                    {
+                        EClassId bid = bucket_states[b].egraph.findEClassByBaseId(cls.base_eclass_id);
+                        if (bid != EClassId{})
+                        {
+                            const EClass &b_cls = bucket_states[b].egraph.getEClass(bid);
+                            max_cand_bytes = std::max(max_cand_bytes, getSizeBytes(b_cls.shape, b_cls.dtype));
+                        }
+                    }
                     candidates.push_back(
-                        {cls.base_eclass_id, getSizeBytes(cls.shape, cls.dtype), cls.dtype, cls.mem_space, n_users});
+                        {cls.base_eclass_id, max_cand_bytes, cls.dtype, cls.mem_space, n_users});
                 }
             }
             std::stable_sort(candidates.begin(), candidates.end(),
@@ -1965,6 +1975,7 @@ struct Planner
             vinfo.base_eclass_id = cand.base_eclass_id;
             vinfo.mem_space = cand.mem_space;
             vinfo.size_bytes = cand.size_bytes;
+            vinfo.size_pages = search_state.bytesToPages(cand.size_bytes, cand.mem_space);
 
             plan::Domain dom = settings.disable_caching ? plan::Domain::makeFixed(0, true) : plan::Domain::makeMask(0b11);
             plan::VarId vid = search_state.addVar(vinfo, dom);

@@ -15,7 +15,7 @@ CORRECTNESS
 -if B is a reader, but not (B.offset >= A.offset && B.offset+B.size <= A.offset+A.size) return false.
 -for every reader C = R(A)/B, B.setMin(reader.start.getMin + 1), C.setMax(start_B - 1)
 -TODO: separate into a few rules
-8. if (VarType::OFFSET and dom.isFixed() and corresponding start is fixed and corresponding selected is not fixed to 0), any reader views should have offset fixed to equal this offset (or plus a bit like with a slice).
+8. if VarType::OFFSET || (VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0), whenever an eclass is confirmed to be a view of a base tensor, bidirectionally intersect offset domains [max(base.min, view.min)..min(base.max, view.max)]. If disjoint, return false. Also remove unviable view enodes from selection if offset domains cannot overlap.
 9. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0, pearce-kelly cycle detection given other fixed nonzero selections.
 10. contrapositive of 2. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() == 0, any parent enode must be removed from eclass selection domain
 11. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0 && optype CACHE/SCATTER (or FUSED with root SCATTER in refFactory), fix corresponding cached var to {1}
@@ -23,9 +23,8 @@ CORRECTNESS
 EXTRA
 12. if VarType::SELECTED, update dynamic programming bottom up critical path cp = cost + max(children cp), lower_bound = max(critical_path, lower_bound), if lower_bound > incumbent return false
 13. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, state.cache_sums[mem_space] += size if state.cache_sum > mem_cap
-14. TODO: make plan more descriptive. restrictOffset/restrictStart. basically better versions of 7, but they restrict domain of multiple others instead of only working on pairs
+14. if (VarType::OFFSET and dom.isFixed()) || (VarType::START and corresponding offset is fixed), push start domain of overlapping fixed-offset allocation past all readers of earlier allocation (or before earlier allocation if already bounded), resolving views and in-place ops.
 15. if VarType::SELECTED, update per engine workload, lower_bound = max(lower_bound, engine_workload) for engine_workload in workloads
 16. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, full bucket must have something selected, and cannot have CACHE/SCATTER (or FUSED with root SCATTER in refFactory).
 17. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, any unselected cache nodes that alone push cache size over mem cap must be fixed to {0}
 18. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, fix offset to max(offset+size)+1 for all existing fixed cached enodes
-19. if VarType::OFFSET, any selected views of this must have offset domain updated as well.

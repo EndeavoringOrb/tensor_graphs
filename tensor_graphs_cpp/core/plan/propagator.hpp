@@ -13,6 +13,7 @@
 
 #include "core/common/constants.hpp"
 #include "core/kernels.hpp"
+#include "core/logging.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/search_state.hpp"
 
@@ -591,6 +592,7 @@ class StartUniquePropagator : public Propagator
 // - for every reader C = R(A)/B, B.setMin(reader.start.getMin + 1), C.setMax(start_B - 1)
 class WriteAfterReadPropagator : public Propagator
 {
+  public:
     struct FixedAlloc
     {
         EClassId cid;
@@ -610,8 +612,8 @@ class WriteAfterReadPropagator : public Propagator
 
     static inline const std::vector<EClassId> empty_readers{};
 
-    bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
-                  bool require_fixed_offset = true) const
+    static bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
+                         bool require_fixed_offset = true, bool require_fixed_start = true)
     {
         auto sel_it = state.selected_vars[b].find(cid);
         if (sel_it == state.selected_vars[b].end())
@@ -666,7 +668,9 @@ class WriteAfterReadPropagator : public Propagator
             return false;
         VarId st_v = st_it->second[en_idx];
         const Domain &st_dom = state.domains[st_v];
-        if (!st_dom.isFixed())
+        if (st_dom.isEmpty())
+            return false;
+        if (require_fixed_start && !st_dom.isFixed())
             return false;
 
         out.cid = cid;
@@ -675,7 +679,7 @@ class WriteAfterReadPropagator : public Propagator
         out.offset = static_cast<uint32_t>(off_dom.getMin());
         uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
         out.size = (psize == 0) ? 1 : psize;
-        out.start = st_dom.fixedValue();
+        out.start = st_dom.isFixed() ? st_dom.fixedValue() : st_dom.getMin();
         out.en_idx = en_idx;
         out.en_id = en_id;
         out.start_var = st_v;
@@ -689,12 +693,12 @@ class WriteAfterReadPropagator : public Propagator
         return true;
     }
 
-    bool getFixedAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out) const
+    static bool getFixedAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out)
     {
-        return getAlloc(state, b, cid, out, true);
+        return getAlloc(state, b, cid, out, true, true);
     }
 
-    void buildBucketInfo(const SearchState &state, uint32_t b) const
+    static void buildBucketInfo(const SearchState &state, uint32_t b)
     {
         auto &schedule = state.propagation.write_after_read[b];
         if (!schedule.dirty)
@@ -948,7 +952,7 @@ class WriteAfterReadPropagator : public Propagator
         schedule.dirty = false;
     }
 
-    bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand) const
+    static bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand)
     {
         const auto &class_info = state.propagation.write_after_read[b].class_info;
         if (base == view_cand)
@@ -996,6 +1000,7 @@ class WriteAfterReadPropagator : public Propagator
         return false;
     }
 
+  private:
     bool canShare(const SearchState &state, FixedAlloc A, FixedAlloc B) const
     {
         const auto &class_info = state.propagation.write_after_read[A.bucket_idx].class_info;
@@ -1367,6 +1372,615 @@ class WriteAfterReadPropagator : public Propagator
     }
 };
 
+class FixedOffsetStartPropagator : public Propagator
+{
+    using FixedAlloc = WriteAfterReadPropagator::FixedAlloc;
+
+    bool resolvePair(SearchState &state, uint32_t b, FixedAlloc A, FixedAlloc B,
+                     std::vector<VarId> &worklist)
+    {
+        // 1. Views check: if both are views, or either is view of the other, they can safely share
+        if ((A.is_view && B.is_view) ||
+            WriteAfterReadPropagator::isViewOf(state, b, A.cid, B.cid) ||
+            WriteAfterReadPropagator::isViewOf(state, b, B.cid, A.cid))
+        {
+            return true;
+        }
+
+        // 2. Persistent check: persistent tensors (INPUT, CACHE, ROOT) can never share memory with non-views
+        if (A.is_input_or_cache || A.is_root || B.is_input_or_cache || B.is_root)
+        {
+            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [persistent overlap]: A(cid="
+                       << A.cid.value << ", in_cache=" << A.is_input_or_cache << ", root=" << A.is_root
+                       << ", st=" << state.domains[A.start_var].toString() << ", off=" << A.offset << ", sz=" << A.size
+                       << ") and B(cid=" << B.cid.value << ", in_cache=" << B.is_input_or_cache << ", root=" << B.is_root
+                       << ", st=" << state.domains[B.start_var].toString() << ", off=" << B.offset << ", sz=" << B.size << ")";
+            return false;
+        }
+
+        if (!state.domains[A.start_var].isFixed() && !state.domains[B.start_var].isFixed())
+            return true;
+
+        if (!state.domains[A.start_var].isFixed() && state.domains[B.start_var].isFixed())
+            std::swap(A, B);
+
+        if (state.domains[A.start_var].isFixed() && state.domains[B.start_var].isFixed())
+        {
+            if (A.start > B.start)
+                std::swap(A, B);
+            else if (A.start == B.start)
+            {
+                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [same start]: identical start=" << A.start
+                           << " for non-views A(cid=" << A.cid.value << ", off=" << A.offset << ", sz=" << A.size
+                           << ") and B(cid=" << B.cid.value << ", off=" << B.offset << ", sz=" << B.size << ")";
+                return false;
+            }
+        }
+
+        const auto &class_info = state.propagation.write_after_read[b].class_info;
+        const auto &readers_A = (A.cid.value < class_info.size() && class_info[A.cid.value].is_active)
+                                    ? class_info[A.cid.value].readers
+                                    : WriteAfterReadPropagator::empty_readers;
+        const auto &readers_B = (B.cid.value < class_info.size() && class_info[B.cid.value].is_active)
+                                    ? class_info[B.cid.value].readers
+                                    : WriteAfterReadPropagator::empty_readers;
+
+        bool b_reads_a = std::binary_search(readers_A.begin(), readers_A.end(), B.cid,
+                                            [](EClassId x, EClassId y) { return x.value < y.value; });
+        bool a_reads_b = std::binary_search(readers_B.begin(), readers_B.end(), A.cid,
+                                            [](EClassId x, EClassId y) { return x.value < y.value; });
+
+        // 3. B reads A
+        if (b_reads_a)
+        {
+            const EClass &b_cls = state.bucket_egraphs[b].getEClass(B.cid);
+            const ENode &b_enode = state.bucket_egraphs[b].getENode(b_cls.enodes[B.en_idx]);
+            KernelId b_kid = b_enode.getKernelId();
+            if (b_kid.value == 0 || !KernelRegistry::get().hasKernel(b_kid))
+            {
+                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: kernel missing]: B(cid=" << B.cid.value << ")";
+                return false;
+            }
+            const auto &safe_inplace = KernelRegistry::get().getKernel(b_kid).safe_inplace_idxs;
+            bool found_safe = false;
+            for (size_t in_idx = 0; in_idx < b_enode.getChildren().size(); ++in_idx)
+            {
+                EClassId child_cid = state.bucket_egraphs[b].findConst(b_enode.getChildren()[in_idx]);
+                if (child_cid == A.cid || WriteAfterReadPropagator::isViewOf(state, b, A.cid, child_cid))
+                {
+                    if (std::find(safe_inplace.begin(), safe_inplace.end(), static_cast<uint32_t>(in_idx)) != safe_inplace.end())
+                    {
+                        found_safe = true;
+                        break;
+                    }
+                }
+            }
+            bool fits_in_a = (B.offset >= A.offset && B.offset + B.size <= A.offset + A.size);
+            if (!found_safe || !fits_in_a)
+            {
+                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: unsafe inplace]: found_safe="
+                           << found_safe << ", fits_in_a=" << fits_in_a << " for A(cid=" << A.cid.value
+                           << ") and B(cid=" << B.cid.value << ")";
+                return false;
+            }
+
+            int32_t min_b_start = A.start + 1;
+            for (EClassId c_cid : readers_A)
+            {
+                if (c_cid == B.cid)
+                    continue;
+                auto c_sel_it = state.selected_vars[b].find(c_cid);
+                if (c_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &c_sel_dom = state.domains[c_sel_it->second];
+                if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                    continue;
+
+                auto c_st_it = state.start_vars[b].find(c_cid);
+                if (c_st_it == state.start_vars[b].end())
+                    continue;
+
+                for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+                {
+                    if (!c_sel_dom.contains(c_en + 1))
+                        continue;
+                    VarId c_st_v = c_st_it->second[c_en];
+                    const Domain &c_st_dom = state.domains[c_st_v];
+                    min_b_start = std::max(min_b_start, c_st_dom.getMin() + 1);
+
+                    Domain b_st_dom = state.domains[B.start_var];
+                    if (b_st_dom.getMax() - 1 < c_st_dom.getMax())
+                    {
+                        Domain new_c_dom = c_st_dom;
+                        if (new_c_dom.setMax(b_st_dom.getMax() - 1))
+                        {
+                            if (new_c_dom.isEmpty())
+                            {
+                                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: reader empty]: C(cid="
+                                           << c_cid.value << ") domain empty after setMax(" << (b_st_dom.getMax() - 1) << ")";
+                                return false;
+                            }
+                            state.setDomain(c_st_v, new_c_dom);
+                            worklist.push_back(c_st_v);
+                        }
+                    }
+                }
+            }
+            Domain b_st_dom = state.domains[B.start_var];
+            if (b_st_dom.setMin(min_b_start))
+            {
+                if (b_st_dom.isEmpty())
+                {
+                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: B start empty]: B(cid="
+                               << B.cid.value << ") domain empty after setMin(" << min_b_start << ")";
+                    return false;
+                }
+                state.setDomain(B.start_var, b_st_dom);
+                worklist.push_back(B.start_var);
+            }
+            return true;
+        }
+
+        // 4. A reads B
+        if (a_reads_b)
+        {
+            const EClass &a_cls = state.bucket_egraphs[b].getEClass(A.cid);
+            const ENode &a_enode = state.bucket_egraphs[b].getENode(a_cls.enodes[A.en_idx]);
+            KernelId a_kid = a_enode.getKernelId();
+            if (a_kid.value == 0 || !KernelRegistry::get().hasKernel(a_kid))
+            {
+                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: kernel missing]: A(cid=" << A.cid.value << ")";
+                return false;
+            }
+            const auto &safe_inplace = KernelRegistry::get().getKernel(a_kid).safe_inplace_idxs;
+            bool found_safe = false;
+            for (size_t in_idx = 0; in_idx < a_enode.getChildren().size(); ++in_idx)
+            {
+                EClassId child_cid = state.bucket_egraphs[b].findConst(a_enode.getChildren()[in_idx]);
+                if (child_cid == B.cid || WriteAfterReadPropagator::isViewOf(state, b, B.cid, child_cid))
+                {
+                    if (std::find(safe_inplace.begin(), safe_inplace.end(), static_cast<uint32_t>(in_idx)) != safe_inplace.end())
+                    {
+                        found_safe = true;
+                        break;
+                    }
+                }
+            }
+            bool fits_in_b = (A.offset >= B.offset && A.offset + A.size <= B.offset + B.size);
+            if (!found_safe || !fits_in_b)
+            {
+                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: unsafe inplace]: found_safe="
+                           << found_safe << ", fits_in_b=" << fits_in_b << " for A(cid=" << A.cid.value
+                           << ") and B(cid=" << B.cid.value << ")";
+                return false;
+            }
+
+            Domain b_st_dom = state.domains[B.start_var];
+            if (b_st_dom.setMax(A.start - 1))
+            {
+                if (b_st_dom.isEmpty())
+                {
+                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: B start empty]: B(cid="
+                               << B.cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
+                    return false;
+                }
+                state.setDomain(B.start_var, b_st_dom);
+                worklist.push_back(B.start_var);
+            }
+
+            for (EClassId c_cid : readers_B)
+            {
+                if (c_cid == A.cid)
+                    continue;
+                auto c_sel_it = state.selected_vars[b].find(c_cid);
+                if (c_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &c_sel_dom = state.domains[c_sel_it->second];
+                if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                    continue;
+
+                auto c_st_it = state.start_vars[b].find(c_cid);
+                if (c_st_it == state.start_vars[b].end())
+                    continue;
+
+                for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+                {
+                    if (!c_sel_dom.contains(c_en + 1))
+                        continue;
+                    VarId c_st_v = c_st_it->second[c_en];
+                    Domain c_st_dom = state.domains[c_st_v];
+                    if (c_st_dom.setMax(A.start - 1))
+                    {
+                        if (c_st_dom.isEmpty())
+                        {
+                            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: reader empty]: C(cid="
+                                       << c_cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
+                            return false;
+                        }
+                        state.setDomain(c_st_v, c_st_dom);
+                        worklist.push_back(c_st_v);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // 5. Neither reads the other: lifespans must be disjoint
+        int32_t t_after_a = A.start + 1;
+        for (EClassId c_cid : readers_A)
+        {
+            auto c_sel_it = state.selected_vars[b].find(c_cid);
+            if (c_sel_it == state.selected_vars[b].end())
+                continue;
+            const Domain &c_sel_dom = state.domains[c_sel_it->second];
+            if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                continue;
+
+            auto c_st_it = state.start_vars[b].find(c_cid);
+            if (c_st_it == state.start_vars[b].end())
+                continue;
+
+            for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+            {
+                if (c_sel_dom.contains(c_en + 1))
+                {
+                    VarId c_st_v = c_st_it->second[c_en];
+                    t_after_a = std::max(t_after_a, state.domains[c_st_v].getMin() + 1);
+                }
+            }
+        }
+
+        Domain b_st_dom = state.domains[B.start_var];
+        bool b_cannot_be_before_a = (b_st_dom.getMin() >= A.start);
+        if (!b_cannot_be_before_a)
+        {
+            for (EClassId d_cid : readers_B)
+            {
+                auto d_sel_it = state.selected_vars[b].find(d_cid);
+                if (d_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &d_sel_dom = state.domains[d_sel_it->second];
+                if (d_sel_dom.isFixed() && d_sel_dom.fixedValue() == 0)
+                    continue;
+
+                // An active reader of B needs at least B_min + 1; if that is >= A.start, it can never finish before A
+                if (b_st_dom.getMin() + 1 >= A.start)
+                {
+                    b_cannot_be_before_a = true;
+                    break;
+                }
+
+                auto d_st_it = state.start_vars[b].find(d_cid);
+                if (d_st_it == state.start_vars[b].end())
+                    continue;
+
+                for (uint32_t d_en = 0; d_en < d_st_it->second.size(); ++d_en)
+                {
+                    if (d_sel_dom.contains(d_en + 1))
+                    {
+                        if (state.domains[d_st_it->second[d_en]].getMin() >= A.start)
+                        {
+                            b_cannot_be_before_a = true;
+                            break;
+                        }
+                    }
+                }
+                if (b_cannot_be_before_a)
+                    break;
+            }
+        }
+
+        bool b_cannot_be_after_a = (b_st_dom.getMax() < t_after_a);
+
+        if (b_cannot_be_before_a && b_cannot_be_after_a)
+        {
+            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint lifespans impossible]: A(cid="
+                       << A.cid.value << ", st=" << A.start << ", t_after_a=" << t_after_a
+                       << ") vs B(cid=" << B.cid.value << ", dom=" << b_st_dom.toString()
+                       << "): b_cannot_be_before_a=1 && b_cannot_be_after_a=1";
+            return false;
+        }
+
+
+        if (b_cannot_be_before_a)
+        {
+            if (b_st_dom.setMin(t_after_a))
+            {
+                if (b_st_dom.isEmpty())
+                {
+                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMin empty]: B(cid="
+                               << B.cid.value << ") domain empty after setMin(" << t_after_a << ")";
+                    return false;
+                }
+                state.setDomain(B.start_var, b_st_dom);
+                worklist.push_back(B.start_var);
+            }
+            for (EClassId c_cid : readers_A)
+            {
+                auto c_sel_it = state.selected_vars[b].find(c_cid);
+                if (c_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &c_sel_dom = state.domains[c_sel_it->second];
+                if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                    continue;
+
+                auto c_st_it = state.start_vars[b].find(c_cid);
+                if (c_st_it == state.start_vars[b].end())
+                    continue;
+
+                for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+                {
+                    if (!c_sel_dom.contains(c_en + 1))
+                        continue;
+                    VarId c_st_v = c_st_it->second[c_en];
+                    Domain c_st_dom = state.domains[c_st_v];
+                    if (c_st_dom.setMax(b_st_dom.getMax() - 1))
+                    {
+                        if (c_st_dom.isEmpty())
+                        {
+                            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader C empty]: C(cid="
+                                       << c_cid.value << ") domain empty after setMax(" << (b_st_dom.getMax() - 1) << ")";
+                            return false;
+                        }
+                        state.setDomain(c_st_v, c_st_dom);
+                        worklist.push_back(c_st_v);
+                    }
+                }
+            }
+        }
+        else if (b_cannot_be_after_a)
+        {
+            if (b_st_dom.setMax(A.start - 1))
+            {
+                if (b_st_dom.isEmpty())
+                {
+                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMax empty]: B(cid="
+                               << B.cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
+                    return false;
+                }
+                state.setDomain(B.start_var, b_st_dom);
+                worklist.push_back(B.start_var);
+            }
+            for (EClassId d_cid : readers_B)
+            {
+                auto d_sel_it = state.selected_vars[b].find(d_cid);
+                if (d_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &d_sel_dom = state.domains[d_sel_it->second];
+                if (d_sel_dom.isFixed() && d_sel_dom.fixedValue() == 0)
+                    continue;
+
+                auto d_st_it = state.start_vars[b].find(d_cid);
+                if (d_st_it == state.start_vars[b].end())
+                    continue;
+
+                for (uint32_t d_en = 0; d_en < d_st_it->second.size(); ++d_en)
+                {
+                    if (!d_sel_dom.contains(d_en + 1))
+                        continue;
+                    VarId d_st_v = d_st_it->second[d_en];
+                    Domain d_st_dom = state.domains[d_st_v];
+                    if (d_st_dom.setMax(A.start - 1))
+                    {
+                        if (d_st_dom.isEmpty())
+                        {
+                            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader D empty]: D(cid="
+                                       << d_cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
+                            return false;
+                        }
+                        state.setDomain(d_st_v, d_st_dom);
+                        worklist.push_back(d_st_v);
+                    }
+                }
+            }
+        }
+        else if (b_st_dom.is_mask)
+        {
+            bool changed_mask = false;
+            for (int32_t t = std::max(0, A.start); t < std::min(32, t_after_a); ++t)
+            {
+                if (b_st_dom.remove(t))
+                    changed_mask = true;
+            }
+            if (changed_mask)
+            {
+                if (b_st_dom.isEmpty())
+                {
+                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: mask empty]: B(cid="
+                               << B.cid.value << ") domain empty";
+                    return false;
+                }
+                state.setDomain(B.start_var, b_st_dom);
+                worklist.push_back(B.start_var);
+            }
+        }
+
+        return true;
+    }
+
+  public:
+    std::string name() const override
+    {
+        return "FixedOffsetStartPropagator";
+    }
+
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    {
+        state.ensurePropagationState();
+        if (changed != kInvalidVarId)
+        {
+            const VarInfo &info = state.var_infos[changed];
+            if (info.type != VarType::OFFSET && info.type != VarType::START)
+                return true;
+
+            // If offset changed, it must be fixed to establish memory footprint
+            if (info.type == VarType::OFFSET && !state.domains[changed].isFixed())
+                return true;
+
+            uint32_t b = info.bucket_idx;
+            EClassId cid = info.eclass_id;
+
+            // Eclass must have fixed offset to establish memory footprint
+            auto off_it = state.offset_vars[b].find(cid);
+            if (off_it == state.offset_vars[b].end() || !state.domains[off_it->second].isFixed())
+                return true;
+
+            FixedAlloc curr;
+            if (!WriteAfterReadPropagator::getAlloc(state, b, cid, curr, /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
+                return true;
+
+            // If START changed, ensure it matches the active/selected enode
+            if (info.type == VarType::START && info.enode_idx != curr.en_idx)
+                return true;
+
+            WriteAfterReadPropagator::buildBucketInfo(state, b);
+            if (cid.value >= state.propagation.write_after_read[b].temporal_overlaps.size())
+                return true;
+            const auto candidates = state.propagation.write_after_read[b].temporal_overlaps[cid.value];
+
+            bool curr_start_fixed = state.domains[curr.start_var].isFixed();
+
+            if (curr_start_fixed)
+            {
+                for (EClassId other_cid : candidates)
+                {
+                    if (other_cid == cid)
+                        continue;
+                    FixedAlloc other;
+                    if (!WriteAfterReadPropagator::getAlloc(state, b, other_cid, other, /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
+                        continue;
+                    if (curr.mem_space != other.mem_space)
+                        continue;
+
+                    if (std::max(curr.offset, other.offset) >= std::min(curr.offset + curr.size, other.offset + other.size))
+                        continue;
+
+                    if (!resolvePair(state, b, curr, other, worklist))
+                    {
+                        LOG(DEBUG) << "[FixedOffsetStartPropagator] Pruned left branch cid=" << cid.value
+                                   << " (start=" << curr.start << ") due to conflict with other_cid=" << other_cid.value
+                                   << " (other_start=" << state.domains[other.start_var].toString()
+                                   << ", other_off=" << other.offset << ", other_sz=" << other.size << ")";
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                for (EClassId other_cid : candidates)
+                {
+                    if (other_cid == cid)
+                        continue;
+                    FixedAlloc other;
+                    if (!WriteAfterReadPropagator::getAlloc(state, b, other_cid, other, /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
+                        continue;
+                    if (curr.mem_space != other.mem_space)
+                        continue;
+
+                    if (std::max(curr.offset, other.offset) >= std::min(curr.offset + curr.size, other.offset + other.size))
+                        continue;
+
+                    bool other_fixed = state.domains[other.start_var].isFixed();
+                    if (!other_fixed)
+                    {
+                        if (curr.is_input_or_cache || curr.is_root || other.is_input_or_cache || other.is_root)
+                        {
+                            if (!resolvePair(state, b, curr, other, worklist))
+                            {
+                                LOG(DEBUG) << "[FixedOffsetStartPropagator] Right branch cid=" << cid.value
+                                           << " persistent contradiction with other_cid=" << other_cid.value;
+                                return false;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (!resolvePair(state, b, other, curr, worklist))
+                    {
+                        LOG(DEBUG) << "[FixedOffsetStartPropagator] Right branch cid=" << cid.value
+                                   << " contradiction with other_cid=" << other_cid.value;
+                        return false;
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (uint32_t b = 0; b < state.buckets.size(); ++b)
+            {
+                WriteAfterReadPropagator::buildBucketInfo(state, b);
+                const auto &active_cids = state.propagation.write_after_read[b].active_cids;
+
+                std::vector<FixedAlloc> fixed_start_allocs;
+                std::vector<FixedAlloc> unfixed_start_allocs;
+
+                for (EClassId cid : active_cids)
+                {
+                    FixedAlloc a;
+                    if (WriteAfterReadPropagator::getAlloc(state, b, cid, a, /*require_fixed_offset=*/true, /*require_fixed_start=*/true))
+                    {
+                        fixed_start_allocs.push_back(a);
+                    }
+                    else if (WriteAfterReadPropagator::getAlloc(state, b, cid, a, /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
+                    {
+                        unfixed_start_allocs.push_back(a);
+                    }
+                }
+
+                // Check fixed with fixed
+                for (size_t i = 0; i < fixed_start_allocs.size(); ++i)
+                {
+                    for (size_t j = i + 1; j < fixed_start_allocs.size(); ++j)
+                    {
+                        const auto &a = fixed_start_allocs[i];
+                        const auto &b_alloc = fixed_start_allocs[j];
+                        if (a.mem_space != b_alloc.mem_space)
+                            continue;
+                        if (std::max(a.offset, b_alloc.offset) >= std::min(a.offset + a.size, b_alloc.offset + b_alloc.size))
+                            continue;
+                        if (!resolvePair(state, b, a, b_alloc, worklist))
+                            return false;
+                    }
+                }
+
+                // Check fixed with unfixed
+                for (const auto &a : fixed_start_allocs)
+                {
+                    for (const auto &b_alloc : unfixed_start_allocs)
+                    {
+                        if (a.mem_space != b_alloc.mem_space)
+                            continue;
+                        if (std::max(a.offset, b_alloc.offset) >= std::min(a.offset + a.size, b_alloc.offset + b_alloc.size))
+                            continue;
+                        if (!resolvePair(state, b, a, b_alloc, worklist))
+                            return false;
+                    }
+                }
+
+                // Check unfixed with unfixed if either is persistent
+                for (size_t i = 0; i < unfixed_start_allocs.size(); ++i)
+                {
+                    for (size_t j = i + 1; j < unfixed_start_allocs.size(); ++j)
+                    {
+                        const auto &a = unfixed_start_allocs[i];
+                        const auto &b_alloc = unfixed_start_allocs[j];
+                        if (a.mem_space != b_alloc.mem_space)
+                            continue;
+                        if (std::max(a.offset, b_alloc.offset) >= std::min(a.offset + a.size, b_alloc.offset + b_alloc.size))
+                            continue;
+                        if (a.is_input_or_cache || a.is_root || b_alloc.is_input_or_cache || b_alloc.is_root)
+                        {
+                            if (!resolvePair(state, b, a, b_alloc, worklist))
+                                return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+};
+
 // If two active values have overlapping fixed addresses and their start
 // domains already establish an order, push the later value past the earlier
 // value's readers before branching on each individual start.
@@ -1582,62 +2196,243 @@ class WriteAfterReadStartPropagator : public Propagator
     }
 };
 
-// 8. if (VarType::OFFSET and dom.isFixed() and corresponding start is fixed and corresponding
-// selected is not fixed to 0), any reader views should have offset fixed to equal this offset
-// (or plus a bit like with a slice).
+// 8. if VarType::OFFSET || (VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0),
+// whenever an eclass is confirmed to be a view of a base tensor, bidirectionally intersect
+// offset domains [max(base.min, view.min)..min(base.max, view.max)]. If disjoint, return false.
+// Also remove unviable view enodes from selection if offset domains cannot overlap.
 class ViewOffsetPropagator : public Propagator
 {
-    bool propagateViewOffset(SearchState &state, uint32_t b, EClassId cid, int32_t off_val)
-    {
-        for (const auto &pair : state.selected_vars[b])
-        {
-            EClassId v_cid = pair.first;
-            if (v_cid == cid)
-                continue;
-            VarId v_sel_v = pair.second;
-            Domain v_sel_dom = state.domains[v_sel_v];
-            if (v_sel_dom.isFixed() && v_sel_dom.fixedValue() == 0)
-                continue;
+    std::vector<std::unordered_map<EClassId, std::vector<EClassId>>> bucket_view_users;
+    bool initialized = false;
 
-            const EClass &v_cls = state.bucket_egraphs[b].getEClass(v_cid);
-            for (uint32_t en_idx = 0; en_idx < v_cls.enodes.size(); ++en_idx)
+    void ensureInitialized(const SearchState &state)
+    {
+        if (initialized && bucket_view_users.size() == state.buckets.size())
+            return;
+        bucket_view_users.clear();
+        bucket_view_users.resize(state.buckets.size());
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            for (const auto &pair : state.selected_vars[b])
             {
-                if (!v_sel_dom.contains(en_idx + 1))
-                    continue;
-                ENodeId en_id = v_cls.enodes[en_idx];
-                bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
-                               state.bucket_enode_infos[b][en_id.value].is_view;
-                if (!is_view)
-                    continue;
-                const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
-                if (!enode.getChildren().empty() &&
-                    state.bucket_egraphs[b].findConst(enode.getChildren()[0]) == cid)
+                EClassId v_cid = pair.first;
+                const EClass &cls = state.bucket_egraphs[b].getEClass(v_cid);
+                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
                 {
-                    auto off_it = state.offset_vars[b].find(v_cid);
-                    if (off_it != state.offset_vars[b].end())
+                    ENodeId en_id = cls.enodes[en_idx];
+                    bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                                   state.bucket_enode_infos[b][en_id.value].is_view;
+                    if (!is_view)
+                        continue;
+                    const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+                    if (!enode.getChildren().empty())
                     {
-                        VarId v_off_v = off_it->second;
-                        Domain v_off_dom = state.domains[v_off_v];
-                        if (!v_off_dom.contains(off_val))
+                        EClassId base_cid = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+                        if (base_cid != v_cid)
                         {
-                            if (v_sel_dom.isFixed())
-                                return false;
-                            v_sel_dom.remove(en_idx + 1);
-                            if (v_sel_dom.isEmpty())
-                                return false;
-                            state.setDomain(v_sel_v, v_sel_dom);
-                        }
-                        else if (v_sel_dom.isFixed() && v_sel_dom.fixedValue() == static_cast<int32_t>(en_idx + 1))
-                        {
-                            if (!v_off_dom.isFixed() || v_off_dom.fixedValue() != off_val)
+                            auto &users = bucket_view_users[b][base_cid];
+                            if (std::find(users.begin(), users.end(), v_cid) == users.end())
                             {
-                                state.setDomain(v_off_v, Domain::makeFixed(off_val, false));
+                                users.push_back(v_cid);
                             }
                         }
                     }
                 }
             }
         }
+        initialized = true;
+    }
+
+    bool getConfirmedViewBase(const SearchState &state, uint32_t b, EClassId cid, EClassId &out_base_cid) const
+    {
+        auto sel_it = state.selected_vars[b].find(cid);
+        if (sel_it == state.selected_vars[b].end())
+            return false;
+        const Domain &sel_dom = state.domains[sel_it->second];
+        if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
+            return false;
+
+        uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
+        const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+        if (en_idx >= cls.enodes.size())
+            return false;
+
+        ENodeId en_id = cls.enodes[en_idx];
+        if (en_id.value >= state.bucket_enode_infos[b].size() ||
+            !state.bucket_enode_infos[b][en_id.value].is_view)
+            return false;
+
+        const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+        if (enode.getChildren().empty())
+            return false;
+
+        out_base_cid = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+        return out_base_cid != cid;
+    }
+
+    bool intersectViewAndBase(SearchState &state, uint32_t b, EClassId view_cid, EClassId base_cid,
+                              std::vector<VarId> &worklist)
+    {
+        auto base_off_it = state.offset_vars[b].find(base_cid);
+        auto view_off_it = state.offset_vars[b].find(view_cid);
+        if (base_off_it == state.offset_vars[b].end() || view_off_it == state.offset_vars[b].end())
+            return true;
+
+        VarId base_off_v = base_off_it->second;
+        VarId view_off_v = view_off_it->second;
+
+        const Domain &dom_base = state.domains[base_off_v];
+        const Domain &dom_view = state.domains[view_off_v];
+
+        if (dom_base.isEmpty() || dom_view.isEmpty())
+            return false;
+
+        int32_t common_min = std::max(dom_base.getMin(), dom_view.getMin());
+        int32_t common_max = std::min(dom_base.getMax(), dom_view.getMax());
+
+        if (common_min > common_max)
+            return false; // Contradiction!
+
+        if (dom_base.getMin() != common_min || dom_base.getMax() != common_max)
+        {
+            if (state.setDomain(base_off_v, Domain::makeRange(common_min, common_max)))
+            {
+                worklist.push_back(base_off_v);
+            }
+        }
+
+        if (dom_view.getMin() != common_min || dom_view.getMax() != common_max)
+        {
+            if (state.setDomain(view_off_v, Domain::makeRange(common_min, common_max)))
+            {
+                worklist.push_back(view_off_v);
+            }
+        }
+
+        return true;
+    }
+
+    bool filterUnviableViewEnodes(SearchState &state, uint32_t b, EClassId v_cid, EClassId base_cid,
+                                  std::vector<VarId> &worklist)
+    {
+        auto base_off_it = state.offset_vars[b].find(base_cid);
+        auto view_off_it = state.offset_vars[b].find(v_cid);
+        if (base_off_it == state.offset_vars[b].end() || view_off_it == state.offset_vars[b].end())
+            return true;
+
+        VarId base_off_v = base_off_it->second;
+        VarId view_off_v = view_off_it->second;
+        const Domain &dom_base = state.domains[base_off_v];
+        const Domain &dom_view = state.domains[view_off_v];
+
+        if (dom_base.isEmpty() || dom_view.isEmpty())
+            return false;
+
+        int32_t common_min = std::max(dom_base.getMin(), dom_view.getMin());
+        int32_t common_max = std::min(dom_base.getMax(), dom_view.getMax());
+
+        if (common_min > common_max)
+        {
+            auto sel_it = state.selected_vars[b].find(v_cid);
+            if (sel_it == state.selected_vars[b].end())
+                return true;
+            VarId sel_v = sel_it->second;
+            Domain sel_dom = state.domains[sel_v];
+            if (sel_dom.isFixed() && sel_dom.fixedValue() == 0)
+                return true;
+
+            const EClass &cls = state.bucket_egraphs[b].getEClass(v_cid);
+            bool domain_modified = false;
+            for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+            {
+                if (!sel_dom.contains(en_idx + 1))
+                    continue;
+                ENodeId en_id = cls.enodes[en_idx];
+                bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                               state.bucket_enode_infos[b][en_id.value].is_view;
+                if (!is_view)
+                    continue;
+                const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+                if (!enode.getChildren().empty() &&
+                    state.bucket_egraphs[b].findConst(enode.getChildren()[0]) == base_cid)
+                {
+                    if (sel_dom.isFixed())
+                        return false;
+                    sel_dom.remove(en_idx + 1);
+                    domain_modified = true;
+                }
+            }
+            if (domain_modified)
+            {
+                if (sel_dom.isEmpty())
+                    return false;
+                if (state.setDomain(sel_v, sel_dom))
+                    worklist.push_back(sel_v);
+            }
+        }
+        return true;
+    }
+
+    bool propagateEClass(SearchState &state, uint32_t b, EClassId cid, std::vector<VarId> &worklist)
+    {
+        // 1. Match views with base: follow confirmed view chain upwards from cid
+        EClassId curr = cid;
+        bool is_confirmed_view = false;
+        for (uint32_t step = 0; step < 32; ++step)
+        {
+            EClassId next_base;
+            if (!getConfirmedViewBase(state, b, curr, next_base))
+                break;
+            is_confirmed_view = true;
+            if (!intersectViewAndBase(state, b, curr, next_base, worklist))
+                return false;
+            curr = next_base;
+        }
+
+        // If cid itself is not a confirmed view, filter any unviable view enodes in cid
+        if (!is_confirmed_view)
+        {
+            const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+            for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+            {
+                ENodeId en_id = cls.enodes[en_idx];
+                bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                               state.bucket_enode_infos[b][en_id.value].is_view;
+                if (!is_view)
+                    continue;
+                const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+                if (!enode.getChildren().empty())
+                {
+                    EClassId cand_base = state.bucket_egraphs[b].findConst(enode.getChildren()[0]);
+                    if (!filterUnviableViewEnodes(state, b, cid, cand_base, worklist))
+                        return false;
+                }
+            }
+        }
+
+        // 2. Match a base with views: propagate cid with all its view users
+        if (b < bucket_view_users.size())
+        {
+            auto it = bucket_view_users[b].find(cid);
+            if (it != bucket_view_users[b].end())
+            {
+                for (EClassId v_cid : it->second)
+                {
+                    EClassId v_base_cid;
+                    if (getConfirmedViewBase(state, b, v_cid, v_base_cid) && v_base_cid == cid)
+                    {
+                        if (!intersectViewAndBase(state, b, v_cid, cid, worklist))
+                            return false;
+                    }
+                    else
+                    {
+                        if (!filterUnviableViewEnodes(state, b, v_cid, cid, worklist))
+                            return false;
+                    }
+                }
+            }
+        }
+
         return true;
     }
 
@@ -1649,54 +2444,26 @@ class ViewOffsetPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        if (changed != kInvalidVarId)
-        {
-            if (state.var_infos[changed].type != VarType::OFFSET)
-                return true;
-            const Domain &dom = state.domains[changed];
-            if (!dom.isFixed())
-                return true;
-            uint32_t b = state.var_infos[changed].bucket_idx;
-            EClassId cid = state.var_infos[changed].eclass_id;
-            VarId sel_v = state.selected_vars[b].at(cid);
-            const Domain &sel_dom = state.domains[sel_v];
-            if (sel_dom.isFixed() && sel_dom.fixedValue() == 0)
-                return true;
-            if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
-            {
-                uint32_t en_idx = sel_dom.fixedValue() - 1;
-                VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                if (!state.domains[st_v].isFixed())
-                    return true;
-            }
-            return propagateViewOffset(state, b, cid, dom.fixedValue());
-        }
-        else
+        ensureInitialized(state);
+
+        if (changed == kInvalidVarId)
         {
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 for (const auto &pair : state.selected_vars[b])
                 {
-                    EClassId cid = pair.first;
-                    const Domain &sel_dom = state.domains[pair.second];
-                    if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
-                        continue;
-                    uint32_t en_idx = sel_dom.fixedValue() - 1;
-                    VarId st_v = state.start_vars[b].at(cid)[en_idx];
-                    if (!state.domains[st_v].isFixed())
-                        continue;
-                    auto off_it = state.offset_vars[b].find(cid);
-                    if (off_it == state.offset_vars[b].end())
-                        continue;
-                    const Domain &off_dom = state.domains[off_it->second];
-                    if (!off_dom.isFixed())
-                        continue;
-                    if (!propagateViewOffset(state, b, cid, off_dom.fixedValue()))
+                    if (!propagateEClass(state, b, pair.first, worklist))
                         return false;
                 }
             }
+            return true;
         }
-        return true;
+
+        const auto &info = state.var_infos[changed];
+        if (info.type != VarType::OFFSET && info.type != VarType::SELECTED)
+            return true;
+
+        return propagateEClass(state, info.bucket_idx, info.eclass_id, worklist);
     }
 };
 
@@ -2209,7 +2976,36 @@ class CachedOffsetAllocationPropagator : public Propagator
         offset_index_initialized_ = true;
     }
 
-    bool allocateCachedOffset(SearchState &state, BaseEClassId base_id)
+    uint32_t getMaxSizePages(const SearchState &state, BaseEClassId base_id) const
+    {
+        uint32_t max_pages = 1;
+        const auto cache_it = state.cached_vars.find(base_id);
+        if (cache_it != state.cached_vars.end())
+        {
+            const VarInfo &cinfo = state.var_infos[cache_it->second];
+            max_pages = std::max(max_pages, state.bytesToPages(cinfo.size_bytes, cinfo.mem_space));
+        }
+        const auto off_it = offsets_by_base_.find(base_id);
+        if (off_it != offsets_by_base_.end())
+        {
+            for (VarId off_var : off_it->second)
+            {
+                max_pages = std::max(max_pages, state.var_infos[off_var].size_pages);
+            }
+        }
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            EClassId cid = state.bucket_egraphs[b].findEClassByBaseId(base_id);
+            if (cid != EClassId{})
+            {
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                max_pages = std::max(max_pages, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
+            }
+        }
+        return max_pages;
+    }
+
+    bool allocateCachedOffset(SearchState &state, BaseEClassId base_id, std::vector<VarId> &worklist)
     {
         const auto cache_it = state.cached_vars.find(base_id);
         const auto offsets_it = offsets_by_base_.find(base_id);
@@ -2217,8 +3013,7 @@ class CachedOffsetAllocationPropagator : public Propagator
             return true;
 
         const VarInfo &cache_info = state.var_infos[cache_it->second];
-        const uint32_t size_pages = std::max<uint32_t>(
-            1, state.bytesToPages(cache_info.size_bytes, cache_info.mem_space));
+        const uint32_t size_pages = getMaxSizePages(state, base_id);
 
         int32_t min_offset = 0;
         int32_t max_offset = std::numeric_limits<int32_t>::max();
@@ -2238,10 +3033,29 @@ class CachedOffsetAllocationPropagator : public Propagator
             }
         }
 
-        // Existing fixed cache allocations and preallocated buffers occupy
-        // ranges for the full plan lifetime. Work in arena pages, matching
-        // the units used by offset variables.
-        std::vector<std::pair<int64_t, int64_t>> occupied;
+        if (fixed_offset >= 0)
+        {
+            for (VarId offset_var : offsets_it->second)
+            {
+                const Domain &domain = state.domains[offset_var];
+                if (!domain.contains(fixed_offset))
+                    return false;
+                if (!domain.isFixed())
+                {
+                    if (state.setDomain(offset_var, Domain::makeFixed(fixed_offset)))
+                        worklist.push_back(offset_var);
+                }
+            }
+            return true;
+        }
+
+        // Approach A: Arrival-order sequential packing for cached nodes.
+        // Pack cached variables sequentially in the dynamic arena starting at min_p
+        // (after preallocated buffers).
+        const auto prealloc_it = state.preallocated_pages.find(cache_info.mem_space);
+        int64_t candidate = (prealloc_it != state.preallocated_pages.end()) ? prealloc_it->second : 0;
+        candidate = std::max<int64_t>(candidate, min_offset);
+
         for (const auto &other_cache : state.cached_vars)
         {
             if (other_cache.first == base_id)
@@ -2253,15 +3067,16 @@ class CachedOffsetAllocationPropagator : public Propagator
             const auto other_offsets_it = offsets_by_base_.find(other_cache.first);
             if (other_offsets_it == offsets_by_base_.end())
                 continue;
+
             int32_t other_offset = -1;
             for (VarId offset_var : other_offsets_it->second)
             {
                 const Domain &domain = state.domains[offset_var];
-                if (!domain.isFixed())
-                    continue;
-                if (other_offset >= 0 && other_offset != domain.fixedValue())
-                    return false;
-                other_offset = domain.fixedValue();
+                if (domain.isFixed())
+                {
+                    other_offset = domain.fixedValue();
+                    break;
+                }
             }
             if (other_offset < 0)
                 continue;
@@ -2269,37 +3084,19 @@ class CachedOffsetAllocationPropagator : public Propagator
             const VarInfo &other_info = state.var_infos[other_cache.second];
             if (other_info.mem_space != cache_info.mem_space)
                 continue;
-            const uint32_t other_size = std::max<uint32_t>(
-                1, state.bytesToPages(other_info.size_bytes, other_info.mem_space));
-            occupied.emplace_back(other_offset, static_cast<int64_t>(other_offset) + other_size);
-        }
 
-        int64_t candidate = fixed_offset >= 0 ? fixed_offset : min_offset;
-        if (fixed_offset < 0)
-        {
-            // Domains begin after the preallocated high-water mark, so these
-            // ranges are already excluded. Retain the explicit bound for
-            // states whose offset domains were built without that entry.
-            const auto prealloc_it = state.preallocated_pages.find(cache_info.mem_space);
-            if (prealloc_it != state.preallocated_pages.end())
-                candidate = std::max<int64_t>(candidate, prealloc_it->second);
-            std::sort(occupied.begin(), occupied.end());
-            for (const auto &[start, end] : occupied)
-            {
-                if (candidate + size_pages <= start)
-                    break;
-                if (candidate < end && candidate + size_pages > start)
-                    candidate = end;
-            }
+            const uint32_t other_size = getMaxSizePages(state, other_cache.first);
+            candidate = std::max<int64_t>(candidate, static_cast<int64_t>(other_offset) + other_size);
         }
 
         if (candidate > max_offset || candidate + size_pages - 1 > std::numeric_limits<int32_t>::max())
             return false;
-        for (const auto &[start, end] : occupied)
-        {
-            if (candidate < end && candidate + size_pages > start)
-                return false;
-        }
+
+        uint64_t mem_cap = state.getMemoryCap(cache_info.mem_space);
+        uint32_t align = state.getPageAlignment(cache_info.mem_space);
+        if (mem_cap > 0 && (static_cast<uint64_t>(candidate + size_pages) * align > mem_cap))
+            return false;
+
         for (VarId offset_var : offsets_it->second)
         {
             const Domain &domain = state.domains[offset_var];
@@ -2308,7 +3105,10 @@ class CachedOffsetAllocationPropagator : public Propagator
         }
 
         for (VarId offset_var : offsets_it->second)
-            state.setDomain(offset_var, Domain::makeFixed(static_cast<int32_t>(candidate)));
+        {
+            if (state.setDomain(offset_var, Domain::makeFixed(static_cast<int32_t>(candidate))))
+                worklist.push_back(offset_var);
+        }
         return true;
     }
 
@@ -2323,11 +3123,19 @@ class CachedOffsetAllocationPropagator : public Propagator
         ensureOffsetIndex(state);
         if (changed == kInvalidVarId)
         {
+            std::vector<BaseEClassId> active_caches;
             for (const auto &cache_pair : state.cached_vars)
             {
                 const Domain &domain = state.domains[cache_pair.second];
-                if (domain.isFixed() && domain.fixedValue() == 1 &&
-                    !allocateCachedOffset(state, cache_pair.first))
+                if (domain.isFixed() && domain.fixedValue() == 1)
+                    active_caches.push_back(cache_pair.first);
+            }
+            std::sort(active_caches.begin(), active_caches.end(), [](BaseEClassId a, BaseEClassId b) {
+                return a.value < b.value;
+            });
+            for (BaseEClassId bid : active_caches)
+            {
+                if (!allocateCachedOffset(state, bid, worklist))
                     return false;
             }
             return true;
@@ -2338,7 +3146,7 @@ class CachedOffsetAllocationPropagator : public Propagator
         {
             const Domain &domain = state.domains[changed];
             return !domain.isFixed() || domain.fixedValue() != 1 ||
-                   allocateCachedOffset(state, info.base_eclass_id);
+                   allocateCachedOffset(state, info.base_eclass_id, worklist);
         }
         if (info.type == VarType::OFFSET)
         {
@@ -2349,7 +3157,7 @@ class CachedOffsetAllocationPropagator : public Propagator
             const Domain &cache_domain = state.domains[cache_it->second];
             if (!cache_domain.isFixed() || cache_domain.fixedValue() != 1)
                 return true;
-            return allocateCachedOffset(state, base_id);
+            return allocateCachedOffset(state, base_id, worklist);
         }
         return true;
     }
@@ -2664,6 +3472,7 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = true)
     engine.addPropagator(std::make_unique<CacheExclusionPropagator>());
     engine.addPropagator(std::make_unique<StartPrecedencePropagator>(fixed_starts_only));
     // engine.addPropagator(std::make_unique<StartUniquePropagator>());
+    engine.addPropagator(std::make_unique<FixedOffsetStartPropagator>());
     engine.addPropagator(std::make_unique<WriteAfterReadPropagator>());
     engine.addPropagator(std::make_unique<ViewOffsetPropagator>());
     engine.addPropagator(std::make_unique<PearceKellyCyclePropagator>());

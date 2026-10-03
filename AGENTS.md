@@ -1,4 +1,4 @@
--use `rg` instead of `grep`
+-use `rg` instead of `grep`. make searches targeted (e.g tensor_graphs_cpp) to avoid long search times.
 -use .venv/Scripts/python.exe (or .venv/bin/python for linux) when running python. .venvx64/Scripts/python is used for ortools as there is no arm64 windows package
 
 conventions
