@@ -1367,6 +1367,221 @@ class WriteAfterReadPropagator : public Propagator
     }
 };
 
+// If two active values have overlapping fixed addresses and their start
+// domains already establish an order, push the later value past the earlier
+// value's readers before branching on each individual start.
+class WriteAfterReadStartPropagator : public Propagator
+{
+    struct ActiveAllocation
+    {
+        EClassId cid;
+        BaseEClassId base_id;
+        MemSpace mem_space;
+        int32_t offset;
+        uint32_t size;
+        VarId start_var;
+        Domain start_domain;
+        bool is_view;
+        bool is_persistent;
+    };
+
+    bool addReaderAncestors(const SearchState &state, uint32_t b, EClassId child,
+                            EClassId reader, std::vector<std::vector<EClassId>> &readers_by_value) const
+    {
+        for (uint32_t step = 0; step < 32; ++step)
+        {
+            child = state.bucket_egraphs[b].findConst(child);
+            if (child.value >= readers_by_value.size())
+                return true;
+            readers_by_value[child.value].push_back(reader);
+
+            auto sel_it = state.selected_vars[b].find(child);
+            if (sel_it == state.selected_vars[b].end())
+                return true;
+            const Domain &selection = state.domains[sel_it->second];
+            if (!selection.isFixed() || selection.fixedValue() <= 0)
+                return true;
+            const EClass &cls = state.bucket_egraphs[b].getEClass(child);
+            const uint32_t en_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
+            if (en_idx >= cls.enodes.size())
+                return true;
+            const ENodeId en_id = cls.enodes[en_idx];
+            if (en_id.value >= state.bucket_enode_infos[b].size() ||
+                !state.bucket_enode_infos[b][en_id.value].is_view)
+                return true;
+            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+            if (enode.getChildren().empty())
+                return true;
+            child = enode.getChildren()[0];
+        }
+        return true;
+    }
+
+    bool propagateBucket(SearchState &state, uint32_t b, std::vector<VarId> &worklist) const
+    {
+        const size_t num_classes = state.bucket_egraphs[b].classes.size();
+        std::vector<ActiveAllocation> active;
+        active.reserve(state.selected_vars[b].size());
+
+        for (const auto &selected_pair : state.selected_vars[b])
+        {
+            const EClassId cid = selected_pair.first;
+            const Domain &selection = state.domains[selected_pair.second];
+            if (!selection.isFixed() || selection.fixedValue() <= 0)
+                continue;
+            const uint32_t en_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
+            const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+            if (en_idx >= cls.enodes.size())
+                continue;
+
+            const auto offset_it = state.offset_vars[b].find(cid);
+            const auto start_it = state.start_vars[b].find(cid);
+            if (offset_it == state.offset_vars[b].end() || start_it == state.start_vars[b].end() ||
+                en_idx >= start_it->second.size())
+                continue;
+            const Domain &offset_domain = state.domains[offset_it->second];
+            if (!offset_domain.isFixed())
+                continue;
+
+            const ENodeId en_id = cls.enodes[en_idx];
+            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+            const bool is_view = en_id.value < state.bucket_enode_infos[b].size() &&
+                                 state.bucket_enode_infos[b][en_id.value].is_view;
+            const bool is_root = b < state.bucket_root_ids.size() &&
+                                 state.bucket_egraphs[b].findConst(cid) ==
+                                     state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]);
+            const bool is_persistent = is_root || enode.getOpType() == OpType::INPUT ||
+                                       enode.getOpType() == OpType::CACHE ||
+                                       state.preallocated_buffers.count(cls.base_eclass_id) != 0;
+            const uint32_t size_pages = std::max<uint32_t>(
+                1, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
+
+            active.push_back({cid, cls.base_eclass_id, cls.mem_space, offset_domain.fixedValue(),
+                              size_pages, start_it->second[en_idx],
+                              state.domains[start_it->second[en_idx]], is_view, is_persistent});
+        }
+
+        if (active.size() < 2)
+            return true;
+
+        std::vector<std::vector<EClassId>> readers_by_value(num_classes);
+        for (const auto &selected_pair : state.selected_vars[b])
+        {
+            const EClassId reader = selected_pair.first;
+            const Domain &selection = state.domains[selected_pair.second];
+            if (!selection.isFixed() || selection.fixedValue() <= 0)
+                continue;
+            const EClass &cls = state.bucket_egraphs[b].getEClass(reader);
+            const uint32_t en_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
+            if (en_idx >= cls.enodes.size())
+                continue;
+            const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+            for (EClassId child : enode.getChildren())
+                addReaderAncestors(state, b, child, reader, readers_by_value);
+        }
+
+        std::unordered_map<MemSpace, std::vector<size_t>> allocations_by_space;
+        for (size_t i = 0; i < active.size(); ++i)
+            allocations_by_space[active[i].mem_space].push_back(i);
+
+        for (auto &space_pair : allocations_by_space)
+        {
+            auto &indices = space_pair.second;
+            std::sort(indices.begin(), indices.end(), [&](size_t lhs, size_t rhs) {
+                return active[lhs].offset < active[rhs].offset;
+            });
+
+            for (size_t i = 0; i < indices.size(); ++i)
+            {
+                const ActiveAllocation &first = active[indices[i]];
+                const int64_t first_end = static_cast<int64_t>(first.offset) + first.size;
+                for (size_t j = i + 1; j < indices.size() && active[indices[j]].offset < first_end; ++j)
+                {
+                    const ActiveAllocation &second = active[indices[j]];
+                    if (first.cid == second.cid || first.base_id == second.base_id || first.is_view ||
+                        second.is_view || first.is_persistent || second.is_persistent)
+                        continue;
+                    if (static_cast<int64_t>(second.offset) + second.size <= first.offset)
+                        continue;
+
+                    const bool first_before_second = first.start_domain.getMax() < second.start_domain.getMin();
+                    const bool second_before_first = second.start_domain.getMax() < first.start_domain.getMin();
+                    if (!first_before_second && !second_before_first)
+                        continue;
+
+                    const ActiveAllocation &earlier = first_before_second ? first : second;
+                    const ActiveAllocation &later = first_before_second ? second : first;
+                    if (earlier.cid.value >= readers_by_value.size())
+                        continue;
+
+                    const auto &readers = readers_by_value[earlier.cid.value];
+                    int32_t earliest_last_reader = -1;
+                    bool later_reads_earlier = false;
+                    for (EClassId reader_cid : readers)
+                    {
+                        if (reader_cid == later.cid)
+                        {
+                            later_reads_earlier = true;
+                            break;
+                        }
+                        const auto reader_start_it = state.start_vars[b].find(reader_cid);
+                        const auto reader_sel_it = state.selected_vars[b].find(reader_cid);
+                        if (reader_start_it == state.start_vars[b].end() ||
+                            reader_sel_it == state.selected_vars[b].end())
+                            continue;
+                        const Domain &reader_selection = state.domains[reader_sel_it->second];
+                        if (!reader_selection.isFixed() || reader_selection.fixedValue() <= 0)
+                            continue;
+                        const uint32_t reader_en_idx = static_cast<uint32_t>(reader_selection.fixedValue() - 1);
+                        if (reader_en_idx >= reader_start_it->second.size())
+                            continue;
+                        earliest_last_reader = std::max(
+                            earliest_last_reader,
+                            state.domains[reader_start_it->second[reader_en_idx]].getMin());
+                    }
+                    if (later_reads_earlier || earliest_last_reader < 0)
+                        continue;
+
+                    Domain later_start = state.domains[later.start_var];
+                    const int32_t required_start = earliest_last_reader + 1;
+                    if (later_start.setMin(required_start))
+                    {
+                        if (later_start.isEmpty())
+                            return false;
+                        state.setDomain(later.start_var, later_start);
+                        worklist.push_back(later.start_var);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+  public:
+    std::string name() const override
+    {
+        return "WriteAfterReadStartPropagator";
+    }
+
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    {
+        if (changed == kInvalidVarId)
+            return true;
+        const VarInfo &info = state.var_infos[changed];
+        if (info.type != VarType::START || !state.domains[changed].isFixed())
+            return true;
+
+        const auto selected_it = state.selected_vars[info.bucket_idx].find(info.eclass_id);
+        if (selected_it == state.selected_vars[info.bucket_idx].end())
+            return true;
+        const Domain &selection = state.domains[selected_it->second];
+        if (!selection.isFixed() || selection.fixedValue() != static_cast<int32_t>(info.enode_idx + 1))
+            return true;
+
+        return propagateBucket(state, info.bucket_idx, worklist);
+    }
+};
+
 // 8. if (VarType::OFFSET and dom.isFixed() and corresponding start is fixed and corresponding
 // selected is not fixed to 0), any reader views should have offset fixed to equal this offset
 // (or plus a bit like with a slice).
@@ -1799,7 +2014,8 @@ class CacheRequirementPropagator : public Propagator
     {
         if (changed != kInvalidVarId)
         {
-            if (state.var_infos[changed].type != VarType::SELECTED)
+            const VarInfo &changed_info = state.var_infos[changed];
+            if (changed_info.type != VarType::SELECTED)
                 return true;
             const Domain &dom = state.domains[changed];
             if (dom.isFixed() && dom.fixedValue() > 0)
@@ -1822,6 +2038,265 @@ class CacheRequirementPropagator : public Propagator
                     }
                 }
             }
+        }
+        return true;
+    }
+};
+
+// Offsets of a globally cached eclass must match across bucket arenas so a
+// CACHE enode aliases the buffer populated by the corresponding computation.
+class CachedOffsetPropagator : public Propagator
+{
+    bool offset_index_initialized_ = false;
+    std::unordered_map<BaseEClassId, std::vector<VarId>> offsets_by_base_;
+
+    void ensureOffsetIndex(const SearchState &state)
+    {
+        if (offset_index_initialized_)
+            return;
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            for (const auto &offset_pair : state.offset_vars[b])
+            {
+                const BaseEClassId base_id = state.bucket_egraphs[b].getEClass(offset_pair.first).base_eclass_id;
+                offsets_by_base_[base_id].push_back(offset_pair.second);
+            }
+        }
+        offset_index_initialized_ = true;
+    }
+
+    bool synchronizeOffset(SearchState &state, BaseEClassId base_id, VarId source_var)
+    {
+        const Domain &source_domain = state.domains[source_var];
+        if (!source_domain.isFixed())
+            return true;
+        const int32_t shared_offset = source_domain.fixedValue();
+
+        auto offsets_it = offsets_by_base_.find(base_id);
+        if (offsets_it == offsets_by_base_.end())
+            return true;
+        for (VarId other_var : offsets_it->second)
+        {
+            if (other_var == source_var)
+                continue;
+
+            const Domain &other_domain = state.domains[other_var];
+            if (!other_domain.contains(shared_offset))
+                return false;
+            state.setDomain(other_var, Domain::makeFixed(shared_offset));
+        }
+        return true;
+    }
+
+  public:
+    std::string name() const override
+    {
+        return "CachedOffsetPropagator";
+    }
+
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    {
+        if (changed == kInvalidVarId)
+            return true;
+
+        ensureOffsetIndex(state);
+        const VarInfo &info = state.var_infos[changed];
+        BaseEClassId base_id;
+        if (info.type == VarType::OFFSET)
+        {
+            base_id = state.bucket_egraphs[info.bucket_idx].getEClass(info.eclass_id).base_eclass_id;
+            const auto cache_it = state.cached_vars.find(base_id);
+            if (cache_it == state.cached_vars.end())
+                return true;
+            const Domain &cache_dom = state.domains[cache_it->second];
+            if (!cache_dom.isFixed() || cache_dom.fixedValue() != 1)
+                return true;
+            return synchronizeOffset(state, base_id, changed);
+        }
+
+        if (info.type != VarType::CACHED)
+            return true;
+        const Domain &cache_dom = state.domains[changed];
+        if (!cache_dom.isFixed() || cache_dom.fixedValue() != 1)
+            return true;
+        base_id = info.base_eclass_id;
+        auto offsets_it = offsets_by_base_.find(base_id);
+        if (offsets_it != offsets_by_base_.end())
+        {
+            for (VarId offset_var : offsets_it->second)
+            {
+                if (state.domains[offset_var].isFixed())
+                    return synchronizeOffset(state, base_id, offset_var);
+            }
+        }
+        return true;
+    }
+};
+
+// Allocate a stable arena range as soon as a cache candidate is selected.
+// Cached values live across buckets, so their offsets must agree everywhere
+// and must not overlap any other persistent cached value.
+class CachedOffsetAllocationPropagator : public Propagator
+{
+    bool offset_index_initialized_ = false;
+    std::unordered_map<BaseEClassId, std::vector<VarId>> offsets_by_base_;
+
+    void ensureOffsetIndex(const SearchState &state)
+    {
+        if (offset_index_initialized_)
+            return;
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            for (const auto &offset_pair : state.offset_vars[b])
+            {
+                const BaseEClassId base_id = state.bucket_egraphs[b].getEClass(offset_pair.first).base_eclass_id;
+                offsets_by_base_[base_id].push_back(offset_pair.second);
+            }
+        }
+        offset_index_initialized_ = true;
+    }
+
+    bool allocateCachedOffset(SearchState &state, BaseEClassId base_id)
+    {
+        const auto cache_it = state.cached_vars.find(base_id);
+        const auto offsets_it = offsets_by_base_.find(base_id);
+        if (cache_it == state.cached_vars.end() || offsets_it == offsets_by_base_.end() || offsets_it->second.empty())
+            return true;
+
+        const VarInfo &cache_info = state.var_infos[cache_it->second];
+        const uint32_t size_pages = std::max<uint32_t>(
+            1, state.bytesToPages(cache_info.size_bytes, cache_info.mem_space));
+
+        int32_t min_offset = 0;
+        int32_t max_offset = std::numeric_limits<int32_t>::max();
+        int32_t fixed_offset = -1;
+        for (VarId offset_var : offsets_it->second)
+        {
+            const Domain &domain = state.domains[offset_var];
+            if (domain.isEmpty())
+                return false;
+            min_offset = std::max(min_offset, domain.getMin());
+            max_offset = std::min(max_offset, domain.getMax());
+            if (domain.isFixed())
+            {
+                if (fixed_offset >= 0 && fixed_offset != domain.fixedValue())
+                    return false;
+                fixed_offset = domain.fixedValue();
+            }
+        }
+
+        // Existing fixed cache allocations and preallocated buffers occupy
+        // ranges for the full plan lifetime. Work in arena pages, matching
+        // the units used by offset variables.
+        std::vector<std::pair<int64_t, int64_t>> occupied;
+        for (const auto &other_cache : state.cached_vars)
+        {
+            if (other_cache.first == base_id)
+                continue;
+            const Domain &cached_domain = state.domains[other_cache.second];
+            if (!cached_domain.isFixed() || cached_domain.fixedValue() != 1)
+                continue;
+
+            const auto other_offsets_it = offsets_by_base_.find(other_cache.first);
+            if (other_offsets_it == offsets_by_base_.end())
+                continue;
+            int32_t other_offset = -1;
+            for (VarId offset_var : other_offsets_it->second)
+            {
+                const Domain &domain = state.domains[offset_var];
+                if (!domain.isFixed())
+                    continue;
+                if (other_offset >= 0 && other_offset != domain.fixedValue())
+                    return false;
+                other_offset = domain.fixedValue();
+            }
+            if (other_offset < 0)
+                continue;
+
+            const VarInfo &other_info = state.var_infos[other_cache.second];
+            if (other_info.mem_space != cache_info.mem_space)
+                continue;
+            const uint32_t other_size = std::max<uint32_t>(
+                1, state.bytesToPages(other_info.size_bytes, other_info.mem_space));
+            occupied.emplace_back(other_offset, static_cast<int64_t>(other_offset) + other_size);
+        }
+
+        int64_t candidate = fixed_offset >= 0 ? fixed_offset : min_offset;
+        if (fixed_offset < 0)
+        {
+            // Domains begin after the preallocated high-water mark, so these
+            // ranges are already excluded. Retain the explicit bound for
+            // states whose offset domains were built without that entry.
+            const auto prealloc_it = state.preallocated_pages.find(cache_info.mem_space);
+            if (prealloc_it != state.preallocated_pages.end())
+                candidate = std::max<int64_t>(candidate, prealloc_it->second);
+            std::sort(occupied.begin(), occupied.end());
+            for (const auto &[start, end] : occupied)
+            {
+                if (candidate + size_pages <= start)
+                    break;
+                if (candidate < end && candidate + size_pages > start)
+                    candidate = end;
+            }
+        }
+
+        if (candidate > max_offset || candidate + size_pages - 1 > std::numeric_limits<int32_t>::max())
+            return false;
+        for (const auto &[start, end] : occupied)
+        {
+            if (candidate < end && candidate + size_pages > start)
+                return false;
+        }
+        for (VarId offset_var : offsets_it->second)
+        {
+            const Domain &domain = state.domains[offset_var];
+            if (!domain.contains(static_cast<int32_t>(candidate)))
+                return false;
+        }
+
+        for (VarId offset_var : offsets_it->second)
+            state.setDomain(offset_var, Domain::makeFixed(static_cast<int32_t>(candidate)));
+        return true;
+    }
+
+  public:
+    std::string name() const override
+    {
+        return "CachedOffsetAllocationPropagator";
+    }
+
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    {
+        ensureOffsetIndex(state);
+        if (changed == kInvalidVarId)
+        {
+            for (const auto &cache_pair : state.cached_vars)
+            {
+                const Domain &domain = state.domains[cache_pair.second];
+                if (domain.isFixed() && domain.fixedValue() == 1 &&
+                    !allocateCachedOffset(state, cache_pair.first))
+                    return false;
+            }
+            return true;
+        }
+
+        const VarInfo &info = state.var_infos[changed];
+        if (info.type == VarType::CACHED)
+        {
+            const Domain &domain = state.domains[changed];
+            return !domain.isFixed() || domain.fixedValue() != 1 ||
+                   allocateCachedOffset(state, info.base_eclass_id);
+        }
+        if (info.type == VarType::OFFSET)
+        {
+            const BaseEClassId base_id = state.bucket_egraphs[info.bucket_idx].getEClass(info.eclass_id).base_eclass_id;
+            const auto cache_it = state.cached_vars.find(base_id);
+            if (cache_it == state.cached_vars.end())
+                return true;
+            const Domain &cache_domain = state.domains[cache_it->second];
+            if (!cache_domain.isFixed() || cache_domain.fixedValue() != 1)
+                return true;
+            return allocateCachedOffset(state, base_id);
         }
         return true;
     }
@@ -2141,6 +2616,7 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = true)
     engine.addPropagator(std::make_unique<PearceKellyCyclePropagator>());
     engine.addPropagator(std::make_unique<ParentRemovalPropagator>());
     engine.addPropagator(std::make_unique<CacheRequirementPropagator>());
+    engine.addPropagator(std::make_unique<CachedOffsetPropagator>());
 }
 
 template <typename EngineT>
@@ -2149,6 +2625,8 @@ inline void addExtraPropagators(EngineT &engine)
     engine.addPropagator(std::make_unique<CriticalPathPropagator>());
     engine.addPropagator(std::make_unique<CacheBudgetPropagator>());
     engine.addPropagator(std::make_unique<EngineWorkloadPropagator>());
+    engine.addPropagator(std::make_unique<WriteAfterReadStartPropagator>());
+    engine.addPropagator(std::make_unique<CachedOffsetAllocationPropagator>());
 }
 
 template <typename EngineT>

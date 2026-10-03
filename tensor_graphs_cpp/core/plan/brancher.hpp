@@ -272,6 +272,16 @@ class HeuristicBrancher : public Brancher
     mutable std::vector<uint32_t> sched_child_seen_epoch;
     mutable uint32_t current_sched_child_seen_epoch = 1;
 
+    struct CachedOffsetCandidate
+    {
+        uint32_t bucket_idx;
+        EClassId eclass_id;
+        VarId cached_var;
+        VarId offset_var;
+    };
+    mutable bool cached_offset_index_initialized = false;
+    mutable std::vector<CachedOffsetCandidate> cached_offset_candidates;
+
 #ifdef TG_PROFILE
     struct BrancherTiming
     {
@@ -600,6 +610,53 @@ class HeuristicBrancher : public Brancher
         return false;
     }
 
+    bool chooseCachedOffset(const SearchState &state, BranchDecision &out_decision) const
+    {
+        if (!cached_offset_index_initialized)
+        {
+            for (uint32_t b = 0; b < state.buckets.size(); ++b)
+            {
+                for (const auto &offset_pair : state.offset_vars[b])
+                {
+                    const EClass &cls = state.bucket_egraphs[b].getEClass(offset_pair.first);
+                    if (state.preallocated_buffers.count(cls.base_eclass_id))
+                        continue;
+                    auto cached_it = state.cached_vars.find(cls.base_eclass_id);
+                    auto selected_it = state.selected_vars[b].find(offset_pair.first);
+                    if (cached_it == state.cached_vars.end() || selected_it == state.selected_vars[b].end())
+                        continue;
+                    cached_offset_candidates.push_back(
+                        {b, offset_pair.first, cached_it->second, offset_pair.second});
+                }
+            }
+            cached_offset_index_initialized = true;
+        }
+
+        for (uint32_t pass = 0; pass < 2; ++pass)
+        {
+            for (const CachedOffsetCandidate &candidate : cached_offset_candidates)
+            {
+                const Domain &cached = state.domains[candidate.cached_var];
+                const Domain &selected = state.domains[state.selected_vars[candidate.bucket_idx].at(candidate.eclass_id)];
+                const Domain &offset = state.domains[candidate.offset_var];
+                if (!cached.isFixed() || cached.fixedValue() != 1 || !selected.isFixed() ||
+                    selected.fixedValue() <= 0 || offset.isFixed() || offset.isEmpty())
+                    continue;
+
+                const EClass &cls = state.bucket_egraphs[candidate.bucket_idx].getEClass(candidate.eclass_id);
+                const ENode &selected_enode = state.bucket_egraphs[candidate.bucket_idx].getENode(
+                    cls.enodes[static_cast<uint32_t>(selected.fixedValue() - 1)]);
+                const bool selected_cache = selected_enode.getOpType() == OpType::CACHE;
+                if (selected_cache != (pass == 0))
+                    continue;
+
+                const int32_t preferred = preferredOffset(state, candidate.bucket_idx, candidate.eclass_id, offset);
+                return setOffsetDecision(offset, preferred, out_decision, candidate.offset_var);
+            }
+        }
+        return false;
+    }
+
     bool chooseSchedule(const SearchState &state, BranchDecision &out_decision) const
     {
         static const std::vector<EClassId> empty_cids;
@@ -813,6 +870,17 @@ class HeuristicBrancher : public Brancher
         // Schedule and allocate one active operation at a time. This keeps
         // start/offset variables in the same hyperbox search instead of
         // manufacturing a complete heuristic assignment in one delta.
+        // Place persistent cache buffers first so CachedOffsetPropagator can
+        // immediately share their addresses with every bucket copy.
+        if (chooseCachedOffset(state, out_decision))
+        {
+#ifdef TG_PROFILE
+            brancher_timing.total_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - total_start).count());
+#endif
+            return true;
+        }
         if (chooseSchedule(state, out_decision))
         {
 #ifdef TG_PROFILE

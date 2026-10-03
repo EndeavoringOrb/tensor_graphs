@@ -127,6 +127,13 @@ struct Session
         }
         for (const auto &bucket : manualBuckets)
         {
+            // Zero-weight buckets (especially the automatically-added full
+            // bucket) are planning witnesses, not expected runtime traffic.
+            // Letting their dirty regions into this set prevents inputs that
+            // stay clean in every weighted bucket from being folded into the
+            // repository for those buckets.
+            if (bucket.weight <= 0.0f)
+                continue;
             for (const auto &pair : bucket.inputDirtyRegions)
             {
                 dynamic_inputs.push_back(pair.first);

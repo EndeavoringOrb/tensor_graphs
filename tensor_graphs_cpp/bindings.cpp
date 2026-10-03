@@ -291,7 +291,6 @@ class LLMSession
     uint32_t vocab_size = 0;
     uint32_t max_seq_len = 128;
     std::vector<uint32_t> prev_tokens;
-    bool compileNoWeightsBucket = false;
     Debug::ReferenceVerifier referenceVerifier;
     std::string referenceFile;
     std::string compareReferenceFile;
@@ -308,7 +307,6 @@ class LLMSession
                 bool disable_compilation_caching = false, bool ref_only = false,
                bool compile_no_weights_bucket = false)
     {
-        this->compileNoWeightsBucket = compile_no_weights_bucket;
         referenceFile = write_refs;
         compareReferenceFile = compare_refs;
         runFullGraph = !referenceFile.empty() || !compareReferenceFile.empty();
@@ -363,6 +361,8 @@ class LLMSession
             std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : ""));
             actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
+        if (compile_no_weights_bucket)
+            actual_cache += ".no-weights-persistent-cache-v2";
         if (!referenceFile.empty())
             actual_cache += disable_fusion ? ".no-fusion-reference-write" : ".reference-write";
         else if (disable_fusion)

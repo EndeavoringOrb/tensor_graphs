@@ -218,7 +218,7 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                     Error::throw_err("Parent node " + std::to_string(pid.value) + " not found in results or store");
                 }
             }
-            input_ptrs.push_back(results[pid].data());
+            input_ptrs.push_back(results[pid].data() + views[pid].offset);
             input_views.push_back(views[pid]);
             TensorNode in_node = graph.getNode(pid);
             in_node.strides = views[pid].strides;
@@ -271,11 +271,12 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
             LogicalId parent_id = node.child_ids[0];
             results[node_id] = results[parent_id];
             chosen_out_view.strides = dummy_out_view.strides;
-            chosen_out_view.offset = dummy_out_view.offset;
+            chosen_out_view.offset = views[parent_id].offset + dummy_out_view.offset;
             views[node_id] = chosen_out_view;
 
             TensorView contig_view = dummy_out_view;
             contig_view.strides = calcContiguousStrides(dummy_out_view.getShape());
+            contig_view.offset = 0;
             std::vector<uint8_t> contig_data(countElements(contig_view) * elem_size);
             const uint8_t *src_data = results[parent_id].data() + chosen_out_view.offset;
             for (uint64_t i = 0; i < countElements(contig_view); ++i)
@@ -292,6 +293,35 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
         results[node_id].resize(buf_elements * elem_size, 0);
         std::vector<void *> output_ptrs = {results[node_id].data()};
         std::vector<TensorView> output_views = {chosen_out_view};
+
+        std::vector<std::vector<uint8_t>> temp_contiguous_buffers;
+        if (!kernel.requiresContiguous.empty())
+        {
+            for (size_t i = 0; i < input_ptrs.size(); ++i)
+            {
+                size_t rule_idx = std::min(i, kernel.requiresContiguous.size() - 1);
+                if (kernel.requiresContiguous[rule_idx] && !isContiguous(input_views[i]))
+                {
+                    uint64_t in_elem_size = getDTypeSize(input_views[i].dtype);
+                    TensorView contig_view = input_views[i];
+                    contig_view.strides = calcContiguousStrides(input_views[i].getShape());
+                    contig_view.offset = 0;
+
+                    std::vector<uint8_t> contig_data(countElements(contig_view) * in_elem_size);
+                    const uint8_t *src_data = static_cast<const uint8_t *>(input_ptrs[i]);
+                    for (uint64_t el = 0; el < countElements(contig_view); ++el)
+                    {
+                        uint64_t src_idx = getStridedIndex(el, input_views[i].getShape(), input_views[i].strides);
+                        std::memcpy(contig_data.data() + el * in_elem_size, src_data + src_idx * in_elem_size,
+                                    in_elem_size);
+                    }
+
+                    temp_contiguous_buffers.push_back(std::move(contig_data));
+                    input_ptrs[i] = temp_contiguous_buffers.back().data();
+                    input_views[i] = contig_view;
+                }
+            }
+        }
 
         if (kernel.run)
         {

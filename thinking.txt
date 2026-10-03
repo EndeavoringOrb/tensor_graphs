@@ -63,3 +63,5 @@ EXTRA
 13. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, state.cache_sums[mem_space] += size if state.cache_sum > mem_cap
 14. TODO: make plan more descriptive. restrictOffset/restrictStart. basically better versions of 7, but they restrict domain of multiple others instead of only working on pairs
 15. if VarType::SELECTED, update per engine workload, lower_bound = max(lower_bound, engine_workload) for engine_workload in workloads
+16. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, full bucket must have something selected, and cannot have CACHE/SCATTER (or FUSED with root SCATTER in refFactory).
+17. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, any unselected cache nodes that alone push cache size over mem cap must be fixed to {0}
