@@ -1194,7 +1194,6 @@ struct Planner
         }
 
         baseState.egraph.rebuild();
-        baseState.egraph.populateBaseEClassIds();
         baseStateInitialized = true;
     }
 

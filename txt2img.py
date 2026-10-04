@@ -98,12 +98,6 @@ def main():
         help="Path to Qwen Image VAE checkpoint",
     )
     parser.add_argument(
-        "--run-dir",
-        type=str,
-        default=None,
-        help="Path to run directory (e.g. runs/0) to load the cost predictor model from",
-    )
-    parser.add_argument(
         "--min-compile-time",
         type=float,
         default=0.0,
@@ -194,54 +188,6 @@ def main():
     prefix_len = len(tokenizer[0].encode(PROMPT_TEMPLATE_ENCODE_PREFIX).ids)
     text_seq_len = len(token_ids) - prefix_len
 
-    # Initialize search agent delegate
-    if args.run_dir:
-        run_dir_path = Path(args.run_dir)
-        config_file = run_dir_path / "config.json"
-        cfg = TrainConfig()
-        if config_file.exists():
-            try:
-                cfg = TrainConfig.load(config_file)
-                print(f"[Txt2Img] Loaded config from {config_file}")
-            except Exception as e:
-                print(
-                    f"[Txt2Img] Warning: Failed to load config from {config_file}: {e}"
-                )
-
-        model_file = run_dir_path / "model.safetensors"
-        if model_file.exists():
-            try:
-                from safetensors.torch import load_file
-                from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
-            except ModuleNotFoundError as exc:
-                if exc.name == "torch":
-                    raise RuntimeError(
-                        "Loading a trained --run-dir requires PyTorch. "
-                        "Run without --run-dir or install a PyTorch build "
-                        "compatible with this platform."
-                    ) from exc
-                raise
-            state_dict = load_file(model_file)
-            model = CostPredictorRNN(hidden_dim=cfg.hidden_dim)
-            model.load_state_dict(state_dict, strict=False)
-            model.eval()
-            delegate = CostPredictorDelegate(
-                model=model,
-                epsilon=0.0,
-                is_training=False,
-            )
-            print(f"[Txt2Img] Loaded trained CostPredictorRNN agent from {model_file}")
-        else:
-            print(
-                f"[Txt2Img] Warning: Model file not found at {model_file}, using HeuristicSearchDelegate."
-            )
-            delegate = None
-    else:
-        print(
-            "[Txt2Img] No --run-dir specified. Using HeuristicSearchDelegate."
-        )
-        delegate = None
-
     if args.use_ortools_lns:
         os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
 
@@ -254,7 +200,7 @@ def main():
         text_seq_len=text_seq_len,
         steps=args.steps,
         mu=args.mu,
-        delegate=delegate,
+        brancher=None,
         min_compile_time=args.min_compile_time,
         disable_node_caching=args.disable_node_caching,
         disable_compilation_caching=args.disable_compilation_caching,

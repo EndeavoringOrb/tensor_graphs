@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -344,8 +345,25 @@ struct EGraph
         const BaseEClassId baseB = classes[rb.value].base_eclass_id;
         if (baseA != BaseEClassId{} && baseB != BaseEClassId{})
         {
-            Error::throw_err("EClass merge would merge two base eclasses: " + toString(ra) + " and " +
-                             toString(rb));
+            auto describeEClass = [this](EClassId id) {
+                const EClass &e_class = classes[id.value];
+                std::stringstream details;
+                details << "EClass " << toString(id) << " (base=" << toString(e_class.base_eclass_id)
+                        << ", shape=" << toString(e_class.shape) << ", strides=" << toString(e_class.strides)
+                        << ", dtype=" << toString(e_class.dtype) << ", mem_space=" << toString(e_class.mem_space)
+                        << ", enodes=" << e_class.enodes.size() << ")";
+                for (ENodeId enode_id : e_class.enodes)
+                {
+                    const ENode &enode = enodes[enode_id.value];
+                    details << "\n  ENode " << toString(enode_id) << ": op=" << toString(enode.getOpType())
+                            << ", name=" << (enode.getOpName().empty() ? "N/A" : enode.getOpName())
+                            << ", kernel=" << toString(enode.getKernelId()) << ", debugOrigin="
+                            << (enode.getDebugOrigin().empty() ? "N/A" : enode.getDebugOrigin());
+                }
+                return details.str();
+            };
+            Error::throw_err("EClass merge would merge two base eclasses:\n  " + describeEClass(ra) +
+                             "\n  " + describeEClass(rb));
         }
         if (baseA == BaseEClassId{})
             classes[ra.value].base_eclass_id = baseB;
