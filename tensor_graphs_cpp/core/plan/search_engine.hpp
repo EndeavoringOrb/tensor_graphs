@@ -5,10 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <array>
-#ifdef TG_PROFILE
 #include <iomanip>
-#endif
-#include <iostream>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -64,10 +61,6 @@ class SearchEngine
         : state(std::move(state)), selector(selector ? selector : std::make_shared<PriorityQueueSelector>()),
           brancher(brancher ? brancher : std::make_shared<HeuristicBrancher>())
     {
-#ifdef TG_PROFILE
-        search_start_time = std::chrono::steady_clock::now();
-        next_propagator_report = search_start_time + std::chrono::seconds(2);
-#endif
     }
 
     void addPropagator(std::unique_ptr<Propagator> prop)
@@ -231,7 +224,6 @@ class SearchEngine
                 timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
                 if (!propagated)
                     timing.contradictions++;
-                propagator_calls_since_report++;
                 prop_and_lb_ns_in_call += propagate_ns;
 #endif
                 if (!propagated)
@@ -241,7 +233,6 @@ class SearchEngine
                         *out_conflict_reason = prop->name();
 #ifdef TG_PROFILE
                     record_prop_overhead();
-                    maybeReportPropagatorTimings();
 #endif
                     return false;
                 }
@@ -260,7 +251,6 @@ class SearchEngine
                     }
 #ifdef TG_PROFILE
                     record_prop_overhead();
-                    maybeReportPropagatorTimings();
 #endif
                     return false;
                 }
@@ -270,7 +260,6 @@ class SearchEngine
 
 #ifdef TG_PROFILE
         record_prop_overhead();
-        maybeReportPropagatorTimings();
 #endif
         // An incumbent can improve without changing a domain (for example
         // after restoring an already-propagated node).
@@ -495,10 +484,7 @@ class SearchEngine
     bool solve(float timeout_seconds = 0.0f)
     {
         TimeoutChecker timer(timeout_seconds);
-#ifdef TG_PROFILE
-        search_start_time = std::chrono::steady_clock::now();
-        next_propagator_report = search_start_time + std::chrono::seconds(2);
-#endif
+        const auto search_start_time = std::chrono::steady_clock::now();
 
         LOG(DEBUG) << "[SearchEngine] Starting solve: num_vars=" << state.numVars()
                    << ", candidates=" << state.candidates.size()
@@ -716,13 +702,13 @@ class SearchEngine
             }
         }
 
-        LOG(INFO) << "[SearchEngine] Search finished after " << iterations << " iterations ("
+        const double search_elapsed_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - search_start_time).count();
+        LOG(INFO) << "[SearchEngine] Search finished after " << iterations << " iterations in "
+                  << std::fixed << std::setprecision(2)
+                  << search_elapsed_seconds << "s ("
                   << all_nodes.size() << " total nodes generated). Best cost: "
                   << (incumbent_best_cost < TGConstants::INF ? std::to_string(incumbent_best_cost) : "none");
-
-#ifdef TG_PROFILE
-        reportPropagatorTimings(true);
-#endif
 
         return incumbent_best_cost < TGConstants::INF;
     }
@@ -756,144 +742,6 @@ class SearchEngine
 
     std::vector<PropagatorTiming> propagator_timings;
     SearchTimingBreakdown search_timing;
-    uint64_t propagator_calls_since_report = 0;
-    std::chrono::steady_clock::time_point next_propagator_report;
-    std::chrono::steady_clock::time_point search_start_time;
-
-    void maybeReportPropagatorTimings()
-    {
-        if (std::chrono::steady_clock::now() < next_propagator_report)
-            return;
-
-        reportPropagatorTimings(false);
-    }
-
-    void reportPropagatorTimings(bool force)
-    {
-        if (!force && propagator_calls_since_report == 0)
-            return;
-
-        const auto now = std::chrono::steady_clock::now();
-        const double search_elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
-            now - search_start_time).count();
-
-        uint64_t total_ns = 0;
-        for (size_t i = 0; i < propagators.size(); ++i)
-        {
-            total_ns += propagator_timings[i].propagate_ns + propagator_timings[i].lower_bound_ns;
-        }
-        const double total_prop_ms = total_ns / 1.0e6;
-        const double total_pct_search = (search_elapsed_ms > 0.0)
-                                            ? (total_prop_ms / search_elapsed_ms) * 100.0
-                                            : 0.0;
-        const double other_search_ms = std::max(0.0, search_elapsed_ms - total_prop_ms);
-        const double other_pct_search = (search_elapsed_ms > 0.0)
-                                            ? (other_search_ms / search_elapsed_ms) * 100.0
-                                            : 0.0;
-
-        std::cout << "\n[SearchEngine] Propagator timing report" << (force ? " (final)" : "") << "\n";
-        std::cout << std::left << std::setw(32) << "Propagator" << std::right
-                  << std::setw(12) << "Prop (ms)"
-                  << std::setw(12) << "Prop calls"
-                  << std::setw(14) << "Prop avg (us)"
-                  << std::setw(14) << "Prop max (ms)"
-                  << std::setw(15) << "Contradictions"
-                  << std::setw(10) << "LB (ms)"
-                  << std::setw(10) << "LB calls"
-                  << std::setw(12) << "LB max (ms)"
-                  << std::setw(12) << "Total (ms)"
-                  << std::setw(10) << "% Search"
-                  << std::setw(10) << "% Prop"
-                  << "\n";
-        std::cout << std::string(151, '-') << "\n";
-
-        for (size_t i = 0; i < propagators.size(); ++i)
-        {
-            const auto &timing = propagator_timings[i];
-            const double propagate_ms = timing.propagate_ns / 1.0e6;
-            const double lower_bound_ms = timing.lower_bound_ns / 1.0e6;
-            const double total_ms = propagate_ms + lower_bound_ms;
-            const double propagate_avg_us = timing.propagate_calls == 0
-                                                ? 0.0
-                                                : static_cast<double>(timing.propagate_ns) /
-                                                      static_cast<double>(timing.propagate_calls) / 1.0e3;
-            const double pct_search = (search_elapsed_ms > 0.0)
-                                          ? (total_ms / search_elapsed_ms) * 100.0
-                                          : 0.0;
-            const double pct_prop = (total_prop_ms > 0.0)
-                                        ? (total_ms / total_prop_ms) * 100.0
-                                        : 0.0;
-            std::cout << std::left << std::setw(32) << propagators[i]->name().substr(0, 31) << std::right
-                      << std::fixed << std::setprecision(2)
-                      << std::setw(12) << propagate_ms
-                      << std::setw(12) << timing.propagate_calls
-                      << std::setw(14) << propagate_avg_us
-                      << std::setw(14) << timing.max_propagate_ns / 1.0e6
-                      << std::setw(15) << timing.contradictions
-                      << std::setw(10) << lower_bound_ms
-                      << std::setw(10) << timing.lower_bound_calls
-                      << std::setw(12) << timing.max_lower_bound_ns / 1.0e6
-                      << std::setw(12) << total_ms
-                      << std::setw(9) << pct_search << "%"
-                      << std::setw(9) << pct_prop << "%"
-                      << "\n";
-        }
-        std::cout << std::string(151, '-') << "\n";
-        std::cout << std::fixed << std::setprecision(2)
-                  << "Total Search Elapsed Time:            " << std::setw(10) << search_elapsed_ms << " ms\n"
-                  << "Cumulative Propagator Time:          " << std::setw(10) << total_prop_ms << " ms ("
-                  << total_pct_search << "% of total search time)\n"
-                  << "Rest of Search (branching, queue...): " << std::setw(10) << other_search_ms << " ms ("
-                  << other_pct_search << "% of total search time)\n";
-
-        const double choose_branch_ms = search_timing.choose_branch_ns / 1.0e6;
-        const double restore_node_ms = search_timing.restore_node_ns / 1.0e6;
-        const double run_prop_overhead_ms = search_timing.run_prop_overhead_ns / 1.0e6;
-        const double queue_pop_ms = search_timing.queue_pop_ns / 1.0e6;
-        const double queue_push_ms = search_timing.queue_push_ns / 1.0e6;
-        const double leaf_eval_ms = search_timing.leaf_eval_ns / 1.0e6;
-        const double queue_total_ms = queue_pop_ms + queue_push_ms;
-        const double accounted_other_ms = choose_branch_ms + restore_node_ms + run_prop_overhead_ms + queue_total_ms + leaf_eval_ms;
-        const double remaining_other_ms = std::max(0.0, other_search_ms - accounted_other_ms);
-
-        std::cout << "\n[SearchEngine] Non-Propagator Timing Breakdown:\n";
-        std::cout << std::left << std::setw(32) << "Component" << std::right
-                  << std::setw(12) << "Time (ms)"
-                  << std::setw(12) << "Calls"
-                  << std::setw(14) << "% Search"
-                  << std::setw(14) << "% Rest"
-                  << "\n";
-        std::cout << std::string(84, '-') << "\n";
-
-        auto print_component = [&](const std::string &name, double ms, uint64_t calls) {
-            const double pct_search = (search_elapsed_ms > 0.0) ? (ms / search_elapsed_ms) * 100.0 : 0.0;
-            const double pct_rest = (other_search_ms > 0.0) ? (ms / other_search_ms) * 100.0 : 0.0;
-            std::cout << std::left << std::setw(32) << name << std::right
-                      << std::fixed << std::setprecision(2)
-                      << std::setw(12) << ms
-                      << std::setw(12) << calls
-                      << std::setw(13) << pct_search << "%"
-                      << std::setw(13) << pct_rest << "%"
-                      << "\n";
-        };
-
-        print_component("chooseBranch", choose_branch_ms, 0);
-        print_component("restoreNode", restore_node_ms, search_timing.restore_node_calls);
-        print_component("runPropagators Overhead", run_prop_overhead_ms, 0);
-        print_component("Queue Pop", queue_pop_ms, search_timing.queue_pop_calls);
-        print_component("Queue Push", queue_push_ms, search_timing.queue_push_calls);
-        print_component("Leaf Evaluation", leaf_eval_ms, search_timing.leaf_eval_calls);
-        print_component("Other / Engine Overhead", remaining_other_ms, 0);
-        std::cout << std::string(84, '-') << "\n";
-
-        if (brancher)
-            brancher->reportBrancherTiming();
-
-        std::cout << std::flush;
-
-        propagator_calls_since_report = 0;
-        next_propagator_report = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-    }
 #endif
 };
 

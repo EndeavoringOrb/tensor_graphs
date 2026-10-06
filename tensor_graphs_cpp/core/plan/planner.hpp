@@ -569,6 +569,7 @@ struct Planner
                 enodeInfos[enode_id.value].dp_cp_cost = 0.0f;
                 enodeInfos[enode_id.value].dp_mem = node_size;
             }
+
         }
 
         const uint32_t max_iters = std::max<uint32_t>(1, num_classes + num_enodes);
@@ -577,10 +578,13 @@ struct Planner
             bool changed = false;
             for (uint32_t i = 0; i < num_enodes; ++i)
             {
+
                 const ENode &enode = egraph.getENodes()[i];
                 const float cost = enodeInfos[i].cost;
                 if (cost == TGConstants::INF || std::isnan(cost))
+                {
                     continue;
+                }
 
                 std::vector<EClassId> child_classes;
                 child_classes.reserve(enode.getChildren().size());
@@ -602,7 +606,9 @@ struct Planner
                     max_child_cp_cost = std::max(max_child_cp_cost, eclass_dp_cp_cost[child.value]);
                 }
                 if (!all_children_ready)
+                {
                     continue;
+                }
 
                 float total_mem = 0.0f;
                 if (!child_classes.empty())
@@ -698,6 +704,7 @@ struct Planner
                     eclass_dp_mem[parent.value] = total_mem;
                     changed = true;
                 }
+
             }
             if (!changed)
                 break;
@@ -708,15 +715,35 @@ struct Planner
             float cost = TGConstants::INF;
             ENodeId chosen_enode = ENodeId{UINT32_MAX};
             std::vector<uint64_t> covered_bits;
-            std::vector<ENodeId> selected_enodes;
-            std::unordered_map<Engine, float> engine_work;
+            // Sorted class-bit indices for sparse child-summary traversal.
+            std::vector<uint32_t> covered_class_bits;
+            // Chosen enode per covered_class_bits entry, kept parallel and
+            // sorted so child merges never touch a num_canonical-sized array.
+            std::vector<ENodeId> covered_enodes;
+            // Dense per-engine work accumulator indexed by engine ordinal.
+            std::vector<float> engine_work;
+            // Engine ordinals with nonzero work, so clears and makespan scans
+            // skip the untouched majority.
+            std::vector<uint32_t> used_engines;
             bool valid = false;
+        };
+
+        struct CandidateCostCache
+        {
+            std::vector<uint64_t> child_versions;
+            // Full last-built candidate summary, kept so an accepted
+            // candidate can be adopted without a rebuild. Empty on misses.
+            OptimisticSummary summary;
+            float cost = TGConstants::INF;
+            bool valid = false;
+            bool initialized = false;
         };
 
         std::vector<EClassId> canonical_classes;
         std::vector<uint32_t> class_to_bit(num_classes, UINT32_MAX);
         for (uint32_t i = 0; i < num_classes; ++i)
         {
+
             EClassId cid = egraph.findConst(EClassId{i});
             if (cid.value != i)
                 continue;
@@ -733,27 +760,77 @@ struct Planner
         auto add_bits = [](std::vector<uint64_t> &bits, uint32_t bit) {
             bits[bit >> 6] |= 1ULL << (bit & 63);
         };
-        auto add_enode_work = [&](std::unordered_map<Engine, float> &work, ENodeId enode_id) {
-            if (enode_id.value >= egraph.getENodes().size() || enode_id.value >= enodeInfos.size())
-                return;
-            const float cost = enodeInfos[enode_id.value].cost;
-            if (cost == TGConstants::INF || std::isnan(cost))
-                return;
-            for (const Engine &engine : egraph.getENode(enode_id).getEngines())
-                work[engine] += cost;
+        // Precompute per-enode engine-work data once. Candidate construction
+        // accumulates this on every merged bit, so the hot path must not
+        // revisit egraph/enodeInfos or hash Engine keys.
+        struct EngineKeyLess
+        {
+            bool operator()(const Engine &a, const Engine &b) const { return a < b; }
         };
-        auto makespan = [](const std::unordered_map<Engine, float> &work) {
+        std::map<Engine, uint32_t, EngineKeyLess> engine_ordinal;
+        struct ENodeWork
+        {
+            float cost = TGConstants::INF;
+            uint32_t begin = 0;
+            uint32_t count = 0;
+        };
+        std::vector<ENodeWork> enode_work(num_enodes);
+        std::vector<uint32_t> enode_engine_ids;
+        for (uint32_t i = 0; i < num_enodes; ++i)
+        {
+            const float cost = enodeInfos[i].cost;
+            if (cost == TGConstants::INF || std::isnan(cost))
+                continue;
+            ENodeWork &work = enode_work[i];
+            work.cost = cost;
+            work.begin = static_cast<uint32_t>(enode_engine_ids.size());
+            for (const Engine &engine : egraph.getENodes()[i].getEngines())
+            {
+                auto inserted = engine_ordinal.emplace(
+                    engine, static_cast<uint32_t>(engine_ordinal.size()));
+                enode_engine_ids.push_back(inserted.first->second);
+                ++work.count;
+            }
+        }
+        const uint32_t num_engines = static_cast<uint32_t>(engine_ordinal.size());
+        auto add_enode_work = [&](OptimisticSummary &summary, ENodeId enode_id) {
+            if (enode_id.value >= num_enodes)
+                return;
+            const ENodeWork &work = enode_work[enode_id.value];
+            if (work.cost == TGConstants::INF)
+                return;
+            if (summary.engine_work.size() < num_engines)
+                summary.engine_work.resize(num_engines, 0.0f);
+            for (uint32_t k = 0; k < work.count; ++k)
+            {
+                const uint32_t ordinal = enode_engine_ids[work.begin + k];
+                float &accumulated = summary.engine_work[ordinal];
+                if (accumulated == 0.0f)
+                    summary.used_engines.push_back(ordinal);
+                accumulated += work.cost;
+            }
+        };
+        auto makespan = [](const OptimisticSummary &summary) {
             float result = 0.0f;
-            for (const auto &entry : work)
-                result = std::max(result, entry.second);
+            for (uint32_t ordinal : summary.used_engines)
+                result = std::max(result, summary.engine_work[ordinal]);
             return result;
         };
 
         std::vector<OptimisticSummary> optimistic(num_classes);
-        for (EClassId cid : canonical_classes)
+
+        // Canonicalize and deduplicate each enode's children once. Candidate
+        // construction revisits the same enodes many times during propagation.
+        std::vector<std::vector<EClassId>> canonical_children(num_enodes);
+        for (uint32_t i = 0; i < num_enodes; ++i)
         {
-            optimistic[cid.value].covered_bits.assign(bit_words, 0);
-            optimistic[cid.value].selected_enodes.assign(num_canonical, invalid_enode);
+            const auto &children = egraph.getENodes()[i].getChildren();
+            auto &canonical = canonical_children[i];
+            canonical.reserve(children.size());
+            for (EClassId child : children)
+                canonical.push_back(egraph.findConst(child));
+            std::sort(canonical.begin(), canonical.end());
+            canonical.erase(std::unique(canonical.begin(), canonical.end()), canonical.end());
         }
 
         std::vector<std::vector<EClassId>> parent_map(num_classes);
@@ -761,19 +838,57 @@ struct Planner
         {
             for (ENodeId enode_id : egraph.getEClass(cid).enodes)
             {
-                for (EClassId child : egraph.getENode(enode_id).getChildren())
+                for (EClassId canonical_child : canonical_children[enode_id.value])
                 {
-                    EClassId canonical_child = egraph.findConst(child);
                     if (canonical_child.value < num_classes)
+                    {
                         parent_map[canonical_child.value].push_back(cid);
+                    }
                 }
             }
+            
         }
         for (auto &parents : parent_map)
         {
             std::sort(parents.begin(), parents.end());
             parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
         }
+
+        // Each enode candidate depends on its fixed cost and its children's
+        // current summaries. Versioning those summaries lets us reuse the
+        // candidate's scalar result when a worklist revisit changed unrelated
+        // classes.
+        std::vector<CandidateCostCache> candidate_cost_cache(num_enodes);
+        std::vector<uint64_t> summary_versions(num_classes, 0);
+        auto candidate_cache_is_current = [&](ENodeId enode_id) {
+            const CandidateCostCache &cache = candidate_cost_cache[enode_id.value];
+            const auto &children = canonical_children[enode_id.value];
+            if (!cache.initialized || cache.child_versions.size() != children.size())
+                return false;
+            for (size_t i = 0; i < children.size(); ++i)
+            {
+                if (cache.child_versions[i] != summary_versions[children[i].value])
+                    return false;
+            }
+            return true;
+        };
+        auto update_candidate_cache = [&](ENodeId enode_id, bool valid, float cost,
+                                          OptimisticSummary &candidate) {
+            CandidateCostCache &cache = candidate_cost_cache[enode_id.value];
+            const auto &children = canonical_children[enode_id.value];
+            cache.child_versions.resize(children.size());
+            for (size_t i = 0; i < children.size(); ++i)
+                cache.child_versions[i] = summary_versions[children[i].value];
+            cache.cost = cost;
+            cache.valid = valid;
+            // Move the built summary into the cache so an accepted candidate
+            // can be adopted later without rebuilding it.
+            if (valid)
+                std::swap(cache.summary, candidate);
+            else
+                cache.summary.covered_class_bits.clear();
+            cache.initialized = true;
+        };
 
         auto build_candidate = [&](EClassId cid, ENodeId enode_id, OptimisticSummary &candidate) {
             if (enode_id.value >= enodeInfos.size() || enodeInfos[enode_id.value].cost == TGConstants::INF ||
@@ -784,56 +899,66 @@ struct Planner
             if (class_bit == UINT32_MAX)
                 return false;
 
-            candidate = OptimisticSummary{};
+            candidate.cost = TGConstants::INF;
+            candidate.chosen_enode = invalid_enode;
+            candidate.valid = false;
             candidate.covered_bits.assign(bit_words, 0);
-            candidate.selected_enodes.assign(num_canonical, invalid_enode);
+            if (candidate.engine_work.size() != num_engines)
+                candidate.engine_work.assign(num_engines, 0.0f);
+            else
+            {
+                for (uint32_t ordinal : candidate.used_engines)
+                    candidate.engine_work[ordinal] = 0.0f;
+            }
+            candidate.used_engines.clear();
             add_bits(candidate.covered_bits, class_bit);
-            candidate.selected_enodes[class_bit] = enode_id;
-            add_enode_work(candidate.engine_work, enode_id);
+            add_enode_work(candidate, enode_id);
 
-            std::vector<EClassId> child_classes;
-            for (EClassId child : egraph.getENode(enode_id).getChildren())
-                child_classes.push_back(egraph.findConst(child));
-            std::sort(child_classes.begin(), child_classes.end());
-            child_classes.erase(std::unique(child_classes.begin(), child_classes.end()), child_classes.end());
-
-            for (EClassId child : child_classes)
+            for (EClassId child : canonical_children[enode_id.value])
             {
                 if (child.value >= num_classes || !optimistic[child.value].valid)
+                {
                     return false;
+                }
                 const OptimisticSummary &child_summary = optimistic[child.value];
                 if (class_to_bit[child.value] == UINT32_MAX || bit_test(child_summary.covered_bits, class_bit))
-                    return false;
-
-                for (uint32_t word = 0; word < bit_words; ++word)
                 {
-                    uint64_t new_bits = child_summary.covered_bits[word] & ~candidate.covered_bits[word];
-                    candidate.covered_bits[word] |= new_bits;
-                    while (new_bits != 0)
-                    {
-#if defined(__GNUG__) || defined(__clang__)
-                        const uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(new_bits));
-#else
-                        uint32_t bit = 0;
-                        uint64_t remaining = new_bits;
-                        while ((remaining & 1ULL) == 0)
-                        {
-                            remaining >>= 1;
-                            ++bit;
-                        }
-#endif
-                        const uint32_t selected_bit = (word << 6) + bit;
-                        if (selected_bit >= num_canonical ||
-                            child_summary.selected_enodes[selected_bit] == invalid_enode)
-                            return false;
-                        candidate.selected_enodes[selected_bit] = child_summary.selected_enodes[selected_bit];
-                        add_enode_work(candidate.engine_work, child_summary.selected_enodes[selected_bit]);
-                        new_bits &= new_bits - 1;
-                    }
+                    return false;
+                }
+
+                // covered_class_bits is sorted, so this visits the same new
+                // bits in the same ascending order as the former word scan,
+                // while skipping words and bits absent from the child.
+                // covered_enodes is parallel to it, so covered bits never
+                // carry the invalid_enode sentinel.
+                size_t capacity_hint = candidate.covered_class_bits.size();
+                if (!child_summary.covered_class_bits.empty())
+                {
+                    capacity_hint += child_summary.covered_class_bits.back();
+                }
+                candidate.covered_class_bits.reserve(capacity_hint);
+                candidate.covered_enodes.reserve(capacity_hint);
+                for (size_t k = 0; k < child_summary.covered_class_bits.size(); ++k)
+                {
+                    const uint32_t selected_bit = child_summary.covered_class_bits[k];
+                    if (bit_test(candidate.covered_bits, selected_bit))
+                        continue;
+
+                    const ENodeId selected_enode = child_summary.covered_enodes[k];
+                    candidate.covered_class_bits.push_back(selected_bit);
+                    candidate.covered_enodes.push_back(selected_enode);
+                    add_enode_work(candidate, selected_enode);
+                    add_bits(candidate.covered_bits, selected_bit);
                 }
             }
 
-            candidate.cost = makespan(candidate.engine_work);
+            // The candidate's own class_bit is the smallest covered bit, so
+            // the child appends above keep covered_class_bits sorted without
+            // rescanning the bitset.
+            candidate.covered_class_bits.insert(candidate.covered_class_bits.begin(), class_bit);
+            candidate.covered_enodes.insert(candidate.covered_enodes.begin(), enode_id);
+
+            candidate.cost = makespan(candidate);
             candidate.chosen_enode = enode_id;
             candidate.valid = true;
             return true;
@@ -842,29 +967,55 @@ struct Planner
         std::vector<EClassId> worklist = canonical_classes;
         std::vector<EClassId> next_worklist;
         std::vector<bool> in_queue(num_classes, true);
+        OptimisticSummary candidate_scratch;
+        ProgressTimer timer(0, "calculating optimistic cost");
         while (!worklist.empty())
         {
+            const size_t round_classes = worklist.size();
             for (EClassId cid : worklist)
             {
                 in_queue[cid.value] = false;
-                OptimisticSummary best;
+                float best_cost = TGConstants::INF;
+                ENodeId best_enode = invalid_enode;
+                bool best_valid = false;
                 for (ENodeId enode_id : egraph.getEClass(cid).enodes)
                 {
-                    OptimisticSummary candidate;
-                    if (!build_candidate(cid, enode_id, candidate))
+                    CandidateCostCache &cache = candidate_cost_cache[enode_id.value];
+                    if (!candidate_cache_is_current(enode_id))
+                    {
+                        const bool valid = build_candidate(cid, enode_id, candidate_scratch);
+                        update_candidate_cache(enode_id, valid, valid ? candidate_scratch.cost : TGConstants::INF,
+                                               candidate_scratch);
+                    }
+                    enodeInfos[enode_id.value].optimistic_dag_cost = cache.valid ? cache.cost : TGConstants::INF;
+                    if (!cache.valid)
                         continue;
-                    enodeInfos[enode_id.value].optimistic_dag_cost = candidate.cost;
-                    if (!best.valid || candidate.cost < best.cost - 1e-6f ||
-                        (std::abs(candidate.cost - best.cost) <= 1e-6f && enode_id < best.chosen_enode))
-                        best = std::move(candidate);
+                    if (!best_valid || cache.cost < best_cost - 1e-6f ||
+                        (std::abs(cache.cost - best_cost) <= 1e-6f && enode_id < best_enode))
+                    {
+                        best_valid = true;
+                        best_cost = cache.cost;
+                        best_enode = enode_id;
+                    }
+
                 }
 
                 OptimisticSummary &current = optimistic[cid.value];
-                if (best.valid &&
-                    (!current.valid || best.cost < current.cost - 1e-6f ||
-                     (std::abs(best.cost - current.cost) <= 1e-6f && best.chosen_enode < current.chosen_enode)))
+                if (best_valid &&
+                    (!current.valid || best_cost < current.cost - 1e-6f ||
+                     (std::abs(best_cost - current.cost) <= 1e-6f && best_enode < current.chosen_enode)))
                 {
-                    current = std::move(best);
+                    // Adopt the candidate summary the cache already holds
+                    // instead of building it a second time. The old summary
+                    // (or the emptied cache slot) becomes scratch storage.
+                    CandidateCostCache &best_cache = candidate_cost_cache[best_enode.value];
+                    if (!best_cache.valid || best_cache.cost != best_cost)
+                        Error::throw_err("Optimistic candidate cache did not reproduce its selected candidate");
+                    std::swap(current, best_cache.summary);
+                    if (candidate_scratch.covered_class_bits.empty() &&
+                        candidate_scratch.covered_bits.capacity() < best_cache.summary.covered_bits.capacity())
+                        std::swap(candidate_scratch, best_cache.summary);
+                    ++summary_versions[cid.value];
                     for (EClassId parent : parent_map[cid.value])
                     {
                         if (!in_queue[parent.value])
@@ -877,6 +1028,7 @@ struct Planner
             }
             worklist.clear();
             std::swap(worklist, next_worklist);
+            timer.tick();
         }
 
         // Recompute every enode after the fixed point.  During propagation an
@@ -885,9 +1037,14 @@ struct Planner
         {
             for (ENodeId enode_id : egraph.getEClass(cid).enodes)
             {
-                OptimisticSummary candidate;
-                enodeInfos[enode_id.value].optimistic_dag_cost =
-                    build_candidate(cid, enode_id, candidate) ? candidate.cost : TGConstants::INF;
+                CandidateCostCache &cache = candidate_cost_cache[enode_id.value];
+                if (!candidate_cache_is_current(enode_id))
+                {
+                    const bool valid = build_candidate(cid, enode_id, candidate_scratch);
+                    update_candidate_cache(enode_id, valid, valid ? candidate_scratch.cost : TGConstants::INF,
+                                           candidate_scratch);
+                }
+                enodeInfos[enode_id.value].optimistic_dag_cost = cache.valid ? cache.cost : TGConstants::INF;
             }
         }
     }
@@ -1347,7 +1504,24 @@ struct Planner
                                     const std::unordered_set<BaseEClassId> &cachedNodes = {}, bool doSaturate = true,
                                     TGStore *repo = nullptr, const SaturationResult *startingState = nullptr)
     {
+        using BucketClock = std::chrono::steady_clock;
+        const auto bucket_start = BucketClock::now();
+        auto last_report = bucket_start;
+        auto report_bucket_timing = [&](const std::string &stage, const std::string &details = std::string()) {
+            const auto now = BucketClock::now();
+            std::cout << "[saturateBucket] " << (startingState ? "partial" : "full") << " bucket " << stage
+                      << " | total=" << std::chrono::duration<double, std::milli>(now - bucket_start).count()
+                      << " ms | since previous="
+                      << std::chrono::duration<double, std::milli>(now - last_report).count() << " ms";
+            if (!details.empty())
+                std::cout << " | " << details;
+            std::cout << std::endl;
+            last_report = now;
+        };
+
+        report_bucket_timing("start", "doSaturate=" + std::string(doSaturate ? "true" : "false"));
         SaturationResult result;
+        auto graph_setup_start = BucketClock::now();
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         bool base_state_has_base_ids = false;
 
@@ -1365,7 +1539,15 @@ struct Planner
             result.nodeToEClass = baseState.nodeToEClass;
             result.eclassToLogical = baseState.eclassToLogical;
         }
+        report_bucket_timing("prepared egraph state", "topological nodes=" + std::to_string(topo.size()) +
+                                                            ", classes=" +
+                                                            std::to_string(result.egraph.getClasses().size()) +
+                                                            ", enodes=" + std::to_string(result.egraph.getENodes().size()) +
+                                                            ", elapsed=" + std::to_string(
+                                                                std::chrono::duration<double, std::milli>(BucketClock::now() - graph_setup_start).count()) +
+                                                            " ms");
 
+        auto base_ids_start = BucketClock::now();
         for (const EClass &cls : result.egraph.getClasses())
         {
             if (result.egraph.findConst(cls.id) == cls.id && cls.base_eclass_id != BaseEClassId{})
@@ -1374,7 +1556,11 @@ struct Planner
                 break;
             }
         }
+        report_bucket_timing("checked base IDs", "elapsed=" + std::to_string(
+                                                       std::chrono::duration<double, std::milli>(BucketClock::now() - base_ids_start).count()) +
+                                                       " ms");
 
+        auto dirty_start = BucketClock::now();
         std::unordered_map<LogicalId, bool> logicalDirty;
         for (LogicalId nodeId : topo)
         {
@@ -1392,8 +1578,14 @@ struct Planner
             }
             logicalDirty[nodeId] = dirty;
         }
+        report_bucket_timing("propagated dirty logical nodes", "nodes=" + std::to_string(topo.size()) +
+                                                                     ", elapsed=" + std::to_string(
+                                                                         std::chrono::duration<double, std::milli>(BucketClock::now() - dirty_start).count()) +
+                                                                     " ms");
 
         Engine cpu = Engine{0, EngineType::CPU};
+        auto cache_seed_start = BucketClock::now();
+        uint64_t cache_enodes_added = 0;
         for (BaseEClassId baseEClassId : cachedNodes)
         {
             EClassId eclassId = result.egraph.findEClassByBaseId(baseEClassId);
@@ -1416,8 +1608,15 @@ struct Planner
                 ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space,
                                 {cpu}, std::to_string(baseEClassId.value));
                 result.egraph.addENode(eclassId, cacheNode);
+                ++cache_enodes_added;
             }
         }
+        report_bucket_timing("added requested cache enodes", "base IDs=" + std::to_string(cachedNodes.size()) +
+                                                                  ", enodes added=" +
+                                                                  std::to_string(cache_enodes_added) +
+                                                                  ", elapsed=" + std::to_string(
+                                                                      std::chrono::duration<double, std::milli>(BucketClock::now() - cache_seed_start).count()) +
+                                                                  " ms");
 
         std::unordered_set<EClassId> protectedEClasses;
         for (BaseEClassId baseEClassId : cachedNodes)
@@ -1426,6 +1625,7 @@ struct Planner
             if (eclassId != EClassId{})
                 protectedEClasses.insert(eclassId);
         }
+        report_bucket_timing("built protected class set", "classes=" + std::to_string(protectedEClasses.size()));
 
         auto isFullRegion = [](const Region &region, const std::vector<uint32_t> &shape) {
             if (region.region.size() != shape.size())
@@ -1466,24 +1666,45 @@ struct Planner
             }
         }
 
+        auto inject_start = BucketClock::now();
         const bool dirtyInjected = hasPartialInputRegion &&
                                    injectInputPartialPaths(result.egraph, graph, bucket.inputDirtyRegions, cachedNodes,
                                                            result.nodeToEClass, result.eclassToLogical);
         const bool neededInjected = hasPartialOutputRegion &&
                                     injectOutputPartialPaths(result.egraph, graph, rootId,
-                                                             bucket.outputNeededRegion, cachedNodes,
-                                                             result.nodeToEClass, result.eclassToLogical);
+                                                            bucket.outputNeededRegion, cachedNodes,
+                                                            result.nodeToEClass, result.eclassToLogical);
+        report_bucket_timing("injected partial paths", "dirty=" + std::string(dirtyInjected ? "true" : "false") +
+                                                             ", needed=" +
+                                                             (neededInjected ? "true" : "false") +
+                                                             ", elapsed=" + std::to_string(
+                                                                 std::chrono::duration<double, std::milli>(BucketClock::now() - inject_start).count()) +
+                                                             " ms");
 
+        auto saturation_start = BucketClock::now();
         if (doSaturate && settings.do_saturate)
             saturate(result.egraph, protectedEClasses, result.eclassToLogical, dirtyInjected || neededInjected,
                      false, repo);
+        report_bucket_timing("finished rewrite saturation", "elapsed=" + std::to_string(
+                                                                   std::chrono::duration<double, std::milli>(BucketClock::now() - saturation_start).count()) +
+                                                                   " ms, classes=" +
+                                                                   std::to_string(result.egraph.getClasses().size()) +
+                                                                   ", enodes=" +
+                                                                   std::to_string(result.egraph.getENodes().size()));
 
+        auto canonicalize_start = BucketClock::now();
         std::unordered_map<EClassId, LogicalId> canonicalLogical;
         for (const auto &kv : result.eclassToLogical)
             canonicalLogical[result.egraph.findConst(kv.first)] = kv.second;
         result.eclassToLogical = std::move(canonicalLogical);
+        report_bucket_timing("canonicalized logical class map", "entries=" +
+                                                                      std::to_string(result.eclassToLogical.size()) +
+                                                                      ", elapsed=" + std::to_string(
+                                                                          std::chrono::duration<double, std::milli>(BucketClock::now() - canonicalize_start).count()) +
+                                                                      " ms");
 
         const uint32_t maxClasses = static_cast<uint32_t>(result.egraph.getClasses().size());
+        auto clean_init_start = BucketClock::now();
         std::vector<uint8_t> clean(maxClasses, 0);
         for (uint32_t i = 0; i < maxClasses; ++i)
         {
@@ -1501,12 +1722,33 @@ struct Planner
                     clean[i] = 1;
             }
         }
+        report_bucket_timing("seeded clean classes", "classes=" + std::to_string(maxClasses) +
+                                                        ", elapsed=" + std::to_string(
+                                                            std::chrono::duration<double, std::milli>(BucketClock::now() - clean_init_start).count()) +
+                                                        " ms");
         bool changed = true;
+        uint32_t clean_round = 0;
+        uint64_t clean_class_checks = 0;
+        auto clean_propagation_start = BucketClock::now();
         while (changed)
         {
+            ++clean_round;
             changed = false;
+            auto clean_round_start = BucketClock::now();
+            auto clean_round_last_report = clean_round_start;
             for (uint32_t i = 0; i < maxClasses; ++i)
             {
+                ++clean_class_checks;
+                if ((i & 0xFFFFU) == 0 &&
+                    BucketClock::now() - clean_round_last_report >= std::chrono::seconds(2))
+                {
+                    report_bucket_timing("clean-class propagation", "round=" + std::to_string(clean_round) +
+                                                                         ", classes scanned=" +
+                                                                         std::to_string(i) + "/" +
+                                                                         std::to_string(maxClasses));
+                    clean_round_last_report = BucketClock::now();
+                }
+
                 EClassId id{i};
                 if (result.egraph.findConst(id) != id || clean[i])
                     continue;
@@ -1530,7 +1772,25 @@ struct Planner
                     }
                 }
             }
+            const double clean_round_elapsed_ms = std::chrono::duration<double, std::milli>(
+                                                      BucketClock::now() - clean_round_start)
+                                                      .count();
+            if (clean_round <= 5 || clean_round % 100 == 0 || clean_round_elapsed_ms >= 2000.0)
+            {
+                report_bucket_timing("finished clean-class propagation round", "round=" +
+                                                                                     std::to_string(clean_round) +
+                                                                                     ", changed=" +
+                                                                                     (changed ? std::string("true") :
+                                                                                                std::string("false")) +
+                                                                                     ", elapsed=" + std::to_string(
+                                                                                         clean_round_elapsed_ms) +
+                                                                                     " ms");
+            }
         }
+        const double clean_propagation_ms = std::chrono::duration<double, std::milli>(
+                                                BucketClock::now() - clean_propagation_start)
+                                                .count();
+        auto collect_clean_start = BucketClock::now();
         for (uint32_t i = 0; i < maxClasses; ++i)
         {
             if (clean[i])
@@ -1540,6 +1800,15 @@ struct Planner
             kv.second = result.egraph.findConst(kv.second);
         if (!startingState && !base_state_has_base_ids)
             result.egraph.populateBaseEClassIds();
+        report_bucket_timing("finished bucket postprocessing", "clean rounds=" + std::to_string(clean_round) +
+                                                                     ", class checks=" +
+                                                                     std::to_string(clean_class_checks) +
+                                                                     ", propagation elapsed=" +
+                                                                     std::to_string(clean_propagation_ms) + " ms" +
+                                                                     ", collection/remap elapsed=" +
+                                                                     std::to_string(
+                                                                         std::chrono::duration<double, std::milli>(BucketClock::now() - collect_clean_start).count()) +
+                                                                     " ms");
         return result;
     }
 

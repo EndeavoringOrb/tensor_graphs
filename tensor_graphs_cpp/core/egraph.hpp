@@ -146,6 +146,10 @@ struct EGraph
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<EClassId>> constantHashIndex;
 
+    // Base eclass ID -> current canonical eclass ID.
+    mutable std::unordered_map<BaseEClassId, EClassId> baseEClassToEClass;
+    mutable bool baseEClassIndexInitialized = false;
+
     inline std::vector<int32_t> getConstantInt32(EClassId id) const
     {
         if (constantStaging.count(id))
@@ -174,6 +178,7 @@ struct EGraph
         classes.reserve(classCap);
         parent.reserve(classCap);
         ufSize.reserve(classCap);
+        baseEClassToEClass.reserve(classCap);
 
         enodes.reserve(nodeCap);
         nodeToEClass.reserve(nodeCap);
@@ -366,7 +371,11 @@ struct EGraph
                              "\n  " + describeEClass(rb));
         }
         if (baseA == BaseEClassId{})
+        {
             classes[ra.value].base_eclass_id = baseB;
+            if (baseEClassIndexInitialized && baseB != BaseEClassId{})
+                baseEClassToEClass.insert_or_assign(baseB, ra);
+        }
 
         parent[rb.value] = ra;
         ufSize[ra.value] += ufSize[rb.value];
@@ -492,21 +501,41 @@ struct EGraph
 
     void populateBaseEClassIds()
     {
+        baseEClassToEClass.clear();
+        baseEClassToEClass.reserve(classes.size());
         for (EClass &cls : classes)
         {
             if (findConst(cls.id) == cls.id)
+            {
                 cls.base_eclass_id = BaseEClassId{cls.id.value};
+                if (cls.base_eclass_id != BaseEClassId{})
+                    baseEClassToEClass.emplace(cls.base_eclass_id, cls.id);
+            }
         }
+        baseEClassIndexInitialized = true;
     }
 
     EClassId findEClassByBaseId(BaseEClassId base_id) const
     {
-        for (const EClass &cls : classes)
+        if (base_id == BaseEClassId{})
+            return EClassId{};
+        // Some callers construct an EGraph and assign base_eclass_id directly
+        // through getEClass(). Build the index on the first lookup so those
+        // graphs retain the same lookup behavior without penalizing indexed
+        // lookups thereafter.
+        if (!baseEClassIndexInitialized)
         {
-            if (findConst(cls.id) == cls.id && cls.base_eclass_id == base_id)
-                return cls.id;
+            baseEClassToEClass.clear();
+            baseEClassToEClass.reserve(classes.size());
+            for (const EClass &cls : classes)
+            {
+                if (findConst(cls.id) == cls.id && cls.base_eclass_id != BaseEClassId{})
+                    baseEClassToEClass.emplace(cls.base_eclass_id, cls.id);
+            }
+            baseEClassIndexInitialized = true;
         }
-        return EClassId{};
+        auto it = baseEClassToEClass.find(base_id);
+        return it == baseEClassToEClass.end() ? EClassId{} : it->second;
     }
 
     EClassId getENodeEClass(ENodeId enodeId) const
