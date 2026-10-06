@@ -10,3 +10,5 @@ verification:
 do not use `--no-lint` when building
 `python -m tests.test_gemma_output`
 to debug correctness issues, if you have some configuration that works (i.e. without caching or full bucket only) you can use utils/compare_reference_tensors.py along with --write-refs, --compare-refs
+
+kernels should not have branching logic (e.g. to thread or not to thread based on input size), it is the compiler's responsibility to decide to use the threaded version or the unthreaded version so they should be two different kernels

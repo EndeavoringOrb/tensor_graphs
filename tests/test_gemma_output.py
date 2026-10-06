@@ -23,7 +23,7 @@ CONFIGS = {
 }
 
 
-def run_gemma_output(config_name):
+def run_gemma_output(config_name, cache_file=""):
     if config_name not in CONFIGS:
         raise ValueError(f"Unknown Gemma test config: {config_name}")
 
@@ -33,14 +33,16 @@ def run_gemma_output(config_name):
     conversation_tokens = encode_text(tokenizer, "Hi, my name", is_first=True)
     expected_string = " is <strong>Jasmine"
 
+    disable_compilation_caching = not bool(cache_file)
     session = tensor_graphs.LLMSession(
         "gemma-3-270m",
         str(model_path),
         tensor_graphs.HeuristicSearchDelegate(),
         max_sequence_length=16,
         **CONFIGS[config_name],
+        cache_file=cache_file,
         disable_node_caching=False,
-        disable_compilation_caching=True,
+        disable_compilation_caching=disable_compilation_caching,
     )
 
     generated_string = ""
@@ -58,9 +60,9 @@ def run_gemma_output(config_name):
         )
 
 
-def test_gemma_output():
+def test_gemma_output(cache_file=""):
     for config_name in CONFIGS:
-        run_gemma_output(config_name)
+        run_gemma_output(config_name, cache_file=cache_file)
 
 
 def main():
@@ -71,12 +73,20 @@ def main():
         default="all",
         help="Configuration to test (default: all)",
     )
+    parser.add_argument(
+        "--cache-file",
+        "--cache",
+        dest="cache_file",
+        type=str,
+        default="",
+        help="Path to compiled cache file. If specified, enables compilation caching to/from this file.",
+    )
     args = parser.parse_args()
 
     config_names = CONFIGS if args.config == "all" else [args.config]
     for config_name in config_names:
         print(f"\n=== Gemma output config: {config_name} ===", flush=True)
-        run_gemma_output(config_name)
+        run_gemma_output(config_name, cache_file=args.cache_file)
 
 
 if __name__ == "__main__":

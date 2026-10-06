@@ -65,7 +65,8 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
         return false;
 
     uint64_t cap = ctx.mem_caps.at(ms);
-    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + 4095) & ~4095ULL;
+    uint32_t out_align = plan::SearchState::getDefaultPageAlignment(ms);
+    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + out_align - 1) & ~static_cast<uint64_t>(out_align - 1);
 
     if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
     {
@@ -89,7 +90,8 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
                 const EClass cls = ctx.egraph.getEClass(child);
                 if (cls.mem_space == ms)
                 {
-                    uint64_t in_size = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
+                    uint32_t in_align = plan::SearchState::getDefaultPageAlignment(cls.mem_space);
+                    uint64_t in_size = (getSizeBytes(cls.shape, cls.dtype) + in_align - 1) & ~static_cast<uint64_t>(in_align - 1);
                     if (out_size <= in_size)
                     {
                         can_be_inplace = true;
@@ -110,7 +112,8 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
             const EClass cls = ctx.egraph.getEClass(canon_child);
             if (cls.mem_space == ms)
             {
-                sum_inputs_in_ms += (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
+                uint32_t in_align = plan::SearchState::getDefaultPageAlignment(cls.mem_space);
+                sum_inputs_in_ms += (getSizeBytes(cls.shape, cls.dtype) + in_align - 1) & ~static_cast<uint64_t>(in_align - 1);
             }
         }
     }
@@ -343,7 +346,8 @@ struct Planner
             uint64_t size_bytes = getSizeBytes(e.shape, e.dtype);
             if (size_bytes == 0)
                 continue;
-            size_bytes = (size_bytes + 4095) & ~4095ULL;
+            uint32_t align = plan::SearchState::getDefaultPageAlignment(e.memSpace);
+            size_bytes = (size_bytes + align - 1) & ~static_cast<uint64_t>(align - 1);
 
             uint64_t offset = cursor[e.memSpace];
             cursor[e.memSpace] = offset + size_bytes;
@@ -2216,7 +2220,8 @@ struct Planner
         for (const auto &pair : preallocated)
         {
             uint64_t extent = static_cast<uint64_t>(pair.second.offset) + pair.second.size;
-            uint32_t pages = static_cast<uint32_t>((extent + 4095) / 4096);
+            uint32_t align = plan::SearchState::getDefaultPageAlignment(pair.second.mem_space);
+            uint32_t pages = static_cast<uint32_t>((extent + align - 1) / align);
             preallocated_pages[pair.second.mem_space] = std::max(preallocated_pages[pair.second.mem_space], pages);
         }
 
