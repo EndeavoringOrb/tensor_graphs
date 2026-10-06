@@ -141,7 +141,7 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze TensorGraph performance.")
-    parser.add_argument("--graph", default="dirty_region_caches/jina-v5-928x1376.bin")
+    parser.add_argument("graph", help="Path to compiled graph .bin file")
     parser.add_argument("--top_n", "-n", type=int, default=20)
     parser.add_argument("--chain_len", "-c", type=int, default=1)
     parser.add_argument("--bucket", nargs="?", const="show_range", default=None)

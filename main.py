@@ -147,6 +147,11 @@ def main():
         help="Disable logging cost model calls to benchmarks/calls.bin",
     )
     parser.add_argument(
+        "--saturate-only",
+        action="store_true",
+        help="Run saturation/planning only to log cost model calls without running the model",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
         default=0,
@@ -191,6 +196,9 @@ def main():
     if args.use_ortools_lns:
         os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
 
+    disable_compilation_caching = (
+        args.disable_compilation_caching or args.saturate_only
+    )
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(
         args.model,
@@ -201,7 +209,7 @@ def main():
         compile_no_weights_bucket=args.compile_no_weights_bucket,
         cache_file=args.cache_file,
         disable_node_caching=args.disable_node_caching,
-        disable_compilation_caching=args.disable_compilation_caching,
+        disable_compilation_caching=disable_compilation_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
         max_sequence_length=args.seq_len,
@@ -212,7 +220,12 @@ def main():
         disable_fusion=args.disable_fusion,
         write_refs=args.write_refs,
         compare_refs=args.compare_refs,
+        saturate_only=args.saturate_only,
     )
+
+    if args.saturate_only:
+        print("[Main] Saturate-only complete. Cost model calls logged.")
+        return
 
     print(f"Loading tokenizer for {args.model}...")
     tokenizer = load_tokenizer([args.model_path, args.model])
