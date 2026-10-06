@@ -55,6 +55,7 @@ tokenize_flux.py
 .vs
 clean.txt
 OpenCL-SDK
+!tests/embeddinggemma-2/assets/sample.png
 analysis*.txt
 reference_tensors
 *.log
