@@ -223,6 +223,56 @@ inline void testVariableDomainBoundaries()
     for (VarId start_var : state.start_vars[0].at(root_id))
         require(state.domains[start_var].isFixed() && state.domains[start_var].fixedValue() == 0,
                 "Single reachable class needs only one schedule position");
+
+    // Relative mask offset tests
+    {
+        Domain d = Domain::makeMask(0b1101, 10); // {10, 12, 13}
+        require(d.size() == 3, "Mask size should be 3");
+        require(d.getMin() == 10, "Min should be 10");
+        require(d.getMax() == 13, "Max should be 13");
+        require(d.contains(10) && !d.contains(11) && d.contains(12) && d.contains(13), "Contains check failed");
+        require(!d.contains(9) && !d.contains(14) && !d.contains(50), "Out-of-range contains check failed");
+
+        // remove min
+        require(d.remove(10), "Remove 10 should succeed");
+        require(d.getMin() == 12 && d.size() == 2, "Min should now be 12");
+
+        // remove until fixed
+        require(d.remove(12), "Remove 12 should succeed");
+        require(d.isFixed() && d.fixedValue() == 13, "Should be fixed to 13");
+
+        // setMin / setMax with offset
+        Domain d2 = Domain::makeMask(0b1111, 20); // {20, 21, 22, 23}
+        require(d2.setMin(22), "setMin(22) should change domain");
+        require(d2.getMin() == 22 && d2.size() == 2, "setMin result incorrect");
+
+        Domain d3 = Domain::makeMask(0b1111, 20); // {20, 21, 22, 23}
+        require(d3.setMax(21), "setMax(21) should change domain");
+        require(d3.getMax() == 21 && d3.size() == 2, "setMax result incorrect");
+
+        // makeFixed with arbitrary value
+        Domain d_fixed = Domain::makeFixed(45, true);
+        require(d_fixed.isFixed() && d_fixed.fixedValue() == 45, "makeFixed mask out of 0..31 failed");
+
+        // Automatic conversion from range to mask on interior removal
+        Domain d_range = Domain::makeRange(10, 20);
+        require(d_range.canConvertToMask(), "Range [10..20] should be convertible to mask");
+        require(d_range.remove(15), "Interior removal should convert to mask and remove 15");
+        require(d_range.is_mask, "Should now be mask");
+        require(!d_range.contains(15) && d_range.contains(14) && d_range.contains(16), "15 removed but neighbors intact");
+        require(d_range.getMin() == 10 && d_range.getMax() == 20 && d_range.size() == 10, "Range-to-mask bounds preserved");
+
+        // Intersecting two masks with different relative offsets
+        Domain m1 = Domain::makeMask(0b10101, 10); // {10, 12, 14}
+        Domain m2 = Domain::makeMask(0b00101, 12); // {12, 14}
+        require(m1.intersectWith(m2), "Intersection should narrow m1");
+        require(m1.size() == 2 && m1.contains(12) && m1.contains(14) && !m1.contains(10), "Shifted mask intersection failed");
+
+        // Equality between differently offset masks representing same values
+        Domain eq1 = Domain::makeMask(0b0100, 10); // {12}
+        Domain eq2 = Domain::makeMask(0b0001, 12); // {12}
+        require(eq1 == eq2, "Mask equality with different offsets should hold");
+    }
 }
 
 inline void testRepairsAndUndo()

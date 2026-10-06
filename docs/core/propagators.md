@@ -1,30 +1,244 @@
+# Plan propagators
 
-propagator rules
-CORRECTNESS
-1. if VarType::SELECTED, update reachable, fix unreachable to {0}
-2. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0, for each eclass that is definitely selected and fixed to enode e, all children of enode e cannot be 0.
-3. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() == 0, fix start to {0} and offset to {min_p} because they don't matter.
-4. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 0, remove CACHE/SCATTER (and FUSED with CACHE/SCATTER in refFactory graph) from corresponding selected domain in all buckets
-5. if VarType::START, and corresponding selected (dom.isFixed() && dom.fixedValue() > 0), all consumers (including through views) starts setMin(changed start + 1)
-6. if (VarType::START and dom.isFixed()) and corresponding selected (dom.isFixed() && dom.fixedValue() > 0), remove start from domain of all other start domains in the same bucket where corresponding selected is not fixed to 0.
-7. WRITE AFTER READ if (VarType::OFFSET and dom.isFixed() and corresponding start is fixed || VarType::START and dom.isFixed() and corresponding offset is fixed) and corresponding selected is not fixed to 0, and overlaps with another fixed start+offset+size+selected_not_{0} in the same bucket and mem_space. Sort by start to get A, B. let R(A) be all readers of a direct or through view(s), use max(reader_start+1) as end.
--if both A and B are views, return true. ignore
--if B is view of A and (B.offset >= A.offset && B.offset+B.size <= A.offset+A.size), or A is a view of B and A is within B, return true. ignore
--if A is INPUT/CACHE/ROOT, or B is INPUT/CACHE/ROOT, return false.
--if B is a reader (direct or through view(s)) of A, make sure A is in safe_inplace_idxs. if not, return false.
--if B is a reader, but not (B.offset >= A.offset && B.offset+B.size <= A.offset+A.size) return false.
--for every reader C = R(A)/B, B.setMin(reader.start.getMin + 1), C.setMax(start_B - 1)
--TODO: separate into a few rules
-8. if VarType::OFFSET || (VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0), whenever an eclass is confirmed to be a view of a base tensor, bidirectionally intersect offset domains [max(base.min, view.min)..min(base.max, view.max)]. If disjoint, return false. Also remove unviable view enodes from selection if offset domains cannot overlap.
-9. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0, pearce-kelly cycle detection given other fixed nonzero selections.
-10. contrapositive of 2. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() == 0, any parent enode must be removed from eclass selection domain
-11. if VarType::SELECTED && dom.isFixed() && dom.fixedValue() > 0 && optype CACHE/SCATTER (or FUSED with root SCATTER in refFactory), fix corresponding cached var to {1}
+This page is the reference for the plan search propagators. The comments above each propagator class in `tensor_graphs_cpp/core/plan/propagators/` point here. A propagator narrows variable domains or reports a conflict when the current domains cannot describe a valid plan.
 
-EXTRA
-12. if VarType::SELECTED, update dynamic programming bottom up critical path cp = cost + max(children cp), lower_bound = max(critical_path, lower_bound), if lower_bound > incumbent return false
-13. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, state.cache_sums[mem_space] += size if state.cache_sum > mem_cap
-14. if (VarType::OFFSET and dom.isFixed()) || (VarType::START and corresponding offset is fixed), push start domain of overlapping fixed-offset allocation past all readers of earlier allocation (or before earlier allocation if already bounded), resolving views and in-place ops.
-15. if VarType::SELECTED, update per engine workload, lower_bound = max(lower_bound, engine_workload) for engine_workload in workloads
-16. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, full bucket must have something selected, and cannot have CACHE/SCATTER (or FUSED with root SCATTER in refFactory).
-17. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, any unselected cache nodes that alone push cache size over mem cap must be fixed to {0}
-18. if VarType::CACHED && dom.isFixed() && dom.fixedValue() == 1, fix offset to max(offset+size)+1 for all existing fixed cached enodes
+## Search Variable Types
+
+Plan search operates on four types of variables (`VarType` in `tensor_graphs_cpp/core/plan/search_state.hpp`):
+
+- **`CACHED`**: `cached_<base_e-class_id>` Binary domain `{0, 1}` indicating whether a candidate base e-class is cached across buckets (`0` = not cached, `1` = cached).
+- **`SELECTED`**: `selected_<bucket_id>_<e-class_id>` Selection domain `{0, 1, ..., N}` for an e-class within a bucket, where `0` means unselected, and `1, ..., N` corresponds to selecting candidate e-node `e1, ..., eN`.
+- **`START`**: `start_<bucket_id>_<e-class_id>` Integer range `[0, max_steps]` representing the dispatch step of an e-class in that bucket.
+- **`OFFSET`**: `offset_<bucket_id>_<e-class_id>` Page offset range `[min_page, max_page]` representing the memory buffer allocation for an e-class in that bucket.
+
+## Correctness
+
+### `SelectionReachabilityPropagator`
+
+When a selection variable changes, it may make some e-classes unreachable. Fix unreachable e-classes to `{0}`.
+
+#### Example
+
+Before selection in bucket 0, either e-node in `EClass 0` could be chosen, so both child connections are possible:
+
+```mermaid
+flowchart LR
+    subgraph c0_before["selected_0_0 = {0, 1, 2}"]
+        direction TB
+        e1_0_before((e1))
+        e2_0_before((e2))
+    end
+    subgraph c1_before["selected_0_1 = {0, 1}"]
+        e1_1_before((e1))
+    end
+    subgraph c2_before["selected_0_2 = {0, 1}"]
+        e1_2_before((e1))
+    end
+    e1_0_before -. possible .-> e1_1_before
+    e2_0_before -. possible .-> e1_2_before
+```
+
+After `selected_0_0` is fixed to `1` (selecting `e1`), `EClass 2` has no connection from the selected graph and its selection is fixed to `{0}`:
+
+```mermaid
+flowchart LR
+    subgraph c0_after["selected_0_0 = {1}"]
+        direction TB
+        e1_0_after((e1))
+        e2_0_after((e2))
+    end
+    subgraph c1_after["selected_0_1 = {0, 1}"]
+        e1_1_after((e1))
+    end
+    subgraph c2_after["selected_0_2 = {0}"]
+        e1_2_after((e1))
+    end
+    e1_0_after --> e1_1_after
+    e2_0_after -. X .-> e1_2_after
+```
+
+### `SelectionChildrenPropagator`
+
+When an e-class is fixed to a selected e-node, every child e-class of that e-node must be selected. Remove `0` from each child's selection domain. An invalid selected e-node index is a conflict.
+
+#### Example
+
+Before selection in bucket 0, `EClass 1` and `EClass 2` could still be unselected (`0` in domain):
+
+```mermaid
+flowchart LR
+    subgraph c0_before["selected_0_0 = {0, 1, 2}"]
+        direction TB
+        e1_0_before((e1))
+        e2_0_before((e2))
+    end
+    subgraph c1_before["selected_0_1 = {0, 1}"]
+        e1_1_before((e1))
+    end
+    subgraph c2_before["selected_0_2 = {0, 1}"]
+        e1_2_before((e1))
+    end
+    e1_0_before -. possible .-> e1_1_before
+    e2_0_before -. possible .-> e1_2_before
+```
+
+After `selected_0_0` is fixed to `1` (selecting `e1`), child `EClass 1` must be selected, so `0` is removed from its domain (`selected_0_1 = {1}`). Meanwhile, unreached `EClass 2` retains `{0, 1}` under this propagator alone:
+
+```mermaid
+flowchart LR
+    subgraph c0_after["selected_0_0 = {1}"]
+        direction TB
+        e1_0_after((e1))
+        e2_0_after((e2))
+    end
+    subgraph c1_after["selected_0_1 = {1}"]
+        e1_1_after((e1))
+    end
+    subgraph c2_after["selected_0_2 = {0, 1}"]
+        e1_2_after((e1))
+    end
+    e1_0_after --> e1_1_after
+    e2_0_after -. X .-> e1_2_after
+```
+
+
+### `UnselectedStartOffsetPropagator`
+
+When an e-class is fixed to `{0}` (unselected), fix all its start & offset variables to `0`. These values are irrelevant for an unselected e-class.
+
+### `CacheExclusionPropagator`
+
+When a base e-class is fixed as not cached `{0}`, remove e-node choices selection domains of corresponding e-classes in every bucket where the e-node is any of:
+-`CACHE`
+-`SCATTER`
+-`FUSED` with `CACHE` or `SCATTER` as root of refFactory graph
+
+`CACHE`/`SCATTER` e-nodes can only be used when that base e-class is cached.
+
+### `InputPruneStartPrecedencePropagator`
+
+An e-class must start after its inputs. On start upper bound change, if 0 not in `selected_<bucket_id>_<e-class_id>`:
+-For each candidate e $\in$ selected_C, if any input I $\in$ inputs(e) has start_min(I) ≥ start_max(C), remove candidate e from selected_C. if selected_C empty, return false.
+-For any input I that is present in all remaining candidates of selected, start_max(I) <= start_max(C)-1
+
+### `ConsumerStartPrecedencePropagator`
+
+An e-class must start after its inputs. On start lower bound change, if 0 not in `selected_<bucket_id>_<e-class_id>`, for all consumers where 0 not in selected, set consumer start min to max(consumer start min, min(e-node start min for e-node in domain)) where e-node start min = max(input start min + 1 for input in e-node inputs, 0 for case with no inputs). if consumer start_min > start_max, return false.
+
+### `StartPrecedencePropagator`
+
+An e-class must start after its inputs. On select change, if 0 not in `selected_<bucket_id>_<e-class_id>`, set start min to max(start min, min(e-node start min for e-node in domain)) where e-node start min = max(input start min + 1 for input in e-node inputs)
+
+### `StartUniquePropagator`
+
+When a selected e-class's start is fixed, remove that start value from the start domains of other e-classes whose start is not fixed to {0}. This prevents two active operations from occupying the same execution step. Because we cannot represent holes in the start domain when it is a range, only remove if value is equal to min/max (maybe keep a hashmap for fast lookup of values based on min/max). But also, I want domains to be able to switch between mask and range so for example if we manage to narrow down start to a range < 32 we can swap it to a mask and then we can remove in the middle.
+
+### `MemoryNoOverlapPropagator`
+
+When active allocations in the same bucket and memory space have fixed offsets that overlap in physical page ranges:
+$$\max(offset_A, offset_B) < \min(offset_A + size_A, offset_B + size_B)$$
+
+Enforce physical memory safety by validating allocations and narrowing `start` domains before and during dispatch step assignments:
+
+1. **View Aliases:** If $A$ and $B$ are views of each other (or share the same base e-class), ignore (valid alias sharing storage).
+2. **Persistent Buffers:** If either $A$ or $B$ is persistent (`INPUT`, `CACHE`, or `ROOT`), report conflict (persistent buffers cannot share storage with non-view allocations).
+3. **Producer-Consumer Overlap ($B$ reads $A$):**
+   - If $B$ is not declared a safe in-place reader of $A$, or does not fit within $A$'s buffer ($offset_B < offset_A$ or $offset_B + size_B > offset_A + size_A$), report conflict.
+   - Otherwise, $B$ must execute after $A$ and after all other readers of $A$:
+     - Narrow $A$ and $B$: $\text{start}_{\min}(B) \ge \text{start}_{\min}(A) + 1$, $\text{start}_{\max}(A) \le \text{start}_{\max}(B) - 1$.
+     - For every other reader $C \in R(A) \setminus \{B\}$: $\text{start}_{\max}(C) \le \text{start}_{\max}(B) - 1$, and $\text{start}_{\min}(B) \ge \text{start}_{\min}(C) + 1$.
+   *(The case where $A$ reads $B$ is symmetric).*
+4. **General Buffer Reuse (Neither reads the other):**
+   Allocations $A$ and $B$ must have completely disjoint execution lifespans:
+   - **If order is determined ($A$ precedes $B$):** $B$ can only start after ALL readers of $A$ ($R(A)$) have finished:
+     $$\text{start}_{\min}(B) \ge \max_{C \in R(A)}(\text{start}_{\min}(C)) + 1$$
+     And for all $C \in R(A)$: $\text{start}_{\max}(C) \le \text{start}_{\max}(B) - 1$.
+   - **If order is determined ($B$ precedes $A$):** Symmetric ($A$ can only start after all readers of $B$ have finished).
+   - **If order is not yet determined:** If bounds make one ordering impossible (e.g., $B$ cannot precede $A$), enforce the remaining order and narrow bounds. If neither ordering is possible, report conflict.
+5. **Fixed Start Validation:** When starts are already fixed, these conditions act as conflict checks (if $start(B) \le start(A)$ or any required reader finishes at or after $B$ starts, report conflict).
+
+```mermaid
+flowchart TD
+    Overlap["Active allocations A and B<br/>overlap in memory (fixed offsets)"] --> ViewCheck{"Are A and B views<br/>of each other?"}
+    ViewCheck -- Yes --> Safe["Valid<br/>(views share buffer)"]
+    ViewCheck -- No --> PersCheck{"Is either A or B persistent?<br/>(INPUT, CACHE, ROOT)"}
+    PersCheck -- Yes --> Conflict1["Conflict!<br/>(Persistent buffers cannot be overwritten)"]
+    PersCheck -- No --> DepCheck{"Does B read A<br/>or A read B?"}
+    
+    DepCheck -- "B reads A" --> InplaceCheck{"Is B a safe in-place reader<br/>and fits in A's buffer?"}
+    InplaceCheck -- No --> Conflict2["Conflict!<br/>(Unsafe in-place reuse)"]
+    InplaceCheck -- Yes --> TightenInplace["Required readers to clear: R(A) excluding B<br/>Tighten: start(B) > reader(A)"]
+
+    DepCheck -- "Neither reads<br/>the other" --> OrderCheck{"Determine order:<br/>A before B or B before A?"}
+    OrderCheck -- "A before B" --> TightenReuseA["Required readers to clear: ALL R(A)<br/>Tighten: start(B) > ALL readers of A"]
+    OrderCheck -- "B before A" --> TightenReuseB["Required readers to clear: ALL R(B)<br/>Tighten: start(A) > ALL readers of B"]
+    OrderCheck -- "Neither possible" --> Conflict3["Conflict!<br/>(Disjoint lifespans impossible)"]
+
+    TightenInplace --> CheckFixed{"Are starts fixed?<br/>(Validation)"}
+    TightenReuseA --> CheckFixed
+    TightenReuseB --> CheckFixed
+    CheckFixed -- "start(B) <= reader" --> Conflict4["Conflict!<br/>(Write-After-Read Hazard)"]
+    CheckFixed -- "Valid bounds" --> Done["Narrow start domains<br/>or confirm valid"]
+```
+
+### `ViewSelectOffsetPropagator`
+
+When an e-class $V$ is fixed to a selected view e-node whose base is $B$:
+- Intersect the offset domain of $V$ with the offset domain of $B$:
+  $$\text{common\_min} = \max(\min(offset_V), \min(offset_B)), \quad \text{common\_max} = \min(\max(offset_V), \max(offset_B))$$
+- If $\text{common\_min} > \text{common\_max}$, report conflict (disjoint allocation).
+- Narrow both $offset_V$ and $offset_B$ to $[\text{common\_min}, \text{common\_max}]$. Any narrowing of $offset_B$ queues offset updates to all other aliases via the solver worklist.
+
+### `ViewToBaseOffsetPropagator`
+
+When the offset domain of view e-class $V$ narrows:
+- **Confirmed view:** If $V$ is fixed to a view of base $B$, narrow $offset_B$ to $[\max(\min(offset_B), \min(offset_V)), \min(\max(offset_B), \max(offset_V))]$. Disjoint ranges report a conflict.
+- **Unconfirmed candidate view:** For each candidate view e-node in $V$ with candidate base $B$, if $offset_V$ and $offset_B$ have disjoint domains, remove that e-node from $selected_V$'s domain. If $selected_V$ becomes empty, report conflict.
+
+### `BaseToViewOffsetPropagator`
+
+When the offset domain of base e-class $B$ narrows:
+- **Confirmed views:** For every confirmed view $V$ of $B$, narrow $offset_V$ to $[\max(\min(offset_V), \min(offset_B)), \min(\max(offset_V), \max(offset_B))]$. Disjoint ranges report a conflict.
+- **Unconfirmed candidate views:** For every candidate view consumer $V$ of $B$, if $offset_V$ and $offset_B$ have disjoint domains, remove the view e-node pointing to $B$ from $selected_V$'s domain. If $selected_V$ becomes empty, report conflict.
+
+### `PearceKellyCyclePropagator`
+
+When a selection is fixed to a nonzero e-node, check the dependency graph formed by the other fixed nonzero selections for a cycle. Reject a selection that closes a cycle.
+
+### `ParentRemovalPropagator`
+
+When an e-class is fixed unselected, remove every parent e-node that requires it from the parent's selection domain. This is the contrapositive of `SelectionChildrenPropagator`.
+
+### `CacheRequirementPropagator`
+
+When a selected e-node is `CACHE` or `SCATTER`, require its corresponding base e-class to be cached. In the reference-factory graph, a fused e-node with a `SCATTER` root also requires caching.
+
+### `CachedOffsetAllocationPropagator`
+
+When a cache variable is fixed to `1`, assign its offset variables the same stable arena range in every bucket. Respect preallocated pages, offset-domain bounds, memory-space capacity, and the ranges already assigned to other active caches. If any corresponding offset is already fixed, synchronize the rest to that offset; otherwise append the allocation after the existing active cached ranges.
+
+## Search pruning and allocation
+
+### `CriticalPathPropagator`
+
+After selection changes, recompute the per-bucket critical path bottom-up as the selected operation cost plus the maximum child critical path. Raise the bucket lower bound to at least this value and reject the state when the lower bound exceeds the incumbent. Only initialize after we have an incumbent.
+
+### `CacheBudgetPropagator`
+
+Sum of sizes of cached vars in a given mem space must be less than that space's memory cap. On cache selection, check sum < cap.
+
+### `EarlyCacheBudgetPropagator`
+
+Sum of sizes of cached vars in a given mem space must be less than that space's memory cap. On cache selection, for any unfixed cache vars if size > (cap - sum) then remove 1 from that var's domain.
+
+### `EngineWorkloadPropagator`
+
+Maintain selected work per execution engine and bucket. Raise each bucket's lower bound to at least its largest engine workload, and reject the state if that lower bound exceeds the incumbent.
+
+### `CachedOffsetPropagator`
+
+For a base e-class fixed as cached, all corresponding offset variables across buckets must use the same page offset. A fixed offset is copied to the other buckets; conflicting fixed or restricted domains are a conflict. When caching is required, reuse any already fixed corresponding offset.
+
+### `WriteAfterReadStartPropagator`
+
+When a selected start variable becomes fixed, inspect active allocations with overlapping fixed offsets whose start domains already establish an order. If the later allocation does not read the earlier one, raise its minimum start to after the earliest last reader of the earlier allocation. This performs the reader ordering before branching on individual starts.
