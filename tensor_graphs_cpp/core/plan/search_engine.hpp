@@ -497,11 +497,20 @@ class SearchEngine
         all_nodes.push_back(root_node);
         current_node_id = 0;
 
+        std::string initial_conflict;
+        if (!runPropagators(kInvalidVarId, &initial_conflict))
+        {
+            LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation: "
+                         << initial_conflict;
+            return false;
+        }
+
         if (incumbent_best_cost < TGConstants::INF)
         {
             selector->setIncumbent(incumbent_best_cost);
         }
 
+        root_node->lower_bound = state.lower_bound;
         root_node->priority = root_node->lower_bound;
         root_node->trail_marker = state.getTrailMarker();
 #ifdef TG_PROFILE

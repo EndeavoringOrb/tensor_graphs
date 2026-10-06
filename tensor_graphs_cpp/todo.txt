@@ -62,3 +62,5 @@ make sure we don't have stale cache when needed region (push down from output ne
 DRY scatter add eclass with eclassToLogical
 
 linter
+
+Option B alignment: per-kernel/per-tensor alignment as a solver constraint variable (see docs/core/memory_alignment.md)

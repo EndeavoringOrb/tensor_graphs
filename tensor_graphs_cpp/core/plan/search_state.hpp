@@ -822,10 +822,21 @@ class SearchState
         markDomainDirty(var_id);
     }
 
+    static uint32_t getDefaultPageAlignment(const MemSpace &ms)
+    {
+        if (ms.type == HandleType::CPP)
+            return 64;
+        if (ms.type == HandleType::CUDA)
+            return 256;
+        if (ms.type == HandleType::OPENCL)
+            return 4096;
+        return 64;
+    }
+
     uint32_t getPageAlignment(const MemSpace &ms) const
     {
         auto it = page_alignments.find(ms);
-        return (it != page_alignments.end()) ? it->second : 4096;
+        return (it != page_alignments.end()) ? it->second : getDefaultPageAlignment(ms);
     }
 
     uint64_t getMemoryCap(const MemSpace &ms) const
