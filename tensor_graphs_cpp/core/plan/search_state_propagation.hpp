@@ -50,11 +50,6 @@ inline void SearchState::ensurePropagationState() const
     data.topo_aff_stamp = 0;
     data.mem_alloc_visited_stamp.assign(numVars(), 0);
     data.mem_alloc_stamp = 0;
-    data.mem_affected_stamp.assign(numVars(), 0);
-    data.mem_prop_aff_stamp = 0;
-    data.mem_affected_scratch.clear();
-    data.mem_affected_scratch.reserve(numVars());
-    data.memory_dirty.reserve(numVars());
 
     for (uint32_t b = 0; b < buckets.size(); ++b)
     {
@@ -123,7 +118,6 @@ inline void SearchState::ensurePropagationState() const
                 }
                 data.alternatives[sel_var].push_back(std::move(alternative));
             }
-            data.memory_dirty.insert(sel_var);
         }
         // Preserve the selected_vars iteration order used by the original
         // StartPrecedencePropagator parent cache.
@@ -238,65 +232,6 @@ inline void SearchState::updatePropagationContribution(VarId var_id, bool add) c
         const float weight = info.bucket_idx < bucket_weights.size() ? bucket_weights[info.bucket_idx] : 1.0f;
         const double bound = bucket.engine_bounds.empty() ? 0.0 : *bucket.engine_bounds.rbegin();
         data.cost.set(info.bucket_idx, weight > 0.0f ? weight * bound : 0.0);
-    }
-    if (!alternative.is_view && alternative.start_var != kInvalidVarId && domains[alternative.start_var].isFixed())
-    {
-        const int32_t old_finish = bucket.finish_times.empty() ? 0 : *bucket.finish_times.rbegin();
-        const int32_t finish = domains[alternative.start_var].fixedValue() + 1;
-        if (add)
-            bucket.finish_times.insert(finish);
-        else
-            bucket.finish_times.erase(bucket.finish_times.find(finish));
-        const int32_t new_finish = bucket.finish_times.empty() ? 0 : *bucket.finish_times.rbegin();
-        if (old_finish != new_finish)
-            data.memory_dirty.insert(bucket.open_lifetimes.begin(), bucket.open_lifetimes.end());
-    }
-}
-
-inline void SearchState::markMemoryAffected(VarId var_id) const
-{
-    auto &data = propagation;
-    if (!data.initialized || var_infos[var_id].type == VarType::CACHED)
-        return;
-    const VarId owner = data.owners[var_id];
-    if (owner == kInvalidVarId)
-        return;
-    const int32_t index = selectedAlternative(owner);
-    if (var_infos[var_id].type == VarType::START &&
-        (index < 0 || var_infos[var_id].enode_idx != static_cast<uint32_t>(index)))
-        return;
-    // Reuse per-state scratch and stamps instead of allocating a frontier and
-    // visited hash set for every domain update.
-    ++data.mem_prop_aff_stamp;
-    if (data.mem_prop_aff_stamp == 0)
-    {
-        std::fill(data.mem_affected_stamp.begin(), data.mem_affected_stamp.end(), 0);
-        data.mem_prop_aff_stamp = 1;
-    }
-    const uint32_t stamp = data.mem_prop_aff_stamp;
-    auto &frontier = data.mem_affected_scratch;
-    frontier.clear();
-    frontier.push_back(owner);
-    data.mem_affected_stamp[owner] = stamp;
-    if (var_infos[var_id].type != VarType::OFFSET && index >= 0)
-        for (VarId child : data.alternatives[owner][index].children)
-            if (child != kInvalidVarId && data.mem_affected_stamp[child] != stamp)
-            {
-                data.mem_affected_stamp[child] = stamp;
-                frontier.push_back(child);
-            }
-    for (size_t head = 0; head < frontier.size(); ++head)
-    {
-        const VarId current = frontier[head];
-        data.memory_dirty.insert(current);
-        const auto &neighbors = data.view_neighbors[current];
-        for (VarId neighbor : neighbors)
-        {
-            if (data.mem_affected_stamp[neighbor] == stamp)
-                continue;
-            data.mem_affected_stamp[neighbor] = stamp;
-            frontier.push_back(neighbor);
-        }
     }
 }
 

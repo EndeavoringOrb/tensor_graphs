@@ -438,7 +438,7 @@ class StartPrecedencePropagator : public Propagator
     }
 
   public:
-    explicit StartPrecedencePropagator(bool fixed_starts_only = true)
+    explicit StartPrecedencePropagator(bool fixed_starts_only = false)
         : fixed_starts_only(fixed_starts_only)
     {
     }
@@ -3464,7 +3464,7 @@ class EngineWorkloadPropagator : public Propagator
 // ============================================================================
 
 template <typename EngineT>
-inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = true)
+inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false)
 {
     engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
     engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
@@ -3492,7 +3492,7 @@ inline void addExtraPropagators(EngineT &engine)
 }
 
 template <typename EngineT>
-inline void addAllPropagators(EngineT &engine, bool fixed_starts_only = true)
+inline void addAllPropagators(EngineT &engine, bool fixed_starts_only = false)
 {
     addBasePropagators(engine, fixed_starts_only);
     addExtraPropagators(engine);

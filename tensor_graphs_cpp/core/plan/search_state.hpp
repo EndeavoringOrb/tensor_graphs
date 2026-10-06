@@ -450,8 +450,6 @@ struct PropagationState
     struct BucketData
     {
         std::multiset<double> engine_bounds;
-        std::multiset<int32_t> finish_times;
-        std::unordered_set<VarId> open_lifetimes;
         std::unordered_map<MemSpace, std::unordered_set<VarId>> allocations;
     };
 
@@ -472,7 +470,6 @@ struct PropagationState
     std::vector<WriteAfterReadBucket> write_after_read;
     PropagationSumTree cost;
     std::vector<Allocation> allocations;
-    std::unordered_set<VarId> memory_dirty;
 
     // Scratch storage for stateless propagators
     std::vector<uint32_t> topo_path_visited_stamp;
@@ -489,10 +486,6 @@ struct PropagationState
     std::vector<uint32_t> mem_alloc_visited_stamp;
     uint32_t mem_alloc_stamp = 0;
     std::vector<VarId> mem_alloc_frontier;
-
-    std::vector<uint32_t> mem_affected_stamp;
-    uint32_t mem_prop_aff_stamp = 0;
-    std::vector<VarId> mem_affected_scratch;
 };
 
 class SearchState
@@ -589,7 +582,6 @@ class SearchState
 
     void ensurePropagationState() const;
     void updatePropagationContribution(VarId var_id, bool add) const;
-    void markMemoryAffected(VarId var_id) const;
     int32_t selectedAlternative(VarId sel_var) const;
     bool isSelectedParent(VarId parent, VarId child) const;
     float costLowerBound() const;
@@ -736,12 +728,10 @@ class SearchState
             if (const auto *entry = std::get_if<DomainTrailEntry>(&trail.back()))
             {
                 updatePropagationContribution(entry->var_id, false);
-                markMemoryAffected(entry->var_id);
                 const bool was_empty = domains[entry->var_id].isEmpty();
                 domains[entry->var_id] = entry->prev_domain;
                 invalidateWriteAfterRead(entry->var_id);
                 updatePropagationContribution(entry->var_id, true);
-                markMemoryAffected(entry->var_id);
                 updateEmptyDomainIndex(entry->var_id, was_empty, entry->prev_domain.isEmpty());
                 markDomainDirty(entry->var_id);
             }
@@ -764,13 +754,11 @@ class SearchState
         if (domains[var_id] != new_domain)
         {
             updatePropagationContribution(var_id, false);
-            markMemoryAffected(var_id);
             const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
             domains[var_id] = new_domain;
             invalidateWriteAfterRead(var_id);
             updatePropagationContribution(var_id, true);
-            markMemoryAffected(var_id);
             updateEmptyDomainIndex(var_id, was_empty, new_domain.isEmpty());
             markDomainDirty(var_id);
             return true;
