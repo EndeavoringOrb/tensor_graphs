@@ -688,7 +688,7 @@ def runWorker():
 
             if cache_file_target.exists():
                 runCmd(
-                    [python_exe, "utils/analyze_performance.py", "--graph", str(cache_file_target)],
+                    [python_exe, "utils/analyze_performance.py", str(cache_file_target)],
                     TIMEOUTS["analysis"],
                     log_path=cache_analysis_log,
                 )
