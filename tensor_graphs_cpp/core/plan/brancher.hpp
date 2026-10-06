@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <iomanip>
-#include <iostream>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -31,10 +29,6 @@ class Brancher
     virtual ~Brancher() = default;
 
     virtual bool chooseBranch(const SearchState &state, BranchDecision &out_decision) = 0;
-
-#ifdef TG_PROFILE
-    virtual void reportBrancherTiming() const {}
-#endif
 };
 
 class HeuristicBrancher : public Brancher
@@ -297,33 +291,6 @@ class HeuristicBrancher : public Brancher
     };
     mutable BrancherTiming brancher_timing;
 
-    void reportBrancherTiming() const override
-    {
-        const double total_ms = brancher_timing.total_ns / 1.0e6;
-        const double sel_ms = brancher_timing.selection_ns / 1.0e6;
-        const double cache_ms = brancher_timing.cache_ns / 1.0e6;
-        const double topo_ms = brancher_timing.sched_topo_ns / 1.0e6;
-        const double start_ms = brancher_timing.sched_start_ns / 1.0e6;
-        const double offset_ms = brancher_timing.sched_offset_ns / 1.0e6;
-        const double pref_ms = brancher_timing.preferred_offset_ns / 1.0e6;
-
-        std::cout << "\n[SearchEngine] Brancher Timing Breakdown:\n"
-                  << "  Total chooseBranch:        " << std::fixed << std::setprecision(2)
-                  << std::setw(10) << total_ms << " ms (" << brancher_timing.total_calls << " calls)\n"
-                  << "    chooseSelection:         " << std::setw(10) << sel_ms << " ms ("
-                  << (total_ms > 0 ? (sel_ms / total_ms * 100.0) : 0.0) << "%)\n"
-                  << "    chooseCache:             " << std::setw(10) << cache_ms << " ms ("
-                  << (total_ms > 0 ? (cache_ms / total_ms * 100.0) : 0.0) << "%)\n"
-                  << "    chooseSchedule TopoSort: " << std::setw(10) << topo_ms << " ms ("
-                  << (total_ms > 0 ? (topo_ms / total_ms * 100.0) : 0.0) << "%)\n"
-                  << "    chooseSchedule Starts:   " << std::setw(10) << start_ms << " ms ("
-                  << (total_ms > 0 ? (start_ms / total_ms * 100.0) : 0.0) << "%)\n"
-                  << "    chooseSchedule Offsets:  " << std::setw(10) << offset_ms << " ms ("
-                  << (total_ms > 0 ? (offset_ms / total_ms * 100.0) : 0.0) << "%)\n"
-                  << "      preferredOffset calls: " << brancher_timing.preferred_offset_calls
-                  << " taking " << pref_ms << " ms\n"
-                  << std::flush;
-    }
 #endif
 
     int32_t preferredOffset(const SearchState &state, uint32_t b, EClassId cid,

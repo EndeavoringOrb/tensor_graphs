@@ -318,6 +318,19 @@ struct CostModel
         std::string opName = "";
         ReferenceFactory refFactory = nullptr;
 
+        struct ReferenceWorkloadCache
+        {
+            std::mutex mutex;
+            std::vector<WorkloadMetrics> workloads;
+            bool initialized = false;
+        };
+
+        // LinearModel records are fixed after model construction. Keep the
+        // corresponding reference workloads beside the model so prediction
+        // does not rebuild the same reference graphs for every target.
+        mutable std::shared_ptr<ReferenceWorkloadCache> referenceWorkloadCache =
+            std::make_shared<ReferenceWorkloadCache>();
+
         struct Candidate
         {
             double dist;
@@ -343,6 +356,43 @@ struct CostModel
                 return 1e-6f;
             }
 
+            const auto workload_cache = referenceWorkloadCache;
+            {
+                std::lock_guard<std::mutex> lock(workload_cache->mutex);
+                if (!workload_cache->initialized)
+                {
+                    workload_cache->workloads.reserve(recs_ptr->size());
+                    for (const auto &r : *recs_ptr)
+                    {
+                        ReferenceFactory active_factory = refFactory;
+                        if (!active_factory && KernelRegistry::get().hasKernel(r.kernelId))
+                        {
+                            active_factory = KernelRegistry::get().getKernel(r.kernelId).refFactory;
+                        }
+                        if (!active_factory && !opName.empty())
+                        {
+                            const auto *ref_entry = ReferenceGraphRegistry::get().getFactory(opName);
+                            if (ref_entry)
+                                active_factory = ref_entry->factory;
+                        }
+
+                        if (active_factory)
+                        {
+                            workload_cache->workloads.push_back(computeWorkloadFromRefFactory(
+                                active_factory, r.inputShapes, r.inputDTypes, r.outputShape, r.outputDType,
+                                r.inputConstants, opType));
+                        }
+                        else
+                        {
+                            workload_cache->workloads.push_back(computeWorkload(
+                                opType, r.inputShapes, r.inputDTypes, r.outputShape, r.outputDType, opName,
+                                r.inputConstants));
+                        }
+                    }
+                    workload_cache->initialized = true;
+                }
+            }
+
             double target_bytes = target_w.bytesRead + target_w.bytesWritten;
 
             bool is_dot = (opType == OpType::DOT) || (opName.find("Dot") != std::string::npos) ||
@@ -359,31 +409,10 @@ struct CostModel
             bool tgt_out_contig = (tgt_out_stride == 1);
             uint32_t tgt_eff_rank = getEffectiveRank(out_shape);
 
-            for (const auto &r : *recs_ptr)
+            for (size_t record_idx = 0; record_idx < recs_ptr->size(); ++record_idx)
             {
-                ReferenceFactory active_factory = refFactory;
-                if (!active_factory && KernelRegistry::get().hasKernel(r.kernelId))
-                {
-                    active_factory = KernelRegistry::get().getKernel(r.kernelId).refFactory;
-                }
-                if (!active_factory && !opName.empty())
-                {
-                    const auto *ref_entry = ReferenceGraphRegistry::get().getFactory(opName);
-                    if (ref_entry)
-                        active_factory = ref_entry->factory;
-                }
-
-                WorkloadMetrics ref_w;
-                if (active_factory)
-                {
-                    ref_w = computeWorkloadFromRefFactory(active_factory, r.inputShapes, r.inputDTypes,
-                                                          r.outputShape, r.outputDType, r.inputConstants, opType);
-                }
-                else
-                {
-                    ref_w = computeWorkload(opType, r.inputShapes, r.inputDTypes,
-                                            r.outputShape, r.outputDType, opName, r.inputConstants);
-                }
+                const auto &r = (*recs_ptr)[record_idx];
+                const WorkloadMetrics &ref_w = workload_cache->workloads[record_idx];
 
                 double ref_time = std::max(1e-6, static_cast<double>(std::isnan(r.runTime) ? 1e-6f : r.runTime));
                 double ratio = 1.0;

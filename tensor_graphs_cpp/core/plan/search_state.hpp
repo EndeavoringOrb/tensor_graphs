@@ -14,6 +14,7 @@
 #include "core/common/constants.hpp"
 #include "core/egraph.hpp"
 #include "core/graph.hpp"
+#include "core/logging.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/enode_info.hpp"
 #include "core/types.hpp"
@@ -127,6 +128,11 @@ struct SelectionReachability
     std::vector<Node> nodes;
     std::vector<Edge> edges;
     std::vector<UndoEntry> undo;
+    std::vector<uint32_t> node_undo_epoch;
+    uint32_t current_undo_epoch = 0;
+    // Reused FIFO storage for update(). queued ensures at most one pending
+    // entry per node, so this ring only needs one slot per node.
+    std::vector<uint32_t> queue_buffer;
 
     void initialize(const EGraph &egraph, EClassId root_id,
                     const std::unordered_map<EClassId, VarId> &selected_vars,
@@ -182,13 +188,17 @@ struct SelectionReachability
         {
             Node &node = nodes[idx];
             if (node.level == infinity)
+            {
                 unreachable.push_back(node.var_id);
+            }
             else if (idx != root)
             {
                 while (!supportsLevel(node.incoming[node.next_incoming], node.level))
                     ++node.next_incoming;
             }
         }
+        queue_buffer.resize(nodes.size());
+        node_undo_epoch.assign(nodes.size(), 0);
         initialized = true;
     }
 
@@ -209,13 +219,27 @@ struct SelectionReachability
     void update(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable)
     {
         Node &changed = nodes[node_idx];
+        ++current_undo_epoch;
+        if (current_undo_epoch == 0)
+        {
+            std::fill(node_undo_epoch.begin(), node_undo_epoch.end(), 0);
+            current_undo_epoch = 1;
+        }
         undo.push_back(UndoEntry{UndoEntry::Kind::SELECTION, node_idx, changed.selection});
-        std::vector<uint32_t> frontier;
+        size_t queue_head = 0;
+        size_t queue_tail = 0;
+        size_t queue_count = 0;
         auto enqueue = [&](uint32_t idx) {
             if (!nodes[idx].queued)
             {
+                if (queue_count >= queue_buffer.size())
+                    Error::throw_err("SelectionReachability::update: ring queue capacity exceeded (pending=" +
+                                     std::to_string(queue_count) + ", nodes=" +
+                                     std::to_string(nodes.size()) + ")");
                 nodes[idx].queued = true;
-                frontier.push_back(idx);
+                queue_buffer[queue_tail] = idx;
+                queue_tail = (queue_tail + 1) % queue_buffer.size();
+                ++queue_count;
             }
         };
         for (uint32_t en_idx = 0; en_idx < changed.enode_edges.size(); ++en_idx)
@@ -237,9 +261,11 @@ struct SelectionReachability
         changed.selection = selection;
 
         const uint32_t infinity = static_cast<uint32_t>(nodes.size());
-        for (size_t head = 0; head < frontier.size(); ++head)
+        while (queue_count > 0)
         {
-            const uint32_t idx = frontier[head];
+            const uint32_t idx = queue_buffer[queue_head];
+            queue_head = (queue_head + 1) % queue_buffer.size();
+            --queue_count;
             Node &node = nodes[idx];
             node.queued = false;
             if (node.level == infinity)
@@ -258,11 +284,17 @@ struct SelectionReachability
             }
             if (node.level == prev_level && node.next_incoming == prev_incoming)
                 continue;
-            undo.push_back(UndoEntry{UndoEntry::Kind::NODE, idx, {}, prev_level, prev_incoming});
+            if (node_undo_epoch[idx] != current_undo_epoch)
+            {
+                undo.push_back(UndoEntry{UndoEntry::Kind::NODE, idx, {}, prev_level, prev_incoming});
+                node_undo_epoch[idx] = current_undo_epoch;
+            }
             if (node.level == prev_level)
                 continue;
             if (node.level == infinity)
+            {
                 unreachable.push_back(node.var_id);
+            }
             for (const auto &enode_edges : node.enode_edges)
             {
                 for (uint32_t edge_id : enode_edges)

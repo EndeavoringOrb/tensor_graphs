@@ -52,6 +52,9 @@ inline void SearchState::ensurePropagationState() const
     data.mem_alloc_stamp = 0;
     data.mem_affected_stamp.assign(numVars(), 0);
     data.mem_prop_aff_stamp = 0;
+    data.mem_affected_scratch.clear();
+    data.mem_affected_scratch.reserve(numVars());
+    data.memory_dirty.reserve(numVars());
 
     for (uint32_t b = 0; b < buckets.size(); ++b)
     {
@@ -262,20 +265,38 @@ inline void SearchState::markMemoryAffected(VarId var_id) const
     if (var_infos[var_id].type == VarType::START &&
         (index < 0 || var_infos[var_id].enode_idx != static_cast<uint32_t>(index)))
         return;
-    std::vector<VarId> frontier{owner};
+    // Reuse per-state scratch and stamps instead of allocating a frontier and
+    // visited hash set for every domain update.
+    ++data.mem_prop_aff_stamp;
+    if (data.mem_prop_aff_stamp == 0)
+    {
+        std::fill(data.mem_affected_stamp.begin(), data.mem_affected_stamp.end(), 0);
+        data.mem_prop_aff_stamp = 1;
+    }
+    const uint32_t stamp = data.mem_prop_aff_stamp;
+    auto &frontier = data.mem_affected_scratch;
+    frontier.clear();
+    frontier.push_back(owner);
+    data.mem_affected_stamp[owner] = stamp;
     if (var_infos[var_id].type != VarType::OFFSET && index >= 0)
         for (VarId child : data.alternatives[owner][index].children)
-            if (child != kInvalidVarId)
+            if (child != kInvalidVarId && data.mem_affected_stamp[child] != stamp)
+            {
+                data.mem_affected_stamp[child] = stamp;
                 frontier.push_back(child);
-    std::unordered_set<VarId> visited;
+            }
     for (size_t head = 0; head < frontier.size(); ++head)
     {
         const VarId current = frontier[head];
-        if (!visited.insert(current).second)
-            continue;
         data.memory_dirty.insert(current);
         const auto &neighbors = data.view_neighbors[current];
-        frontier.insert(frontier.end(), neighbors.begin(), neighbors.end());
+        for (VarId neighbor : neighbors)
+        {
+            if (data.mem_affected_stamp[neighbor] == stamp)
+                continue;
+            data.mem_affected_stamp[neighbor] = stamp;
+            frontier.push_back(neighbor);
+        }
     }
 }
 
