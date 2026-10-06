@@ -37,6 +37,7 @@ struct Settings
     bool disable_fusion = false;
     bool reference_only = false;
     bool only_plan = false;
+    bool saturate_only = false;
     bool compile_decode_buckets = false;
     bool fold_weights = false;
     bool use_ortools = false;
@@ -175,6 +176,7 @@ struct Settings
         parser.add_flag({"--disable-node-caching"}, "Disable dirty region session caching.");
         parser.add_flag({"--disable-compilation-caching"}, "Disable compiled-session cache file reads and writes.");
         parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
+        parser.add_flag({"--saturate-only"}, "Stop after saturation and cost estimation without running SearchEngine.");
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
         parser.add_flag({"--disable-fusion"}, "Disable multi-operation fusion patterns.");
         parser.add_flag({"--ref-only"}, "Restrict kernel selection to reference implementations.");
@@ -213,6 +215,9 @@ struct Settings
 
         if (parser.get_flag("--only-plan"))
             only_plan = true;
+
+        if (parser.get_flag("--saturate-only"))
+            saturate_only = true;
 
         if (parser.get_flag("--fold-weights"))
             fold_weights = true;

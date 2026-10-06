@@ -358,6 +358,10 @@ struct Session
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
             foldCleanTensors();
             ensureCacheCoverage(doSaturate);
+            if (settings.saturate_only)
+            {
+                return;
+            }
             persistCache();
             isPlanned = true;
         }
@@ -952,6 +956,11 @@ struct Session
         cachedGraphs = std::move(graphs);
         selectedCachedNodes = std::move(cached_nodes);
         cachedBucketWeights = std::move(bucket_weights);
+
+        if (settings.saturate_only)
+        {
+            return;
+        }
 
         if (cachedGraphs.size() != manualBuckets.size())
         {

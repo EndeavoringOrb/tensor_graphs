@@ -1933,6 +1933,12 @@ struct Planner
             pruneEGraph(bucket_states[b].egraph, all_enode_infos[b]);
         }
 
+        if (settings.saturate_only)
+        {
+            LOG(INFO) << "[Planner.planAll] Saturate-only mode: cost estimation complete across all kernels & shapes. Exiting before SearchEngine.";
+            return {{}, {}};
+        }
+
         // Preallocate constants and inputs
         std::unordered_map<BaseEClassId, ParallelBuffer> preallocated;
         preallocate(graph, full_state.egraph, full_state.nodeToEClass, {}, preallocated);

@@ -305,7 +305,7 @@ class LLMSession
                double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
                const std::string &write_refs = "", const std::string &compare_refs = "",
                 bool disable_compilation_caching = false, bool ref_only = false,
-               bool compile_no_weights_bucket = false)
+               bool compile_no_weights_bucket = false, bool saturate_only = false)
     {
         referenceFile = write_refs;
         compareReferenceFile = compare_refs;
@@ -380,6 +380,7 @@ class LLMSession
         session->settings.use_ortools_lns = use_ortools_lns;
         session->settings.max_time_seconds = max_time_seconds;
         session->settings.disable_fusion = disable_fusion;
+        session->settings.saturate_only = saturate_only;
         KernelRegistry::get().setReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
 
         if ((!referenceFile.empty() || !compareReferenceFile.empty()) &&
@@ -418,6 +419,12 @@ class LLMSession
         {
             session->ensureFullBucket();
             session->setBucketWeights(bucket_weights);
+        }
+
+        if (saturate_only)
+        {
+            session->plan(true);
+            return;
         }
 
         session->compile();
@@ -869,6 +876,7 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("disable_node_caching", &Settings::disable_caching)
         .def_readwrite("disable_compilation_caching", &Settings::disable_compilation_caching)
         .def_readwrite("only_plan", &Settings::only_plan)
+        .def_readwrite("saturate_only", &Settings::saturate_only)
         .def_readwrite("min_compile_seconds", &Settings::min_compile_seconds)
         .def_readwrite("num_threads", &Settings::num_threads)
         .def_readwrite("bucket_weights", &Settings::bucket_weights);
@@ -976,7 +984,7 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
                       const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
-                      bool, const std::string &, const std::string &, bool, bool, bool>(),
+                      bool, const std::string &, const std::string &, bool, bool, bool, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
@@ -985,7 +993,7 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
              py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
              py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false,
-             py::arg("compile_no_weights_bucket") = false)
+             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

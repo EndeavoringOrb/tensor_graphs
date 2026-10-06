@@ -1,0 +1,265 @@
+./deviceQuery
+```text
+./deviceQuery Starting...
+
+ CUDA Device Query (Runtime API) version (CUDART static linking)
+
+Detected 1 CUDA Capable device(s)
+
+Device 0: "Quadro M4000"
+  CUDA Driver Version / Runtime Version          12.2 / 11.8
+  CUDA Capability Major/Minor version number:    5.2
+  Total amount of global memory:                 8121 MBytes (8515485696 bytes)
+  (013) Multiprocessors, (128) CUDA Cores/MP:    1664 CUDA Cores
+  GPU Max Clock rate:                            773 MHz (0.77 GHz)
+  Memory Clock rate:                             3005 Mhz
+  Memory Bus Width:                              256-bit
+  L2 Cache Size:                                 2097152 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(65536), 2D=(65536, 65536), 3D=(4096, 4096, 4096)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(16384), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(16384, 16384), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        98304 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 2 copy engine(s)
+  Run time limit on kernels:                     Yes
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Disabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            No
+  Supports Cooperative Kernel Launch:            No
+  Supports MultiDevice Co-op Kernel Launch:      No
+  Device PCI Domain ID / Bus ID / location ID:   0 / 2 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+deviceQuery, CUDA Driver = CUDART, CUDA Driver Version = 12.2, CUDA Runtime Version = 11.8, NumDevs = 1
+Result = PASS
+```
+
+
+================================================================================
+GPU HARDWARE & MICROARCHITECTURE PROFILE (NVIDIA Quadro M4000 / GM204GL)
+================================================================================
+
+1. HARDWARE IDENTITY & OPERATING ENVIRONMENT
+---------------------------------------------
+- GPU Model: NVIDIA Quadro M4000 (Subsystem: HP, Device ID: 0x13F1, Vendor: 0x10DE)
+- Silicon: GM204GL-A1 (Maxwell 2.0 / 2nd Gen Maxwell architecture, TSMC 28nm HPX)
+- Transistor Count & Die Size: 5.2 billion transistors, 398 mm²
+- Compute Capability: SM 5.2 (sm_52 / compute_52)
+- Driver Version: NVIDIA UNIX x86_64 Kernel Module 535.261.03
+- CUDA Environment: Driver API 12.2, Runtime API 11.8, PyTorch 2.7.1+cu118
+- Graphics & Compute APIs:
+  * Vulkan: 1.3.242 (Conformance 1.3.5.0)
+  * OpenGL: 4.6 (NVIDIA 535.261.03)
+- PCIe Bus: PCIe 3.0 x16 (Max 8.0 GT/s, full 16x link width, bidirectional theoretical peak ~31.5 GB/s)
+- Power & Thermal Limits:
+  * TDP: 120.00 W (Single-slot workstation form factor with 6-pin auxiliary PCIe power)
+  * Target Temp: 81°C, Slowdown Temp: 99°C, Shutdown Temp: 104°C
+- Clocks:
+  * Graphics / SM Base & Boost Clock: 772.5 MHz (Locked / fixed application clock profile)
+  * Memory Clock: 3005 MHz (6010 MT/s effective GDDR5 data rate)
+
+
+2. COMPUTE TOPOLOGY & EXECUTION ENGINE
+---------------------------------------
+- Streaming Multiprocessors (SMM): 13 SMMs active (out of 16 physical SMMs on GM204 die; 3 harvested/disabled)
+- CUDA Cores:
+  * Cores per SMM: 128 FP32/INT32 ALU cores
+  * Total GPU CUDA Cores: 1,664 cores
+- SMM Internal Sub-Core Partitioning (4 Quadrants):
+  * Each SMM is physically divided into 4 independent processing blocks / quadrants.
+  * Each quadrant contains:
+    - 1 Warp Scheduler + 2 Instruction Dispatch Units (supporting dual-issue of complementary instructions)
+    - 32 FP32 CUDA Cores
+    - 8 Special Function Units (SFU) -> 32 SFU per SMM, 416 SFU GPU-wide
+    - 8 Load/Store Units (LSU) -> 32 LSU per SMM, 416 LSU GPU-wide
+    - 16 KB Register File (64 KB / 16,384 32-bit registers per quadrant)
+- Warp Schedulers:
+  * 4 Warp Schedulers per SMM -> 52 Warp Schedulers GPU-wide
+  * Concurrently managed resident warps: Up to 64 warps per SMM (2,048 threads per SMM, 26,624 threads GPU-wide)
+- Peak Theoretical Arithmetic Throughput:
+  * Single-Precision FP32: 2.571 TFLOPS (1,664 cores * 0.7725 GHz * 2 ops/cycle FMA)
+    [Measured FP32 GEMM: 2.027 TFLOPS (~78.8% theoretical peak)]
+  * Double-Precision FP64: 80.34 GFLOPS (1/32 of FP32 rate; 52 units * 0.7725 GHz * 2 ops/cycle)
+    [Measured FP64 GEMM: 72.28 GFLOPS (~90.0% theoretical peak)]
+  * Half-Precision FP16: NO native vector FP16 math hardware on SM 5.2 (neither half2 nor tensor cores exist;
+    FP16 compute is emulated through FP32 or bit manipulation, though FP16 storage/load/store conversions are native)
+    [Measured FP16 GEMM: 2.156 TFLOPS, runs via FP32 cores]
+  * INT32 Add/Sub/Bitwise/Shift: 1,664 ops/cycle GPU-wide (1.285 TOPs)
+  * INT32 Multiplication: Multi-cycle sequence via XMAD instructions (~42.7 ops/cycle/SMM peak, see SASS section)
+  * Special Function Units (SFU - sin, cos, exp2, log2, rsqrt, rcp): 32 ops/cycle/SMM (416 ops/cycle GPU-wide)
+
+
+3. MEMORY SUBSYSTEM & CACHE HIERARCHY
+--------------------------------------
+- VRAM (Global Memory):
+  * Total Capacity: 8,192 MiB (8 GB) GDDR5
+  * Bus Width: 256 bits (4 x 64-bit memory controllers)
+  * Theoretical Peak Bandwidth: 192.32 GB/s (256 bits / 8 * 6.010 GHz)
+  * Measured Device Copy Bandwidth: 141.38 GB/s (~73.5% theoretical peak)
+- L2 Cache:
+  * Size: 2,097,152 bytes (2 MB)
+  * 64-byte cache line width, shared crossbar connecting all 13 SMMs to 4 memory partitions
+  * 64 ROP units (4 partitions x 16 ROPs)
+- Dedicated Shared Memory:
+  * Size per SMM: 96 KB dedicated RAM per SMM (physically independent of L1/Texture cache)
+  * Max allocation per Thread Block: 48 KB (enables 2 x 48 KB blocks or 3 x 32 KB blocks per SMM concurrently)
+  * Architecture: 32 banks, 4 bytes (32-bit word) per bank
+  * Bank Index Mapping: (byte_address >> 2) & 31
+  * Bandwidth: 32 words (128 bytes) per clock cycle per SMM for conflict-free accesses
+  * Broadcast mechanism: Full warp broadcast without conflicts when threads access the same word
+  * Maxwell Caveat: Vector quad loads (LDS.128, 16 bytes/thread) can encounter bank conflicts even within 128-byte
+    windows unless specific swizzled/zigzag memory patterns are used.
+- Unified L1 / Texture Cache:
+  * 48 KB unified L1/texture cache per SMM (24 KB shared per pair of quadrants)
+  * Caches texture fetches and global memory loads (LDG with cache modifiers or read-only cache path)
+- Constant Memory:
+  * 64 KB total constant address space
+  * 8 KB dedicated constant cache per SMM (1-cycle broadcast per warp when accessing uniform constant address)
+- Instruction Cache:
+  * 8 KB instruction cache per SMM (approx. 768 operational 64-bit SASS instructions + control codes)
+
+
+4. REGISTER FILE ARCHITECTURE & BANKING RULES
+----------------------------------------------
+- Capacity: 65,536 32-bit registers per SMM (Total 851,968 registers across the 13 SMMs)
+- Allocation Granularity: 256 registers per warp block (4 registers per thread)
+- Maximum Registers per Thread: 255 registers
+- 4 Register Banks:
+  * Bank Assignment: bank_id = reg_index % 4
+  * Register Bank Conflict: Occurs when an instruction simultaneously requests two or more source registers
+    located in the same bank. Each conflict stalls the execution pipeline by 1 clock cycle.
+- Operand Reuse Cache:
+  * Maxwell provides an 8-byte reuse cache per source operand slot (4 slots = 4 bits in SASS control word).
+  * Instructions can specify the `.reuse` flag on operands (e.g. `R2.reuse`).
+  * When flagged, the operand is stored in the operand reuse cache; subsequent instructions reading the same
+    register read directly from the reuse cache without accessing the register bank, eliminating bank conflict stalls.
+- Delayed Register Bank Conflicts with Memory Operations:
+  * Memory instructions (LDG, LDS, STS, TLD) do not duplicate their source operands into internal buffers.
+    Instead, they hold the operand registers active on the register bank for approximately 20 clock cycles.
+  * Interleaving arithmetic instructions (like FFMA) with memory operations can trigger delayed bank conflicts.
+  * Mitigation Strategy:
+    1) Alternate accumulator register banks (e.g. alternating odd/even banks across adjacent instructions).
+    2) Use 128-bit vector memory operations (LDS.128, LDG.128) to reduce the total number of memory instructions by 4x.
+
+
+5. SASS INSTRUCTION SET ARCHITECTURE (SM 5.2)
+----------------------------------------------
+- SASS Word Size: 64-bit (8 bytes) per operational instruction.
+- Instruction & Control Code Layout:
+  * Maxwell groups instructions in blocks of 3 operational instructions preceded by 1 64-bit control code word:
+    [64-bit Control Code] -> [Inst 0] -> [Inst 1] -> [Inst 2]
+  * The 64-bit control code is split into three 17-bit control fields (one per instruction) + 4-bit reuse flags:
+    - Bits 0-3: Stall Count (0 to 15 clock cycles)
+      * Stall 0: DUAL-ISSUE with the subsequent instruction (0 extra stall clocks if targeting different execution units!)
+      * Stalls 12-15: Require Yield bit set; Stall 13 is required to immediately read a predicate set by an instruction.
+      * Minimum stall of 5 is required for unpipelined instructions: BRA, BAR.SYNC, CAL, RET, EXIT.
+    - Bit 4: Yield Hint (1 = do not yield warp, 0 = yield to another ready warp).
+    - Bits 5-7: Write Dependency Barrier index (0 to 5; 7 = none). Cleared when producer finishes writing destination.
+    - Bits 8-10: Read Dependency Barrier index (0 to 5; 7 = none). Cleared when consumer finishes reading source registers.
+    - Bits 11-16: Wait Dependency Barrier bitmask (6 scoreboards per warp). Blocks issue until marked barriers clear.
+    - Bits 17-20: Operand Reuse Flags (flags which source register operand should be cached in operand reuse buffer).
+
+- Dual-Issue Engine:
+  * Maxwell warp schedulers can issue 2 independent instructions in 1 cycle if they use distinct functional pipelines:
+    - Primary: FP32 ALU (FFMA, FADD, FMUL, IADD, XMAD, LOP3)
+    - Secondary: LSU / Memory (LDS, STS, LDG, STG, TLD) or Branch (BRA)
+  * In highly tuned GEMM kernels, all shared memory loads/stores can be dual-issued with FFMA at 0 effective clock cost.
+
+- Pipeline Latencies:
+  * Fixed ALU operations (FFMA, FADD, FMUL, IADD, XMAD, LOP3, ISCADD): 6 clock cycles.
+  * Predicate write-to-read latency: 13 clock cycles.
+  * Shared memory load (LDS) latency: ~19 to 24 clock cycles.
+  * Global memory load (LDG) latency: ~200 to 400 clock cycles.
+
+- Notable Native Instructions on SM 5.2:
+  * Arithmetic & Indexing:
+    - `FFMA`: Single-precision Fused Multiply-Add (1 cycle throughput per core).
+    - `ISCADD`: Integer Scale and Add `d = (a << imm) + b` (1 cycle throughput, ideal for fast array/matrix indexing).
+    - `XMAD`: 16-bit x 16-bit integer multiply-accumulate:
+      Full 32-bit integer multiplication `a * b` requires a 3-instruction sequence:
+        XMAD R9, R4.reuse, R2.reuse, RZ
+        XMAD.MRG R10, R4.reuse, R2.H1, RZ
+        XMAD.PSL.CBCC R0, R4.H1, R10.H1, R9
+      (Important: Avoid unnecessary 32-bit integer multiplication in inner loops; use ISCADD or pre-scaled strides).
+    - `LOP3.LUT`: Arbitrary 3-input bitwise boolean lookup table (computes any boolean function of 3 inputs in 1 op).
+    - `PRMT`: Byte Permute (arbitrary byte selection/swizzling from two 32-bit registers via 16-bit control mask).
+    - `SHF.L` / `SHF.R`: Funnel Shift (64-bit pair bit-shift across two registers).
+  * Intra-Warp Communication:
+    - `SHFL.DOWN`, `SHFL.UP`, `SHFL.BFLY`, `SHFL.IDX`: Single-cycle warp shuffle (exchanges data between warp lanes
+      without using shared memory or memory barriers).
+    - `VOTE.ALL`, `VOTE.ANY`, `VOTE.BALLOT`: Warp voting and lane predicate bitmasks.
+  * SIMD Video Instructions (int8 / int16):
+    - `VABSDIFF4` / `VABSDIFF2`: 4x8-bit and 2x16-bit SIMD absolute difference.
+    - `VADD4`, `VSUB4`, `VMNMX4`: 4-way 8-bit SIMD integer addition, subtraction, min/max.
+  * Atomics:
+    - Global memory: Native `RED.E.ADD.F32` / `ATOM.E.ADD.F32` (FP32 global atomic add supported directly in hardware).
+    - Shared memory: Shared memory FP32 atomic add is NOT native; hardware falls back to a CAS loop (`ATOMS.CAS`).
+      64-bit integer atomics are supported in both global and shared memory.
+
+
+6. VULKAN / NON-CUDA ACCELERATION CAPABILITIES
+----------------------------------------------
+- Vulkan Subgroups:
+  * Subgroup size: 32 (exact hardware warp width).
+  * Supported subgroup features: Basic, Vote, Arithmetic, Ballot, Shuffle, Shuffle-Relative, Clustered, Quad,
+    and NVIDIA Partitioned (`VK_NV_shader_subgroup_partitioned`).
+  * Subgroup quad operations supported across all shader stages.
+- Supported SPIR-V / Vulkan Shader Features:
+  * `shaderInt8`: Supported (8-bit integer compute).
+  * `storageBuffer8BitAccess` & `uniformAndStorageBuffer8BitAccess`: Supported (int8 storage/loads/stores).
+  * `shaderBufferInt64Atomics` & `shaderSharedInt64Atomics`: Supported (64-bit integer atomics).
+  * `vulkanMemoryModel`: Supported with device scope and availability/visibility chains.
+  * `descriptorIndexing`: Supported.
+- Unsupported Features to Avoid in Non-CUDA / SPIR-V Kernels:
+  * `shaderFloat16`: FALSE (Native FP16 compute does not exist on GM204).
+  * Cooperative Groups / Multi-Device Launch: Unsupported on SM 5.2.
+  * Compute Preemption: Unsupported on SM 5.2.
+
+
+7. KERNEL DESIGN & OPTIMIZATION GUIDELINES FOR QUADRO M4000
+------------------------------------------------------------
+1) Precision Selection:
+   - FP32 is the premier compute engine (peak 2.57 TFLOPS).
+   - Do NOT attempt packed FP16 (`half2`) compute optimizations; GM204 has no FP16 ALUs or Tensor Cores.
+   - For FP16 inputs, load as FP16, convert via hardware `F2F` to FP32, perform computation in FP32, and convert back.
+   - FP64 should be used sparingly due to 1/32 throughput penalty (peak 80.3 GFLOPS).
+
+2) Vectorized Memory Accesses:
+   - Always maximize memory transaction density with 128-bit vector instructions (`LDG.E.128`, `LDS.128`, `STS.128`).
+   - 128-bit loads fetch 16 bytes per thread, reducing address generation and memory issue overhead by 4x.
+
+3) Latency Hiding via Dual-Issue & Software Pipelining:
+   - Exploit dual-issue: interleave shared memory loads (`LDS.128`) and global memory loads (`LDG.E.128`) with compute
+     instructions (`FFMA`) with 0-stall control codes to achieve dual-dispatch.
+   - Double-buffer shared memory and registers (e.g. calculating step `k` using register buffer 0 while loading
+     step `k+1` from shared memory into register buffer 1).
+
+4) Mitigate Register Bank Conflicts & Leverage Reuse Cache:
+   - Arrange variables in registers so that concurrent operands do not share the same index modulo 4.
+   - Use `.reuse` annotations when assembling SASS or structure PTX unrolled loops so that operand registers
+     are read repeatedly from the 8-byte reuse cache instead of hitting the physical register banks.
+   - Alternate accumulator register banks to minimize delayed bank conflicts caused by in-flight memory operations.
+
+5) Indexing Arithmetic:
+   - Use `ISCADD` (`(a << shift) + b`) for array address indexing instead of 32-bit integer multiplication.
+   - Replace complex boolean logic with single `LOP3.LUT` instructions.
+
+6) Occupancy vs. ILP:
+   - High occupancy (64 warps/SMM) is NOT strictly necessary if ILP is high. With 8-register unrolling and dual-issued
+     memory operations, occupancy as low as 16-32 warps/SMM can achieve >95% of theoretical FP32 performance.
+   - Limit register count to <= 64 registers/thread to allow at least 4 active warps per scheduler (16 warps/SMM).
+================================================================================
