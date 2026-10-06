@@ -1,0 +1,38 @@
+#pragma once
+#include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
+#include "kernels/fused/add_3d_1d/ref.hpp"
+
+inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
+{
+    if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 1 || output.getShape().size() != 3)
+        return false;
+    if (inputs[0].getShape()[2] != inputs[1].getShape()[0] || output.getShape()[2] != inputs[1].getShape()[0])
+        return false;
+    if (inputs[0].getShape() != output.getShape())
+        return false;
+    if (!isContiguous(output))
+        return false;
+    return true;
+}
+
+inline void runAddFP32_3D_1D_Inplace(const KernelContext &ctx)
+{
+    float *data3D = static_cast<float *>(ctx.outputs[0]);
+    const float *data1D = static_cast<const float *>(ctx.inputs[1]);
+
+    uint32_t B = ctx.outViews[0].getShape()[0];
+    uint32_t S = ctx.outViews[0].getShape()[1];
+    uint32_t D = ctx.outViews[0].getShape()[2];
+    uint64_t totalElements = (uint64_t)B * S * D;
+
+    for (uint64_t i = 0; i < totalElements; ++i)
+        data3D[i] += data1D[i % D];
+}
+
+REGISTER_KERNEL("Add_3D_1D_inplace", 2, 2, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace,
+                refFactoryAdd3D1D, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

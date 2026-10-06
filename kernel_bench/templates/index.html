@@ -610,7 +610,7 @@ print("Current best:", status["current_best"])
 # Submit optimization
 job = requests.post(f"{bench_url}/api/iteration/submit", json={
     "idea": "Non-contiguous CUDA Multiply Kernel",
-    "filename": "kernels/cuda/mul/NC_F32_ND.cu",
+    "filename": "kernels/fused/mul_f32/NC_F32_ND.cu",
     "source": "&lt;kernel code&gt;",
     "backend": "cuda"
 }).json()

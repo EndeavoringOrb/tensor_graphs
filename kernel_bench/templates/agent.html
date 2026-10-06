@@ -653,7 +653,7 @@ print("Top fallback:", bottlenecks.get("cpu_fallbacks", [{}])[0].get("op"))
 # 3. Submit Optimization Kernel
 payload = {
     "idea": "Broadcast Multiply CUDA kernel to eliminate REF_MUL",
-    "filename": "kernels/cuda/mul/NC_F32_ND.cu",
+    "filename": "kernels/fused/mul_f32/NC_F32_ND.cu",
     "source": "/* your CUDA code with REGISTER_KERNEL */",
     "backend": "cuda"
 }
@@ -693,7 +693,7 @@ curl -X POST http://localhost:8080/api/iteration/submit \
   -H "Content-Type: application/json" \
   -d '{
     "idea": "Optimized CUDA Mul",
-    "filename": "kernels/cuda/mul/NC_F32_ND.cu",
+    "filename": "kernels/fused/mul_f32/NC_F32_ND.cu",
     "source": "#include <cuda_runtime.h> ...",
     "backend": "cuda"
   }'</pre>

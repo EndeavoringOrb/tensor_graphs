@@ -220,7 +220,7 @@ def buildAgentIndexData(target_model: str = "gemma-3-270m") -> dict:
             "description": "Write high-performance CUDA kernel code in a new unique file under tensor_graphs_cpp/kernels/. Register the kernel with REGISTER_KERNEL. Submit via submit_iteration to automatically build, test, and benchmark.",
             "endpoint": "POST /api/iteration/submit",
             "tool": "submit_iteration",
-            "example": "curl -X POST http://localhost:8080/api/iteration/submit -H 'Content-Type: application/json' -d '{\"idea\": \"Strided Mul CUDA kernel\", \"filename\": \"kernels/cuda/mul/NC_F32_ND.cu\", \"source\": \"...\", \"backend\": \"cuda\"}'",
+            "example": "curl -X POST http://localhost:8080/api/iteration/submit -H 'Content-Type: application/json' -d '{\"idea\": \"Strided Mul CUDA kernel\", \"filename\": \"kernels/fused/mul_f32/NC_F32_ND.cu\", \"source\": \"...\", \"backend\": \"cuda\"}'",
         },
         {
             "step": 6,
@@ -244,7 +244,7 @@ def buildAgentIndexData(target_model: str = "gemma-3-270m") -> dict:
         {
             "rule": 1,
             "name": "NEVER Overwrite Existing Kernels",
-            "description": "Existing kernel files in tensor_graphs_cpp/kernels/ are immutable baselines. You must always create a new file with a distinct path (e.g. kernels/cuda/mul/NC_F32_ND.cu).",
+            "description": "Existing kernel files in tensor_graphs_cpp/kernels/ are immutable baselines. You must always create a new file with a distinct path inside the folder for its reference factory (e.g. kernels/fused/mul_f32/NC_F32_ND.cu).",
             "severity": "CRITICAL",
         },
         {
@@ -649,11 +649,11 @@ def getAgentTools():
                 "type": "function",
                 "function": {
                     "name": "read_kernel_source",
-                    "description": "Read the source code of any kernel file (e.g. 'cuda/mul/F32_ND.cu') or core header (e.g. 'core/types.hpp').",
+                    "description": "Read the source code of any kernel file (e.g. 'fused/mul_f32/F32_ND.cu') or core header (e.g. 'core/types.hpp').",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Relative path under tensor_graphs_cpp/kernels (e.g. 'cuda/mul/F32_ND.cu') or core header (e.g. 'core/types.hpp')."}
+                            "path": {"type": "string", "description": "Relative path under tensor_graphs_cpp/kernels (e.g. 'fused/mul_f32/F32_ND.cu') or core header (e.g. 'core/types.hpp')."}
                         },
                         "required": ["path"],
                     },
@@ -707,7 +707,7 @@ def getAgentTools():
                         "properties": {
                             "idea": {"type": "string", "description": "Clear explanation of the idea/hypothesis being tested."},
                             "source": {"type": "string", "description": "C++ or CUDA source code for the new kernel."},
-                            "filename": {"type": "string", "description": "Relative path for the new kernel (e.g. 'kernels/cublas/gemm_f32.cu' or 'kernels/cuda/mul/NC_F32_ND.cu'). Must NOT overwrite existing files."},
+                            "filename": {"type": "string", "description": "Relative path for the new kernel inside its reference factory folder (e.g. 'kernels/fused/dot_f32/gemm_f32.cu' or 'kernels/fused/mul_f32/NC_F32_ND.cu'). Must NOT overwrite existing files."},
                             "backend": {"type": "string", "enum": ["cuda", "cpu"], "default": "cuda", "description": "Target backend."},
                             "target_model": {"type": "string", "default": "gemma-3-270m", "description": "Target model."},
                             "pp": {"type": "integer", "default": 512, "description": "Prompt processing sequence length."},
@@ -1615,4 +1615,3 @@ if __name__ == "__main__":
     host = os.environ.get("BENCH_HOST", "127.0.0.1")
     port = int(os.environ.get("BENCH_PORT", "8080"))
     app.run(host=host, port=port, threaded=True)
-
