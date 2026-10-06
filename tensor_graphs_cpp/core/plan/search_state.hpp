@@ -405,15 +405,38 @@ struct PropagationState
         int32_t start_max = -1;
         int32_t max_reader_start_max = -1;
         std::vector<EClassId> readers;
+        std::vector<EClassId> reader_dependents;
     };
 
     struct WriteAfterReadBucket
     {
         bool dirty = true;
+        bool structure_dirty = true;
+        bool spatial_dirty = true;
         std::vector<WriteAfterReadClassInfo> class_info;
         std::vector<std::vector<EClassId>> temporal_overlaps;
         std::vector<EClassId> active_cids;
         std::vector<EClassId> touched_cids;
+        std::vector<EClassId> dirty_start_cids;
+        std::vector<uint32_t> affected_stamp;
+        uint32_t affected_epoch = 1;
+        struct FixedOffsetAllocation
+        {
+            EClassId cid;
+            MemSpace mem_space;
+            uint32_t offset = 0;
+            uint64_t end = 0;
+            uint32_t size = 0;
+            uint32_t en_idx = 0;
+            ENodeId en_id;
+            VarId start_var = kInvalidVarId;
+            VarId offset_var = kInvalidVarId;
+            bool is_view = false;
+            bool is_input_or_cache = false;
+            bool is_root = false;
+        };
+        std::unordered_map<MemSpace, std::vector<FixedOffsetAllocation>> fixed_offset_allocations;
+        std::unordered_map<MemSpace, uint32_t> max_fixed_allocation_size;
     };
 
     struct Alternative
@@ -531,10 +554,25 @@ class SearchState
         if (!propagation.initialized)
             return;
         const VarInfo &info = var_infos[var_id];
-        if (info.type != VarType::SELECTED && info.type != VarType::START)
+        if (info.bucket_idx >= propagation.write_after_read.size())
             return;
-        if (info.bucket_idx < propagation.write_after_read.size())
-            propagation.write_after_read[info.bucket_idx].dirty = true;
+        auto &write_after_read = propagation.write_after_read[info.bucket_idx];
+        if (info.type == VarType::SELECTED)
+        {
+            write_after_read.dirty = true;
+            write_after_read.structure_dirty = true;
+            write_after_read.spatial_dirty = true;
+            write_after_read.dirty_start_cids.clear();
+        }
+        else if (info.type == VarType::START)
+        {
+            write_after_read.dirty = true;
+            write_after_read.dirty_start_cids.push_back(info.eclass_id);
+        }
+        else if (info.type == VarType::OFFSET)
+        {
+            write_after_read.spatial_dirty = true;
+        }
     }
 
   public:
