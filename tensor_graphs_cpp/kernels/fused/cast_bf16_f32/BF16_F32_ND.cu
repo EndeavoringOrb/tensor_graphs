@@ -1,0 +1,49 @@
+#include "kernels/fused/cast_bf16_f32/ref.hpp"
+#ifdef TG_USE_CUDA
+#pragma once
+#include "core/types.hpp"
+#include "core/kernels.hpp"
+#include <cuda_runtime.h>
+
+__global__ void cast_bf16_f32_nd_kernel(const uint16_t* A, float* Out, uint64_t n) {
+    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        uint32_t bits = static_cast<uint32_t>(A[idx]) << 16;
+        Out[idx] = __uint_as_float(bits);
+    }
+}
+
+inline bool matchCastBF16_F32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
+    if (output.dtype != DType::FLOAT32) return false;
+    if (inputs[0].getShape() != output.getShape()) return false;
+    if (!isContiguous(output)) return false;
+    return true;
+}
+
+inline void runCastBF16_F32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
+    const uint16_t *A = static_cast<const uint16_t *>(ctx.inputs[0]);
+    float *Out = static_cast<float *>(ctx.outputs[0]);
+
+    uint64_t n = countElements(ctx.outViews[0].getShape());
+    if (n == 0) return;
+
+    int blockSize = 256;
+    int numBlocks = (n + blockSize - 1) / blockSize;
+
+    cast_bf16_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, n);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        Error::throw_err("CUDA kernel launch failed in Cast_BF16_F32_CUDA_ND: " + std::string(cudaGetErrorString(err)));
+    }
+}
+
+/**
+ * Reference Factory
+ */
+
+
+REGISTER_KERNEL("Cast_BF16_F32_ND_CUDA", 1, 1, matchCastBF16_F32_CUDA_ND, runCastBF16_F32_CUDA_ND, refFactoryCastBF16_F32,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BF16}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+
+#endif

@@ -591,6 +591,19 @@ class BuildConfig:
 
 
 class KernelLinter:
+    REF_FACTORY_DEFINITION_PATTERN = re.compile(
+        r"\bLogicalId\s+([a-zA-Z_]\w*)\s*\(\s*"
+        r"const\s+std::vector\s*<\s*LogicalId\s*>\s*&\s*[a-zA-Z_]\w*\s*,\s*"
+        r"Graph\s*&\s*[a-zA-Z_]\w*\s*\)\s*\{",
+        re.MULTILINE,
+    )
+    REF_FACTORY_PATTERN = re.compile(
+        r"\bLogicalId\s+[a-zA-Z_]\w*\s*\(\s*"
+        r"const\s+std::vector\s*<\s*LogicalId\s*>\s*&\s*[a-zA-Z_]\w*\s*,\s*"
+        r"Graph\s*&\s*[a-zA-Z_]\w*\s*\)\s*\{",
+        re.MULTILINE,
+    )
+
     REDUNDANCY_PATTERNS = {
         r"inputs\.size\(\)": (
             "Input Count Check",
@@ -633,7 +646,11 @@ class KernelLinter:
     ]
 
     def _validate_kernel_file(self, file_path: Path):
-        if not file_path.is_file() or file_path.suffix not in [".hpp", ".cu"]:
+        if (
+            not file_path.is_file()
+            or file_path.suffix not in [".hpp", ".cu"]
+            or file_path.name == "ref.hpp"
+        ):
             return
         content = file_path.read_text(encoding="utf-8")
         rel_path = file_path.relative_to(ROOT_DIR)
@@ -658,6 +675,7 @@ class KernelLinter:
                 + r"\s*\(([\s\S]*?)\)\s*(?:const\s*)?(?:noexcept\s*)?\{",
                 re.MULTILINE,
             )
+
             func_def_match = func_def_pattern.search(clean_content)
 
             n_matches += 1
@@ -699,6 +717,119 @@ class KernelLinter:
                     border_style="red",
                 )
             )
+
+    def _validate_fused_ref_layout(self):
+        fused_dir = ROOT_DIR / "kernels" / "fused"
+        if not fused_dir.is_dir():
+            return
+
+        kernel_files = [
+            path
+            for path in fused_dir.rglob("*")
+            if path.is_file()
+            and path.suffix in {".hpp", ".cu", ".cl"}
+            and path.name != "ref.hpp"
+        ]
+        nested_ref_paths = [
+            path
+            for path in fused_dir.rglob("ref.hpp")
+            if len(path.relative_to(fused_dir).parts) > 2
+        ]
+        if nested_ref_paths:
+            nested_ref = sorted(nested_ref_paths)[0]
+            console.print(
+                Panel(
+                    f"[bold red]NESTED REFERENCE FACTORY HEADER:[/bold red] [cyan]{nested_ref}[/cyan]\n\n"
+                    "Keep ref.hpp at the fused kernel folder root and have nested kernel implementations include it.",
+                    title="Linter Violation",
+                    border_style="red",
+                )
+            )
+            sys.exit(1)
+
+        factory_dirs = {
+            fused_dir / path.relative_to(fused_dir).parts[0] for path in kernel_files
+        }
+
+        for folder in sorted(factory_dirs):
+            ref_path = folder / "ref.hpp"
+            if not ref_path.is_file():
+                console.print(
+                    Panel(
+                        f"[bold red]REFERENCE FACTORY HEADER MISSING:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
+                        "Every fused kernel folder must contain a ref.hpp.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+            content = ref_path.read_text(encoding="utf-8")
+            clean_content = strip_cpp_comments_and_strings(content)
+            factories = list(
+                self.REF_FACTORY_DEFINITION_PATTERN.finditer(clean_content)
+            )
+            if len(factories) != 1:
+                console.print(
+                    Panel(
+                        f"[bold red]INVALID REFERENCE FACTORY COUNT:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
+                        f"Expected exactly one ref factory definition, found {len(factories)}.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+
+        for file_path in kernel_files:
+            rel_path = file_path.relative_to(fused_dir)
+            is_opencl_kernel = file_path.suffix == ".cl"
+            clean_content = ""
+            if file_path.suffix in {".hpp", ".cu"}:
+                content = file_path.read_text(encoding="utf-8")
+                clean_content = strip_cpp_comments_and_strings(content)
+                is_opencl_kernel = bool(
+                    re.search(
+                        r"\b(?:OpenCL::getKernel|clEnqueueNDRangeKernel)\s*\(",
+                        clean_content,
+                    )
+                )
+
+            if is_opencl_kernel and len(rel_path.parts) < 3:
+                console.print(
+                    Panel(
+                        f"[bold red]OPENCL KERNEL MUST BE NESTED:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
+                        "Place each OpenCL source and wrapper in a subfolder beneath its fused kernel folder.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+
+            if is_opencl_kernel and file_path.suffix in {".hpp", ".cu"}:
+                source_match = re.search(
+                    r'\bOpenCL::getKernel\s*\(\s*"([^"]+\.cl)"', content
+                )
+                if source_match and (ROOT_DIR / source_match.group(1)).parent != file_path.parent:
+                    console.print(
+                        Panel(
+                            f"[bold red]OPENCL SOURCE AND WRAPPER MUST BE TOGETHER:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
+                            f"The referenced source {source_match.group(1)} must be in the wrapper's subfolder.",
+                            title="Linter Violation",
+                            border_style="red",
+                        )
+                    )
+                    sys.exit(1)
+
+            if self.REF_FACTORY_PATTERN.search(clean_content):
+                rel_path = file_path.relative_to(ROOT_DIR)
+                console.print(
+                    Panel(
+                        f"[bold red]REFERENCE FACTORY IN KERNEL FILE:[/bold red] [cyan]{ROOT_DIR / rel_path}[/cyan]\n\n"
+                        "Move the LogicalId ref factory definition into the folder's ref.hpp.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
 
     def _validate_rewrite_file(self, file_path: Path):
         if not file_path.is_file() or file_path.suffix not in [
@@ -819,6 +950,8 @@ class KernelLinter:
         if config.no_lint:
             return
 
+        self._validate_fused_ref_layout()
+
         validators = [
             (ROOT_DIR / "kernels", self._validate_kernel_file),
             (ROOT_DIR / "core", self._validate_rewrite_file),
@@ -900,19 +1033,25 @@ class CodeGenerator:
             [
                 p
                 for p in KERNELS_DIR.rglob("*")
-                if p.is_file() and p.suffix in (".hpp", ".cu")
+                if p.is_file()
+                and p.suffix in (".hpp", ".cu")
+                and p.name != "ref.hpp"
             ]
         )
 
         for path in kernel_files:
             rel_path = path.relative_to(ROOT_DIR)
             inc_path = rel_path.as_posix()
+            path_parts = {part.lower() for part in rel_path.parts}
 
-            if not self.config.use_opencl and ("kernels/opencl" in inc_path.lower()):
+            if not self.config.use_opencl and any(
+                "opencl" in part for part in path_parts
+            ):
                 continue
             if not self.config.use_cuda and (
-                "kernels/cuda" in inc_path.lower()
-                or "kernels/cublas" in inc_path.lower()
+                path.suffix.lower() == ".cu"
+                or "cuda" in path_parts
+                or "cublas" in path_parts
             ):
                 continue
 
@@ -1571,6 +1710,9 @@ def main() -> None:
         "--no-lint", action="store_true", help="Skip kernel validation checks"
     )
     parser.add_argument(
+        "--lint", action="store_true", help="Run kernel validation checks and exit"
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force rebuild of all targets ignoring cache",
@@ -1606,6 +1748,10 @@ def main() -> None:
         help="Specify which target C++ files to build (e.g. main, bench, test, bindings)",
     )
     args = parser.parse_args()
+
+    if args.lint:
+        KernelLinter().lint(BuildConfig())
+        return
 
     config = BuildConfig(
         cuda_override=args.cuda,
