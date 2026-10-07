@@ -205,6 +205,107 @@ When the offset domain of base e-class $B$ narrows:
 
 When a selection is fixed to a nonzero e-node, check the dependency graph formed by the other fixed nonzero selections for a cycle. Reject a selection that closes a cycle.
 
+### `CycleAvoidancePropagator`
+
+Proactively prunes candidate e-nodes from selection domains across the E-graph that would close a directed cycle with currently fixed selections.
+
+While `PearceKellyCyclePropagator` acts reactively (detecting a cycle only after a cyclic selection is branched on, causing hyperbox pruning during search diving), `CycleAvoidancePropagator` removes cyclic candidate e-nodes before branching can explore them.
+
+#### Invariant and Mechanism
+
+In a valid execution plan, the directed graph formed by selected e-nodes and their children must be a Directed Acyclic Graph (DAG). Let $G_{\text{fixed}}$ be the directed dependency graph formed by all currently fixed nonzero selections in bucket $b$, where a fixed selection in e-class $P$ pointing to child e-class $C$ defines a directed edge $P \to C$.
+
+- **Acyclic Selection Invariant:** If there is a directed path from e-class $U$ to e-class $V$ in $G_{\text{fixed}}$ ($U \leadsto V$), then $V$ (or any descendant of $V$) cannot select an e-node that has $U$ (or any ancestor of $U$) as a child. Choosing such an e-node would introduce a back-edge and close a directed cycle:
+  $$U \leadsto V \to \dots \to U$$
+
+#### Incremental Propagation Algorithm
+
+1. **Trigger:** Runs whenever a selection variable `selected_<bucket_id>_<e-class_id>` becomes fixed to a nonzero candidate $e^*$ ($e^* \ge 1$).
+2. **Path Reachability:**
+   - Fixing $P \mapsto e^*$ adds directed edges $P \to C_i$ for each child $C_i \in \text{children}(e^*)$.
+   - Compute the ancestors of $P$ in $G_{\text{fixed}}$: $\text{Anc}(P) = \{ A \mid A \leadsto P \}$.
+   - For each child $C_i$, compute its descendants in $G_{\text{fixed}}$: $\text{Desc}(C_i) = \{ D \mid C_i \leadsto D \}$.
+   - Every ancestor $A \in \text{Anc}(P)$ now reaches every descendant $D \in \text{Desc}(C_i)$ via $A \leadsto P \to C_i \leadsto D$.
+3. **Domain Pruning:**
+   - For each descendant $D \in \text{Desc}(C_i)$ whose selection variable is not yet fixed:
+     - For each candidate e-node $e_D \in \text{selected}_D$:
+     - If $\text{children}(e_D) \cap \text{Anc}(P) \neq \emptyset$, candidate $e_D$ would close a cycle. Remove $e_D$ from $\text{selected}_D$'s domain:
+       $$\text{selected}_D \leftarrow \text{selected}_D \setminus \{e_D\}$$
+   - If any selection domain becomes empty, report conflict.
+   - Queue any narrowed selection variables to the solver worklist to immediately trigger subsequent propagations (such as reachability, children, and start precedence).
+
+#### Example
+
+Consider four e-classes in bucket 0:
+- `EClass 0` is fixed to `1` (selecting `e1`, which requires child `EClass 1`).
+- `EClass 1` has domain `{1, 2}`: `e1` requires child `EClass 2` (realized by candidate `e1` or `e2`); `e2` requires child `EClass 3`.
+- `EClass 2` has domain `{1, 2}`: `e1` requires child `EClass 0`; `e2` requires child `EClass 3`.
+- `EClass 3` is a terminal leaf operation.
+
+Before `selected_0_1` is fixed, both choices in `EClass 1` and `EClass 2` are possible:
+
+```mermaid
+flowchart LR
+    subgraph c0_before["selected_0_0 = {1}"]
+        direction TB
+        e1_0_before((e1))
+    end
+    subgraph c1_before["selected_0_1 = {1, 2}"]
+        direction TB
+        e1_1_before((e1))
+        e2_1_before((e2))
+    end
+    subgraph c2_before["selected_0_2 = {1, 2}"]
+        direction TB
+        e1_2_before((e1))
+        e2_2_before((e2))
+    end
+    subgraph c3_before["selected_0_3 = {0, 1}"]
+        direction TB
+        e1_3_before((e1))
+    end
+    e1_0_before --> e1_1_before
+    e1_1_before -. possible .-> e1_2_before
+    e1_1_before -. possible .-> e2_2_before
+    e2_1_before -. possible .-> e1_3_before
+    e1_2_before -. possible .-> e1_0_before
+    e2_2_before -. possible .-> e1_3_before
+```
+
+When search fixes `selected_0_1 = {1}` (selecting `e1`, which requires child `EClass 2`):
+- `EClass 0` $\in \text{Anc}(\text{EClass 1})$ and `EClass 2` $\in \text{Desc}(\text{EClass 2})$.
+- Candidate `e1` in `EClass 2` has child `EClass 0`, which would close the cycle `0 -> 1 -> 2 -> 0`.
+- **Under `PearceKellyCyclePropagator` alone:** `selected_0_2` remains `{1, 2}`. Later, search branches on `selected_0_2 = {1}`, dives into the left hyperbox, detects the cycle, and prunes the node.
+- **Under `CycleAvoidancePropagator`:** As soon as `selected_0_1` is fixed, the propagator discovers that candidate `e1` in `EClass 2` consumes ancestor `EClass 0` and removes `1` from `selected_0_2`. Combined with `SelectionChildrenPropagator` removing `0` from required children, `selected_0_2` is immediately fixed to `{2}` without branching!
+
+```mermaid
+flowchart LR
+    subgraph c0_after["selected_0_0 = {1}"]
+        direction TB
+        e1_0_after((e1))
+    end
+    subgraph c1_after["selected_0_1 = {1}"]
+        direction TB
+        e1_1_after((e1))
+        e2_1_after((e2))
+    end
+    subgraph c2_after["selected_0_2 = {2}"]
+        direction TB
+        e1_2_after((e1))
+        e2_2_after((e2))
+    end
+    subgraph c3_after["selected_0_3 = {1}"]
+        direction TB
+        e1_3_after((e1))
+    end
+    e1_0_after --> e1_1_after
+    e1_1_after -. "X (cycle)" .-> e1_2_after
+    e1_1_after --> e2_2_after
+    e2_1_after -. X .-> e1_3_after
+    e1_2_after -. "X (cycle)" .-> e1_0_after
+    e2_2_after --> e1_3_after
+```
+
 ### `ParentRemovalPropagator`
 
 When an e-class is fixed unselected, remove every parent e-node that requires it from the parent's selection domain. This is the contrapositive of `SelectionChildrenPropagator`.

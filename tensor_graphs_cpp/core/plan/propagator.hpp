@@ -16,6 +16,7 @@
 #include "core/plan/propagators/view_select_offset.hpp"
 #include "core/plan/propagators/view_to_base_offset.hpp"
 #include "core/plan/propagators/base_to_view_offset.hpp"
+#include "core/plan/propagators/cycle_avoidance.hpp"
 #include "core/plan/propagators/pearce_kelly_cycle.hpp"
 #include "core/plan/propagators/parent_removal.hpp"
 #include "core/plan/propagators/cache_requirement.hpp"
@@ -74,6 +75,7 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false)
     engine.addPropagator(std::make_unique<ViewSelectOffsetPropagator>());
     engine.addPropagator(std::make_unique<ViewToBaseOffsetPropagator>());
     engine.addPropagator(std::make_unique<BaseToViewOffsetPropagator>());
+    engine.addPropagator(std::make_unique<CycleAvoidancePropagator>());
     engine.addPropagator(std::make_unique<PearceKellyCyclePropagator>());
     engine.addPropagator(std::make_unique<ParentRemovalPropagator>());
     engine.addPropagator(std::make_unique<CacheRequirementPropagator>());

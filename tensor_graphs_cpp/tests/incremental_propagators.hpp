@@ -246,6 +246,35 @@ inline void testBaseCorrectness()
                 "Rule 9: Direct cycle 0 -> 1 -> 0 was accepted without contradiction");
     }
 
+    std::cout << "Running Base Test 5b..." << std::endl;
+    // 5b. Cycle avoidance proactive domain pruning
+    {
+        GraphSpec spec = {
+            {AlternativeSpec({1})},
+            {AlternativeSpec({2}), AlternativeSpec({3})},
+            {AlternativeSpec({0}), AlternativeSpec({3})},
+            {AlternativeSpec{}}
+        };
+        SearchEngine engine(makeState(spec, 1));
+        engine.addPropagator(std::make_unique<CycleAvoidancePropagator>());
+        require(engine.runPropagators(kInvalidVarId), "Initial CycleAvoidance test failed");
+
+        // Fix Node 0 to candidate 1 (child 1)
+        engine.state.setDomain(selection(engine.state, 0), Domain::makeFixed(1, true));
+        require(engine.runPropagators(selection(engine.state, 0)), "Selecting node 0 failed");
+
+        // Fix Node 1 to candidate 1 (child 2)
+        engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(1, true));
+        require(engine.runPropagators(selection(engine.state, 1)), "Selecting node 1 failed");
+
+        // Node 2's candidate 1 (child 0) would form cycle 0 -> 1 -> 2 -> 0.
+        // CycleAvoidancePropagator must have removed candidate 1 from Node 2's domain!
+        require(!engine.state.domains[selection(engine.state, 2)].contains(1),
+                "CycleAvoidance: candidate 1 was not removed from node 2");
+        require(engine.state.domains[selection(engine.state, 2)].contains(2),
+                "CycleAvoidance: candidate 2 was mistakenly removed from node 2");
+    }
+
     std::cout << "Running Base Test 6..." << std::endl;
     // 6. View offset propagation (Rule 8)
     {

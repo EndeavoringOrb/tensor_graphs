@@ -361,6 +361,20 @@ class _AudioGraph:
         self.g, self.path = graph, model_path
         self.feature_frames = mel_frames
         self.seq_len = ((mel_frames + 1) // 2 + 1) // 2
+        self.rel_pos_embeddings = self._rel_pos_embeddings()
+
+    def _rel_pos_embeddings(self):
+        context_size = self.chunk_size + (self.context_left - 1) + self.context_right
+        max_dist = context_size // 2
+        num_timescales = self.hidden_size // 2
+        log_increment = math.log(10000.0 / 1.0) / max(num_timescales - 1, 1)
+        inv_timescales = [math.exp(i * -log_increment) for i in range(num_timescales)]
+        values = []
+        for pos_id in range(max_dist, -1, -1):
+            sin_vals = [math.sin(pos_id * inv) for inv in inv_timescales]
+            cos_vals = [math.cos(pos_id * inv) for inv in inv_timescales]
+            values.extend(sin_vals + cos_vals)
+        return self.g.constant_float32([1, max_dist + 1, self.hidden_size], values)
 
     def _weight(self, name: str):
         return _weight(self.g, self.path, name)
@@ -407,9 +421,6 @@ class _AudioGraph:
         # expects [N, output_positions, K] @ [N, K, output_channels].
         cols = g.contiguous(g.permute_axes(cols, [0, 2, 1]))
         out = g.dot(cols, weight)
-        out = g.reshape(out, [1, out_channels, out_h, out_w])
-        out = g.contiguous(g.permute_axes(out, [0, 2, 3, 1]))
-        out = g.reshape(out, [1, out_h * out_w, out_channels])
         out = self._layer_norm_last(out, f"{prefix}.norm", out_h * out_w, out_channels)
         return g.relu(out, [1, out_h * out_w, out_channels]), out_h, out_w
 
@@ -417,6 +428,12 @@ class _AudioGraph:
         shape = [1, 1, rows, dim]
         exp_x = self.g.pow(self.g.fill(math.e, shape), x)
         return self.g.log(self.g.add(self.g.fill(1.0, shape), exp_x))
+
+    def _sigmoid(self, x, rows: int, dim: int):
+        g = self.g
+        shape = [1, rows, dim]
+        exp_x = g.pow(g.fill(math.e, shape), g.neg(x))
+        return g.div(g.fill(1.0, shape), g.add(g.fill(1.0, shape), exp_x))
 
     def _silu(self, x, rows: int, dim: int):
         g = self.g
@@ -440,15 +457,17 @@ class _AudioGraph:
         start = self._linear(conv_input, f"{prefix}.linear_start", self.hidden_size, self.hidden_size * 2, self.seq_len, True)
         a = g.contiguous(g.slice_dims(start, [0, 0, 0], [1, self.seq_len, self.hidden_size], [1, 1, 1]))
         b = g.contiguous(g.slice_dims(start, [0, 0, self.hidden_size], [1, self.seq_len, self.hidden_size * 2], [1, 1, 1]))
-        conv_input = g.mul(a, b)
+        conv_input = g.mul(a, self._sigmoid(b, self.seq_len, self.hidden_size))
         kernel = self._weight(f"{prefix}.depthwise_conv1d.weight")
         convolved = g.fill(0.0, [1, self.seq_len, self.hidden_size])
         for offset in range(self.conv_kernel):
             left = self.conv_kernel - 1 - offset
-            sample = g.contiguous(g.slice_dims(conv_input, [0, left, 0],
-                                               [1, self.seq_len, self.hidden_size], [1, 1, 1]))
-            if left:
+            if left > 0:
+                sample = g.contiguous(g.slice_dims(conv_input, [0, 0, 0],
+                                                   [1, self.seq_len - left, self.hidden_size], [1, 1, 1]))
                 sample = g.concat([g.fill(0.0, [1, left, self.hidden_size]), sample], 1)
+            else:
+                sample = conv_input
             wk = g.reshape(g.slice_dims(kernel, [0, 0, offset],
                                         [self.hidden_size, 1, offset + 1], [1, 1, 1]),
                            [1, 1, self.hidden_size])
@@ -476,20 +495,44 @@ class _AudioGraph:
         k = g.reshape(g.contiguous(g.permute_axes(k, [0, 2, 1, 3])), [heads, seq_len, dim])
         v = g.reshape(g.contiguous(g.permute_axes(v, [0, 2, 1, 3])), [heads, seq_len, dim])
         scores = g.dot(q, g.contiguous(g.permute_axes(k, [0, 2, 1])))
+
+        context_size = self.chunk_size + (self.context_left - 1) + self.context_right
+        max_dist = context_size // 2
+        pos_count = max_dist + 1
+        rel_k_weight = self._weight(f"{prefix}.relative_k_proj.weight")
+        rel_k = _matrix(g, self.rel_pos_embeddings, rel_k_weight, self.hidden_size, self.hidden_size)
+        rel_k = g.reshape(rel_k, [pos_count, heads, dim])
+        rel_k = g.contiguous(g.permute_axes(rel_k, [1, 2, 0]))
+        q_rel = g.dot(q, rel_k)
+
+        L = max(seq_len, max_dist)
+        if L > seq_len:
+            q_rel = g.concat([q_rel, g.fill(0.0, [heads, L - seq_len, pos_count])], 1)
+        padded = g.concat([q_rel, g.fill(0.0, [heads, L, L - max_dist])], 2)
+        flat = g.reshape(padded, [heads, L * (L + 1)])
+        sliced = g.contiguous(g.slice_dims(flat, [0, max_dist], [heads, max_dist + L * L], [1, 1]))
+        shifted = g.reshape(sliced, [heads, L, L])
+        if L > seq_len:
+            matrix_bd = g.contiguous(g.slice_dims(shifted, [0, 0, 0], [heads, seq_len, seq_len], [1, 1, 1]))
+        else:
+            matrix_bd = shifted
+
+        scores = g.add(scores, matrix_bd)
+
+        shape = [heads, seq_len, seq_len]
+        exp_neg = g.pow(g.fill(math.e, shape), g.mul(g.fill(-2.0 / self.logit_cap, shape), scores))
+        tanh_scores = g.add(g.div(g.fill(2.0, shape), g.add(g.fill(1.0, shape), exp_neg)), g.fill(-1.0, shape))
+        scores = g.mul(g.fill(self.logit_cap, shape), tanh_scores)
+
         mask = [-1.0e9] * (heads * seq_len * seq_len)
         for i in range(seq_len):
-            chunk_start = (i // self.chunk_size) * self.chunk_size
-            lo = max(0, chunk_start - (self.context_left - 1))
-            hi = min(seq_len, chunk_start + self.chunk_size + self.context_right)
+            lo = max(0, i - (self.context_left - 2))
+            hi = i + 1
             for j in range(lo, hi):
                 for h in range(heads):
                     mask[(h * seq_len + i) * seq_len + j] = 0.0
         scores = g.add(scores, g.constant_float32([heads, seq_len, seq_len], mask))
-        shape = [heads, seq_len, seq_len]
-        maximum = g.repeat(g.max_axis(scores, -1), seq_len, 2)
-        exp_neg = g.pow(g.fill(math.e, shape), g.mul(g.fill(-2.0 / self.logit_cap, shape), scores))
-        tanh_scores = g.add(g.div(g.fill(2.0, shape), g.add(g.fill(1.0, shape), exp_neg)), g.fill(-1.0, shape))
-        scores = g.mul(g.fill(self.logit_cap, shape), tanh_scores)
+
         shifted = g.add(scores, g.neg(g.repeat(g.max_axis(scores, -1), seq_len, 2)))
         exp_scores = g.pow(g.fill(math.e, shape), shifted)
         weights = g.div(exp_scores, g.repeat(g.sum_axis(exp_scores, -1), seq_len, 2))
