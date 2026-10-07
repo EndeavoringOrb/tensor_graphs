@@ -37,6 +37,8 @@ class WriteAfterReadPropagator : public Propagator
         const Domain &sel_dom = state.domains[sel_it->second];
         if (sel_dom.isFixed() && sel_dom.fixedValue() == 0)
             return false;
+        if (!sel_dom.isFixed() && sel_dom.contains(0))
+            return false;
 
         uint32_t en_idx = 0;
         if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
@@ -80,9 +82,9 @@ class WriteAfterReadPropagator : public Propagator
             return false;
 
         auto st_it = state.start_vars[b].find(cid);
-        if (st_it == state.start_vars[b].end() || en_idx >= st_it->second.size())
+        if (st_it == state.start_vars[b].end())
             return false;
-        VarId st_v = st_it->second[en_idx];
+        VarId st_v = st_it->second;
         const Domain &st_dom = state.domains[st_v];
         if (st_dom.isEmpty())
             return false;
@@ -223,17 +225,7 @@ class WriteAfterReadPropagator : public Propagator
             info.start_max = -1;
             auto st_it = state.start_vars[b].find(cid);
             if (st_it != state.start_vars[b].end())
-            {
-                for (uint32_t c_en = 0; c_en < st_it->second.size(); ++c_en)
-                {
-                    if (sel_dom.contains(c_en + 1))
-                    {
-                        int32_t mx = state.domains[st_it->second[c_en]].getMax();
-                        if (mx > info.start_max)
-                            info.start_max = mx;
-                    }
-                }
-            }
+                info.start_max = state.domains[st_it->second].getMax();
 
             info.max_reader_start_max = -1;
             info.readers.clear();
@@ -273,17 +265,7 @@ class WriteAfterReadPropagator : public Propagator
             int32_t cand_st_max = -1;
             auto st_it = state.start_vars[b].find(cand);
             if (st_it != state.start_vars[b].end())
-            {
-                for (uint32_t c_en = 0; c_en < st_it->second.size(); ++c_en)
-                {
-                    if (dom.contains(c_en + 1))
-                    {
-                        int32_t mx = state.domains[st_it->second[c_en]].getMax();
-                        if (mx > cand_st_max)
-                            cand_st_max = mx;
-                    }
-                }
-            }
+                cand_st_max = state.domains[st_it->second].getMax();
 
             if (cand.value < class_info.size())
             {
@@ -370,13 +352,7 @@ class WriteAfterReadPropagator : public Propagator
                 int32_t start_max = -1;
                 auto st_it = state.start_vars[b].find(cid);
                 if (st_it != state.start_vars[b].end())
-                {
-                    for (uint32_t en_idx = 0; en_idx < st_it->second.size(); ++en_idx)
-                    {
-                        if (selection.contains(en_idx + 1))
-                            start_max = std::max(start_max, state.domains[st_it->second[en_idx]].getMax());
-                    }
-                }
+                    start_max = state.domains[st_it->second].getMax();
                 if (cid.value < class_info.size())
                     class_info[cid.value].start_max = start_max;
 
@@ -463,12 +439,11 @@ class WriteAfterReadPropagator : public Propagator
                 const auto &info = class_info[cid.value];
                 const auto st_it = state.start_vars[b].find(cid);
                 const bool start_fixed = st_it != state.start_vars[b].end() &&
-                                         info.en_idx < st_it->second.size() &&
-                                         state.domains[st_it->second[info.en_idx]].isFixed();
+                                         state.domains[st_it->second].isFixed();
                 const bool broad = !start_fixed || info.is_input_or_cache || info.is_root;
                 int32_t start = 0;
                 if (start_fixed)
-                    start = state.domains[st_it->second[info.en_idx]].fixedValue();
+                    start = state.domains[st_it->second].fixedValue();
                 temporal_candidates.push_back({cid, start, info.max_reader_start_max, broad});
                 const size_t idx = temporal_candidates.size() - 1;
                 (broad ? broad_candidates : fixed_candidates).push_back(idx);
@@ -574,17 +549,15 @@ class WriteAfterReadPropagator : public Propagator
         const auto a_st_it = state.start_vars[b].find(a_cid);
         const auto c_st_it = state.start_vars[b].find(c_cid);
         const bool a_fixed = a_st_it != state.start_vars[b].end() &&
-                             a_info.en_idx < a_st_it->second.size() &&
-                             state.domains[a_st_it->second[a_info.en_idx]].isFixed();
+                             state.domains[a_st_it->second].isFixed();
         const bool c_fixed = c_st_it != state.start_vars[b].end() &&
-                             c_info.en_idx < c_st_it->second.size() &&
-                             state.domains[c_st_it->second[c_info.en_idx]].isFixed();
+                             state.domains[c_st_it->second].isFixed();
         if (!a_fixed || !c_fixed || a_info.is_input_or_cache || a_info.is_root ||
             c_info.is_input_or_cache || c_info.is_root)
             return true;
 
-        const int32_t a_start = state.domains[a_st_it->second[a_info.en_idx]].fixedValue();
-        const int32_t c_start = state.domains[c_st_it->second[c_info.en_idx]].fixedValue();
+        const int32_t a_start = state.domains[a_st_it->second].fixedValue();
+        const int32_t c_start = state.domains[c_st_it->second].fixedValue();
         if (a_start == c_start)
             return true;
         if (a_start < c_start)
@@ -638,6 +611,40 @@ class WriteAfterReadPropagator : public Propagator
             Error::throw_err("WriteAfterReadPropagator::isViewOf: view chain exceeded 32 steps (possible cycle or excessively deep view)");
         }
         return false;
+    }
+
+    static bool allActiveAlternativesRead(const SearchState &state, uint32_t b, EClassId producer,
+                                          EClassId consumer)
+    {
+        const auto selection_it = state.selected_vars[b].find(consumer);
+        if (selection_it == state.selected_vars[b].end())
+            return false;
+        const Domain &selection = state.domains[selection_it->second];
+        if (selection.contains(0))
+            return false;
+
+        const EClass &cls = state.bucket_egraphs[b].getEClass(consumer);
+        bool found_active_alternative = false;
+        for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+        {
+            if (!selection.contains(static_cast<int32_t>(en_idx + 1)))
+                continue;
+            found_active_alternative = true;
+            const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
+            bool reads_producer = false;
+            for (EClassId child : enode.getChildren())
+            {
+                const EClassId child_cid = state.bucket_egraphs[b].findConst(child);
+                if (child_cid == producer || isViewOf(state, b, producer, child_cid))
+                {
+                    reads_producer = true;
+                    break;
+                }
+            }
+            if (!reads_producer)
+                return false;
+        }
+        return found_active_alternative;
     }
 
   private:
@@ -732,6 +739,8 @@ class WriteAfterReadPropagator : public Propagator
         {
             if (c_cid == B.cid)
                 continue;
+            if (!allActiveAlternativesRead(state, A.bucket_idx, A.cid, c_cid))
+                continue;
             int32_t c_st_max = (c_cid.value < class_info.size())
                                    ? class_info[c_cid.value].start_max
                                    : -1;
@@ -763,22 +772,24 @@ class WriteAfterReadPropagator : public Propagator
         {
             if (c_cid == B.cid)
                 continue;
+            if (!allActiveAlternativesRead(state, A.bucket_idx, A.cid, c_cid))
+                continue;
             auto c_sel_it = state.selected_vars[A.bucket_idx].find(c_cid);
             if (c_sel_it == state.selected_vars[A.bucket_idx].end())
                 continue;
             const Domain &c_sel_dom = state.domains[c_sel_it->second];
-            if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+            if (c_sel_dom.contains(0))
                 continue;
 
             auto c_st_it = state.start_vars[A.bucket_idx].find(c_cid);
             if (c_st_it == state.start_vars[A.bucket_idx].end())
                 continue;
 
-            for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+            for (uint32_t c_en = 0; c_en < state.bucket_egraphs[A.bucket_idx].getEClass(c_cid).enodes.size(); ++c_en)
             {
                 if (!c_sel_dom.contains(c_en + 1))
                     continue;
-                VarId c_st_v = c_st_it->second[c_en];
+                VarId c_st_v = c_st_it->second;
                 Domain c_st_dom = state.domains[c_st_v];
                 Domain b_st_dom = state.domains[B.start_var];
 
@@ -1041,11 +1052,7 @@ class FixedOffsetStartPropagator : public Propagator
 
         const auto &class_info = state.propagation.write_after_read[b].class_info;
         auto reads = [&](EClassId producer, EClassId consumer) {
-            if (producer.value >= class_info.size() || !class_info[producer.value].is_active)
-                return false;
-            const auto &readers = class_info[producer.value].readers;
-            return std::binary_search(readers.begin(), readers.end(), consumer,
-                                      [](EClassId x, EClassId y) { return x.value < y.value; });
+            return WriteAfterReadPropagator::allActiveAlternativesRead(state, b, producer, consumer);
         };
 
         auto canReadInPlace = [&](const FixedAlloc &producer, const FixedAlloc &consumer) {
@@ -1128,22 +1135,24 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (c_cid == B.cid)
                     continue;
+                if (!WriteAfterReadPropagator::allActiveAlternativesRead(state, b, A.cid, c_cid))
+                    continue;
                 auto c_sel_it = state.selected_vars[b].find(c_cid);
                 if (c_sel_it == state.selected_vars[b].end())
                     continue;
                 const Domain &c_sel_dom = state.domains[c_sel_it->second];
-                if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                if (c_sel_dom.contains(0))
                     continue;
 
                 auto c_st_it = state.start_vars[b].find(c_cid);
                 if (c_st_it == state.start_vars[b].end())
                     continue;
 
-                for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+                for (uint32_t c_en = 0; c_en < state.bucket_egraphs[b].getEClass(c_cid).enodes.size(); ++c_en)
                 {
                     if (!c_sel_dom.contains(c_en + 1))
                         continue;
-                    VarId c_st_v = c_st_it->second[c_en];
+                    VarId c_st_v = c_st_it->second;
                     const Domain &c_st_dom = state.domains[c_st_v];
                     min_b_start = std::max(min_b_start, c_st_dom.getMin() + 1);
 
@@ -1207,22 +1216,24 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (c_cid == A.cid)
                     continue;
+                if (!WriteAfterReadPropagator::allActiveAlternativesRead(state, b, B.cid, c_cid))
+                    continue;
                 auto c_sel_it = state.selected_vars[b].find(c_cid);
                 if (c_sel_it == state.selected_vars[b].end())
                     continue;
                 const Domain &c_sel_dom = state.domains[c_sel_it->second];
-                if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                if (c_sel_dom.contains(0))
                     continue;
 
                 auto c_st_it = state.start_vars[b].find(c_cid);
                 if (c_st_it == state.start_vars[b].end())
                     continue;
 
-                for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+                for (uint32_t c_en = 0; c_en < state.bucket_egraphs[b].getEClass(c_cid).enodes.size(); ++c_en)
                 {
                     if (!c_sel_dom.contains(c_en + 1))
                         continue;
-                    VarId c_st_v = c_st_it->second[c_en];
+                    VarId c_st_v = c_st_it->second;
                     Domain c_st_dom = state.domains[c_st_v];
                     if (c_st_dom.setMax(A.start - 1))
                     {
@@ -1244,22 +1255,24 @@ class FixedOffsetStartPropagator : public Propagator
         int32_t t_after_a = A.start + 1;
         for (EClassId c_cid : readers_A)
         {
+            if (!WriteAfterReadPropagator::allActiveAlternativesRead(state, b, A.cid, c_cid))
+                continue;
             auto c_sel_it = state.selected_vars[b].find(c_cid);
             if (c_sel_it == state.selected_vars[b].end())
                 continue;
             const Domain &c_sel_dom = state.domains[c_sel_it->second];
-            if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+            if (c_sel_dom.contains(0))
                 continue;
 
             auto c_st_it = state.start_vars[b].find(c_cid);
             if (c_st_it == state.start_vars[b].end())
                 continue;
 
-            for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+            for (uint32_t c_en = 0; c_en < state.bucket_egraphs[b].getEClass(c_cid).enodes.size(); ++c_en)
             {
                 if (c_sel_dom.contains(c_en + 1))
                 {
-                    VarId c_st_v = c_st_it->second[c_en];
+                    VarId c_st_v = c_st_it->second;
                     t_after_a = std::max(t_after_a, state.domains[c_st_v].getMin() + 1);
                 }
             }
@@ -1271,11 +1284,13 @@ class FixedOffsetStartPropagator : public Propagator
         {
             for (EClassId d_cid : readers_B)
             {
+                if (!WriteAfterReadPropagator::allActiveAlternativesRead(state, b, B.cid, d_cid))
+                    continue;
                 auto d_sel_it = state.selected_vars[b].find(d_cid);
                 if (d_sel_it == state.selected_vars[b].end())
                     continue;
                 const Domain &d_sel_dom = state.domains[d_sel_it->second];
-                if (d_sel_dom.isFixed() && d_sel_dom.fixedValue() == 0)
+                if (d_sel_dom.contains(0))
                     continue;
 
                 // An active reader of B needs at least B_min + 1; if that is >= A.start, it can never finish before A
@@ -1289,11 +1304,11 @@ class FixedOffsetStartPropagator : public Propagator
                 if (d_st_it == state.start_vars[b].end())
                     continue;
 
-                for (uint32_t d_en = 0; d_en < d_st_it->second.size(); ++d_en)
+                for (uint32_t d_en = 0; d_en < state.bucket_egraphs[b].getEClass(d_cid).enodes.size(); ++d_en)
                 {
                     if (d_sel_dom.contains(d_en + 1))
                     {
-                        if (state.domains[d_st_it->second[d_en]].getMin() >= A.start)
+                        if (state.domains[d_st_it->second].getMin() >= A.start)
                         {
                             b_cannot_be_before_a = true;
                             break;
@@ -1332,22 +1347,24 @@ class FixedOffsetStartPropagator : public Propagator
             }
             for (EClassId c_cid : readers_A)
             {
+                if (!WriteAfterReadPropagator::allActiveAlternativesRead(state, b, A.cid, c_cid))
+                    continue;
                 auto c_sel_it = state.selected_vars[b].find(c_cid);
                 if (c_sel_it == state.selected_vars[b].end())
                     continue;
                 const Domain &c_sel_dom = state.domains[c_sel_it->second];
-                if (c_sel_dom.isFixed() && c_sel_dom.fixedValue() == 0)
+                if (c_sel_dom.contains(0))
                     continue;
 
                 auto c_st_it = state.start_vars[b].find(c_cid);
                 if (c_st_it == state.start_vars[b].end())
                     continue;
 
-                for (uint32_t c_en = 0; c_en < c_st_it->second.size(); ++c_en)
+                for (uint32_t c_en = 0; c_en < state.bucket_egraphs[b].getEClass(c_cid).enodes.size(); ++c_en)
                 {
                     if (!c_sel_dom.contains(c_en + 1))
                         continue;
-                    VarId c_st_v = c_st_it->second[c_en];
+                    VarId c_st_v = c_st_it->second;
                     Domain c_st_dom = state.domains[c_st_v];
                     if (c_st_dom.setMax(b_st_dom.getMax() - 1))
                     {
@@ -1378,22 +1395,24 @@ class FixedOffsetStartPropagator : public Propagator
             }
             for (EClassId d_cid : readers_B)
             {
+                if (!WriteAfterReadPropagator::allActiveAlternativesRead(state, b, B.cid, d_cid))
+                    continue;
                 auto d_sel_it = state.selected_vars[b].find(d_cid);
                 if (d_sel_it == state.selected_vars[b].end())
                     continue;
                 const Domain &d_sel_dom = state.domains[d_sel_it->second];
-                if (d_sel_dom.isFixed() && d_sel_dom.fixedValue() == 0)
+                if (d_sel_dom.contains(0))
                     continue;
 
                 auto d_st_it = state.start_vars[b].find(d_cid);
                 if (d_st_it == state.start_vars[b].end())
                     continue;
 
-                for (uint32_t d_en = 0; d_en < d_st_it->second.size(); ++d_en)
+                for (uint32_t d_en = 0; d_en < state.bucket_egraphs[b].getEClass(d_cid).enodes.size(); ++d_en)
                 {
                     if (!d_sel_dom.contains(d_en + 1))
                         continue;
-                    VarId d_st_v = d_st_it->second[d_en];
+                    VarId d_st_v = d_st_it->second;
                     Domain d_st_dom = state.domains[d_st_v];
                     if (d_st_dom.setMax(A.start - 1))
                     {
@@ -1462,10 +1481,6 @@ class FixedOffsetStartPropagator : public Propagator
 
             FixedAlloc curr;
             if (!WriteAfterReadPropagator::getAlloc(state, b, cid, curr, /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
-                return true;
-
-            // If START changed, ensure it matches the active/selected enode
-            if (info.type == VarType::START && info.enode_idx != curr.en_idx)
                 return true;
 
             WriteAfterReadPropagator::buildBucketInfo(state, b);

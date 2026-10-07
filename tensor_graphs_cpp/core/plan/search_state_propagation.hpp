@@ -85,9 +85,9 @@ inline void SearchState::ensurePropagationState() const
                         alternative.cost = info.cost;
                 }
                 const auto start_it = start_vars[b].find(cid);
-                if (start_it != start_vars[b].end() && en_idx < start_it->second.size())
+                if (start_it != start_vars[b].end())
                 {
-                    alternative.start_var = start_it->second[en_idx];
+                    alternative.start_var = start_it->second;
                     data.owners[alternative.start_var] = sel_var;
                 }
                 for (EClassId child : enode.getChildren())
@@ -127,13 +127,11 @@ inline void SearchState::ensurePropagationState() const
             const VarId selection_var = pair.second;
             const EClass &cls = bucket_egraphs[b].getEClass(parent_cid);
             const auto start_it = start_vars[b].find(parent_cid);
+            const VarId start_var = start_it == start_vars[b].end() ? kInvalidVarId : start_it->second;
             for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
             {
                 const ENodeId en_id = cls.enodes[en_idx];
                 const ENode &enode = bucket_egraphs[b].getENode(en_id);
-                const VarId start_var = start_it != start_vars[b].end() && en_idx < start_it->second.size()
-                                            ? start_it->second[en_idx]
-                                            : kInvalidVarId;
                 const bool is_view = en_id.value < bucket_enode_infos[b].size() &&
                                      bucket_enode_infos[b][en_id.value].is_view;
                 const PropagationState::StartPrecedenceParent parent_info{
@@ -198,7 +196,7 @@ inline void SearchState::updatePropagationContribution(VarId var_id, bool add) c
         return;
     const VarId owner = data.owners[var_id];
     const int32_t index = selectedAlternative(owner);
-    if (index < 0 || (info.type == VarType::START && info.enode_idx != static_cast<uint32_t>(index)))
+    if (index < 0)
         return;
     const auto &alternative = data.alternatives[owner][index];
     auto &bucket = data.buckets[info.bucket_idx];

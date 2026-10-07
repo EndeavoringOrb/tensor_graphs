@@ -166,7 +166,7 @@ inline void testStructuralVariables()
             "Structural closure lost an alternative or included a disconnected class");
     require(state.reachable_cids[1] == std::vector<EClassId>{EClassId{2}},
             "Reachability must be computed independently for each bucket");
-    require(state.numVars() == 16, "Unexpected number of variables in compact state");
+    require(state.numVars() == 13, "Unexpected number of variables in compact state");
     require(state.cached_vars.at(cache_info.base_eclass_id) == cache_var && state.domains[cache_var].size() == 2,
             "Shared cache variable changed during bucket initialization");
     for (uint32_t b = 0; b < state.buckets.size(); ++b)
@@ -216,13 +216,13 @@ inline void testVariableDomainBoundaries()
                                      {}, {1}, {1}, DType::FLOAT32, mem_space, {}));
     state.bucket_root_ids.push_back(root_id);
     state.addBucketVariables(0);
-    require(state.numVars() == 32 && state.offset_vars[0].empty(), "Storage class should not have an offset");
+    require(state.numVars() == 2 && state.offset_vars[0].empty(), "Storage class should not have an offset");
     const Domain &selection = state.domains[state.selected_vars[0].at(root_id)];
     require(selection.size() == 31 && !selection.contains(0) && selection.contains(31),
             "31 enodes must fit in the selection mask");
-    for (VarId start_var : state.start_vars[0].at(root_id))
-        require(state.domains[start_var].isFixed() && state.domains[start_var].fixedValue() == 0,
-                "Single reachable class needs only one schedule position");
+    VarId start_var = state.start_vars[0].at(root_id);
+    require(state.domains[start_var].isFixed() && state.domains[start_var].fixedValue() == 0,
+            "Single reachable class needs only one schedule position");
 
     // Relative mask offset tests
     {

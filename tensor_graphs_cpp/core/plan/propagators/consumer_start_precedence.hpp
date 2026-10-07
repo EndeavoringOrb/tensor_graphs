@@ -34,41 +34,72 @@ class ConsumerStartPrecedencePropagator : public Propagator
             if (it == precedence.parents.end())
                 continue;
 
+            std::unordered_map<EClassId, std::unordered_set<uint32_t>> dependent_alternatives;
+            std::unordered_map<EClassId, std::unordered_set<uint32_t>> view_alternatives;
             for (const auto &p_info : it->second)
             {
-                EClassId p_cid = p_info.parent_cid;
-                uint32_t p_en_idx = p_info.en_idx;
                 if (p_info.selection_var == kInvalidVarId || p_info.start_var == kInvalidVarId)
                     continue;
-                VarId p_sel_v = p_info.selection_var;
-                const Domain &p_sel_dom = state.domains[p_sel_v];
-                if (!p_sel_dom.contains(static_cast<int32_t>(p_en_idx + 1)))
+                dependent_alternatives[p_info.parent_cid].insert(p_info.en_idx);
+                if (p_info.is_view)
+                    view_alternatives[p_info.parent_cid].insert(p_info.en_idx);
+            }
+
+            for (const auto &parent_entry : dependent_alternatives)
+            {
+                const EClassId p_cid = parent_entry.first;
+                const VarId p_sel_v = state.selected_vars[b].at(p_cid);
+                const auto p_info_it = std::find_if(it->second.begin(), it->second.end(), [&](const auto &p_info) {
+                    return p_info.parent_cid == p_cid;
+                });
+                if (p_info_it == it->second.end())
+                    continue;
+                VarId p_st_v = p_info_it->start_var;
+                Domain p_sel_dom = state.domains[p_sel_v];
+                if (p_sel_dom.isFixed() && p_sel_dom.fixedValue() == 0)
                     continue;
 
-                VarId p_st_v = p_info.start_var;
-                const Domain &current_start_domain = state.domains[p_st_v];
-                if (current_start_domain.isEmpty() || current_start_domain.getMin() < required_consumer_start)
+                const EClass &p_cls = state.bucket_egraphs[b].getEClass(p_cid);
+                bool all_candidates_depend = true;
+                bool any_candidate = false;
+                for (uint32_t p_en_idx = 0; p_en_idx < p_cls.enodes.size(); ++p_en_idx)
                 {
-                    Domain p_st_dom = current_start_domain;
-                    if (p_st_dom.setMin(required_consumer_start))
+                    const int32_t selection_value = static_cast<int32_t>(p_en_idx + 1);
+                    if (!p_sel_dom.contains(selection_value))
+                        continue;
+                    any_candidate = true;
+                    if (parent_entry.second.count(p_en_idx) == 0)
                     {
-                        if (p_st_dom.isEmpty())
-                        {
-                            if (p_sel_dom.isFixed())
-                                return false;
-                            Domain new_sel_dom = p_sel_dom;
-                            new_sel_dom.remove(static_cast<int32_t>(p_en_idx + 1));
-                            if (new_sel_dom.isEmpty())
-                                return false;
-                            state.setDomain(p_sel_v, new_sel_dom);
-                        }
-                        else
-                        {
-                            state.setDomain(p_st_v, p_st_dom);
-                        }
+                        all_candidates_depend = false;
+                        continue;
+                    }
+                    const Domain &start_domain = state.domains[p_st_v];
+                    if (start_domain.isEmpty() || start_domain.getMax() < required_consumer_start)
+                    {
+                        if (p_sel_dom.isFixed())
+                            return false;
+                        p_sel_dom.remove(selection_value);
+                        if (p_sel_dom.isEmpty())
+                            return false;
+                        state.setDomain(p_sel_v, p_sel_dom);
                     }
                 }
-                if (p_info.is_view && precedence.visited_stamp[p_cid.value] != stamp)
+                if (any_candidate && all_candidates_depend && !p_sel_dom.contains(0))
+                {
+                    Domain start_domain = state.domains[p_st_v];
+                    if (start_domain.setMin(required_consumer_start))
+                    {
+                        if (start_domain.isEmpty())
+                            return false;
+                        state.setDomain(p_st_v, start_domain);
+                    }
+                }
+                bool can_be_view = false;
+                const auto view_it = view_alternatives.find(p_cid);
+                if (view_it != view_alternatives.end())
+                    for (uint32_t view_idx : view_it->second)
+                        can_be_view = can_be_view || p_sel_dom.contains(static_cast<int32_t>(view_idx + 1));
+                if (can_be_view && precedence.visited_stamp[p_cid.value] != stamp)
                 {
                     precedence.visited_stamp[p_cid.value] = stamp;
                     frontier.push_back(p_cid);
@@ -100,10 +131,9 @@ class ConsumerStartPrecedencePropagator : public Propagator
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
-            uint32_t en_idx = state.var_infos[changed].enode_idx;
             VarId sel_v = state.selected_vars[b].at(cid);
             const Domain &sel_dom = state.domains[sel_v];
-            if (!sel_dom.isFixed() || sel_dom.fixedValue() != static_cast<int32_t>(en_idx + 1))
+            if (sel_dom.contains(0))
                 return true;
             return propagateStart(state, b, cid, state.domains[changed].getMin());
         }
@@ -118,8 +148,7 @@ class ConsumerStartPrecedencePropagator : public Propagator
                     const Domain &sel_dom = state.domains[sel_v];
                     if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
                     {
-                        uint32_t en_idx = sel_dom.fixedValue() - 1;
-                        VarId st_v = state.start_vars[b].at(cid)[en_idx];
+                        VarId st_v = state.start_vars[b].at(cid);
                         if (fixed_starts_only && !state.domains[st_v].isFixed())
                             continue;
                         if (!propagateStart(state, b, cid, state.domains[st_v].getMin()))

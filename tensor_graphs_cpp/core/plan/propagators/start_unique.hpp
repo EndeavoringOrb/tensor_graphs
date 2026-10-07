@@ -16,23 +16,21 @@ class StartUniquePropagator : public Propagator
             EClassId other_cid = pair.first;
             VarId other_sel_v = pair.second;
             const Domain &other_sel_dom = state.domains[other_sel_v];
-            if (other_sel_dom.isFixed() && other_sel_dom.fixedValue() == 0)
+            if (other_sel_dom.contains(0))
                 continue;
 
-            for (VarId other_st_v : state.start_vars[b].at(other_cid))
+            VarId other_st_v = state.start_vars[b].at(other_cid);
+            if (other_st_v == source_st_v)
+                continue;
+            Domain other_st_dom = state.domains[other_st_v];
+            if (other_st_dom.contains(st_val))
             {
-                if (other_st_v == source_st_v)
-                    continue;
-                Domain other_st_dom = state.domains[other_st_v];
-                if (other_st_dom.contains(st_val))
-                {
-                    if (other_st_dom.isFixed())
-                        return false;
-                    other_st_dom.remove(st_val);
-                    if (other_st_dom.isEmpty())
-                        return false;
-                    state.setDomain(other_st_v, other_st_dom);
-                }
+                if (other_st_dom.isFixed())
+                    return false;
+                other_st_dom.remove(st_val);
+                if (other_st_dom.isEmpty())
+                    return false;
+                state.setDomain(other_st_v, other_st_dom);
             }
         }
         return true;
@@ -55,10 +53,9 @@ class StartUniquePropagator : public Propagator
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
-            uint32_t en_idx = state.var_infos[changed].enode_idx;
             VarId sel_v = state.selected_vars[b].at(cid);
             const Domain &sel_dom = state.domains[sel_v];
-            if (!sel_dom.isFixed() || sel_dom.fixedValue() != static_cast<int32_t>(en_idx + 1))
+            if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
                 return true;
             return removeStartVal(state, b, changed, dom.fixedValue());
         }
@@ -73,8 +70,7 @@ class StartUniquePropagator : public Propagator
                     const Domain &sel_dom = state.domains[sel_v];
                     if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
                         continue;
-                    uint32_t en_idx = sel_dom.fixedValue() - 1;
-                    VarId st_v = state.start_vars[b].at(cid)[en_idx];
+                    VarId st_v = state.start_vars[b].at(cid);
                     const Domain &st_dom = state.domains[st_v];
                     if (st_dom.isFixed())
                     {

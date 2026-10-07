@@ -22,7 +22,7 @@ class StartPrecedencePropagator : public Propagator
         auto st_it = state.start_vars[b].find(cid);
         if (st_it == state.start_vars[b].end())
             return true;
-        const auto &st_vars = st_it->second;
+        VarId st_var = st_it->second;
         const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
 
         int32_t min_enode_start_min = INT32_MAX;
@@ -43,17 +43,11 @@ class StartPrecedencePropagator : public Propagator
                     continue;
 
                 const Domain &ch_sel_dom = state.domains[ch_sel_it->second];
-                const auto &ch_st_vars = ch_st_it->second;
-                int32_t input_start_min = INT32_MAX;
-                for (uint32_t ch_en = 0; ch_en < ch_st_vars.size(); ++ch_en)
+                if (ch_sel_dom.isFixed() && ch_sel_dom.fixedValue() == 0)
+                    continue;
+                if (!state.domains[ch_st_it->second].isEmpty())
                 {
-                    if (ch_sel_dom.contains(static_cast<int32_t>(ch_en + 1)))
-                    {
-                        input_start_min = std::min(input_start_min, state.domains[ch_st_vars[ch_en]].getMin());
-                    }
-                }
-                if (input_start_min != INT32_MAX)
-                {
+                    int32_t input_start_min = state.domains[ch_st_it->second].getMin();
                     enode_start_min = std::max(enode_start_min, input_start_min + 1);
                 }
             }
@@ -62,21 +56,13 @@ class StartPrecedencePropagator : public Propagator
 
         if (min_enode_start_min != INT32_MAX && min_enode_start_min > 0)
         {
-            for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+            Domain st_dom = state.domains[st_var];
+            if (st_dom.setMin(min_enode_start_min))
             {
-                if (!sel_dom.contains(static_cast<int32_t>(en_idx + 1)))
-                    continue;
-                if (en_idx >= st_vars.size())
-                    continue;
-                VarId st_v = st_vars[en_idx];
-                Domain st_dom = state.domains[st_v];
-                if (st_dom.setMin(min_enode_start_min))
-                {
-                    if (st_dom.isEmpty())
-                        return false;
-                    state.setDomain(st_v, st_dom);
-                    worklist.push_back(st_v);
-                }
+                if (st_dom.isEmpty())
+                    return false;
+                state.setDomain(st_var, st_dom);
+                worklist.push_back(st_var);
             }
         }
         return true;

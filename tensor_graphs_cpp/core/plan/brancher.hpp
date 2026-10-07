@@ -372,9 +372,9 @@ class HeuristicBrancher : public Brancher
             if (!is_input_or_cache && !is_root)
             {
                 auto st_it = state.start_vars[b].find(cand);
-                if (st_it != state.start_vars[b].end() && en_idx < st_it->second.size())
+                if (st_it != state.start_vars[b].end())
                 {
-                    const Domain &st_dom = state.domains[st_it->second[en_idx]];
+                    const Domain &st_dom = state.domains[st_it->second];
                     if (st_dom.isFixed())
                         st_val = st_dom.fixedValue();
                 }
@@ -400,9 +400,9 @@ class HeuristicBrancher : public Brancher
 
             int32_t r_finish = 1;
             auto r_st_it = state.start_vars[b].find(r_cid);
-            if (r_st_it != state.start_vars[b].end() && r_en < r_st_it->second.size())
+            if (r_st_it != state.start_vars[b].end())
             {
-                const Domain &r_st_dom = state.domains[r_st_it->second[r_en]];
+                const Domain &r_st_dom = state.domains[r_st_it->second];
                 r_finish = r_st_dom.isFixed() ? (r_st_dom.fixedValue() + 1) : (r_st_dom.getMax() + 1);
             }
 
@@ -732,13 +732,11 @@ class HeuristicBrancher : public Brancher
             // scheduling attempt instead of a split chosen by domain size.
             for (EClassId cid : sched_topo_order)
             {
-                const Domain &selection = state.domains[state.selected_vars[b].at(cid)];
-                uint32_t enode_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
                 auto start_it = state.start_vars[b].find(cid);
-                if (start_it == state.start_vars[b].end() || enode_idx >= start_it->second.size())
+                if (start_it == state.start_vars[b].end())
                     continue;
 
-                VarId start_var = start_it->second[enode_idx];
+                VarId start_var = start_it->second;
                 const Domain &start_domain = state.domains[start_var];
                 if (!start_domain.isFixed())
                 {

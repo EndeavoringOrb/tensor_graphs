@@ -292,8 +292,7 @@ class SearchEngine
             VarId sel_v = it->second;
             if (st.domains[sel_v].isFixed() && st.domains[sel_v].fixedValue() > 0)
             {
-                uint32_t en_idx = static_cast<uint32_t>(st.domains[sel_v].fixedValue() - 1);
-                VarId st_v = st.start_vars[b].at(cid)[en_idx];
+                VarId st_v = st.start_vars[b].at(cid);
                 int32_t st_val = st.domains[st_v].fixedValue();
                 sorted_ops.push_back({st_val, cid});
             }
@@ -394,7 +393,7 @@ class SearchEngine
                 {
                     uint32_t en_idx = static_cast<uint32_t>(st.domains[sel_v].fixedValue() - 1);
                     res.selection_map[cid] = en_idx;
-                    VarId st_v = st.start_vars[b].at(cid)[en_idx];
+                    VarId st_v = st.start_vars[b].at(cid);
                     int32_t st_val = st.domains[st_v].fixedValue();
                     sorted_ops.push_back({st_val, cid});
                 }

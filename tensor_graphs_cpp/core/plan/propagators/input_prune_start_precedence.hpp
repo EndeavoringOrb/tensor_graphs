@@ -22,7 +22,7 @@ class InputPruneStartPrecedencePropagator : public Propagator
         auto st_it = state.start_vars[b].find(cid);
         if (st_it == state.start_vars[b].end())
             return true;
-        const auto &st_vars = st_it->second;
+        VarId st_var = st_it->second;
 
         const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
         bool sel_modified = false;
@@ -32,9 +32,7 @@ class InputPruneStartPrecedencePropagator : public Propagator
             int32_t cand_val = static_cast<int32_t>(en_idx + 1);
             if (!sel_dom.contains(cand_val))
                 continue;
-            if (en_idx >= st_vars.size())
-                continue;
-            int32_t cand_start_max = state.domains[st_vars[en_idx]].getMax();
+            int32_t cand_start_max = state.domains[st_var].getMax();
 
             ENodeId en_id = cls.enodes[en_idx];
             const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
@@ -49,16 +47,9 @@ class InputPruneStartPrecedencePropagator : public Propagator
                     continue;
 
                 const Domain &ch_sel_dom = state.domains[ch_sel_it->second];
-                const auto &ch_st_vars = ch_st_it->second;
-                int32_t input_start_min = INT32_MAX;
-
-                for (uint32_t ch_en = 0; ch_en < ch_st_vars.size(); ++ch_en)
-                {
-                    if (ch_sel_dom.contains(static_cast<int32_t>(ch_en + 1)))
-                    {
-                        input_start_min = std::min(input_start_min, state.domains[ch_st_vars[ch_en]].getMin());
-                    }
-                }
+                if (ch_sel_dom.isFixed() && ch_sel_dom.fixedValue() == 0)
+                    continue;
+                int32_t input_start_min = state.domains[ch_st_it->second].getMin();
                 if (input_start_min != INT32_MAX && input_start_min >= cand_start_max)
                 {
                     remove_cand = true;
@@ -92,11 +83,8 @@ class InputPruneStartPrecedencePropagator : public Propagator
             int32_t cand_val = static_cast<int32_t>(en_idx + 1);
             if (!sel_dom.contains(cand_val))
                 continue;
-            if (en_idx >= st_vars.size())
-                continue;
-
             ++num_remaining_cands;
-            min_start_max_C = std::min(min_start_max_C, state.domains[st_vars[en_idx]].getMax());
+            min_start_max_C = std::min(min_start_max_C, state.domains[st_var].getMax());
 
             ENodeId en_id = cls.enodes[en_idx];
             const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
@@ -122,16 +110,14 @@ class InputPruneStartPrecedencePropagator : public Propagator
                     auto in_st_it = state.start_vars[b].find(input_cid);
                     if (in_st_it != state.start_vars[b].end())
                     {
-                        for (VarId in_st_v : in_st_it->second)
+                        VarId in_st_v = in_st_it->second;
+                        Domain in_st_dom = state.domains[in_st_v];
+                        if (in_st_dom.setMax(max_allowed_input_start))
                         {
-                            Domain in_st_dom = state.domains[in_st_v];
-                            if (in_st_dom.setMax(max_allowed_input_start))
-                            {
-                                if (in_st_dom.isEmpty())
-                                    return false;
-                                state.setDomain(in_st_v, in_st_dom);
-                                worklist.push_back(in_st_v);
-                            }
+                            if (in_st_dom.isEmpty())
+                                return false;
+                            state.setDomain(in_st_v, in_st_dom);
+                            worklist.push_back(in_st_v);
                         }
                     }
                 }

@@ -75,7 +75,6 @@ struct VarInfo
     std::string name;
     uint32_t bucket_idx = 0;
     EClassId eclass_id;
-    uint32_t enode_idx = 0;
     BaseEClassId base_eclass_id;
     MemSpace mem_space;
     uint64_t size_bytes = 0;
@@ -583,7 +582,7 @@ class SearchState
     // Lookups
     std::unordered_map<BaseEClassId, VarId> cached_vars;
     std::vector<std::unordered_map<EClassId, VarId>> selected_vars;
-    std::vector<std::unordered_map<EClassId, std::vector<VarId>>> start_vars;
+    std::vector<std::unordered_map<EClassId, VarId>> start_vars;
     std::vector<std::unordered_map<EClassId, VarId>> offset_vars;
 
     // Context across all buckets
@@ -700,20 +699,15 @@ class SearchState
             VarId sel_vid = addVar(sel_info, Domain::makeMask(mask));
             selected_vars[b][cid] = sel_vid;
 
-            // Starts encode dispatch order, so N reachable classes need at most N slots.
-            for (uint32_t en_idx = 0; en_idx < n_enodes; ++en_idx)
-            {
-                VarInfo st_info;
-                st_info.type = VarType::START;
-                st_info.bucket_idx = b;
-                st_info.eclass_id = cid;
-                st_info.enode_idx = en_idx;
-                st_info.name = "start_" + std::to_string(b) + "_" + std::to_string(cid.value) + "_" +
-                               std::to_string(en_idx);
+            // One dispatch start is shared by every alternative in the e-class.
+            VarInfo st_info;
+            st_info.type = VarType::START;
+            st_info.bucket_idx = b;
+            st_info.eclass_id = cid;
+            st_info.name = "start_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
-                VarId st_vid = addVar(st_info, Domain::makeRange(0, max_start));
-                start_vars[b][cid].push_back(st_vid);
-            }
+            VarId st_vid = addVar(st_info, Domain::makeRange(0, max_start));
+            start_vars[b][cid] = st_vid;
 
             // offset_<bucket_id>_<eclass_id> in [preallocated_pages, max_pages]
             if (cls.mem_space.type != HandleType::STORAGE)

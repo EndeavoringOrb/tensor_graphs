@@ -235,20 +235,36 @@ class _VisionGraph:
 
     def _rotate(self, x):
         cos_values, sin_values = [], []
-        axis_dim = self.head_dim // 4
+        # Gemma 4 vision uses axial RoPE.  Each coordinate owns half of a
+        # head, and rotate_half is applied independently within each half.
+        # The frequency layout is [x, x, y, y] (16 frequencies repeated
+        # across each 32-channel coordinate block), not one rotation across
+        # the complete 64-channel head.
+        axis_dim = self.head_dim // 2
+        frequencies_per_axis = axis_dim // 2
         for row in range(self.seq_len):
             for d in range(self.head_dim):
-                coord = row % self.grid_width if d < self.head_dim // 2 else row // self.grid_width
-                idx = (d % (self.head_dim // 2)) % axis_dim
-                angle = coord * self.rope_theta ** (-2.0 * idx / (2.0 * axis_dim))
+                axis = d // axis_dim
+                coord = row % self.grid_width if axis == 0 else row // self.grid_width
+                idx = (d % axis_dim) % frequencies_per_axis
+                angle = coord * self.rope_theta ** (-idx / frequencies_per_axis)
                 cos_values.append(math.cos(angle))
                 sin_values.append(math.sin(angle))
         g = self.g
         cosine = g.repeat(g.constant_float32([1, self.seq_len, self.head_dim], cos_values), self.heads, 0)
         sine = g.repeat(g.constant_float32([1, self.seq_len, self.head_dim], sin_values), self.heads, 0)
-        first = g.contiguous(g.slice_dims(x, [0, 0, 0], [self.heads, self.seq_len, self.head_dim // 2], [1, 1, 1]))
-        second = g.contiguous(g.slice_dims(x, [0, 0, self.head_dim // 2], [self.heads, self.seq_len, self.head_dim], [1, 1, 1]))
-        rotated = g.concat([g.neg(second), first], 2)
+        rotated_parts = []
+        for axis in range(2):
+            axis_start = axis * axis_dim
+            half = axis_dim // 2
+            first = g.contiguous(g.slice_dims(
+                x, [0, 0, axis_start], [self.heads, self.seq_len, axis_start + half], [1, 1, 1]
+            ))
+            second = g.contiguous(g.slice_dims(
+                x, [0, 0, axis_start + half], [self.heads, self.seq_len, axis_start + axis_dim], [1, 1, 1]
+            ))
+            rotated_parts.extend([g.neg(second), first])
+        rotated = g.concat(rotated_parts, 2)
         return g.add(g.mul(x, cosine), g.mul(rotated, sine))
 
     def _attention(self, x, prefix: str):

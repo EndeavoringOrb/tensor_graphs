@@ -14,14 +14,10 @@ class UnselectedStartOffsetPropagator : public Propagator
         auto st_it = state.start_vars[b].find(cid);
         if (st_it != state.start_vars[b].end())
         {
-            for (VarId st_v : st_it->second)
-            {
-                const Domain &st_dom = state.domains[st_v];
-                if (!st_dom.isFixed() || st_dom.fixedValue() != 0)
-                {
-                    state.setDomain(st_v, Domain::makeFixed(0, false));
-                }
-            }
+            VarId st_v = st_it->second;
+            const Domain &st_dom = state.domains[st_v];
+            if (!st_dom.isFixed() || st_dom.fixedValue() != 0)
+                state.setDomain(st_v, Domain::makeFixed(0, false));
         }
         auto off_it = state.offset_vars[b].find(cid);
         if (off_it != state.offset_vars[b].end())

@@ -72,8 +72,7 @@ class WriteAfterReadStartPropagator : public Propagator
 
             const auto offset_it = state.offset_vars[b].find(cid);
             const auto start_it = state.start_vars[b].find(cid);
-            if (offset_it == state.offset_vars[b].end() || start_it == state.start_vars[b].end() ||
-                en_idx >= start_it->second.size())
+            if (offset_it == state.offset_vars[b].end() || start_it == state.start_vars[b].end())
                 continue;
             const Domain &offset_domain = state.domains[offset_it->second];
             if (!offset_domain.isFixed())
@@ -93,8 +92,8 @@ class WriteAfterReadStartPropagator : public Propagator
                 1, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
 
             active.push_back({cid, cls.base_eclass_id, cls.mem_space, offset_domain.fixedValue(),
-                              size_pages, start_it->second[en_idx],
-                              state.domains[start_it->second[en_idx]], is_view, is_persistent});
+                              size_pages, start_it->second,
+                              state.domains[start_it->second], is_view, is_persistent});
         }
 
         if (active.size() < 2)
@@ -168,12 +167,9 @@ class WriteAfterReadStartPropagator : public Propagator
                         const Domain &reader_selection = state.domains[reader_sel_it->second];
                         if (!reader_selection.isFixed() || reader_selection.fixedValue() <= 0)
                             continue;
-                        const uint32_t reader_en_idx = static_cast<uint32_t>(reader_selection.fixedValue() - 1);
-                        if (reader_en_idx >= reader_start_it->second.size())
-                            continue;
                         earliest_last_reader = std::max(
                             earliest_last_reader,
-                            state.domains[reader_start_it->second[reader_en_idx]].getMin());
+                            state.domains[reader_start_it->second].getMin());
                     }
                     if (later_reads_earlier || earliest_last_reader < 0)
                         continue;
@@ -211,7 +207,7 @@ class WriteAfterReadStartPropagator : public Propagator
         if (selected_it == state.selected_vars[info.bucket_idx].end())
             return true;
         const Domain &selection = state.domains[selected_it->second];
-        if (!selection.isFixed() || selection.fixedValue() != static_cast<int32_t>(info.enode_idx + 1))
+        if (selection.isFixed() && selection.fixedValue() == 0)
             return true;
 
         return propagateBucket(state, info.bucket_idx, worklist);

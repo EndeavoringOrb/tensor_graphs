@@ -39,9 +39,9 @@ inline VarId selection(const SearchState &state, uint32_t node, uint32_t bucket 
     return state.selected_vars[bucket].at(EClassId{node});
 }
 
-inline VarId start(const SearchState &state, uint32_t node, uint32_t bucket = 0, uint32_t alternative = 0)
+inline VarId start(const SearchState &state, uint32_t node, uint32_t bucket = 0)
 {
-    return state.start_vars[bucket].at(EClassId{node})[alternative];
+    return state.start_vars[bucket].at(EClassId{node});
 }
 
 inline VarId offset(const SearchState &state, uint32_t node, uint32_t bucket = 0)
@@ -106,10 +106,9 @@ inline SearchState makeState(const GraphSpec &spec, uint32_t bucket_count = 1)
                 state.bucket_enode_infos[b].resize(en_id.value + 1);
                 state.bucket_enode_infos[b][en_id.value].cost = alternative.cost;
                 state.bucket_enode_infos[b][en_id.value].is_view = alternative.is_view;
-                info.type = VarType::START;
-                info.enode_idx = index;
-                state.start_vars[b][cid].push_back(state.addVar(info, Domain::makeRange(0, spec.size() + 4)));
             }
+            info.type = VarType::START;
+            state.start_vars[b][cid] = state.addVar(info, Domain::makeRange(0, spec.size() + 4));
             info.type = VarType::OFFSET;
             info.mem_space = space;
             info.size_bytes = 8;
@@ -239,7 +238,7 @@ inline void testBaseCorrectness()
             {AlternativeSpec({0}), AlternativeSpec{}}
         };
         SearchEngine engine(makeState(spec, 1));
-        addBasePropagators(engine);
+        engine.addPropagator(std::make_unique<PearceKellyCyclePropagator>());
         engine.state.setDomain(selection(engine.state, 0), Domain::makeFixed(1, true));
         require(engine.runPropagators(selection(engine.state, 0)), "Selecting node 0 failed");
         engine.state.setDomain(selection(engine.state, 1), Domain::makeFixed(1, true));
