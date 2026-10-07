@@ -269,6 +269,15 @@ struct InstallCrashHandler
 
 namespace py = pybind11;
 
+static std::string pythonCallsite()
+{
+    py::object caller = py::module_::import("sys").attr("_getframe")(0);
+    py::object code = caller.attr("f_code");
+    return code.attr("co_filename").cast<std::string>() + ":" +
+           py::str(caller.attr("f_lineno")).cast<std::string>() + " (" +
+           code.attr("co_name").cast<std::string>() + ")";
+}
+
 class PyBrancher : public plan::Brancher
 {
   public:
@@ -940,6 +949,8 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readonly("op_type", &TensorNode::opType)
         .def_readonly("dtype", &TensorNode::dtype)
         .def_readonly("child_ids", &TensorNode::child_ids)
+        .def_readonly("debug_origin", &TensorNode::debugOrigin)
+        .def_readonly("debugOrigin", &TensorNode::debugOrigin)
         .def_property_readonly("shape", &TensorNode::getShape);
 
     py::class_<Graph>(m, "Graph")
@@ -947,6 +958,12 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readonly("nodes", &Graph::nodes)
         .def("hasNode", &Graph::hasNode)
         .def("getNode", [](const Graph &self, LogicalId id) { return self.getNode(id); })
+        .def("set_debug_origin", [](Graph &self, LogicalId id, const std::string &origin) {
+            self.getNode(id).debugOrigin = origin;
+        }, py::arg("node_id"), py::arg("origin"))
+        .def("setDebugOrigin", [](Graph &self, LogicalId id, const std::string &origin) {
+            self.getNode(id).debugOrigin = origin;
+        }, py::arg("node_id"), py::arg("origin"))
         .def(
             "input",
             [](Graph &self, const std::vector<uint32_t> &shape, DType dtype) { return self.input(shape, dtype); },
@@ -966,10 +983,25 @@ PYBIND11_MODULE(tensor_graphs, m)
                 throw std::runtime_error("constant_int32 value count does not match shape");
             return self.constant(shape, values.data(), DType::INT32);
         })
-        .def("add", [](Graph &self, LogicalId a, LogicalId b) { return self.add(a, b); })
+        .def("add", [](Graph &self, LogicalId a, LogicalId b) {
+            LogicalId id = self.add(a, b);
+            self.getNode(id).debugOrigin = pythonCallsite();
+            return id;
+        })
         .def("mul", [](Graph &self, LogicalId a, LogicalId b) { return self.mul(a, b); })
         .def("div", [](Graph &self, LogicalId a, LogicalId b) { return self.div(a, b); })
-        .def("dot", [](Graph &self, LogicalId a, LogicalId b) { return self.dot(a, b); })
+        .def("dot", [](Graph &self, LogicalId a, LogicalId b, const std::string &debugOrigin) {
+            LogicalId id = self.dot(a, b);
+            if (!debugOrigin.empty())
+            {
+                self.getNode(id).debugOrigin = debugOrigin;
+            }
+            else
+            {
+                self.getNode(id).debugOrigin = pythonCallsite();
+            }
+            return id;
+        }, py::arg("a"), py::arg("b"), py::arg("debug_origin") = "")
         .def("sin", [](Graph &self, LogicalId a) { return self.sin(a); })
         .def("cos", [](Graph &self, LogicalId a) { return self.cos(a); })
         .def("neg", [](Graph &self, LogicalId a) { return self.neg(a); })

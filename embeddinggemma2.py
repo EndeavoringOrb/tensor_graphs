@@ -364,20 +364,21 @@ class _AudioGraph:
     def _weight(self, name: str):
         return _weight(self.g, self.path, name)
 
-    def _clamp(self, x, prefix: str, output=False):
+    def _clamp(self, x, prefix: str, shape: list[int], output=False):
         g = self.g
         suffix = "output" if output else "input"
         lo, hi = self._weight(f"{prefix}.{suffix}_min"), self._weight(f"{prefix}.{suffix}_max")
-        shape = list(g.getNode(x).shape)
+        lo = g.fill_from(lo, shape)
+        hi = g.fill_from(hi, shape)
         lower = g.add(lo, g.relu(g.add(x, g.neg(lo)), shape))
         return g.add(lower, g.neg(g.relu(g.add(lower, g.neg(hi)), shape)))
 
     def _linear(self, x, name: str, in_dim: int, out_dim: int, rows: int, clippable=False):
         g = self.g
         if clippable:
-            x = self._clamp(x, name)
+            x = self._clamp(x, name, [1, rows, in_dim])
         result = _matrix(g, x, self._weight(f"{name}.linear.weight"), in_dim, out_dim)
-        return self._clamp(result, name, True) if clippable else result
+        return self._clamp(result, name, [1, rows, out_dim], True) if clippable else result
 
     def _norm(self, x, name: str, rows: int, dim: int, with_scale=True):
         scale = self._weight(f"{name}.weight") if with_scale else self.g.fill(1.0, [dim])
@@ -390,7 +391,8 @@ class _AudioGraph:
         variance = g.div(g.sum_axis(g.mul(centered, centered), -1), g.fill(float(dim), [1, rows, 1]))
         inverse = g.pow(g.add(variance, g.fill(self.eps, [1, rows, 1])), g.fill(-0.5, [1, rows, 1]))
         normalized = g.mul(centered, g.repeat(inverse, dim, 2))
-        return g.mul(normalized, g.reshape(self._weight(f"{name}.weight"), [1, 1, dim]))
+        scale = g.reshape(self._weight(f"{name}.weight"), [1, 1, dim])
+        return g.mul(normalized, g.repeat(scale, rows, 1))
 
     def _conv_subsample(self, features, in_channels: int, out_channels: int, prefix: str,
                         input_h: int, input_w: int):
@@ -400,6 +402,9 @@ class _AudioGraph:
         weight = self._weight(f"{prefix}.conv.weight")
         weight = g.reshape(weight, [out_channels, in_channels * 9])
         weight = g.reshape(g.contiguous(g.permute_axes(weight, [1, 0])), [1, in_channels * 9, out_channels])
+        # IM2COL emits [N, C * kernel * kernel, output_positions]. DOT
+        # expects [N, output_positions, K] @ [N, K, output_channels].
+        cols = g.contiguous(g.permute_axes(cols, [0, 2, 1]))
         out = g.dot(cols, weight)
         out = g.reshape(out, [1, out_channels, out_h, out_w])
         out = g.contiguous(g.permute_axes(out, [0, 2, 3, 1]))
@@ -408,7 +413,7 @@ class _AudioGraph:
         return g.relu(out, [1, out_h * out_w, out_channels]), out_h, out_w
 
     def _softplus(self, x, rows: int, dim: int):
-        shape = list(self.g.getNode(x).shape)
+        shape = [1, 1, rows, dim]
         exp_x = self.g.pow(self.g.fill(math.e, shape), x)
         return self.g.log(self.g.add(self.g.fill(1.0, shape), exp_x))
 
@@ -463,7 +468,9 @@ class _AudioGraph:
         q = g.mul(q, g.fill(1.0 / math.sqrt(dim) / math.log(2.0), [1, seq_len, heads, dim]))
         k = g.mul(k, g.fill(math.log1p(math.e) / math.log(2.0), [1, seq_len, heads, dim]))
         dim_scale = g.reshape(self._weight(f"{prefix}.per_dim_scale"), [1, 1, 1, dim])
-        q = g.mul(q, self._softplus(dim_scale, 1, dim))
+        scale = self._softplus(dim_scale, 1, dim)
+        scale = g.repeat(g.repeat(scale, seq_len, 1), heads, 2)
+        q = g.mul(q, scale)
         q = g.reshape(g.contiguous(g.permute_axes(q, [0, 2, 1, 3])), [heads, seq_len, dim])
         k = g.reshape(g.contiguous(g.permute_axes(k, [0, 2, 1, 3])), [heads, seq_len, dim])
         v = g.reshape(g.contiguous(g.permute_axes(v, [0, 2, 1, 3])), [heads, seq_len, dim])
@@ -498,7 +505,8 @@ class _AudioGraph:
         x = g.reshape(g.permute_axes(g.reshape(x, [1, h0, w0, 128]), [0, 3, 1, 2]), [1, 128, h0, w0])
         x, h1, w1 = self._conv_subsample(x, 128, 32, "audio_tower.subsample_conv_projection.layer1", h0, w0)
         x = g.reshape(x, [1, h1, w1 * 32])
-        x = self._linear(x, "audio_tower.subsample_conv_projection.input_proj_linear", w1 * 32, self.hidden_size, h1)
+        input_projection = self._weight("audio_tower.subsample_conv_projection.input_proj_linear.weight")
+        x = _matrix(g, x, input_projection, w1 * 32, self.hidden_size)
         for i in range(self.num_layers):
             prefix = f"audio_tower.layers.{i}"
             x = self._feed_forward(x, f"{prefix}.feed_forward1")
@@ -513,7 +521,7 @@ class _AudioGraph:
         output_w = self._weight("audio_tower.output_proj.weight")
         output_b = self._weight("audio_tower.output_proj.bias")
         x = g.add(_matrix(g, x, output_w, self.hidden_size, self.output_size),
-                  g.reshape(output_b, [1, 1, self.output_size]))
+                  g.repeat(g.reshape(output_b, [1, 1, self.output_size]), self.seq_len, 1))
         x = _rms_norm(g, x, g.fill(1.0, [self.output_size]), self.seq_len, self.output_size, self.eps, False)
         return _matrix(g, x, self._weight("embed_audio.embedding_projection.weight"), self.output_size, 512)
 
