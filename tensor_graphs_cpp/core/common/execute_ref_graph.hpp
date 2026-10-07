@@ -211,6 +211,16 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                 if (store.has(pid))
                 {
                     results[pid] = store.read(pid);
+                    const TensorNode &stored_node = graph.getNode(pid);
+                    const uint64_t expected_stored_size =
+                        countElements(stored_node) * getDTypeSize(stored_node.dtype);
+                    if (results[pid].size() < expected_stored_size)
+                    {
+                        Error::throw_err("[executeReferenceGraph] Stored tensor has an invalid buffer size: node " +
+                                         std::to_string(pid.value) + " op=" + toString(stored_node.opType) +
+                                         ", expected bytes=" + std::to_string(expected_stored_size) +
+                                         ", stored bytes=" + std::to_string(results[pid].size()));
+                    }
                     // Stored tensors are materialized in contiguous layout. In
                     // particular, view nodes are copied into a contiguous
                     // buffer before store.write(), so reusing the graph node's
@@ -291,17 +301,43 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
 
         const KernelEntry &kernel = KernelRegistry::get().getKernel(chosen_kernel_uid);
 
+        std::vector<uint8_t> contiguous_view_input;
+        const bool materialize_view_input =
+            kernel.is_view && !kernel.requiresContiguous.empty() && kernel.requiresContiguous[0] &&
+            !isContiguous(input_views[0]);
+        if (materialize_view_input)
+        {
+            const uint64_t input_elem_size = getDTypeSize(input_views[0].dtype);
+            TensorView contiguous_view = input_views[0];
+            contiguous_view.strides = calcContiguousStrides(input_views[0].getShape());
+            contiguous_view.offset = 0;
+            contiguous_view_input.resize(countElements(contiguous_view) * input_elem_size);
+
+            const uint8_t *src_data = static_cast<const uint8_t *>(input_ptrs[0]);
+            for (uint64_t i = 0; i < countElements(contiguous_view); ++i)
+            {
+                const uint64_t src_idx = getStridedIndex(i, input_views[0].getShape(), input_views[0].strides);
+                std::memcpy(contiguous_view_input.data() + i * input_elem_size,
+                            src_data + src_idx * input_elem_size, input_elem_size);
+            }
+            input_nodes[0].strides = contiguous_view.strides;
+        }
+
         if (kernel.is_view)
         {
             TensorView dummy_out_view(node, 0);
             kernel.inferView(input_nodes, dummy_out_view, graph);
             LogicalId parent_id = node.child_ids[0];
-            results[node_id] = results[parent_id];
+            if (materialize_view_input)
+                results[node_id] = std::move(contiguous_view_input);
+            else
+                results[node_id] = results[parent_id];
             chosen_out_view.strides = dummy_out_view.strides;
-            chosen_out_view.offset = views[parent_id].offset + dummy_out_view.offset;
+            chosen_out_view.offset = (materialize_view_input ? 0 : views[parent_id].offset) + dummy_out_view.offset;
             views[node_id] = chosen_out_view;
 
-            const uint64_t parent_buffer_size = results[parent_id].size();
+            const uint64_t parent_buffer_size =
+                materialize_view_input ? results[node_id].size() : results[parent_id].size();
             if (chosen_out_view.strides.size() != chosen_out_view.getShape().size())
             {
                 Error::throw_err("[executeReferenceGraph] Invalid view rank for node " +
@@ -313,9 +349,12 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
             if (chosen_out_view.offset > parent_buffer_size ||
                 view_required_size > parent_buffer_size - chosen_out_view.offset)
             {
+                const TensorNode &parent_node = graph.getNode(parent_id);
                 Error::throw_err("[executeReferenceGraph] View exceeds its backing buffer: node " +
                                  std::to_string(node_id.value) + " op=" + toString(node.opType) +
-                                 ", parent node " + std::to_string(parent_id.value) + ", buffer bytes=" +
+                                 ", parent node " + std::to_string(parent_id.value) + " op=" +
+                                 toString(parent_node.opType) + " dtype=" + toString(parent_node.dtype) +
+                                 " shape=" + toString(parent_node.getShape()) + ", buffer bytes=" +
                                  std::to_string(parent_buffer_size) + ", view offset=" +
                                  std::to_string(chosen_out_view.offset) + ", required bytes=" +
                                  std::to_string(view_required_size) + ", shape=" +
@@ -327,7 +366,7 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
             contig_view.strides = calcContiguousStrides(dummy_out_view.getShape());
             contig_view.offset = 0;
             std::vector<uint8_t> contig_data(countElements(contig_view) * elem_size);
-            const uint8_t *src_data = results[parent_id].data() + chosen_out_view.offset;
+            const uint8_t *src_data = results[node_id].data() + chosen_out_view.offset;
             for (uint64_t i = 0; i < countElements(contig_view); ++i)
             {
                 uint64_t src_idx = getStridedIndex(i, chosen_out_view.getShape(), chosen_out_view.strides);

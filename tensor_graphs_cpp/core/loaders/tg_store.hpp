@@ -4,6 +4,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -154,6 +155,36 @@ class TGStore : public ITensorStore
     bool readOnly;
     bool valid = false;
 
+    static bool isRecordInBounds(const RefMetaEntry &entry, uint64_t data_file_size)
+    {
+        if (entry.offset > data_file_size || entry.sizeBytes > data_file_size - entry.offset)
+            return false;
+
+        uint64_t bits_per_element = 0;
+        try
+        {
+            bits_per_element = getDTypeNBits(entry.dtype);
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+        if (bits_per_element == 0)
+            return false;
+
+        uint64_t element_count = 1;
+        for (uint32_t dim : entry.shape)
+        {
+            if (dim == 0 || element_count > std::numeric_limits<uint64_t>::max() / dim)
+                return false;
+            element_count *= dim;
+        }
+        if (element_count > (std::numeric_limits<uint64_t>::max() - 7) / bits_per_element)
+            return false;
+        const uint64_t required_bytes = (element_count * bits_per_element + 7) / 8;
+        return entry.sizeBytes >= required_bytes;
+    }
+
   public:
     TGStore(const std::string &path, const std::string &gHash, bool ro = true)
         : basePath(path), graphHash(gHash), readOnly(ro)
@@ -166,16 +197,54 @@ class TGStore : public ITensorStore
         {
             BinaryReader br(metaIn);
             std::string saved_hash;
-            br.read(saved_hash);
+            try
+            {
+                br.read(saved_hash);
+            }
+            catch (const std::exception &)
+            {
+                saved_hash.clear();
+            }
             if (saved_hash == graphHash)
             {
-                valid = true;
-                while (metaIn.peek() != EOF)
+                std::error_code file_size_error;
+                const uint64_t data_file_size = std::filesystem::file_size(dataPath, file_size_error);
+                if (!file_size_error)
                 {
-                    RefMetaEntry e;
-                    br.read(e);
-                    idEntries[e.logicalId] = e;
-                    entries[std::to_string(e.logicalId.value)] = e;
+                    valid = true;
+                    std::streamoff last_valid_meta_offset = metaIn.tellg();
+                    bool truncated_meta = false;
+                    while (metaIn.peek() != EOF)
+                    {
+                        RefMetaEntry e;
+                        try
+                        {
+                            br.read(e);
+                        }
+                        catch (const std::exception &)
+                        {
+                            truncated_meta = true;
+                            break;
+                        }
+
+                        last_valid_meta_offset = metaIn.tellg();
+                        if (!isRecordInBounds(e, data_file_size))
+                            continue;
+
+                        idEntries[e.logicalId] = e;
+                        entries[std::to_string(e.logicalId.value)] = e;
+                    }
+
+                    // A crash can leave a partial metadata record after all
+                    // complete entries. Keep those entries and remove the
+                    // unreadable tail before future appends.
+                    if (truncated_meta && !readOnly && last_valid_meta_offset >= 0)
+                    {
+                        metaIn.close();
+                        std::error_code resize_error;
+                        std::filesystem::resize_file(metaPath,
+                                                     static_cast<uint64_t>(last_valid_meta_offset), resize_error);
+                    }
                 }
             }
             else
@@ -312,8 +381,15 @@ class TGStore : public ITensorStore
         {
             dataIn.open(dataPath, std::ios::binary);
         }
+        if (!dataIn.is_open())
+            return {};
+        dataIn.clear();
         dataIn.seekg(e.offset, std::ios::beg);
+        if (!dataIn)
+            return {};
         dataIn.read(reinterpret_cast<char *>(data.data()), e.sizeBytes);
+        if (static_cast<uint64_t>(dataIn.gcount()) != e.sizeBytes)
+            return {};
         return data;
     }
 
@@ -329,8 +405,15 @@ class TGStore : public ITensorStore
             {
                 dataIn.open(dataPath, std::ios::binary);
             }
+            if (!dataIn.is_open())
+                return {};
+            dataIn.clear();
             dataIn.seekg(e.offset, std::ios::beg);
+            if (!dataIn)
+                return {};
             dataIn.read(reinterpret_cast<char *>(data.data()), e.sizeBytes);
+            if (static_cast<uint64_t>(dataIn.gcount()) != e.sizeBytes)
+                return {};
             return data;
         }
         auto sit = entries.find(std::to_string(id.value));
@@ -342,8 +425,15 @@ class TGStore : public ITensorStore
             {
                 dataIn.open(dataPath, std::ios::binary);
             }
+            if (!dataIn.is_open())
+                return {};
+            dataIn.clear();
             dataIn.seekg(e.offset, std::ios::beg);
+            if (!dataIn)
+                return {};
             dataIn.read(reinterpret_cast<char *>(data.data()), e.sizeBytes);
+            if (static_cast<uint64_t>(dataIn.gcount()) != e.sizeBytes)
+                return {};
             return data;
         }
         return {};
@@ -371,8 +461,17 @@ class TGStore : public ITensorStore
                 Error::throw_err("[TGStore.loadTensor] Could not open data file: " + dataPath);
             }
         }
+        dataIn.clear();
         dataIn.seekg(e.offset, std::ios::beg);
+        if (!dataIn)
+        {
+            Error::throw_err("[TGStore.loadTensor] Could not seek to tensor data for '" + name + "'");
+        }
         dataIn.read(reinterpret_cast<char *>(dest), e.sizeBytes);
+        if (static_cast<uint64_t>(dataIn.gcount()) != e.sizeBytes)
+        {
+            Error::throw_err("[TGStore.loadTensor] Truncated tensor data for '" + name + "'");
+        }
     }
 
     void write(LogicalId logical_id, const TensorView &view, const void *data, uint64_t size_bytes)
