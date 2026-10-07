@@ -229,9 +229,9 @@ class _VisionGraph:
     def _project(self, x, name: str, in_dim: int, out_dim: int):
         return _matrix(self.g, x, _weight(self.g, self.path, name), in_dim, out_dim)
 
-    def _norm(self, x, name: str, rows: int, with_scale=True):
-        scale = _weight(self.g, self.path, name) if with_scale else self.g.fill(1.0, [self.hidden_size])
-        return _rms_norm(self.g, x, scale, rows, self.hidden_size, self.eps, with_scale)
+    def _norm(self, x, name: str, rows: int, dim: int = hidden_size, with_scale=True):
+        scale = _weight(self.g, self.path, name) if with_scale else self.g.fill(1.0, [dim])
+        return _rms_norm(self.g, x, scale, rows, dim, self.eps, with_scale)
 
     def _rotate(self, x):
         cos_values, sin_values = [], []
@@ -259,9 +259,9 @@ class _VisionGraph:
             value = g.reshape(value, [1, s, h, d])
             return g.reshape(g.permute_axes(value, [0, 2, 1, 3]), [h, s, d])
         q, k, v = map(heads, (project("q_proj"), project("k_proj"), project("v_proj")))
-        q = g.reshape(self._norm(g.reshape(q, [1, h * s, d]), f"{prefix}.self_attn.q_norm.weight", h * s), [h, s, d])
-        k = g.reshape(self._norm(g.reshape(k, [1, h * s, d]), f"{prefix}.self_attn.k_norm.weight", h * s), [h, s, d])
-        v = g.reshape(self._norm(g.reshape(v, [1, h * s, d]), "", h * s, False), [h, s, d])
+        q = g.reshape(self._norm(g.reshape(q, [1, h * s, d]), f"{prefix}.self_attn.q_norm.weight", h * s, d), [h, s, d])
+        k = g.reshape(self._norm(g.reshape(k, [1, h * s, d]), f"{prefix}.self_attn.k_norm.weight", h * s, d), [h, s, d])
+        v = g.reshape(self._norm(g.reshape(v, [1, h * s, d]), "", h * s, d, False), [h, s, d])
         q, k = self._rotate(q), self._rotate(k)
         scores = g.dot(q, g.contiguous(g.permute_axes(k, [0, 2, 1])))
         exps = g.pow(g.fill(math.e, [h, s, s]), g.add(scores, g.neg(g.repeat(g.max_axis(scores, -1), s, 2))))
