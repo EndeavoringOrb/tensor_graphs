@@ -52,6 +52,9 @@ name = "torch-cu118"
 url = "https://download.pytorch.org/whl/cu118"
 explicit = true
 
+[tool.setuptools]
+py-modules = ["embeddinggemma2"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tensor_graphs*"]

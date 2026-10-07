@@ -1616,7 +1616,11 @@ class BuildOrchestrator:
                 _, py_link_flags, ext_suffix = self.toolchain.get_pybind11_flags()
                 out_path = Path(f"tensor_graphs{ext_suffix}")
                 dep_objs = [main_obj] + [Path(co) for co in cuda_objs]
-                ld_flags = py_link_flags + self.toolchain.get_ld_flags()
+                # Python extensions must remain position independent. The
+                # no-CUDA static-link option is intended for native executables
+                # and selects non-PIC startup objects that cannot be used in a
+                # shared extension module.
+                ld_flags = py_link_flags + [flag for flag in self.toolchain.get_ld_flags() if flag != "-static"]
                 link_key = makeLinkKey(info["cxx_bin"], ld_flags, dep_objs, object_cmd_keys)
 
                 bin_up_to_date = isBinaryUpToDate(out_path, dep_objs, link_key, build_cache, self.config.force)

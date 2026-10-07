@@ -1,6 +1,7 @@
 #pragma once
 #include <deque>
 #include <filesystem>
+#include <initializer_list>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -642,6 +643,16 @@ struct Graph
     {
         LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32, loc);
         return reshape(id, shape_node, loc);
+    }
+
+    LogicalId reshape(LogicalId id, std::initializer_list<uint32_t> shape,
+                      SourceLocation loc = SourceLocation::current())
+    {
+        std::vector<int32_t> shape_int;
+        shape_int.reserve(shape.size());
+        for (uint32_t dim : shape)
+            shape_int.push_back(static_cast<int32_t>(dim));
+        return reshape(id, shape_int, loc);
     }
 
     LogicalId concat(std::vector<LogicalId> ids, uint32_t axis, SourceLocation loc = SourceLocation::current())

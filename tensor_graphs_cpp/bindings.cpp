@@ -881,33 +881,58 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("num_threads", &Settings::num_threads)
         .def_readwrite("bucket_weights", &Settings::bucket_weights);
 
+    py::class_<MemoryManager>(m, "MemoryManager").def(py::init<>());
+
     py::class_<Session>(m, "Session")
         .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
                           bool disable_node_caching, bool use_ortools, bool use_ortools_full, bool use_ortools_lns,
-                          bool disable_compilation_caching) {
+                          bool disable_compilation_caching, float min_compile_seconds) {
             Settings settings = Settings::get_default();
             settings.use_ortools = use_ortools;
             settings.use_ortools_full = use_ortools_full;
             settings.use_ortools_lns = use_ortools_lns;
             settings.disable_caching = disable_node_caching;
             settings.disable_compilation_caching = disable_compilation_caching;
+            settings.min_compile_seconds = min_compile_seconds;
             if (!cache_file.empty())
                 settings.cache_file = cache_file;
             return std::make_unique<Session>(g, mem, root_id, settings);
         }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
             py::arg("disable_node_caching") = false, py::arg("use_ortools") = false,
             py::arg("use_ortools_full") = false, py::arg("use_ortools_lns") = false,
-            py::arg("disable_compilation_caching") = false)
+            py::arg("disable_compilation_caching") = false, py::arg("min_compile_seconds") = 0.0f)
         .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
                               const std::vector<Region> &outNeeded, float weight) {
             s.addBucket(inDirty, outNeeded, weight);
         }, py::arg("input_dirty_regions"), py::arg("output_needed_region"), py::arg("weight") = 1.0f)
         .def("plan", &Session::plan, py::arg("do_saturate") = true)
         .def("compile", &Session::compile, py::arg("do_saturate") = true)
+        .def("ensure_full_bucket", &Session::ensureFullBucket)
         .def("export_ortools_problem", &Session::exportOrtoolsProblem, py::arg("do_saturate") = true)
         .def("ensure_cache_coverage_ortools", &Session::ensureCacheCoverageOrtools, py::arg("do_saturate") = true)
         .def("get_compiled_graphs", &Session::getCachedGraphs)
         .def("set_compiled_graphs", &Session::setCachedGraphs)
+        .def("write_input_int32", [](Session &s, LogicalId id, const std::vector<int32_t> &values) {
+            s.writeInput(id, values.data(), values.size() * sizeof(int32_t));
+        })
+        .def("write_input_float32", [](Session &s, LogicalId id, const std::vector<float> &values) {
+            s.writeInput(id, values.data(), values.size() * sizeof(float));
+        })
+        .def("run_float32", [](Session &s, LogicalId root_id) {
+            const float *output = static_cast<const float *>(s.run());
+            const uint64_t count = countElements(s.graph.getNode(root_id).getShape());
+            std::vector<float> result(count);
+#ifdef TG_USE_CUDA
+            cudaPointerAttributes attrs;
+            if (cudaPointerGetAttributes(&attrs, output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+            {
+                cudaMemcpy(result.data(), output, count * sizeof(float), cudaMemcpyDeviceToHost);
+                return result;
+            }
+#endif
+            std::copy(output, output + count, result.begin());
+            return result;
+        })
         .def_readwrite("settings", &Session::settings);
 
     py::class_<TensorNode>(m, "TensorNode")
@@ -926,6 +951,21 @@ PYBIND11_MODULE(tensor_graphs, m)
             "input",
             [](Graph &self, const std::vector<uint32_t> &shape, DType dtype) { return self.input(shape, dtype); },
             py::arg("shape"), py::arg("dtype") = DType::FLOAT32)
+        .def("weight", [](Graph &self, const std::string &path, const std::string &name) {
+            return self.weight(path, name);
+        })
+        .def("constant_float32", [](Graph &self, const std::vector<uint32_t> &shape,
+                                     const std::vector<float> &values) {
+            if (countElements(shape) != values.size())
+                throw std::runtime_error("constant_float32 value count does not match shape");
+            return self.constant(shape, values.data(), DType::FLOAT32);
+        })
+        .def("constant_int32", [](Graph &self, const std::vector<uint32_t> &shape,
+                                   const std::vector<int32_t> &values) {
+            if (countElements(shape) != values.size())
+                throw std::runtime_error("constant_int32 value count does not match shape");
+            return self.constant(shape, values.data(), DType::INT32);
+        })
         .def("add", [](Graph &self, LogicalId a, LogicalId b) { return self.add(a, b); })
         .def("mul", [](Graph &self, LogicalId a, LogicalId b) { return self.mul(a, b); })
         .def("div", [](Graph &self, LogicalId a, LogicalId b) { return self.div(a, b); })
@@ -935,12 +975,32 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("neg", [](Graph &self, LogicalId a) { return self.neg(a); })
         .def("pow", [](Graph &self, LogicalId a, LogicalId b) { return self.pow(a, b); })
         .def("sum", [](Graph &self, LogicalId a, LogicalId b) { return self.sum(a, b); })
+        .def("sum_axis", [](Graph &self, LogicalId a, int32_t axis) {
+            return self.sum(a, self.constant({1}, &axis, DType::INT32));
+        })
+        .def("max_axis", [](Graph &self, LogicalId a, int32_t axis) {
+            return self.max(a, self.constant({1}, &axis, DType::INT32));
+        })
         .def("max", [](Graph &self, LogicalId a, LogicalId b) { return self.max(a, b); })
+        .def("contiguous", [](Graph &self, LogicalId a) { return self.contiguous(a); })
         .def("reshape",
              [](Graph &self, LogicalId a, const std::vector<int32_t> &shape) { return self.reshape(a, shape); })
         .def("permute", [](Graph &self, LogicalId a, LogicalId dims) { return self.permute(a, dims); })
+        .def("permute_axes", [](Graph &self, LogicalId a, const std::vector<int32_t> &axes) {
+            return self.permute(a, axes);
+        })
         .def("slice", [](Graph &self, LogicalId a, LogicalId st, LogicalId en,
                          LogicalId step) { return self.slice(a, st, en, step); })
+        .def("slice_dims", [](Graph &self, LogicalId a, const std::vector<int32_t> &st,
+                               const std::vector<int32_t> &en, const std::vector<int32_t> &step) {
+            if (st.size() != en.size() || st.size() != step.size())
+                throw std::runtime_error("slice_dims bounds must have equal rank");
+            const std::vector<uint32_t> shape{static_cast<uint32_t>(st.size())};
+            LogicalId start = self.constant(shape, st.data(), DType::INT32);
+            LogicalId end = self.constant(shape, en.data(), DType::INT32);
+            LogicalId stride = self.constant(shape, step.data(), DType::INT32);
+            return self.slice(a, start, end, stride);
+        })
         .def("scatter", [](Graph &self, LogicalId u, LogicalId st, LogicalId en, LogicalId step,
                            LogicalId shape) { return self.scatter(u, st, en, step, shape); })
         .def("concat",
@@ -954,8 +1014,14 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("gather", [](Graph &self, LogicalId a, LogicalId idx) { return self.gather(a, idx); })
         .def("fill",
              [](Graph &self, float value, const std::vector<uint32_t> &shape) { return self.fill(value, shape); })
+        .def("fill_from", [](Graph &self, LogicalId value, const std::vector<uint32_t> &shape) {
+            return self.fill(value, shape);
+        })
         .def("constant", [](Graph &self, const std::vector<int32_t> &vals) { return self.constant(vals); })
         .def("relu", [](Graph &self, LogicalId a, const std::vector<uint32_t> &shape) { return self.relu(a, shape); })
+        .def("im2col", [](Graph &self, LogicalId a, uint32_t kernel, uint32_t stride, uint32_t padding) {
+            return self.im2col(a, kernel, stride, padding);
+        })
         .def("log", [](Graph &self, LogicalId a) { return self.log(a); })
         .def("argmax", [](Graph &self, LogicalId a, LogicalId dim, LogicalId k) { return self.argmax(a, dim, k); })
         .def("lt", [](Graph &self, LogicalId a, LogicalId b) { return self.lt(a, b); })
@@ -980,6 +1046,7 @@ PYBIND11_MODULE(tensor_graphs, m)
     m.attr("SearchDelegate") = m.attr("Brancher");
     m.attr("HeuristicSearchDelegate") = m.attr("HeuristicBrancher");
     m.attr("HeuristicDelegate") = m.attr("HeuristicBrancher");
+    m.def("make_full_regions", [](const std::vector<uint32_t> &shape) { return makeFull(shape); });
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
@@ -1011,4 +1078,6 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
              py::arg("latent_data"));
+
+    m.attr("EmbeddingGemma2") = py::module_::import("embeddinggemma2").attr("EmbeddingGemma2");
 }
