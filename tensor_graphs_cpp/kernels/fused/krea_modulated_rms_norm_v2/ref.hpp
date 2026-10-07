@@ -21,7 +21,7 @@ inline LogicalId refFactoryKreaModulatedRMSNormV2(const std::vector<LogicalId> &
     LogicalId inv_std = g.repeat(g.div(g.fill(1.0f, {B, S, 1}), std), D, 2);
     LogicalId x_norm = g.mul(x, inv_std);
 
-    LogicalId w_3d = g.reshape(w, {1, 1, static_cast<int32_t>(D)});
+    LogicalId w_3d = g.reshape(w, {1, 1, D});
     LogicalId w_exp = g.repeat(g.repeat(w_3d, B, 0), S, 1);
     LogicalId one_full = g.fill(1.0f, {B, S, D});
     LogicalId w_scale = g.add(w_exp, one_full);

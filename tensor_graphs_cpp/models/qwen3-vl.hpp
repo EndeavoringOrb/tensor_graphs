@@ -78,14 +78,14 @@ class Qwen3VLModel
     {
         LogicalId w = weight(w_name);
         LogicalId w_t = g.contiguous(g.permute(w, {1, 0}));
-        LogicalId out = g.dot(x, g.reshape(w_t, {1, (int32_t)in_d, (int32_t)out_d}));
+        LogicalId out = g.dot(x, g.reshape(w_t, {1, (uint32_t)in_d, (uint32_t)out_d}));
         if (!b_name.empty())
         {
             std::string resolved_b = resolve_weight_name(b_name);
             if (TensorResolver::get().hasTensor(w_path, resolved_b))
             {
                 LogicalId b = weight(b_name);
-                LogicalId b_exp = g.repeat(g.reshape(b, {1, 1, (int32_t)out_d}), S, 1);
+                LogicalId b_exp = g.repeat(g.reshape(b, {1, 1, (uint32_t)out_d}), S, 1);
                 out = g.add(out, b_exp);
             }
         }
@@ -104,7 +104,7 @@ class Qwen3VLModel
         if (!w_name.empty())
         {
             LogicalId w = weight(w_name);
-            LogicalId w_exp = g.repeat(g.reshape(w, {1, 1, (int32_t)D}), S, 1);
+            LogicalId w_exp = g.repeat(g.reshape(w, {1, 1, (uint32_t)D}), S, 1);
             x_norm = g.mul(x_norm, w_exp);
         }
         return x_norm;
@@ -123,7 +123,7 @@ class Qwen3VLModel
         if (!w_name.empty())
         {
             LogicalId w = weight(w_name);
-            LogicalId w_4d = g.reshape(w, {1, 1, 1, (int32_t)head_dim});
+            LogicalId w_4d = g.reshape(w, {1, 1, 1, (uint32_t)head_dim});
             LogicalId w_exp = g.repeat(g.repeat(w_4d, num_heads, 1), S, 2);
             x_norm = g.mul(x_norm, w_exp);
         }
@@ -190,7 +190,7 @@ class Qwen3VLModel
         LogicalId triu_mask = g.triu(ones_matrix, k_val);
         float neg_inf_val = -1e9f;
         LogicalId neg_inf_node = g.fill(neg_inf_val, {1, 1, S, S});
-        LogicalId triu_4d = g.reshape(triu_mask, {1, 1, (int32_t)S, (int32_t)S});
+        LogicalId triu_4d = g.reshape(triu_mask, {1, 1, (uint32_t)S, (uint32_t)S});
         return g.mul(triu_4d, neg_inf_node);
     }
 
@@ -216,11 +216,11 @@ class Qwen3VLModel
         LogicalId v = linear(x, prefix + "v_proj.weight", "", cfg.hidden_size, kv_dim, S);
 
         q = g.contiguous(g.permute(
-            g.reshape(q, {1, (int32_t)S, (int32_t)cfg.num_attention_heads, (int32_t)cfg.head_dim}), {0, 2, 1, 3}));
+            g.reshape(q, {1, (uint32_t)S, (uint32_t)cfg.num_attention_heads, (uint32_t)cfg.head_dim}), {0, 2, 1, 3}));
         k = g.contiguous(g.permute(
-            g.reshape(k, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}), {0, 2, 1, 3}));
+            g.reshape(k, {1, (uint32_t)S, (uint32_t)cfg.num_key_value_heads, (uint32_t)cfg.head_dim}), {0, 2, 1, 3}));
         v = g.contiguous(g.permute(
-            g.reshape(v, {1, (int32_t)S, (int32_t)cfg.num_key_value_heads, (int32_t)cfg.head_dim}), {0, 2, 1, 3}));
+            g.reshape(v, {1, (uint32_t)S, (uint32_t)cfg.num_key_value_heads, (uint32_t)cfg.head_dim}), {0, 2, 1, 3}));
 
         q = per_head_rms_norm(q, prefix + "q_norm.weight", cfg.num_attention_heads, S, cfg.head_dim, cfg.rms_norm_eps);
         k = per_head_rms_norm(k, prefix + "k_norm.weight", cfg.num_key_value_heads, S, cfg.head_dim, cfg.rms_norm_eps);
@@ -233,17 +233,17 @@ class Qwen3VLModel
 
         uint32_t rep_factor = cfg.num_attention_heads / cfg.num_key_value_heads;
         LogicalId k_5d = g.repeat(
-            g.reshape(k, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}), rep_factor, 2);
+            g.reshape(k, {1, (uint32_t)cfg.num_key_value_heads, 1, (uint32_t)S, (uint32_t)cfg.head_dim}), rep_factor, 2);
         LogicalId v_5d = g.repeat(
-            g.reshape(v, {1, (int32_t)cfg.num_key_value_heads, 1, (int32_t)S, (int32_t)cfg.head_dim}), rep_factor, 2);
-        k = g.reshape(g.contiguous(k_5d), {1, (int32_t)cfg.num_attention_heads, (int32_t)S, (int32_t)cfg.head_dim});
-        v = g.reshape(g.contiguous(v_5d), {1, (int32_t)cfg.num_attention_heads, (int32_t)S, (int32_t)cfg.head_dim});
+            g.reshape(v, {1, (uint32_t)cfg.num_key_value_heads, 1, (uint32_t)S, (uint32_t)cfg.head_dim}), rep_factor, 2);
+        k = g.reshape(g.contiguous(k_5d), {1, (uint32_t)cfg.num_attention_heads, (uint32_t)S, (uint32_t)cfg.head_dim});
+        v = g.reshape(g.contiguous(v_5d), {1, (uint32_t)cfg.num_attention_heads, (uint32_t)S, (uint32_t)cfg.head_dim});
 
         LogicalId k_t = g.contiguous(g.permute(k, {0, 1, 3, 2}));
         LogicalId scores = g.dot(q, k_t);
 
         scores = g.add(scores, g.repeat(mask, cfg.num_attention_heads, 1));
-        LogicalId key_mask = g.reshape(key_padding_mask, {1, 1, 1, (int32_t)S});
+        LogicalId key_mask = g.reshape(key_padding_mask, {1, 1, 1, (uint32_t)S});
         key_mask = g.repeat(key_mask, S, 2);
         key_mask = g.repeat(key_mask, cfg.num_attention_heads, 1);
         LogicalId invalid_keys = g.add(g.fill(1.0f, {1, cfg.num_attention_heads, S, S}), g.neg(key_mask));
@@ -252,7 +252,7 @@ class Qwen3VLModel
 
         LogicalId attn_out = g.dot(probs, v);
         LogicalId ctx_perm = g.contiguous(g.permute(attn_out, {0, 2, 1, 3}));
-        LogicalId ctx_flat = g.reshape(ctx_perm, {1, (int32_t)S, (int32_t)q_dim});
+        LogicalId ctx_flat = g.reshape(ctx_perm, {1, (uint32_t)S, (uint32_t)q_dim});
 
         return linear(ctx_flat, prefix + "o_proj.weight", "", q_dim, cfg.hidden_size, S);
     }

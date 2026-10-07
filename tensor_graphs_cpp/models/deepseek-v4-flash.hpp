@@ -78,9 +78,9 @@ class DeepSeekV4FlashModel
         LogicalId scale_f32 = g.cast(raw_scale, DType::FLOAT32);
 
         uint32_t scale_w = in_d / 32;
-        LogicalId scale_reshaped = g.reshape(scale_f32, {(int32_t)out_d, (int32_t)scale_w, 1});
+        LogicalId scale_reshaped = g.reshape(scale_f32, {(uint32_t)out_d, (uint32_t)scale_w, 1});
         LogicalId scale_repeated = g.repeat(scale_reshaped, 32, 2);
-        LogicalId scale_final = g.reshape(scale_repeated, {(int32_t)out_d, (int32_t)in_d});
+        LogicalId scale_final = g.reshape(scale_repeated, {(uint32_t)out_d, (uint32_t)in_d});
 
         return g.mul(unpacked_f32, scale_final);
     }

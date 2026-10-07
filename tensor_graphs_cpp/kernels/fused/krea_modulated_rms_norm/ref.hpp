@@ -20,7 +20,7 @@ inline LogicalId refFactoryKreaModulatedRMSNorm(const std::vector<LogicalId> &in
     LogicalId inv_std = g.repeat(g.div(g.fill(1.0f, {1, S, 1}), std), D, 2);
     LogicalId x_norm = g.mul(x, inv_std);
 
-    LogicalId w_exp = g.repeat(g.reshape(w, {1, 1, (int32_t)D}), S, 1);
+    LogicalId w_exp = g.repeat(g.reshape(w, {1, 1, D}), S, 1);
     LogicalId x_scaled = g.mul(x_norm, w_exp);
 
     LogicalId one = g.fill(1.0f, {1, S, D});
