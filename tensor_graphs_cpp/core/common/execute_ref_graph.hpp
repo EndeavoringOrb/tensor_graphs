@@ -211,15 +211,42 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                 if (store.has(pid))
                 {
                     results[pid] = store.read(pid);
+                    // Stored tensors are materialized in contiguous layout. In
+                    // particular, view nodes are copied into a contiguous
+                    // buffer before store.write(), so reusing the graph node's
+                    // view strides here can index beyond the stored buffer.
                     views[pid] = makeView(graph.getNode(pid));
+                    views[pid].strides = calcContiguousStrides(views[pid].getShape());
+                    views[pid].offset = 0;
                 }
                 else
                 {
                     Error::throw_err("Parent node " + std::to_string(pid.value) + " not found in results or store");
                 }
             }
+            const TensorView &input_view = views[pid];
+            const uint64_t input_elem_size = getDTypeSize(input_view.dtype);
+            if (input_view.strides.size() != input_view.getShape().size())
+            {
+                Error::throw_err("[executeReferenceGraph] Invalid input view rank for parent node " +
+                                 std::to_string(pid.value) + " (shape=" + toString(input_view.getShape()) +
+                                 ", strides=" + toString(input_view.strides) + ")");
+            }
+            const uint64_t input_buffer_size = results[pid].size();
+            const uint64_t input_required_size = getRequiredBufferSize(input_view) * input_elem_size;
+            if (input_view.offset > input_buffer_size ||
+                input_required_size > input_buffer_size - input_view.offset)
+            {
+                Error::throw_err("[executeReferenceGraph] Input view exceeds its backing buffer: consumer node " +
+                                 std::to_string(node_id.value) + " op=" + toString(node.opType) +
+                                 ", parent node " + std::to_string(pid.value) + ", buffer bytes=" +
+                                 std::to_string(input_buffer_size) + ", view offset=" +
+                                 std::to_string(input_view.offset) + ", required bytes=" +
+                                 std::to_string(input_required_size) + ", shape=" +
+                                 toString(input_view.getShape()) + ", strides=" + toString(input_view.strides));
+            }
             input_ptrs.push_back(results[pid].data() + views[pid].offset);
-            input_views.push_back(views[pid]);
+            input_views.push_back(input_view);
             TensorNode in_node = graph.getNode(pid);
             in_node.strides = views[pid].strides;
             input_nodes.push_back(in_node);
@@ -273,6 +300,28 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
             chosen_out_view.strides = dummy_out_view.strides;
             chosen_out_view.offset = views[parent_id].offset + dummy_out_view.offset;
             views[node_id] = chosen_out_view;
+
+            const uint64_t parent_buffer_size = results[parent_id].size();
+            if (chosen_out_view.strides.size() != chosen_out_view.getShape().size())
+            {
+                Error::throw_err("[executeReferenceGraph] Invalid view rank for node " +
+                                 std::to_string(node_id.value) + " (shape=" +
+                                 toString(chosen_out_view.getShape()) + ", strides=" +
+                                 toString(chosen_out_view.strides) + ")");
+            }
+            const uint64_t view_required_size = getRequiredBufferSize(chosen_out_view) * elem_size;
+            if (chosen_out_view.offset > parent_buffer_size ||
+                view_required_size > parent_buffer_size - chosen_out_view.offset)
+            {
+                Error::throw_err("[executeReferenceGraph] View exceeds its backing buffer: node " +
+                                 std::to_string(node_id.value) + " op=" + toString(node.opType) +
+                                 ", parent node " + std::to_string(parent_id.value) + ", buffer bytes=" +
+                                 std::to_string(parent_buffer_size) + ", view offset=" +
+                                 std::to_string(chosen_out_view.offset) + ", required bytes=" +
+                                 std::to_string(view_required_size) + ", shape=" +
+                                 toString(chosen_out_view.getShape()) + ", strides=" +
+                                 toString(chosen_out_view.strides));
+            }
 
             TensorView contig_view = dummy_out_view;
             contig_view.strides = calcContiguousStrides(dummy_out_view.getShape());

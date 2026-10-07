@@ -12,7 +12,6 @@ import tensor_graphs
 import torch
 from PIL import Image
 from sentence_transformers import SentenceTransformer
-from torchvision.io import read_video
 from transformers import AutoProcessor
 
 
@@ -30,7 +29,6 @@ CONFIGS = {
     "video-dirty": {"modality": "video", "compile_no_weights_bucket": False, "compile_dirty_input_bucket": True},
     "audio-dirty": {"modality": "audio", "compile_no_weights_bucket": False, "compile_dirty_input_bucket": True},
 }
-MEDIA_TOKEN_IDS = {"image": 258880, "video": 258884, "audio": 258881}
 
 
 def parseArgs() -> argparse.Namespace:
@@ -46,14 +44,9 @@ def parseArgs() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def mediaPositions(input_ids: torch.Tensor, modality: str) -> list[int]:
-    token_id = MEDIA_TOKEN_IDS[modality]
-    return torch.nonzero(input_ids.reshape(-1) == token_id, as_tuple=False).reshape(-1).tolist()
-
-
 def prepareText(processor: AutoProcessor) -> dict:
     batch = processor(text=[SEARCH_TEXT], return_tensors="pt")
-    return {"token_ids": batch["input_ids"][0].to(torch.int32), "positions": []}
+    return {"token_ids": batch["input_ids"][0].to(torch.int32)}
 
 
 def prepareImage(processor: AutoProcessor, image_path: Path) -> dict:
@@ -68,7 +61,6 @@ def prepareImage(processor: AutoProcessor, image_path: Path) -> dict:
     grid_width = int(valid_positions[:, 0].max().item()) + 1
     return {
         "token_ids": batch["input_ids"][0].to(torch.int32),
-        "positions": mediaPositions(batch["input_ids"][0], "image"),
         "media": pixels.float().contiguous(),
         "patch_count": int(pixels.shape[0]),
         "patch_grid_width": grid_width,
@@ -88,7 +80,6 @@ def prepareAudio(processor: AutoProcessor, audio_path: Path) -> dict:
     features = batch["input_features"][0, :valid_frames]
     return {
         "token_ids": batch["input_ids"][0].to(torch.int32),
-        "positions": mediaPositions(batch["input_ids"][0], "audio"),
         "media": features.float().contiguous(),
         "mel_frames": valid_frames,
     }
@@ -97,14 +88,32 @@ def prepareAudio(processor: AutoProcessor, audio_path: Path) -> dict:
 def prepareVideo(processor: AutoProcessor, video_path: Path) -> dict:
     if not video_path.is_file():
         raise FileNotFoundError(video_path)
-    decoded, _, metadata = read_video(str(video_path), pts_unit="sec")
-    fps = float(metadata.get("video_fps", 0.0))
-    if fps <= 0.0:
-        raise ValueError("Could not determine video frame rate")
-    # The checkpoint's default video sampling rate is 1 frame per second.
-    stride = max(1, round(fps))
-    frames = decoded[::stride]
-    batch = processor(videos=[frames], return_tensors="pt")
+    try:
+        import av
+    except ImportError as error:
+        raise RuntimeError("Video mode requires PyAV; install the embeddinggemma dependencies") from error
+    with av.open(str(video_path)) as container:
+        if not container.streams.video:
+            raise ValueError(f"Video file has no video stream: {video_path}")
+        stream = container.streams.video[0]
+        source_fps = stream.average_rate or stream.base_rate or stream.guessed_rate
+        if source_fps is None or float(source_fps) <= 0.0:
+            raise ValueError("Could not determine video frame rate")
+        target_fps = float(processor.video_processor.fps or 1.0)
+        stride = max(1, round(float(source_fps) / target_fps))
+        frames = [
+            torch.from_numpy(frame.to_ndarray(format="rgb24"))
+            for frame_index, frame in enumerate(container.decode(video=0))
+            if frame_index % stride == 0
+        ]
+    if not frames:
+        raise ValueError(f"Video file contains no decodable frames: {video_path}")
+    max_frames = getattr(processor.video_processor, "max_frames", None)
+    if max_frames and len(frames) > max_frames:
+        selected = torch.linspace(0, len(frames) - 1, max_frames).round().to(torch.int64).tolist()
+        frames = [frames[index] for index in selected]
+    frames = torch.stack(frames)
+    batch = processor(videos=[frames], do_sample_frames=False, return_tensors="pt")
     pixels = batch["pixel_values_videos"]
     positions = batch["video_position_ids"]
     valid = (positions >= 0).all(dim=-1)
@@ -116,11 +125,11 @@ def prepareVideo(processor: AutoProcessor, video_path: Path) -> dict:
     grid_width = int(valid_positions[:, 0].max().item()) + 1
     return {
         "token_ids": batch["input_ids"][0].to(torch.int32),
-        "positions": mediaPositions(batch["input_ids"][0], "video"),
         "media": pixels.float().contiguous(),
         "patch_count": int(pixels.shape[1]),
         "patch_grid_width": grid_width,
         "video_frames": int(pixels.shape[0]),
+        "video": frames,
     }
 
 
@@ -134,9 +143,16 @@ def prepareNativeInput(processor: AutoProcessor, modality: str, args: argparse.N
     return prepareAudio(processor, args.audio)
 
 
-def encodeReference(model: SentenceTransformer, modality: str, args: argparse.Namespace) -> torch.Tensor:
+def encodeReference(model: SentenceTransformer, modality: str, args: argparse.Namespace,
+                    native_input: dict) -> torch.Tensor:
     if modality == "text":
         return model.encode(TEXT, prompt_name="SearchQuery", convert_to_tensor=True)
+    if modality == "video":
+        return model.encode(
+            {"video": native_input["video"]},
+            processing_kwargs={"video": {"do_sample_frames": False}},
+            convert_to_tensor=True,
+        )
     media_path = getattr(args, modality)
     return model.encode({modality: str(media_path)}, convert_to_tensor=True)
 
@@ -160,18 +176,16 @@ def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace
                        reference_model: SentenceTransformer, processor: AutoProcessor) -> None:
     options = CONFIGS[config_name]
     native_input = prepareNativeInput(processor, modality, args)
-    reference = encodeReference(reference_model, modality, args)
+    reference = encodeReference(reference_model, modality, args, native_input)
     token_ids = native_input["token_ids"].tolist()
     kwargs = {
-        "sequence_length": len(token_ids),
-        "patch_count": native_input.get("patch_count", 2520),
-        "patch_grid_width": native_input.get("patch_grid_width", 60),
-        "mel_frames": native_input.get("mel_frames", 280),
-        "video_frames": native_input.get("video_frames", 1),
-        "media_placeholder_positions": native_input["positions"],
+        "token_ids": token_ids,
         "compile_no_weights_bucket": options["compile_no_weights_bucket"],
         "compile_dirty_input_bucket": options["compile_dirty_input_bucket"],
     }
+    for shape_key in ("patch_count", "patch_grid_width", "mel_frames", "video_frames"):
+        if shape_key in native_input:
+            kwargs[shape_key] = native_input[shape_key]
     session = tensor_graphs.EmbeddingGemma2(str(args.model_path), modality, **kwargs)
     if modality == "text":
         output = session.embed_text(token_ids)

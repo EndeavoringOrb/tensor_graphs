@@ -36,8 +36,10 @@ ortools = [
     "ortools>=9.15.6755",
 ]
 ml = [
-    "torch==2.7.1+cu118",
-    "torchvision==0.22.1+cu118",
+    "torch==2.7.1+cu118 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision==0.22.1+cu118 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.10.0+cpu ; sys_platform == 'win32' and platform_machine == 'ARM64' and python_full_version >= '3.11'",
+    "torchvision==0.25.0+8ac84ee ; sys_platform == 'win32' and platform_machine == 'ARM64' and python_full_version >= '3.11'",
 ]
 embeddinggemma = [
     "av>=17.1.0 ; python_full_version >= '3.10'",
@@ -48,8 +50,18 @@ embeddinggemma = [
 ]
 
 [[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
 name = "torch-cu118"
 url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "torch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.setuptools]
@@ -68,5 +80,12 @@ addopts = "--cov=tensor_graphs"
 ignore = ["E402", "F403", "E741"]
 
 [tool.uv.sources]
-torch = { index = "torch-cu118" }
-torchvision = { index = "torch-cu118" }
+markupsafe = { index = "pypi" }
+torch = [
+    { index = "torch-cu118", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "torch-cpu", marker = "sys_platform == 'win32' and platform_machine == 'ARM64'" },
+]
+torchvision = [
+    { index = "torch-cu118", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "torch-cpu", marker = "sys_platform == 'win32' and platform_machine == 'ARM64'" },
+]

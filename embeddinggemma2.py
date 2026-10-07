@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -521,22 +522,41 @@ class _AudioGraph:
 class EmbeddingGemma2:
     """Compile and run an EmbeddingGemma 2 graph defined in Python."""
 
-    def __init__(self, model_path, modality, sequence_length=32, patch_count=2520,
-                 patch_grid_width=60, mel_frames=280, video_frames=1,
-                 media_placeholder_positions=(), cache_file="", compile_no_weights_bucket=False,
+    def __init__(self, model_path, modality, token_ids, patch_count=None,
+                 patch_grid_width=None, mel_frames=None, video_frames=None,
+                 cache_file="", compile_no_weights_bucket=False,
                  compile_dirty_input_bucket=False, disable_node_caching=False,
                  disable_compilation_caching=False, min_compile_seconds=1.0):
         if modality not in ("text", "image", "video", "audio"):
             raise ValueError("EmbeddingGemma2 modality must be text, image, video, or audio")
-        if modality == "video" and video_frames < 1:
+        model_path = str(model_path)
+        config_path = Path(model_path) / "config.json"
+        if not config_path.is_file():
+            raise FileNotFoundError(f"EmbeddingGemma 2 config does not exist: {config_path}")
+        with config_path.open(encoding="utf-8") as config_file:
+            model_config = json.load(config_file)
+        token_ids = [int(token_id) for token_id in token_ids]
+        sequence_length = len(token_ids)
+        token_key = f"{modality}_token_id"
+        if modality != "text" and token_key not in model_config:
+            raise ValueError(f"Model config does not define {token_key}")
+        media_placeholder_positions = (
+            [index for index, token_id in enumerate(token_ids) if token_id == model_config[token_key]]
+            if modality != "text" else []
+        )
+        if modality == "video" and (video_frames is None or video_frames < 1):
             raise ValueError("EmbeddingGemma2 video requires at least one frame")
+        if modality in ("image", "video") and (patch_count is None or patch_grid_width is None):
+            raise ValueError("EmbeddingGemma2 image and video require patch_count and patch_grid_width")
         if modality in ("image", "video") and (
             not patch_count or not patch_grid_width or patch_count % 9
             or (patch_count // patch_grid_width) % 3 or patch_grid_width % 3
         ):
             raise ValueError("EmbeddingGemma2 vision patch grid must divide evenly into 3x3 pooling windows")
+        if modality == "audio" and mel_frames is None:
+            raise ValueError("EmbeddingGemma2 audio requires mel_frames")
         self.modality = modality
-        self.model_path = str(model_path)
+        self.model_path = model_path
         self.sequence_length = sequence_length
         self.input_shape = None
         self.token_ids_id = None

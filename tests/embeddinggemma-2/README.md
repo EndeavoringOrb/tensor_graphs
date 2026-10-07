@@ -14,21 +14,28 @@ dependencies with:
 uv sync --extra embeddinggemma --extra ml
 ```
 
-The `ml` extra pins the CUDA 11.8 Torch and TorchVision builds used by this
-desktop; PyAV supports the current TorchVision video reader. Generate the
-compact, deterministic sample files with FFmpeg and Pillow:
+The same sync command selects CPU PyTorch on Windows ARM64 and the pinned CUDA
+11.8 PyTorch and TorchVision builds on Linux x64. Video decoding uses PyAV and
+works on any platform with the `embeddinggemma` dependencies installed.
+Generate the compact, deterministic sample files with FFmpeg and Pillow:
 
 ```bash
 .venv/bin/python tests/embeddinggemma-2/make_samples.py
 ```
 
-Then run all four modalities:
+Run image mode on either machine with:
+
+```bash
+uv run --extra embeddinggemma --extra ml python tests/embeddinggemma-2/run.py image --config full
+```
+
+On Linux x64, run all four modalities with:
 
 ```bash
 uv run --extra embeddinggemma --extra ml python tests/embeddinggemma-2/run.py
 ```
 
-Or run one at a time:
+Or run one at a time on Linux x64:
 
 ```bash
 uv run --extra embeddinggemma --extra ml python tests/embeddinggemma-2/run.py text
@@ -44,7 +51,5 @@ model's `SearchQuery` prompt. Image, video, and audio inputs receive no text
 task prefix, as recommended by the model card.
 
 The video and audio fixtures are intentionally short (3 seconds and 2 seconds)
-to keep the reference run small. Transformers currently falls back to
-TorchVision for video decoding if TorchCodec is unavailable; that fallback
-works here but emits a deprecation warning. Replace the fixtures with real
-media paths when investigating more representative outputs.
+to keep the reference run small. Replace the fixtures with real media paths
+when investigating more representative outputs.
