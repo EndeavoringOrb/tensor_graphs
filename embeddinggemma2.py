@@ -121,8 +121,13 @@ class _TextGraph:
         q = self._apply_rope(q, self._rope(dim, theta, False), self._rope(dim, theta, True), self.num_heads, dim)
         k = self._apply_rope(k, self._rope(dim, theta, False), self._rope(dim, theta, True), kv_heads, dim)
         if kv_heads != self.num_heads:
-            k = g.concat([k] * (self.num_heads // kv_heads), 0)
-            v = g.concat([v] * (self.num_heads // kv_heads), 0)
+            repeats_per_kv_head = self.num_heads // kv_heads
+            k = g.reshape(k, [kv_heads, 1, self.seq_len, dim])
+            v = g.reshape(v, [kv_heads, 1, self.seq_len, dim])
+            k = g.contiguous(g.repeat(k, repeats_per_kv_head, 1))
+            v = g.contiguous(g.repeat(v, repeats_per_kv_head, 1))
+            k = g.reshape(k, [self.num_heads, self.seq_len, dim])
+            v = g.reshape(v, [self.num_heads, self.seq_len, dim])
         scores = g.dot(q, g.contiguous(g.permute_axes(k, [0, 2, 1])))
         mask = []
         for _head in range(self.num_heads):
