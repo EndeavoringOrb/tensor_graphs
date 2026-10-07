@@ -29,22 +29,25 @@ struct DotOp
         if (r0 == 2)
         {
             if (s0[1] != s1[0])
-                Error::throw_err("DOT: K-dim mismatch [M,K] @ [K,N]");
+                Error::throw_err("DOT: K-dim mismatch [M,K] @ [K,N], " + std::to_string(s0[1]) + " != " +
+                                 std::to_string(s1[0]) + "; lhs=" + toString(s0) + ", rhs=" + toString(s1) +
+                                 "; debugOrigin=" + graph.getNode(nodeId).debugOrigin);
             graph.getNode(nodeId).setShape({s0[0], s1[1]});
         }
         else if (r0 == 3)
         {
             if (s0[2] != s1[1])
                 Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) +
-                                 " != " + std::to_string(s1[1]));
+                                 " != " + std::to_string(s1[1]) + "; lhs=" + toString(s0) + ", rhs=" + toString(s1) +
+                                 "; debugOrigin=" + graph.getNode(nodeId).debugOrigin);
             graph.getNode(nodeId).setShape({s0[0], s0[1], s1[2]});
         }
         else if (r0 == 4)
         {
             if (s0[0] != s1[0] || s0[1] != s1[1] || s0[3] != s1[2])
             {
-                Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[3]) +
-                                 " != " + std::to_string(s1[2]));
+                Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], lhs=" + toString(s0) +
+                                 ", rhs=" + toString(s1) + "; debugOrigin=" + graph.getNode(nodeId).debugOrigin);
             }
             graph.getNode(nodeId).setShape({s0[0], s0[1], s0[2], s1[3]});
         }

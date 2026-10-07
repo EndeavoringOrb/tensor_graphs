@@ -290,7 +290,7 @@ inline void inferShapeElementwise(LogicalId nodeId, Graph &graph, const char *op
         {
             std::stringstream ss;
             ss << "[ShapePropagator.inferShape] Atomic " << opName << " requires exact shape match. Got "
-               << toString(s0) << " and " << toString(si) << ". Use explicit repeat/reshape. (Node "
+               << toString(s0) << " and " << toString(si) << ". Use explicit repeat/reshape/fill. (Node "
                << graph.getNode(nodeId).id << "). " << graph.getNode(nodeId).debugOrigin;
             Error::throw_err(ss.str());
         }
