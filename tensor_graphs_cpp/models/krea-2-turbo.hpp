@@ -94,16 +94,16 @@ class Krea2TurboModel
     {
         LogicalId w = weight(w_name, loc);
         LogicalId w_t = g.contiguous(g.permute(w, {1, 0}));
-        LogicalId x_flat = g.reshape(x, {1, static_cast<int32_t>(B * S), static_cast<int32_t>(in_d)});
+        LogicalId x_flat = g.reshape(x, {1, static_cast<uint32_t>(B * S), static_cast<uint32_t>(in_d)});
         LogicalId out_flat =
-            g.dot(x_flat, g.reshape(w_t, {1, static_cast<int32_t>(in_d), static_cast<int32_t>(out_d)}));
+            g.dot(x_flat, g.reshape(w_t, {1, static_cast<uint32_t>(in_d), static_cast<uint32_t>(out_d)}));
         LogicalId out =
-            g.reshape(out_flat, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(out_d)});
+            g.reshape(out_flat, {static_cast<uint32_t>(B), static_cast<uint32_t>(S), static_cast<uint32_t>(out_d)});
 
         if (!b_name.empty() && TensorResolver::get().hasTensor(w_path, b_name))
         {
             LogicalId b = weight(b_name, loc);
-            LogicalId b_3d = g.reshape(b, {1, 1, static_cast<int32_t>(out_d)});
+            LogicalId b_3d = g.reshape(b, {1, 1, static_cast<uint32_t>(out_d)});
             LogicalId b_exp = g.repeat(g.repeat(b_3d, B, 0), S, 1);
             out = g.add(out, b_exp);
         }
@@ -129,7 +129,7 @@ class Krea2TurboModel
         if (!w_name.empty() && TensorResolver::get().hasTensor(w_path, w_name))
         {
             LogicalId w = weight(w_name);
-            LogicalId w_3d = g.reshape(w, {1, 1, static_cast<int32_t>(D)});
+            LogicalId w_3d = g.reshape(w, {1, 1, static_cast<uint32_t>(D)});
             LogicalId w_exp = g.repeat(g.repeat(w_3d, B, 0), S, 1);
             LogicalId one_full = g.fill(1.0f, {B, S, D});
             LogicalId scale = g.add(w_exp, one_full);
@@ -157,7 +157,7 @@ class Krea2TurboModel
         if (!w_name.empty() && TensorResolver::get().hasTensor(w_path, w_name))
         {
             LogicalId w = weight(w_name);
-            LogicalId w_4d = g.reshape(w, {1, 1, 1, static_cast<int32_t>(head_dim)});
+            LogicalId w_4d = g.reshape(w, {1, 1, 1, static_cast<uint32_t>(head_dim)});
             LogicalId w_exp = g.repeat(g.repeat(g.repeat(w_4d, B, 0), num_heads, 1), S, 2);
             LogicalId one_full = g.fill(1.0f, {B, num_heads, S, head_dim});
             LogicalId scale = g.add(w_exp, one_full);
@@ -222,10 +222,10 @@ class Krea2TurboModel
     LogicalId apply_key_mask(LogicalId scores, LogicalId valid_keys, uint32_t query_len, uint32_t num_heads,
                              uint32_t key_len)
     {
-        LogicalId key_mask = g.reshape(valid_keys, {1, 1, 1, static_cast<int32_t>(key_len)});
+        LogicalId key_mask = g.reshape(valid_keys, {1, 1, 1, static_cast<uint32_t>(key_len)});
         key_mask = g.repeat(key_mask, query_len, 2);
         key_mask = g.repeat(key_mask, num_heads, 1);
-        LogicalId query_mask = g.reshape(valid_keys, {1, 1, static_cast<int32_t>(query_len), 1});
+        LogicalId query_mask = g.reshape(valid_keys, {1, 1, static_cast<uint32_t>(query_len), 1});
         query_mask = g.repeat(query_mask, key_len, 3);
         query_mask = g.repeat(query_mask, num_heads, 1);
         LogicalId valid = g.mul(key_mask, query_mask);
@@ -239,17 +239,17 @@ class Krea2TurboModel
     {
         uint32_t half_dim = head_dim / 2; // 64
         LogicalId x_5d = g.reshape(
-            x, {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S), static_cast<int32_t>(half_dim), 2});
+            x, {1, static_cast<uint32_t>(num_heads), static_cast<uint32_t>(S), static_cast<uint32_t>(half_dim), 2});
         LogicalId x_even = g.contiguous(
             g.slice(x_5d, {0, 0, 0, 0, 0},
                     {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S), static_cast<int32_t>(half_dim), 1}));
         x_even = g.reshape(
-            x_even, {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S), static_cast<int32_t>(half_dim)});
+            x_even, {1, static_cast<uint32_t>(num_heads), static_cast<uint32_t>(S), static_cast<uint32_t>(half_dim)});
         LogicalId x_odd = g.contiguous(
             g.slice(x_5d, {0, 0, 0, 0, 1},
                     {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S), static_cast<int32_t>(half_dim), 2}));
         x_odd = g.reshape(
-            x_odd, {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S), static_cast<int32_t>(half_dim)});
+            x_odd, {1, static_cast<uint32_t>(num_heads), static_cast<uint32_t>(S), static_cast<uint32_t>(half_dim)});
 
         LogicalId cos_exp = g.repeat(cos_node, num_heads, 1);
         LogicalId sin_exp = g.repeat(sin_node, num_heads, 1);
@@ -257,13 +257,13 @@ class Krea2TurboModel
         LogicalId x_rot_even = g.add(g.mul(x_even, cos_exp), g.neg(g.mul(x_odd, sin_exp)));
         LogicalId x_rot_odd = g.add(g.mul(x_even, sin_exp), g.mul(x_odd, cos_exp));
 
-        LogicalId e_5d = g.reshape(x_rot_even, {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S),
-                                                static_cast<int32_t>(half_dim), 1});
-        LogicalId o_5d = g.reshape(x_rot_odd, {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S),
-                                               static_cast<int32_t>(half_dim), 1});
+        LogicalId e_5d = g.reshape(x_rot_even, {1, static_cast<uint32_t>(num_heads), static_cast<uint32_t>(S),
+                                                static_cast<uint32_t>(half_dim), 1});
+        LogicalId o_5d = g.reshape(x_rot_odd, {1, static_cast<uint32_t>(num_heads), static_cast<uint32_t>(S),
+                                               static_cast<uint32_t>(half_dim), 1});
         LogicalId pair_5d = g.concat({e_5d, o_5d}, 4);
         return g.reshape(pair_5d,
-                         {1, static_cast<int32_t>(num_heads), static_cast<int32_t>(S), static_cast<int32_t>(head_dim)});
+                         {1, static_cast<uint32_t>(num_heads), static_cast<uint32_t>(S), static_cast<uint32_t>(head_dim)});
     }
 
     LogicalId compute_timestep_embedding(LogicalId t)
@@ -300,16 +300,16 @@ class Krea2TurboModel
         LogicalId v = linear(h, prefix + "attn.wv.weight", "", cfg.text_dim, cfg.text_dim, B, S);
 
         q = g.contiguous(g.permute(
-            g.reshape(q, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(cfg.text_fusion_heads),
-                          static_cast<int32_t>(cfg.text_fusion_head_dim)}),
+            g.reshape(q, {static_cast<uint32_t>(B), static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.text_fusion_heads),
+                          static_cast<uint32_t>(cfg.text_fusion_head_dim)}),
             {0, 2, 1, 3}));
         k = g.contiguous(g.permute(
-            g.reshape(k, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(cfg.text_fusion_heads),
-                          static_cast<int32_t>(cfg.text_fusion_head_dim)}),
+            g.reshape(k, {static_cast<uint32_t>(B), static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.text_fusion_heads),
+                          static_cast<uint32_t>(cfg.text_fusion_head_dim)}),
             {0, 2, 1, 3}));
         v = g.contiguous(g.permute(
-            g.reshape(v, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(cfg.text_fusion_heads),
-                          static_cast<int32_t>(cfg.text_fusion_head_dim)}),
+            g.reshape(v, {static_cast<uint32_t>(B), static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.text_fusion_heads),
+                          static_cast<uint32_t>(cfg.text_fusion_head_dim)}),
             {0, 2, 1, 3}));
 
         q = per_head_rms_norm(q, prefix + "attn.qknorm.qnorm.scale", B, cfg.text_fusion_heads, S,
@@ -329,7 +329,7 @@ class Krea2TurboModel
         LogicalId attn_out = g.dot(probs, v);
         LogicalId ctx_perm = g.contiguous(g.permute(attn_out, {0, 2, 1, 3}));
         LogicalId ctx_flat =
-            g.reshape(ctx_perm, {static_cast<int32_t>(B), static_cast<int32_t>(S), static_cast<int32_t>(cfg.text_dim)});
+            g.reshape(ctx_perm, {static_cast<uint32_t>(B), static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.text_dim)});
 
         LogicalId gate =
             sigmoid(linear(h, prefix + "attn.gate.weight", "", cfg.text_dim, cfg.text_dim, B, S), {B, S, cfg.text_dim});
@@ -352,13 +352,13 @@ class Krea2TurboModel
     LogicalId patchify_latents(LogicalId latents)
     {
         // latents: [1, 16, H_lat, W_lat] -> [1, 16, Gh, 2, Gw, 2]
-        LogicalId split = g.reshape(latents, {1, static_cast<int32_t>(cfg.latent_channels),
-                                              static_cast<int32_t>(cfg.grid_h), static_cast<int32_t>(cfg.patch_size),
-                                              static_cast<int32_t>(cfg.grid_w), static_cast<int32_t>(cfg.patch_size)});
+        LogicalId split = g.reshape(latents, {1, static_cast<uint32_t>(cfg.latent_channels),
+                                              static_cast<uint32_t>(cfg.grid_h), static_cast<uint32_t>(cfg.patch_size),
+                                              static_cast<uint32_t>(cfg.grid_w), static_cast<uint32_t>(cfg.patch_size)});
         // Permute to [1, Gh, Gw, 16, 2, 2]
         LogicalId perm = g.contiguous(g.permute(split, {0, 2, 4, 1, 3, 5}));
         LogicalId patches =
-            g.reshape(perm, {1, static_cast<int32_t>(cfg.num_patches), static_cast<int32_t>(cfg.patch_dim)});
+            g.reshape(perm, {1, static_cast<uint32_t>(cfg.num_patches), static_cast<uint32_t>(cfg.patch_dim)});
         return linear(patches, "first.weight", "first.bias", cfg.patch_dim, cfg.hidden_size, cfg.num_patches);
     }
 
@@ -366,13 +366,13 @@ class Krea2TurboModel
     {
         // x_img: [1, num_patches, 64]
         LogicalId split =
-            g.reshape(x_img, {1, static_cast<int32_t>(cfg.grid_h), static_cast<int32_t>(cfg.grid_w),
-                              static_cast<int32_t>(cfg.latent_channels), static_cast<int32_t>(cfg.patch_size),
-                              static_cast<int32_t>(cfg.patch_size)});
+            g.reshape(x_img, {1, static_cast<uint32_t>(cfg.grid_h), static_cast<uint32_t>(cfg.grid_w),
+                              static_cast<uint32_t>(cfg.latent_channels), static_cast<uint32_t>(cfg.patch_size),
+                              static_cast<uint32_t>(cfg.patch_size)});
         // Permute to [1, 16, Gh, 2, Gw, 2]
         LogicalId perm = g.contiguous(g.permute(split, {0, 3, 1, 4, 2, 5}));
-        return g.reshape(perm, {1, static_cast<int32_t>(cfg.latent_channels), static_cast<int32_t>(cfg.latent_h),
-                                static_cast<int32_t>(cfg.latent_w)});
+        return g.reshape(perm, {1, static_cast<uint32_t>(cfg.latent_channels), static_cast<uint32_t>(cfg.latent_h),
+                                static_cast<uint32_t>(cfg.latent_w)});
     }
 
     LogicalId single_stream_block(LogicalId x, uint32_t layer_idx, LogicalId t_mod, LogicalId cos_node,
@@ -408,14 +408,14 @@ class Krea2TurboModel
         LogicalId k = linear(h, prefix + "attn.wk.weight", "", cfg.hidden_size, cfg.num_kv_heads * cfg.head_dim, S);
         LogicalId v = linear(h, prefix + "attn.wv.weight", "", cfg.hidden_size, cfg.num_kv_heads * cfg.head_dim, S);
 
-        q = g.contiguous(g.permute(g.reshape(q, {1, static_cast<int32_t>(S), static_cast<int32_t>(cfg.num_heads),
-                                                 static_cast<int32_t>(cfg.head_dim)}),
+        q = g.contiguous(g.permute(g.reshape(q, {1, static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.num_heads),
+                                                 static_cast<uint32_t>(cfg.head_dim)}),
                                    {0, 2, 1, 3}));
-        k = g.contiguous(g.permute(g.reshape(k, {1, static_cast<int32_t>(S), static_cast<int32_t>(cfg.num_kv_heads),
-                                                 static_cast<int32_t>(cfg.head_dim)}),
+        k = g.contiguous(g.permute(g.reshape(k, {1, static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.num_kv_heads),
+                                                 static_cast<uint32_t>(cfg.head_dim)}),
                                    {0, 2, 1, 3}));
-        v = g.contiguous(g.permute(g.reshape(v, {1, static_cast<int32_t>(S), static_cast<int32_t>(cfg.num_kv_heads),
-                                                 static_cast<int32_t>(cfg.head_dim)}),
+        v = g.contiguous(g.permute(g.reshape(v, {1, static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.num_kv_heads),
+                                                 static_cast<uint32_t>(cfg.head_dim)}),
                                    {0, 2, 1, 3}));
 
         q = per_head_rms_norm(q, prefix + "attn.qknorm.qnorm.scale", cfg.num_heads, S, cfg.head_dim, cfg.rms_eps);
@@ -428,16 +428,16 @@ class Krea2TurboModel
         q = g.mul(q, g.fill(scale_val, {1, cfg.num_heads, S, cfg.head_dim}));
 
         uint32_t rep_factor = cfg.num_heads / cfg.num_kv_heads; // 4
-        LogicalId k_5d = g.repeat(g.reshape(k, {1, static_cast<int32_t>(cfg.num_kv_heads), 1, static_cast<int32_t>(S),
-                                                static_cast<int32_t>(cfg.head_dim)}),
+        LogicalId k_5d = g.repeat(g.reshape(k, {1, static_cast<uint32_t>(cfg.num_kv_heads), 1, static_cast<uint32_t>(S),
+                                                static_cast<uint32_t>(cfg.head_dim)}),
                                   rep_factor, 2);
-        LogicalId v_5d = g.repeat(g.reshape(v, {1, static_cast<int32_t>(cfg.num_kv_heads), 1, static_cast<int32_t>(S),
-                                                static_cast<int32_t>(cfg.head_dim)}),
+        LogicalId v_5d = g.repeat(g.reshape(v, {1, static_cast<uint32_t>(cfg.num_kv_heads), 1, static_cast<uint32_t>(S),
+                                                static_cast<uint32_t>(cfg.head_dim)}),
                                   rep_factor, 2);
-        k = g.reshape(g.contiguous(k_5d), {1, static_cast<int32_t>(cfg.num_heads), static_cast<int32_t>(S),
-                                           static_cast<int32_t>(cfg.head_dim)});
-        v = g.reshape(g.contiguous(v_5d), {1, static_cast<int32_t>(cfg.num_heads), static_cast<int32_t>(S),
-                                           static_cast<int32_t>(cfg.head_dim)});
+        k = g.reshape(g.contiguous(k_5d), {1, static_cast<uint32_t>(cfg.num_heads), static_cast<uint32_t>(S),
+                                           static_cast<uint32_t>(cfg.head_dim)});
+        v = g.reshape(g.contiguous(v_5d), {1, static_cast<uint32_t>(cfg.num_heads), static_cast<uint32_t>(S),
+                                           static_cast<uint32_t>(cfg.head_dim)});
 
         LogicalId scores = g.dot(q, g.contiguous(g.permute(k, {0, 1, 3, 2})));
         scores = apply_key_mask(scores, attention_mask, S, cfg.num_heads, S);
@@ -445,7 +445,7 @@ class Krea2TurboModel
 
         LogicalId attn_out = g.dot(probs, v);
         LogicalId ctx_perm = g.contiguous(g.permute(attn_out, {0, 2, 1, 3}));
-        LogicalId ctx_flat = g.reshape(ctx_perm, {1, static_cast<int32_t>(S), static_cast<int32_t>(cfg.hidden_size)});
+        LogicalId ctx_flat = g.reshape(ctx_perm, {1, static_cast<uint32_t>(S), static_cast<uint32_t>(cfg.hidden_size)});
 
         LogicalId gate = sigmoid(linear(h, prefix + "attn.gate.weight", "", cfg.hidden_size, cfg.hidden_size, S),
                                  {1, S, cfg.hidden_size});
@@ -540,7 +540,7 @@ class Krea2TurboModel
         uint32_t B_tok = cfg.text_seq_len;      // 128
         uint32_t S_layer = cfg.text_num_layers; // 12
         LogicalId h = g.reshape(
-            text_raw, {static_cast<int32_t>(B_tok), static_cast<int32_t>(S_layer), static_cast<int32_t>(cfg.text_dim)});
+            text_raw, {static_cast<uint32_t>(B_tok), static_cast<uint32_t>(S_layer), static_cast<uint32_t>(cfg.text_dim)});
 
         for (uint32_t i = 0; i < cfg.num_layerwise_blocks; ++i)
         {
@@ -550,17 +550,17 @@ class Krea2TurboModel
 
         // Projector: rearrange "(b l) n d -> b l d n", project n=12 -> 1
         LogicalId h_4d = g.reshape(
-            h, {1, static_cast<int32_t>(B_tok), static_cast<int32_t>(S_layer), static_cast<int32_t>(cfg.text_dim)});
+            h, {1, static_cast<uint32_t>(B_tok), static_cast<uint32_t>(S_layer), static_cast<uint32_t>(cfg.text_dim)});
         LogicalId h_perm = g.contiguous(g.permute(h_4d, {0, 1, 3, 2}));
         LogicalId h_flat =
-            g.reshape(h_perm, {1, static_cast<int32_t>(B_tok * cfg.text_dim), static_cast<int32_t>(S_layer)});
+            g.reshape(h_perm, {1, static_cast<uint32_t>(B_tok * cfg.text_dim), static_cast<uint32_t>(S_layer)});
 
         LogicalId proj_w = weight("txtfusion.projector.weight");
         LogicalId proj_w_t = g.contiguous(g.permute(proj_w, {1, 0}));
-        LogicalId proj_w_3d = g.reshape(proj_w_t, {1, static_cast<int32_t>(S_layer), 1});
+        LogicalId proj_w_3d = g.reshape(proj_w_t, {1, static_cast<uint32_t>(S_layer), 1});
         LogicalId h_collapsed = g.dot(h_flat, proj_w_3d);
 
-        LogicalId fused = g.reshape(h_collapsed, {1, static_cast<int32_t>(B_tok), static_cast<int32_t>(cfg.text_dim)});
+        LogicalId fused = g.reshape(h_collapsed, {1, static_cast<uint32_t>(B_tok), static_cast<uint32_t>(cfg.text_dim)});
 
         for (uint32_t i = 0; i < cfg.num_refiner_blocks; ++i)
         {
@@ -600,8 +600,8 @@ class Krea2TurboModel
         LogicalId last_mod_lin = weight("last.modulation.lin");
         LogicalId last_scale = g.slice(last_mod_lin, {0, 0}, {1, static_cast<int32_t>(cfg.hidden_size)});
         LogicalId last_shift = g.slice(last_mod_lin, {1, 0}, {2, static_cast<int32_t>(cfg.hidden_size)});
-        last_scale = g.reshape(last_scale, {1, 1, static_cast<int32_t>(cfg.hidden_size)});
-        last_shift = g.reshape(last_shift, {1, 1, static_cast<int32_t>(cfg.hidden_size)});
+        last_scale = g.reshape(last_scale, {1, 1, static_cast<uint32_t>(cfg.hidden_size)});
+        last_shift = g.reshape(last_shift, {1, 1, static_cast<uint32_t>(cfg.hidden_size)});
 
         LogicalId scale_vec = g.add(t, last_scale);
         LogicalId shift_vec = g.add(t, last_shift);

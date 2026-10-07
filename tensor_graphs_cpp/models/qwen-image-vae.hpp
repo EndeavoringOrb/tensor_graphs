@@ -90,11 +90,11 @@ class Krea2TurboVAEModel
             LogicalId sliced = g.slice(raw_f32, {0, 0, (int32_t)(kT - 1), 0, 0},
                                        {(int32_t)out_c, (int32_t)in_c, (int32_t)kT, (int32_t)kH, (int32_t)kW});
             sliced = g.contiguous(sliced);
-            res = g.reshape(sliced, {(int32_t)out_c, (int32_t)(in_c * k * k)});
+            res = g.reshape(sliced, {(uint32_t)out_c, (uint32_t)(in_c * k * k)});
         }
         else
         {
-            res = g.reshape(raw_f32, {(int32_t)out_c, (int32_t)(in_c * k * k)});
+            res = g.reshape(raw_f32, {(uint32_t)out_c, (uint32_t)(in_c * k * k)});
         }
         return res;
     }
@@ -103,7 +103,7 @@ class Krea2TurboVAEModel
                      uint32_t H, uint32_t W, uint32_t k = 3, uint32_t stride = 1, uint32_t pad = 1)
     {
         LogicalId w_2d = load_conv_weight(w_name, out_c, in_c, k);
-        LogicalId w_3d = g.reshape(w_2d, {1, (int32_t)out_c, (int32_t)(in_c * k * k)});
+        LogicalId w_3d = g.reshape(w_2d, {1, (uint32_t)out_c, (uint32_t)(in_c * k * k)});
 
         LogicalId col;
         uint32_t H_out = (H + 2 * pad - k) / stride + 1;
@@ -111,7 +111,7 @@ class Krea2TurboVAEModel
 
         if (k == 1 && stride == 1 && pad == 0)
         {
-            col = g.reshape(x, {1, (int32_t)in_c, (int32_t)(H * W)});
+            col = g.reshape(x, {1, (uint32_t)in_c, (uint32_t)(H * W)});
         }
         else
         {
@@ -119,7 +119,7 @@ class Krea2TurboVAEModel
         }
 
         LogicalId out_flat = g.dot(w_3d, col);
-        LogicalId out = g.reshape(out_flat, {1, (int32_t)out_c, (int32_t)H_out, (int32_t)W_out});
+        LogicalId out = g.reshape(out_flat, {1, (uint32_t)out_c, (uint32_t)H_out, (uint32_t)W_out});
 
         if (!b_name.empty())
         {
@@ -127,7 +127,7 @@ class Krea2TurboVAEModel
             if (TensorResolver::get().hasTensor(w_path, resolved_b))
             {
                 LogicalId b = weight(b_name);
-                LogicalId b_4d = g.reshape(b, {1, (int32_t)out_c, 1, 1});
+                LogicalId b_4d = g.reshape(b, {1, (uint32_t)out_c, 1, 1});
                 LogicalId b_exp = g.repeat(g.repeat(b_4d, H_out, 2), W_out, 3);
                 out = g.add(out, b_exp);
             }
@@ -142,10 +142,10 @@ class Krea2TurboVAEModel
                                         uint32_t in_c, uint32_t out_c, uint32_t H, uint32_t W)
     {
         LogicalId w_2d = load_conv_weight(w_name, out_c, in_c, 1);
-        LogicalId w_3d = g.reshape(w_2d, {1, (int32_t)out_c, (int32_t)in_c});
-        LogicalId x_flat = g.reshape(x, {1, (int32_t)in_c, (int32_t)(H * W)});
+        LogicalId w_3d = g.reshape(w_2d, {1, (uint32_t)out_c, (uint32_t)in_c});
+        LogicalId x_flat = g.reshape(x, {1, (uint32_t)in_c, (uint32_t)(H * W)});
         LogicalId out_flat = g.dot(w_3d, x_flat);
-        LogicalId out = g.reshape(out_flat, {1, (int32_t)out_c, (int32_t)H, (int32_t)W});
+        LogicalId out = g.reshape(out_flat, {1, (uint32_t)out_c, (uint32_t)H, (uint32_t)W});
 
         std::string resolved_b = resolve_weight_name(b_name);
         if (TensorResolver::get().hasTensor(w_path, resolved_b))
@@ -153,7 +153,7 @@ class Krea2TurboVAEModel
             LogicalId raw_b = g.weight(w_path, resolved_b);
             LogicalId b = g.cast(raw_b, DType::FLOAT32);
             b = g.contiguous(g.slice(b, {0}, {(int32_t)out_c}));
-            LogicalId b_4d = g.reshape(b, {1, (int32_t)out_c, 1, 1});
+            LogicalId b_4d = g.reshape(b, {1, (uint32_t)out_c, 1, 1});
             LogicalId b_exp = g.repeat(g.repeat(b_4d, H, 2), W, 3);
             out = g.add(out, b_exp);
         }
@@ -176,7 +176,7 @@ class Krea2TurboVAEModel
             if (TensorResolver::get().hasTensor(w_path, resolved_gamma))
             {
                 LogicalId gamma = weight(gamma_name);
-                LogicalId gamma_4d = g.reshape(gamma, {1, (int32_t)C, 1, 1});
+                LogicalId gamma_4d = g.reshape(gamma, {1, (uint32_t)C, 1, 1});
                 LogicalId gamma_exp = g.repeat(g.repeat(gamma_4d, H, 2), W, 3);
                 x_norm = g.mul(x_norm, gamma_exp);
             }
@@ -220,7 +220,7 @@ class Krea2TurboVAEModel
 
         LogicalId qkv = conv2d(norm_x, prefix + "to_qkv.weight", prefix + "to_qkv.bias", dim, 3 * dim, H, W, 1, 1, 0);
 
-        LogicalId qkv_flat = g.reshape(qkv, {1, (int32_t)(3 * dim), (int32_t)(H * W)});
+        LogicalId qkv_flat = g.reshape(qkv, {1, (uint32_t)(3 * dim), (uint32_t)(H * W)});
         LogicalId qkv_t = g.contiguous(g.permute(qkv_flat, {0, 2, 1}));
 
         int32_t HW = H * W;
@@ -243,7 +243,7 @@ class Krea2TurboVAEModel
         LogicalId attn_out = g.dot(probs, v);
 
         LogicalId attn_t = g.contiguous(g.permute(attn_out, {0, 2, 1}));
-        LogicalId attn_2d = g.reshape(attn_t, {1, (int32_t)dim, (int32_t)H, (int32_t)W});
+        LogicalId attn_2d = g.reshape(attn_t, {1, (uint32_t)dim, (uint32_t)H, (uint32_t)W});
 
         LogicalId proj = conv2d(attn_2d, prefix + "proj.weight", prefix + "proj.bias", dim, dim, H, W, 1, 1, 0);
         return g.add(identity, proj);
@@ -251,11 +251,11 @@ class Krea2TurboVAEModel
 
     LogicalId upsample_2d(LogicalId x, uint32_t C, uint32_t H, uint32_t W)
     {
-        LogicalId r1 = g.reshape(x, {1, (int32_t)C, (int32_t)H, 1, (int32_t)W, 1});
+        LogicalId r1 = g.reshape(x, {1, (uint32_t)C, (uint32_t)H, 1, (uint32_t)W, 1});
         LogicalId rep_h = g.repeat(r1, 2, 3);
         LogicalId rep_hw = g.repeat(rep_h, 2, 5);
         LogicalId contig = g.contiguous(rep_hw);
-        return g.reshape(contig, {1, (int32_t)C, (int32_t)(2 * H), (int32_t)(2 * W)});
+        return g.reshape(contig, {1, (uint32_t)C, (uint32_t)(2 * H), (uint32_t)(2 * W)});
     }
 
   public:
