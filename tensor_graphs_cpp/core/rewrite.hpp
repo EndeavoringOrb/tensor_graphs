@@ -321,7 +321,7 @@ inline EClassId createCacheInputNode(EGraph &egraph, EClassId sourceClassId,
                                      const std::string &debugOrigin = "")
 {
     EClassId canonSrcClass = egraph.findConst(sourceClassId);
-    const EClass &srcClass = egraph.getEClass(canonSrcClass);
+    const EClass srcClass = egraph.getEClass(canonSrcClass);
 
     LogicalId srcLogicalId = srcClass.logical_id;
 
