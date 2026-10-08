@@ -26,6 +26,7 @@
 #include "core/misc.hpp"
 #include "core/ops/ops.hpp"
 #include "core/plan/brancher.hpp"
+#include "core/plan/cycles.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/propagator.hpp"
 #include "core/plan/search_engine.hpp"
@@ -40,191 +41,6 @@
 
 using ExtractionResult = plan::ExtractionResult;
 
-
-inline void printEGraphCycles(const EGraph &egraph, std::ostream &output)
-{
-    struct Edge
-    {
-        uint32_t from;
-        uint32_t to;
-        ENodeId enode;
-        uint32_t childIndex;
-    };
-
-    const uint32_t classCount = static_cast<uint32_t>(egraph.getClasses().size());
-    std::vector<std::vector<Edge>> outgoing(classCount);
-    std::vector<std::vector<Edge>> incoming(classCount);
-    std::vector<uint8_t> canonical(classCount, 0);
-
-    for (uint32_t classId = 0; classId < classCount; ++classId)
-        canonical[classId] = egraph.findConst(EClassId{classId}).value == classId;
-
-    for (uint32_t classId = 0; classId < classCount; ++classId)
-    {
-        if (!canonical[classId])
-            continue;
-        const EClass &eclass = egraph.getEClass(EClassId{classId});
-        for (ENodeId enodeId : eclass.enodes)
-        {
-            const ENode &enode = egraph.getENode(enodeId);
-            const auto &children = enode.getChildren();
-            for (uint32_t childIndex = 0; childIndex < children.size(); ++childIndex)
-            {
-                const uint32_t childId = egraph.findConst(children[childIndex]).value;
-                if (childId >= classCount || !canonical[childId])
-                    continue;
-                Edge edge{classId, childId, enodeId, childIndex};
-                outgoing[classId].push_back(edge);
-                incoming[childId].push_back(edge);
-            }
-        }
-    }
-
-    std::vector<int32_t> index(classCount, -1);
-    std::vector<int32_t> lowLink(classCount, -1);
-    std::vector<uint8_t> onStack(classCount, 0);
-    std::vector<uint32_t> stack;
-    std::vector<std::vector<uint32_t>> components;
-    int32_t nextIndex = 0;
-
-    std::function<void(uint32_t)> strongConnect = [&](uint32_t node)
-    {
-        index[node] = nextIndex;
-        lowLink[node] = nextIndex++;
-        stack.push_back(node);
-        onStack[node] = 1;
-
-        for (const Edge &edge : outgoing[node])
-        {
-            const uint32_t child = edge.to;
-            if (index[child] == -1)
-            {
-                strongConnect(child);
-                lowLink[node] = std::min(lowLink[node], lowLink[child]);
-            }
-            else if (onStack[child])
-            {
-                lowLink[node] = std::min(lowLink[node], index[child]);
-            }
-        }
-
-        if (lowLink[node] == index[node])
-        {
-            std::vector<uint32_t> component;
-            while (true)
-            {
-                const uint32_t member = stack.back();
-                stack.pop_back();
-                onStack[member] = 0;
-                component.push_back(member);
-                if (member == node)
-                    break;
-            }
-            components.push_back(std::move(component));
-        }
-    };
-
-    for (uint32_t classId = 0; classId < classCount; ++classId)
-        if (canonical[classId] && index[classId] == -1)
-            strongConnect(classId);
-
-    std::vector<std::vector<uint32_t>> cyclicComponents;
-    for (auto &component : components)
-    {
-        bool cyclic = component.size() > 1;
-        if (!cyclic)
-        {
-            const uint32_t node = component.front();
-            for (const Edge &edge : outgoing[node])
-                cyclic = cyclic || edge.to == node;
-        }
-        if (!cyclic)
-            continue;
-        std::sort(component.begin(), component.end());
-        cyclicComponents.push_back(std::move(component));
-    }
-
-    std::sort(cyclicComponents.begin(), cyclicComponents.end(),
-              [](const auto &left, const auto &right) { return left.front() < right.front(); });
-
-    output << "[EGraph cycles] Tarjan found " << cyclicComponents.size() << " cyclic component(s) across "
-           << std::count(canonical.begin(), canonical.end(), static_cast<uint8_t>(1))
-           << " canonical e-class(es).\n";
-
-    auto printEdge = [&](const Edge &edge)
-    {
-        const ENode &enode = egraph.getENode(edge.enode);
-        output << "      EClass " << edge.from << " --ENode " << edge.enode.value << " ["
-               << toString(enode.getOpType());
-        if (!enode.getOpName().empty())
-            output << " (" << enode.getOpName() << ")";
-        output << ", kernel=" << toString(enode.getKernelId())
-               << ", child[" << edge.childIndex << "]--> EClass " << edge.to
-               << " | shape=" << toString(enode.getShape())
-               << ", dtype=" << toString(enode.getDType());
-        if (!enode.getDebugOrigin().empty())
-            output << ", debugOrigin=" << enode.getDebugOrigin();
-        output << "\n";
-    };
-
-    for (uint32_t componentIndex = 0; componentIndex < cyclicComponents.size(); ++componentIndex)
-    {
-        const auto &component = cyclicComponents[componentIndex];
-        output << "[EGraph cycles] Component " << componentIndex << " (" << component.size()
-               << " e-classes): [";
-        for (uint32_t i = 0; i < component.size(); ++i)
-            output << component[i] << (i + 1 == component.size() ? "]\n" : ", ");
-
-        for (uint32_t classId : component)
-        {
-            const EClass &eclass = egraph.getEClass(EClassId{classId});
-            output << "  EClass " << classId << " (base=" << eclass.base_eclass_id.value
-                   << ", shape=" << toString(eclass.shape) << ", strides=" << toString(eclass.strides)
-                   << ", dtype=" << toString(eclass.dtype) << ", mem_space=" << toString(eclass.mem_space)
-                   << ")\n";
-            output << "    Incoming edges (all inputs):\n";
-            if (incoming[classId].empty())
-                output << "      <none>\n";
-            for (const Edge &edge : incoming[classId])
-                printEdge(edge);
-            output << "    Outgoing edges (all outputs):\n";
-            if (outgoing[classId].empty())
-                output << "      <none>\n";
-            for (const Edge &edge : outgoing[classId])
-                printEdge(edge);
-        }
-    }
-}
-
-inline uint32_t removeDirectSelfReferenceENodes(EGraph &egraph)
-{
-    uint32_t removedCount = 0;
-    for (uint32_t classIndex = 0; classIndex < egraph.getClasses().size(); ++classIndex)
-    {
-        EClassId classId{classIndex};
-        if (egraph.findConst(classId) != classId)
-            continue;
-
-        EClass &eclass = egraph.getEClass(classId);
-        std::vector<ENodeId> retainedEnodes;
-        retainedEnodes.reserve(eclass.enodes.size());
-        for (ENodeId enodeId : eclass.enodes)
-        {
-            const ENode &enode = egraph.getENode(enodeId);
-            const bool hasDirectSelfReference = std::any_of(
-                enode.getChildren().begin(), enode.getChildren().end(),
-                [&](EClassId child) { return egraph.findConst(child) == classId; });
-            if (hasDirectSelfReference)
-            {
-                ++removedCount;
-                continue;
-            }
-            retainedEnodes.push_back(enodeId);
-        }
-        eclass.enodes = std::move(retainedEnodes);
-    }
-    return removedCount;
-}
 
 struct ENodeDominationContext
 {
@@ -2327,10 +2143,13 @@ struct Planner
         std::vector<std::vector<ENodeInfo>> all_enode_infos(buckets.size());
         std::ofstream cycleLogBeforeClean("egraph_cycles0.txt", std::ios::out | std::ios::trunc);
         std::ofstream cycleLogAfterClean("egraph_cycles1.txt", std::ios::out | std::ios::trunc);
+        std::ofstream cycleLogAfterClean2("egraph_cycles2.txt", std::ios::out | std::ios::trunc);
         if (!cycleLogBeforeClean)
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles0.txt for cycle diagnostics.";
         if (!cycleLogAfterClean)
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles1.txt for cycle diagnostics.";
+        if (!cycleLogAfterClean2)
+            LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
             bucket_states[b].rebuild(true);
@@ -2338,20 +2157,42 @@ struct Planner
             all_enode_infos[b] =
                 computeENodeInfos(bucket_states[b], {}, false);
             pruneEGraph(bucket_states[b], all_enode_infos[b]);
+
+            const uint32_t initial_cycles = countCyclicComponents(bucket_states[b]);
             if (cycleLogBeforeClean)
             {
                 cycleLogBeforeClean << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n";
                 printEGraphCycles(bucket_states[b], cycleLogBeforeClean);
             }
 
-            const uint32_t removedSelfReferences = removeDirectSelfReferenceENodes(bucket_states[b]);
+            const uint32_t removed_self_references = removeDirectSelfReferenceENodes(bucket_states[b]);
+            const uint32_t post_pass1_cycles = countCyclicComponents(bucket_states[b]);
             if (cycleLogAfterClean)
             {
                 cycleLogAfterClean << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                                   << "[Planner.planAll] Removed " << removedSelfReferences
+                                   << "[Planner.planAll] Removed " << removed_self_references
                                    << " enode(s) with direct self-references.\n";
                 printEGraphCycles(bucket_states[b], cycleLogAfterClean);
             }
+
+            const uint32_t removed_single_ext = removeSingleExternalConnectionCycleENodes(bucket_states[b]);
+            const uint32_t post_pass2_cycles = countCyclicComponents(bucket_states[b]);
+            if (cycleLogAfterClean2)
+            {
+                cycleLogAfterClean2 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                                    << "[Planner.planAll] Removed " << removed_single_ext
+                                    << " enode(s) from single-external-connection cycles.\n";
+                printEGraphCycles(bucket_states[b], cycleLogAfterClean2);
+            }
+
+            LOG(INFO) << "[Planner.planAll] Bucket " << b << " cycle reduction:";
+            LOG(INFO) << "  Initial cyclic components: " << initial_cycles;
+            LOG(INFO) << "  Pass 1 (direct self-references): " << initial_cycles << " -> " << post_pass1_cycles
+                      << " (-" << (initial_cycles - post_pass1_cycles) << ", removed "
+                      << removed_self_references << " enodes)";
+            LOG(INFO) << "  Pass 2 (single-external connection): " << post_pass1_cycles << " -> " << post_pass2_cycles
+                      << " (-" << (post_pass1_cycles - post_pass2_cycles) << ", removed "
+                      << removed_single_ext << " enodes)";
         }
 
         if (settings.saturate_only)
