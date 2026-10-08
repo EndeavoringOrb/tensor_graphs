@@ -515,18 +515,23 @@ struct PropagationSumTree
 
 struct PropagationState
 {
-    struct StartPrecedenceParent
+    struct StartPrecedenceConsumer
     {
         EClassId parent_cid;
-        uint32_t en_idx = 0;
         VarId selection_var = kInvalidVarId;
         VarId start_var = kInvalidVarId;
-        bool is_view = false;
+        uint32_t total_enodes = 0;
+        uint32_t dep_mask = 0;
+        uint32_t view_mask = 0;
+        std::vector<uint32_t> dep_indices;
+        std::vector<uint32_t> view_indices;
     };
+    using StartPrecedenceParent = StartPrecedenceConsumer;
 
     struct StartPrecedenceBucket
     {
-        std::unordered_map<EClassId, std::vector<StartPrecedenceParent>> parents;
+        std::vector<std::vector<StartPrecedenceConsumer>> consumers_by_cid;
+        std::vector<VarId> selected_by_cid;
         std::vector<uint32_t> visited_stamp;
         uint32_t stamp = 0;
         std::vector<EClassId> frontier;

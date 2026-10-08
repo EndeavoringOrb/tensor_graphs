@@ -21,88 +21,139 @@ class ConsumerStartPrecedencePropagator : public Propagator
             precedence.stamp = 1;
         }
         const uint32_t stamp = precedence.stamp;
-        int32_t required_consumer_start = min_start + 1;
+        const int32_t required_consumer_start = min_start + 1;
         auto &frontier = precedence.frontier;
         frontier.clear();
         frontier.push_back(cid);
-        precedence.visited_stamp[cid.value] = stamp;
+        if (cid.value < precedence.visited_stamp.size())
+            precedence.visited_stamp[cid.value] = stamp;
 
         for (size_t head = 0; head < frontier.size(); ++head)
         {
-            EClassId current = frontier[head];
-            auto it = precedence.parents.find(current);
-            if (it == precedence.parents.end())
+            const EClassId current = frontier[head];
+            if (current.value >= precedence.consumers_by_cid.size())
+                continue;
+            const auto &consumers = precedence.consumers_by_cid[current.value];
+            if (consumers.empty())
                 continue;
 
-            std::unordered_map<EClassId, std::unordered_set<uint32_t>> dependent_alternatives;
-            std::unordered_map<EClassId, std::unordered_set<uint32_t>> view_alternatives;
-            for (const auto &p_info : it->second)
+            for (const auto &consumer : consumers)
             {
-                if (p_info.selection_var == kInvalidVarId || p_info.start_var == kInvalidVarId)
-                    continue;
-                dependent_alternatives[p_info.parent_cid].insert(p_info.en_idx);
-                if (p_info.is_view)
-                    view_alternatives[p_info.parent_cid].insert(p_info.en_idx);
-            }
-
-            for (const auto &parent_entry : dependent_alternatives)
-            {
-                const EClassId p_cid = parent_entry.first;
-                const VarId p_sel_v = state.selected_vars[b].at(p_cid);
-                const auto p_info_it = std::find_if(it->second.begin(), it->second.end(), [&](const auto &p_info) {
-                    return p_info.parent_cid == p_cid;
-                });
-                if (p_info_it == it->second.end())
-                    continue;
-                VarId p_st_v = p_info_it->start_var;
+                const VarId p_sel_v = consumer.selection_var;
                 Domain p_sel_dom = state.domains[p_sel_v];
                 if (p_sel_dom.isFixed() && p_sel_dom.fixedValue() == 0)
                     continue;
 
-                const EClass &p_cls = state.bucket_egraphs[b].getEClass(p_cid);
-                bool all_candidates_depend = true;
-                bool any_candidate = false;
-                for (uint32_t p_en_idx = 0; p_en_idx < p_cls.enodes.size(); ++p_en_idx)
+                const VarId p_st_v = consumer.start_var;
+                const Domain &start_dom = state.domains[p_st_v];
+                const bool cannot_start = start_dom.isEmpty() || start_dom.getMax() < required_consumer_start;
+
+                if (cannot_start)
                 {
-                    const int32_t selection_value = static_cast<int32_t>(p_en_idx + 1);
-                    if (!p_sel_dom.contains(selection_value))
-                        continue;
-                    any_candidate = true;
-                    if (parent_entry.second.count(p_en_idx) == 0)
+                    bool domain_changed = false;
+                    if (p_sel_dom.is_mask && p_sel_dom.min_val == 0 && consumer.total_enodes <= 31)
                     {
-                        all_candidates_depend = false;
-                        continue;
+                        const uint32_t cand_bits = p_sel_dom.mask >> 1;
+                        const uint32_t remove_bits = cand_bits & consumer.dep_mask;
+                        if (remove_bits != 0)
+                        {
+                            if (p_sel_dom.isFixed())
+                                return false;
+                            p_sel_dom.mask &= ~(remove_bits << 1);
+                            if (p_sel_dom.mask == 0)
+                                return false;
+                            domain_changed = true;
+                        }
                     }
-                    const Domain &start_domain = state.domains[p_st_v];
-                    if (start_domain.isEmpty() || start_domain.getMax() < required_consumer_start)
+                    else
                     {
-                        if (p_sel_dom.isFixed())
-                            return false;
-                        p_sel_dom.remove(selection_value);
-                        if (p_sel_dom.isEmpty())
-                            return false;
+                        for (uint32_t dep_idx : consumer.dep_indices)
+                        {
+                            const int32_t sel_val = static_cast<int32_t>(dep_idx + 1);
+                            if (p_sel_dom.contains(sel_val))
+                            {
+                                if (p_sel_dom.isFixed())
+                                    return false;
+                                p_sel_dom.remove(sel_val);
+                                if (p_sel_dom.isEmpty())
+                                    return false;
+                                domain_changed = true;
+                            }
+                        }
+                    }
+                    if (domain_changed)
+                    {
                         state.setDomain(p_sel_v, p_sel_dom);
                     }
                 }
-                if (any_candidate && all_candidates_depend && !p_sel_dom.contains(0))
+                else
                 {
-                    Domain start_domain = state.domains[p_st_v];
-                    if (start_domain.setMin(required_consumer_start))
+                    bool all_candidates_depend = true;
+                    bool any_candidate = false;
+                    bool can_be_view = false;
+
+                    if (p_sel_dom.is_mask && p_sel_dom.min_val == 0 && consumer.total_enodes <= 31)
                     {
-                        if (start_domain.isEmpty())
-                            return false;
-                        state.setDomain(p_st_v, start_domain);
+                        const uint32_t cand_bits = p_sel_dom.mask >> 1;
+                        if (cand_bits != 0)
+                        {
+                            any_candidate = true;
+                            all_candidates_depend = ((cand_bits & ~consumer.dep_mask) == 0);
+                        }
+                        else
+                        {
+                            all_candidates_depend = false;
+                        }
+                        can_be_view = (cand_bits & consumer.view_mask) != 0;
                     }
-                }
-                bool can_be_view = false;
-                const auto view_it = view_alternatives.find(p_cid);
-                if (view_it != view_alternatives.end())
-                    for (uint32_t view_idx : view_it->second)
-                        can_be_view = can_be_view || p_sel_dom.contains(static_cast<int32_t>(view_idx + 1));
-                if (can_be_view && precedence.visited_stamp[p_cid.value] != stamp)
-                {
-                    precedence.visited_stamp[p_cid.value] = stamp;
-                    frontier.push_back(p_cid);
+                    else
+                    {
+                        for (uint32_t p_en_idx = 0; p_en_idx < consumer.total_enodes; ++p_en_idx)
+                        {
+                            const int32_t sel_val = static_cast<int32_t>(p_en_idx + 1);
+                            if (!p_sel_dom.contains(sel_val))
+                                continue;
+                            any_candidate = true;
+                            if (p_en_idx < 32)
+                            {
+                                if ((consumer.dep_mask & (1u << p_en_idx)) == 0)
+                                    all_candidates_depend = false;
+                            }
+                            else
+                            {
+                                if (std::find(consumer.dep_indices.begin(), consumer.dep_indices.end(), p_en_idx) ==
+                                    consumer.dep_indices.end())
+                                    all_candidates_depend = false;
+                            }
+                        }
+                        for (uint32_t view_idx : consumer.view_indices)
+                        {
+                            if (p_sel_dom.contains(static_cast<int32_t>(view_idx + 1)))
+                            {
+                                can_be_view = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (any_candidate && all_candidates_depend && !p_sel_dom.contains(0))
+                    {
+                        Domain new_st_dom = state.domains[p_st_v];
+                        if (new_st_dom.setMin(required_consumer_start))
+                        {
+                            if (new_st_dom.isEmpty())
+                                return false;
+                            state.setDomain(p_st_v, new_st_dom);
+                        }
+                    }
+
+                    const EClassId p_cid = consumer.parent_cid;
+                    if (can_be_view && p_cid.value < precedence.visited_stamp.size() &&
+                        precedence.visited_stamp[p_cid.value] != stamp)
+                    {
+                        precedence.visited_stamp[p_cid.value] = stamp;
+                        frontier.push_back(p_cid);
+                    }
                 }
             }
         }
@@ -131,7 +182,17 @@ class ConsumerStartPrecedencePropagator : public Propagator
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
-            VarId sel_v = state.selected_vars[b].at(cid);
+            const auto &precedence = state.propagation.start_precedence[b];
+            VarId sel_v = (cid.value < precedence.selected_by_cid.size())
+                              ? precedence.selected_by_cid[cid.value]
+                              : kInvalidVarId;
+            if (sel_v == kInvalidVarId)
+            {
+                auto it = state.selected_vars[b].find(cid);
+                if (it == state.selected_vars[b].end())
+                    return true;
+                sel_v = it->second;
+            }
             const Domain &sel_dom = state.domains[sel_v];
             if (sel_dom.contains(0))
                 return true;

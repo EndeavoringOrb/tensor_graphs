@@ -55,8 +55,18 @@ inline void SearchState::ensurePropagationState() const
     {
         std::unordered_map<Engine, uint32_t> engine_indices;
         auto &precedence = data.start_precedence[b];
-        precedence.visited_stamp.assign(bucket_egraphs[b].classes.size(), 0);
-        precedence.frontier.reserve(bucket_egraphs[b].classes.size());
+        const size_t num_classes = bucket_egraphs[b].classes.size();
+        precedence.consumers_by_cid.resize(num_classes);
+        precedence.selected_by_cid.assign(num_classes, kInvalidVarId);
+        precedence.visited_stamp.assign(num_classes, 0);
+        precedence.frontier.reserve(num_classes);
+        for (const auto &pair : selected_vars[b])
+        {
+            if (pair.first.value < num_classes)
+            {
+                precedence.selected_by_cid[pair.first.value] = pair.second;
+            }
+        }
         for (EClassId cid : reachable_cids[b])
         {
             const VarId sel_var = selected_vars[b].at(cid);
@@ -125,22 +135,81 @@ inline void SearchState::ensurePropagationState() const
         {
             const EClassId parent_cid = pair.first;
             const VarId selection_var = pair.second;
-            const EClass &cls = bucket_egraphs[b].getEClass(parent_cid);
             const auto start_it = start_vars[b].find(parent_cid);
             const VarId start_var = start_it == start_vars[b].end() ? kInvalidVarId : start_it->second;
+            if (selection_var == kInvalidVarId || start_var == kInvalidVarId)
+                continue;
+
+            const EClass &cls = bucket_egraphs[b].getEClass(parent_cid);
+            const uint32_t total_enodes = static_cast<uint32_t>(cls.enodes.size());
+
+            struct ChildAccumulator
+            {
+                EClassId child;
+                uint32_t dep_mask = 0;
+                uint32_t view_mask = 0;
+                std::vector<uint32_t> dep_indices;
+                std::vector<uint32_t> view_indices;
+            };
+            std::vector<ChildAccumulator> child_accs;
+
             for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
             {
                 const ENodeId en_id = cls.enodes[en_idx];
                 const ENode &enode = bucket_egraphs[b].getENode(en_id);
                 const bool is_view = en_id.value < bucket_enode_infos[b].size() &&
                                      bucket_enode_infos[b][en_id.value].is_view;
-                const PropagationState::StartPrecedenceParent parent_info{
-                    parent_cid, en_idx, selection_var, start_var, is_view};
+
                 for (EClassId child : enode.getChildren())
                 {
                     const EClassId canonical_child = bucket_egraphs[b].findConst(child);
-                    precedence.parents[canonical_child].push_back(parent_info);
+                    auto it = std::find_if(child_accs.begin(), child_accs.end(), [&](const auto &acc) {
+                        return acc.child == canonical_child;
+                    });
+                    if (it == child_accs.end())
+                    {
+                        child_accs.push_back({canonical_child});
+                        it = child_accs.end() - 1;
+                    }
+                    if (en_idx < 32)
+                    {
+                        if ((it->dep_mask & (1u << en_idx)) == 0)
+                        {
+                            it->dep_mask |= (1u << en_idx);
+                            it->dep_indices.push_back(en_idx);
+                            if (is_view)
+                            {
+                                it->view_mask |= (1u << en_idx);
+                                it->view_indices.push_back(en_idx);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (std::find(it->dep_indices.begin(), it->dep_indices.end(), en_idx) == it->dep_indices.end())
+                        {
+                            it->dep_indices.push_back(en_idx);
+                            if (is_view)
+                                it->view_indices.push_back(en_idx);
+                        }
+                    }
                 }
+            }
+
+            for (auto &acc : child_accs)
+            {
+                if (acc.child.value >= precedence.consumers_by_cid.size())
+                    precedence.consumers_by_cid.resize(acc.child.value + 1);
+                PropagationState::StartPrecedenceConsumer consumer;
+                consumer.parent_cid = parent_cid;
+                consumer.selection_var = selection_var;
+                consumer.start_var = start_var;
+                consumer.total_enodes = total_enodes;
+                consumer.dep_mask = acc.dep_mask;
+                consumer.view_mask = acc.view_mask;
+                consumer.dep_indices = std::move(acc.dep_indices);
+                consumer.view_indices = std::move(acc.view_indices);
+                precedence.consumers_by_cid[acc.child.value].push_back(std::move(consumer));
             }
         }
     }
