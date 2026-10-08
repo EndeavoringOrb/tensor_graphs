@@ -100,7 +100,6 @@ struct RuleCtx
 {
     EGraph &egraph;
     const std::unordered_set<EClassId> &protectedEClasses;
-    std::unordered_map<EClassId, LogicalId> &eclassToLogical;
     TGStore *repo;
     CostModel *costModel = nullptr;
 };
@@ -319,37 +318,19 @@ inline EClassId copyTo(EGraph &egraph, EClassId class_id, MemSpace target_mem_sp
 }
 
 inline EClassId createCacheInputNode(EGraph &egraph, EClassId sourceClassId,
-                                     std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                                      const std::string &debugOrigin = "")
 {
     EClassId canonSrcClass = egraph.findConst(sourceClassId);
-    const EClass srcClass = egraph.getEClass(canonSrcClass);
+    const EClass &srcClass = egraph.getEClass(canonSrcClass);
 
-    EClassId op_cache = egraph.addEClass(srcClass.shape, srcClass.strides, srcClass.dtype, srcClass.mem_space);
+    LogicalId srcLogicalId = srcClass.logical_id;
 
-    LogicalId srcLogicalId;
-    auto it = eclassToLogical.find(canonSrcClass);
-    if (it != eclassToLogical.end())
-    {
-        srcLogicalId = it->second;
-    }
-    else
-    {
-        for (const auto &kv : eclassToLogical)
-        {
-            if (egraph.findConst(kv.first) == canonSrcClass)
-            {
-                srcLogicalId = kv.second;
-                break;
-            }
-        }
-    }
+    EClassId op_cache =
+        egraph.addEClass(srcClass.shape, srcClass.strides, srcClass.dtype, srcClass.mem_space, srcLogicalId);
 
     ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, srcClass.shape, srcClass.strides, srcClass.dtype,
                     srcClass.mem_space, {}, toString(srcLogicalId), 0, debugOrigin);
     op_cache = egraph.addENode(op_cache, cacheNode);
-
-    eclassToLogical[op_cache] = srcLogicalId;
 
     return op_cache;
 }
@@ -1058,9 +1039,7 @@ struct InfinityDomination : public Rule
 
         if (ctx.repo && ctx.repo->isValid())
         {
-            LogicalId logical_id;
-            if (ctx.eclassToLogical.count(e_class_id))
-                logical_id = ctx.eclassToLogical.at(e_class_id);
+            LogicalId logical_id = cls.logical_id;
 
             if (logical_id != LogicalId() && ctx.repo->has(logical_id))
             {

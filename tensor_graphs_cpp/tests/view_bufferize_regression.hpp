@@ -50,7 +50,7 @@ inline void testViewNotEmittedIntoInstructions()
     std::vector<LogicalId> topo = topologicalSort({out}, graph);
     Planner planner(costModel, settings);
     planner.initBaseEGraph(out, graph, topo, nullptr);
-    populateDummyRecords(costModel, planner.baseState.egraph);
+    populateDummyRecords(costModel, planner.baseState);
 
     Bucket bucket;
     bucket.inputDirtyRegions[x] = {makeFull(graph.getNode(x).getShape())};
@@ -85,7 +85,9 @@ inline void testViewNotEmittedIntoInstructions()
     }
 
     // Verify 3: nodeViews must still contain precalculated metadata for all views
-    EClassId w_3d_eclass = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(w_3d));
+    EClassId w_3d_eclass = compiled.logical_to_eclass.count(w_3d)
+                               ? compiled.logical_to_eclass.at(w_3d)
+                               : planner.baseState.findEClassByLogicalId(w_3d);
     if (compiled.nodeViews.find(w_3d_eclass) == compiled.nodeViews.end())
     {
         Error::throw_err("[Regression Test Failed] View node missing from compiled.nodeViews!");

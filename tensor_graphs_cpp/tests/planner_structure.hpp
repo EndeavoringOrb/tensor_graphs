@@ -24,9 +24,9 @@ inline void runPlannerStructureTests()
     fullBucket.outputNeededRegion = {makeRegion({{0, 8}, {0, 8}})};
 
     Planner planner(costModel, settings);
-    const SaturationResult result = planner.saturateBucket(inputId, graph, fullBucket, {}, false);
+    const EGraph result = planner.saturateBucket(inputId, graph, fullBucket, {}, false);
 
-    for (const ENode &enode : result.egraph.getENodes())
+    for (const ENode &enode : result.getENodes())
     {
         if (enode.getOpType() == OpType::SCATTER)
         {

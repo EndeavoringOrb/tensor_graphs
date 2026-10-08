@@ -125,6 +125,8 @@ struct EClass
     std::vector<uint64_t> strides;
     DType dtype;
     MemSpace mem_space;
+    LogicalId logical_id;
+    bool is_clean = false;
 };
 
 struct EGraph
@@ -149,6 +151,10 @@ struct EGraph
     // Base eclass ID -> current canonical eclass ID.
     mutable std::unordered_map<BaseEClassId, EClassId> baseEClassToEClass;
     mutable bool baseEClassIndexInitialized = false;
+
+    // Logical node ID -> current canonical eclass ID.
+    mutable std::unordered_map<LogicalId, EClassId> logicalToEClass;
+    mutable bool logicalIndexInitialized = false;
 
     inline std::vector<int32_t> getConstantInt32(EClassId id) const
     {
@@ -179,6 +185,7 @@ struct EGraph
         parent.reserve(classCap);
         ufSize.reserve(classCap);
         baseEClassToEClass.reserve(classCap);
+        logicalToEClass.reserve(classCap);
 
         enodes.reserve(nodeCap);
         nodeToEClass.reserve(nodeCap);
@@ -233,7 +240,7 @@ struct EGraph
     }
 
     EClassId addEClass(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
-                       MemSpace mem_space)
+                       MemSpace mem_space, LogicalId logical_id = LogicalId{}, bool is_clean = false)
     {
         EClassId id{(uint32_t)classes.size()};
 
@@ -243,10 +250,14 @@ struct EGraph
         c.strides = strides;
         c.dtype = dtype;
         c.mem_space = mem_space;
+        c.logical_id = logical_id;
+        c.is_clean = is_clean;
 
         classes.push_back(std::move(c));
         parent.push_back(id);
         ufSize.push_back(1);
+        if (logicalIndexInitialized && logical_id != LogicalId{})
+            logicalToEClass.insert_or_assign(logical_id, id);
         return id;
     }
 
@@ -377,6 +388,19 @@ struct EGraph
                 baseEClassToEClass.insert_or_assign(baseB, ra);
         }
 
+        if (classes[ra.value].logical_id == LogicalId{})
+        {
+            classes[ra.value].logical_id = classes[rb.value].logical_id;
+        }
+        if (logicalIndexInitialized)
+        {
+            if (classes[ra.value].logical_id != LogicalId{})
+                logicalToEClass.insert_or_assign(classes[ra.value].logical_id, ra);
+            if (classes[rb.value].logical_id != LogicalId{})
+                logicalToEClass.insert_or_assign(classes[rb.value].logical_id, ra);
+        }
+        classes[ra.value].is_clean = classes[ra.value].is_clean || classes[rb.value].is_clean;
+
         parent[rb.value] = ra;
         ufSize[ra.value] += ufSize[rb.value];
 
@@ -411,69 +435,241 @@ struct EGraph
         return count;
     }
 
-    void rebuild()
+    void rebuild(bool compact = false)
     {
-        std::unordered_map<uint64_t, std::vector<ENodeId>> newHash;
-        newHash.reserve(enodes.size() * 2);
-        uint32_t nDupes = 0;
-
-        for (uint32_t i = 0, n = static_cast<uint32_t>(enodes.size()); i < n; ++i)
+        while (true)
         {
-            ENode &node = enodes[i];
-            ENodeId currentEnodeId{i};
+            std::unordered_map<uint64_t, std::vector<ENodeId>> new_hash;
+            new_hash.reserve(enodes.size() * 2);
+            uint32_t n_dupes = 0;
+            uint32_t n_merges = 0;
 
-            bool childrenChanged = false;
-            std::vector<EClassId> updatedChildren = node.getChildren();
-            for (EClassId &child : updatedChildren)
+            for (uint32_t i = 0, n = static_cast<uint32_t>(enodes.size()); i < n; ++i)
             {
-                EClassId c = find(child);
-                if (c != child)
+                ENode &node = enodes[i];
+                ENodeId current_enode_id{i};
+
+                bool children_changed = false;
+                std::vector<EClassId> updated_children = node.getChildren();
+                for (EClassId &child : updated_children)
                 {
-                    child = c;
-                    childrenChanged = true;
+                    EClassId c = find(child);
+                    if (c != child)
+                    {
+                        child = c;
+                        children_changed = true;
+                    }
+                }
+                if (children_changed)
+                {
+                    node.setChildren(std::move(updated_children));
+                }
+
+                EClassId cls = find(nodeToEClass[i]);
+                nodeToEClass[i] = cls;
+
+                if (children_changed || node.getSig() == 0)
+                {
+                    node.setSig(computeSignature(node));
+                }
+
+                auto &bucket = new_hash[node.getSig()];
+                bool merged = false;
+
+                for (ENodeId other_enode_id : bucket)
+                {
+                    const EClassId other_cls = find(nodeToEClass[other_enode_id.value]);
+                    if (node == enodes[other_enode_id.value])
+                    {
+                        n_dupes++;
+                        if (other_cls != cls)
+                        {
+                            merge(other_cls, cls);
+                            n_merges++;
+                        }
+                        nodeToEClass[i] = find(other_cls);
+                        merged = true;
+                        break;
+                    }
+                }
+
+                if (!merged)
+                {
+                    bucket.push_back(current_enode_id);
                 }
             }
-            if (childrenChanged)
+
+            hashcons = std::move(new_hash);
+            rebuildConstantHashIndex();
+
+            if (!compact || n_merges == 0)
+                break;
+        }
+
+        if (!compact)
+            return;
+
+        // Compaction phase: prune dead/merged classes and duplicate enodes,
+        // and renumber both classes and enodes densely starting from 0.
+        const uint32_t num_old_classes = static_cast<uint32_t>(classes.size());
+        std::vector<EClassId> old_to_new_class(num_old_classes, EClassId{UINT32_MAX});
+        uint32_t new_class_count = 0;
+
+        for (uint32_t i = 0; i < num_old_classes; ++i)
+        {
+            EClassId cid{i};
+            if (find(cid) == cid)
             {
-                node.setChildren(std::move(updatedChildren));
-            }
-
-            EClassId cls = find(nodeToEClass[i]);
-            nodeToEClass[i] = cls;
-
-            if (childrenChanged || node.getSig() == 0)
-            {
-                node.setSig(computeSignature(node));
-            }
-
-            auto &bucket = newHash[node.getSig()];
-            bool merged = false;
-
-            for (ENodeId otherEnodeId : bucket)
-            {
-                const EClassId otherCls = find(nodeToEClass[otherEnodeId.value]);
-                if (node == enodes[otherEnodeId.value])
-                {
-                    nDupes++;
-                    merge(otherCls, cls);
-                    nodeToEClass[i] = find(otherCls);
-                    merged = true;
-                    break;
-                }
-            }
-
-            if (!merged)
-            {
-                bucket.push_back(currentEnodeId);
+                old_to_new_class[i] = EClassId{new_class_count++};
             }
         }
-#ifdef TG_DEBUG
-        std::cout << "[EGraph.rebuild] Found " << nDupes << " duplicate enodes" << std::endl;
-#endif
+        for (uint32_t i = 0; i < num_old_classes; ++i)
+        {
+            EClassId canon = find(EClassId{i});
+            old_to_new_class[i] = old_to_new_class[canon.value];
+        }
 
-        hashcons = std::move(newHash);
+        // Mark unique enodes kept in hashcons as alive
+        std::vector<bool> is_alive_node(enodes.size(), false);
+        for (const auto &kv : hashcons)
+        {
+            for (ENodeId nid : kv.second)
+            {
+                is_alive_node[nid.value] = true;
+            }
+        }
 
-        // Rebuild constant hash index to remove stale entries from merges
+        std::vector<ENodeId> old_to_new_node(enodes.size(), ENodeId{UINT32_MAX});
+        std::vector<ENode> new_enodes;
+        new_enodes.reserve(getNumUniqueENodes());
+        std::vector<EClassId> new_node_to_eclass;
+        new_node_to_eclass.reserve(getNumUniqueENodes());
+
+        std::vector<EClass> new_classes;
+        new_classes.reserve(new_class_count);
+
+        for (uint32_t old_cls_idx = 0; old_cls_idx < num_old_classes; ++old_cls_idx)
+        {
+            EClassId old_cls_id{old_cls_idx};
+            if (find(old_cls_id) != old_cls_id)
+                continue;
+
+            EClass &old_cls = classes[old_cls_idx];
+            EClassId new_cls_id = old_to_new_class[old_cls_idx];
+
+            EClass new_cls;
+            new_cls.id = new_cls_id;
+            new_cls.base_eclass_id = old_cls.base_eclass_id;
+            new_cls.shape = std::move(old_cls.shape);
+            new_cls.strides = std::move(old_cls.strides);
+            new_cls.dtype = old_cls.dtype;
+            new_cls.mem_space = old_cls.mem_space;
+            new_cls.logical_id = old_cls.logical_id;
+            new_cls.is_clean = old_cls.is_clean;
+
+            for (ENodeId old_nid : old_cls.enodes)
+            {
+                if (!is_alive_node[old_nid.value])
+                    continue;
+
+                ENodeId new_nid{static_cast<uint32_t>(new_enodes.size())};
+                old_to_new_node[old_nid.value] = new_nid;
+
+                ENode node = std::move(enodes[old_nid.value]);
+                std::vector<EClassId> children = node.getChildren();
+                for (EClassId &child : children)
+                {
+                    child = old_to_new_class[child.value];
+                }
+                node.setChildren(std::move(children));
+                node.setSig(computeSignature(node));
+
+                new_enodes.push_back(std::move(node));
+                new_node_to_eclass.push_back(new_cls_id);
+                new_cls.enodes.push_back(new_nid);
+            }
+
+            new_classes.push_back(std::move(new_cls));
+        }
+
+        // Remap constant staging keys
+        std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> new_constant_staging;
+        for (auto &kv : constantStaging)
+        {
+            if (kv.first.value < num_old_classes)
+            {
+                EClassId new_cls_id = old_to_new_class[kv.first.value];
+                if (new_cls_id.value != UINT32_MAX && new_constant_staging.find(new_cls_id) == new_constant_staging.end())
+                {
+                    new_constant_staging.emplace(new_cls_id, std::move(kv.second));
+                }
+            }
+        }
+        constantStaging = std::move(new_constant_staging);
+
+        // Reset union-find data structures
+        std::vector<EClassId> new_parent(new_class_count);
+        for (uint32_t i = 0; i < new_class_count; ++i)
+        {
+            new_parent[i] = EClassId{i};
+        }
+        std::vector<uint32_t> new_uf_size(new_class_count, 1);
+
+        // Rebuild baseEClassToEClass map if initialized
+        if (baseEClassIndexInitialized)
+        {
+            baseEClassToEClass.clear();
+            for (const auto &cls : new_classes)
+            {
+                if (cls.base_eclass_id != BaseEClassId{})
+                    baseEClassToEClass.emplace(cls.base_eclass_id, cls.id);
+            }
+        }
+
+        // Rebuild logicalToEClass map if initialized
+        if (logicalIndexInitialized)
+        {
+            std::unordered_map<LogicalId, EClassId> new_logical_map;
+            new_logical_map.reserve(logicalToEClass.size());
+            for (const auto &pair : logicalToEClass)
+            {
+                if (pair.second.value < num_old_classes)
+                {
+                    EClassId canon = find(pair.second);
+                    if (canon.value < num_old_classes)
+                    {
+                        EClassId new_id = old_to_new_class[canon.value];
+                        if (new_id.value != UINT32_MAX)
+                            new_logical_map.emplace(pair.first, new_id);
+                    }
+                }
+            }
+            for (const auto &cls : new_classes)
+            {
+                if (cls.logical_id != LogicalId{})
+                    new_logical_map.insert_or_assign(cls.logical_id, cls.id);
+            }
+            logicalToEClass = std::move(new_logical_map);
+        }
+
+        // Rebuild hashcons
+        std::unordered_map<uint64_t, std::vector<ENodeId>> new_hashcons;
+        new_hashcons.reserve(new_enodes.size() * 2);
+        for (uint32_t i = 0; i < new_enodes.size(); ++i)
+        {
+            new_hashcons[new_enodes[i].getSig()].push_back(ENodeId{i});
+        }
+
+        LOG(DEBUG) << "[EGraph.rebuild] Compacted egraph: " << num_old_classes << " -> " << new_classes.size()
+                  << " classes, " << enodes.size() << " -> " << new_enodes.size() << " enodes" << std::endl;
+
+        classes = std::move(new_classes);
+        enodes = std::move(new_enodes);
+        parent = std::move(new_parent);
+        ufSize = std::move(new_uf_size);
+        nodeToEClass = std::move(new_node_to_eclass);
+        hashcons = std::move(new_hashcons);
+
         rebuildConstantHashIndex();
     }
 
@@ -541,6 +737,48 @@ struct EGraph
     EClassId getENodeEClass(ENodeId enodeId) const
     {
         return nodeToEClass[enodeId.value];
+    }
+
+    EClassId findEClassByLogicalId(LogicalId logical_id) const
+    {
+        if (logical_id == LogicalId{})
+            return EClassId{};
+        if (!logicalIndexInitialized)
+        {
+            logicalToEClass.clear();
+            logicalToEClass.reserve(classes.size());
+            for (const EClass &cls : classes)
+            {
+                if (cls.logical_id != LogicalId{})
+                    logicalToEClass.insert_or_assign(cls.logical_id, findConst(cls.id));
+            }
+            logicalIndexInitialized = true;
+        }
+        auto it = logicalToEClass.find(logical_id);
+        return it == logicalToEClass.end() ? EClassId{} : findConst(it->second);
+    }
+
+    LogicalId getLogicalId(EClassId id) const
+    {
+        return getEClass(id).logical_id;
+    }
+
+    void setLogicalId(EClassId id, LogicalId logical_id)
+    {
+        EClassId cid = find(id);
+        classes[cid.value].logical_id = logical_id;
+        if (logicalIndexInitialized && logical_id != LogicalId{})
+            logicalToEClass.insert_or_assign(logical_id, cid);
+    }
+
+    bool isClean(EClassId id) const
+    {
+        return getEClass(id).is_clean;
+    }
+
+    void setClean(EClassId id, bool clean = true)
+    {
+        classes[find(id).value].is_clean = clean;
     }
 
   private:
@@ -677,8 +915,20 @@ inline std::string toString(const EClass &cls, const std::string &prefix = "")
 {
     std::stringstream ss;
     ss << prefix << "EClass\n"
-       << prefix << "  ID:         " << cls.id.value << "\n"
-       << prefix << "  Shape:      " << ::toString(cls.shape) << "\n"
+       << prefix << "  ID:         " << cls.id.value << "\n";
+    if (cls.logical_id != LogicalId{})
+    {
+        ss << prefix << "  LogicalId:  " << cls.logical_id.value << "\n";
+    }
+    if (cls.base_eclass_id != BaseEClassId{})
+    {
+        ss << prefix << "  BaseId:     " << cls.base_eclass_id.value << "\n";
+    }
+    if (cls.is_clean)
+    {
+        ss << prefix << "  Clean:      true\n";
+    }
+    ss << prefix << "  Shape:      " << ::toString(cls.shape) << "\n"
        << prefix << "  Strides:    " << ::toString(cls.strides) << "\n"
        << prefix << "  DType:      " << ::toString(cls.dtype) << "\n"
        << prefix << "  MemSpace:   " << cls.mem_space.idx << "\n"

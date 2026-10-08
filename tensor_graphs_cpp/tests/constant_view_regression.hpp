@@ -207,11 +207,11 @@ inline void testAnalysisConstantsDoNotOverwriteViewStorage()
 
     // InfinityDomination loads dense reference data for views during analysis.
     // Reproduce that state without depending on model weights or a reference repo.
-    EClassId ones_class = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(ones));
+    EClassId ones_class = planner.baseState.findEClassByLogicalId(ones);
     std::vector<float> dense_ones(8 * 2048, 1.0f);
     auto snapshot = std::make_shared<std::vector<uint8_t>>(dense_ones.size() * sizeof(float));
     std::memcpy(snapshot->data(), dense_ones.data(), snapshot->size());
-    planner.baseState.egraph.constantStaging[ones_class] = snapshot;
+    planner.baseState.constantStaging[ones_class] = snapshot;
     Session session(graph, mem, out, "", 0, nullptr, true);
     session.ensureFullBucket();
     Bucket bucket = session.manualBuckets.at(session.fullBucketIdx);

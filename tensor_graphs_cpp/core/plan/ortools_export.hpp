@@ -78,11 +78,9 @@ inline json serializeProblem(
     const std::vector<Bucket> &buckets,
     const std::vector<EGraph> &bucket_egraphs,
     const std::vector<EClassId> &bucket_root_eclass_ids,
-    const std::vector<std::unordered_map<EClassId, LogicalId>> &bucket_eclass_to_logicals,
     const std::vector<std::vector<ENodeInfo>> &bucket_enode_infos,
     const std::vector<CacheCandidate> &candidates,
     const std::vector<std::vector<uint32_t>> &candidate_clean_buckets,
-    const std::vector<std::unordered_set<EClassId>> &bucket_clean_eclasses,
     const Graph &graph,
     const std::unordered_map<BaseEClassId, ParallelBuffer> &preallocated_buffers,
     const Settings &settings)
@@ -150,21 +148,23 @@ inline json serializeProblem(
         b_obj["bucket_idx"] = b;
         b_obj["weight"] = buckets[b].weight;
         b_obj["root_eclass_id"] = bucket_root_eclass_ids[b].value;
-        json clean_eclasses_json = json::array();
-        for (EClassId clean_id : bucket_clean_eclasses[b])
-            clean_eclasses_json.push_back(clean_id.value);
-        b_obj["clean_eclasses"] = std::move(clean_eclasses_json);
 
         const EGraph &egraph = bucket_egraphs[b];
-        const auto &eclass_to_logical = bucket_eclass_to_logicals[b];
         const auto &enode_infos = bucket_enode_infos[b];
 
+        json clean_eclasses_json = json::array();
         json eclass_to_logical_json = json::object();
-        for (const auto &kv : eclass_to_logical)
+        for (const auto &cls : egraph.getClasses())
         {
-            eclass_to_logical_json[std::to_string(kv.first.value)] = kv.second.value;
+            if (egraph.findConst(cls.id) != cls.id)
+                continue;
+            if (cls.is_clean)
+                clean_eclasses_json.push_back(cls.id.value);
+            if (cls.logical_id != LogicalId{})
+                eclass_to_logical_json[std::to_string(cls.id.value)] = cls.logical_id.value;
         }
-        b_obj["eclass_to_logical"] = eclass_to_logical_json;
+        b_obj["clean_eclasses"] = std::move(clean_eclasses_json);
+        b_obj["eclass_to_logical"] = std::move(eclass_to_logical_json);
 
         json classes_json = json::array();
         for (const auto &cls : egraph.getClasses())

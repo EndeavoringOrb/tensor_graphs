@@ -28,16 +28,16 @@ inline void runInputHashconsTests()
         Planner planner(costModel);
         planner.initBaseEGraph(addNode, graph, topo, nullptr);
 
-        EClassId cls0 = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(in0));
-        EClassId cls1 = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(in1));
+        EClassId cls0 = planner.baseState.findEClassByLogicalId(in0);
+        EClassId cls1 = planner.baseState.findEClassByLogicalId(in1);
 
         if (cls0 == cls1)
         {
             Error::throw_err("[InputHashcons] Distinct runtime inputs with matching shapes were incorrectly merged!");
         }
 
-        const ENode &addENode = planner.baseState.egraph.getENode(
-            planner.baseState.egraph.getEClass(planner.baseState.nodeToEClass.at(addNode)).enodes[0]);
+        const ENode &addENode = planner.baseState.getENode(
+            planner.baseState.getEClass(planner.baseState.findEClassByLogicalId(addNode)).enodes[0]);
         if (addENode.getChildren()[0] == addENode.getChildren()[1])
         {
             Error::throw_err("[InputHashcons] ADD node children collapsed onto the same input EClass!");
@@ -56,8 +56,8 @@ inline void runInputHashconsTests()
         Planner planner(costModel);
         planner.initBaseEGraph(addSelf, graph, topo, nullptr);
 
-        const ENode &selfAddENode = planner.baseState.egraph.getENode(
-            planner.baseState.egraph.getEClass(planner.baseState.nodeToEClass.at(addSelf)).enodes[0]);
+        const ENode &selfAddENode = planner.baseState.getENode(
+            planner.baseState.getEClass(planner.baseState.findEClassByLogicalId(addSelf)).enodes[0]);
 
         if (selfAddENode.getChildren()[0] != selfAddENode.getChildren()[1])
         {
@@ -138,8 +138,8 @@ inline void runInputHashconsTests()
         Planner planner(costModel);
         planner.initBaseEGraph(addNode, graph, topo, nullptr);
 
-        EClassId inCls = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(in));
-        EClassId constCls = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(c));
+        EClassId inCls = planner.baseState.findEClassByLogicalId(in);
+        EClassId constCls = planner.baseState.findEClassByLogicalId(c);
 
         if (inCls == constCls)
         {
@@ -171,17 +171,17 @@ inline void runInputHashconsTests()
         Planner planner(costModel);
         planner.initBaseEGraph(root, graph, topo, nullptr);
 
-        EClassId eA = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(inA));
-        EClassId eB = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(inB));
-        EClassId eC = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(inC));
+        EClassId eA = planner.baseState.findEClassByLogicalId(inA);
+        EClassId eB = planner.baseState.findEClassByLogicalId(inB);
+        EClassId eC = planner.baseState.findEClassByLogicalId(inC);
 
         if (eA == eB || eA == eC || eB == eC)
         {
             Error::throw_err("[InputHashcons] Runtime inputs in multi-branch DAG were incorrectly merged!");
         }
 
-        EClassId eAxis0 = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(cAxis0));
-        EClassId eAxis1 = planner.baseState.egraph.findConst(planner.baseState.nodeToEClass.at(cAxis1));
+        EClassId eAxis0 = planner.baseState.findEClassByLogicalId(cAxis0);
+        EClassId eAxis1 = planner.baseState.findEClassByLogicalId(cAxis1);
 
         if (eAxis0 != eAxis1)
         {
