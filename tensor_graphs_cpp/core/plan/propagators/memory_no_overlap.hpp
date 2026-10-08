@@ -160,6 +160,10 @@ class WriteAfterReadPropagator : public Propagator
                     info.is_input_or_cache = false;
                     info.is_root = false;
                     info.view_parent = EClassId{UINT32_MAX};
+                    info.first_view_child = EClassId{UINT32_MAX};
+                    info.next_view_sibling = EClassId{UINT32_MAX};
+                    info.view_tin = UINT32_MAX;
+                    info.view_tout = UINT32_MAX;
                     info.base_cid = EClassId{UINT32_MAX};
                     info.start_min = -1;
                     info.start_max = -1;
@@ -245,6 +249,47 @@ class WriteAfterReadPropagator : public Propagator
             info.readers.clear();
             active_cids.push_back(cid);
             touched_cids.push_back(cid);
+            }
+
+            // Active view relations form a forest. Euler intervals make the
+            // repeated ancestor checks in overlap propagation constant-time.
+            for (EClassId cid : active_cids)
+            {
+                auto &info = class_info[cid.value];
+                const EClassId parent = info.view_parent;
+                if (info.is_view && parent.value < class_info.size() &&
+                    class_info[parent.value].is_active)
+                {
+                    info.next_view_sibling = class_info[parent.value].first_view_child;
+                    class_info[parent.value].first_view_child = cid;
+                }
+            }
+            std::vector<std::pair<EClassId, bool>> view_stack;
+            view_stack.reserve(active_cids.size() * 2);
+            uint32_t view_clock = 0;
+            for (EClassId root : active_cids)
+            {
+                const EClassId parent = class_info[root.value].view_parent;
+                if (parent.value < class_info.size() && class_info[parent.value].is_active)
+                    continue;
+                view_stack.emplace_back(root, false);
+                while (!view_stack.empty())
+                {
+                    const auto [cid, exiting] = view_stack.back();
+                    view_stack.pop_back();
+                    auto &info = class_info[cid.value];
+                    if (exiting)
+                    {
+                        info.view_tout = view_clock++;
+                        continue;
+                    }
+                    info.view_tin = view_clock++;
+                    view_stack.emplace_back(cid, true);
+                    for (EClassId child = info.first_view_child;
+                         child.value < class_info.size();
+                         child = class_info[child.value].next_view_sibling)
+                        view_stack.emplace_back(child, false);
+                }
             }
 
             // Resolve base_cid for each active eclass
@@ -520,9 +565,162 @@ class WriteAfterReadPropagator : public Propagator
         schedule.dirty = false;
     }
 
+    using SpatialIntervalIndex = PropagationState::WriteAfterReadBucket::SpatialIntervalIndex;
+    using SpatialIntervalNode = PropagationState::WriteAfterReadBucket::SpatialIntervalNode;
+    using FixedOffsetAllocation = PropagationState::WriteAfterReadBucket::FixedOffsetAllocation;
+
+    static bool spatialKeyLess(const FixedOffsetAllocation &a, const FixedOffsetAllocation &b)
+    {
+        return a.offset != b.offset ? a.offset < b.offset : a.cid.value < b.cid.value;
+    }
+
+    static void refreshSpatialNode(SpatialIntervalIndex &index, int32_t node_id)
+    {
+        auto &node = index.nodes[node_id];
+        node.max_end = node.allocation.end;
+        if (node.left >= 0)
+            node.max_end = std::max(node.max_end, index.nodes[node.left].max_end);
+        if (node.right >= 0)
+            node.max_end = std::max(node.max_end, index.nodes[node.right].max_end);
+    }
+
+    static uint64_t spatialPriority(const FixedOffsetAllocation &allocation)
+    {
+        uint64_t value = (static_cast<uint64_t>(allocation.offset) << 32) | allocation.cid.value;
+        value += 0x9e3779b97f4a7c15ULL;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+        return value ^ (value >> 31);
+    }
+
+    static int32_t rotateSpatialRight(SpatialIntervalIndex &index, int32_t root_id)
+    {
+        const int32_t new_root = index.nodes[root_id].left;
+        index.nodes[root_id].left = index.nodes[new_root].right;
+        index.nodes[new_root].right = root_id;
+        refreshSpatialNode(index, root_id);
+        refreshSpatialNode(index, new_root);
+        return new_root;
+    }
+
+    static int32_t rotateSpatialLeft(SpatialIntervalIndex &index, int32_t root_id)
+    {
+        const int32_t new_root = index.nodes[root_id].right;
+        index.nodes[root_id].right = index.nodes[new_root].left;
+        index.nodes[new_root].left = root_id;
+        refreshSpatialNode(index, root_id);
+        refreshSpatialNode(index, new_root);
+        return new_root;
+    }
+
+    static int32_t mergeSpatialNodes(SpatialIntervalIndex &index, int32_t left_id, int32_t right_id)
+    {
+        if (left_id < 0)
+            return right_id;
+        if (right_id < 0)
+            return left_id;
+        if (index.nodes[left_id].priority > index.nodes[right_id].priority)
+        {
+            index.nodes[left_id].right = mergeSpatialNodes(index, index.nodes[left_id].right, right_id);
+            refreshSpatialNode(index, left_id);
+            return left_id;
+        }
+        index.nodes[right_id].left = mergeSpatialNodes(index, left_id, index.nodes[right_id].left);
+        refreshSpatialNode(index, right_id);
+        return right_id;
+    }
+
+    static int32_t insertSpatialNode(SpatialIntervalIndex &index, int32_t root_id, int32_t node_id)
+    {
+        if (root_id < 0)
+            return node_id;
+        if (spatialKeyLess(index.nodes[node_id].allocation, index.nodes[root_id].allocation))
+        {
+            index.nodes[root_id].left = insertSpatialNode(index, index.nodes[root_id].left, node_id);
+            if (index.nodes[index.nodes[root_id].left].priority > index.nodes[root_id].priority)
+                root_id = rotateSpatialRight(index, root_id);
+        }
+        else
+        {
+            index.nodes[root_id].right = insertSpatialNode(index, index.nodes[root_id].right, node_id);
+            if (index.nodes[index.nodes[root_id].right].priority > index.nodes[root_id].priority)
+                root_id = rotateSpatialLeft(index, root_id);
+        }
+        refreshSpatialNode(index, root_id);
+        return root_id;
+    }
+
+    static int32_t eraseSpatialNode(SpatialIntervalIndex &index, int32_t root_id,
+                                    const FixedOffsetAllocation &allocation, bool &erased)
+    {
+        if (root_id < 0)
+            return -1;
+        const auto &root_allocation = index.nodes[root_id].allocation;
+        if (!spatialKeyLess(allocation, root_allocation) && !spatialKeyLess(root_allocation, allocation))
+        {
+            const int32_t merged = mergeSpatialNodes(index, index.nodes[root_id].left,
+                                                      index.nodes[root_id].right);
+            index.free_nodes.push_back(root_id);
+            erased = true;
+            return merged;
+        }
+        if (spatialKeyLess(allocation, root_allocation))
+            index.nodes[root_id].left = eraseSpatialNode(index, index.nodes[root_id].left, allocation, erased);
+        else
+            index.nodes[root_id].right = eraseSpatialNode(index, index.nodes[root_id].right, allocation, erased);
+        refreshSpatialNode(index, root_id);
+        return root_id;
+    }
+
+    static void addSpatialAllocation(SpatialIntervalIndex &index, const FixedOffsetAllocation &allocation)
+    {
+        int32_t node_id;
+        if (index.free_nodes.empty())
+        {
+            node_id = static_cast<int32_t>(index.nodes.size());
+            index.nodes.emplace_back();
+        }
+        else
+        {
+            node_id = index.free_nodes.back();
+            index.free_nodes.pop_back();
+        }
+        auto &node = index.nodes[node_id];
+        node.allocation = allocation;
+        node.max_end = allocation.end;
+        node.priority = spatialPriority(allocation);
+        node.left = -1;
+        node.right = -1;
+        index.root = insertSpatialNode(index, index.root, node_id);
+    }
+
+    static void removeSpatialAllocation(SpatialIntervalIndex &index,
+                                        const FixedOffsetAllocation &allocation)
+    {
+        bool erased = false;
+        index.root = eraseSpatialNode(index, index.root, allocation, erased);
+    }
+
+    template <typename Callback>
+    static bool visitSpatialOverlaps(const SpatialIntervalIndex &index, int32_t node_id,
+                                     uint64_t low, uint64_t high, Callback &callback)
+    {
+        if (node_id < 0 || index.nodes[node_id].max_end <= low)
+            return true;
+        const auto &node = index.nodes[node_id];
+        if (node.left >= 0 && index.nodes[node.left].max_end > low &&
+            !visitSpatialOverlaps(index, node.left, low, high, callback))
+            return false;
+        if (node.allocation.offset < high && node.allocation.end > low && !callback(node.allocation))
+            return false;
+        if (node.allocation.offset < high && node.right >= 0 &&
+            !visitSpatialOverlaps(index, node.right, low, high, callback))
+            return false;
+        return true;
+    }
+
     static void buildFixedOffsetIndex(const SearchState &state, uint32_t b, VarId changed)
     {
-        using FixedOffsetAllocation = PropagationState::WriteAfterReadBucket::FixedOffsetAllocation;
         auto &schedule = state.propagation.write_after_read[b];
         const bool rebuild = !schedule.fixed_offset_index_initialized ||
                              schedule.fixed_offset_structure_dirty;
@@ -534,7 +732,16 @@ class WriteAfterReadPropagator : public Propagator
             {
                 auto old_space = schedule.fixed_offset_allocations.find(old_key->second.first);
                 if (old_space != schedule.fixed_offset_allocations.end())
+                {
+                    const auto old_allocation = old_space->second.find(old_key->second.second);
+                    if (old_allocation != old_space->second.end())
+                    {
+                        auto spatial_it = schedule.fixed_offset_spatial_index.find(old_key->second.first);
+                        if (spatial_it != schedule.fixed_offset_spatial_index.end())
+                            removeSpatialAllocation(spatial_it->second, old_allocation->second);
+                    }
                     old_space->second.erase(old_key->second.second);
+                }
                 schedule.fixed_offset_keys_by_var.erase(old_key);
             }
 
@@ -554,6 +761,8 @@ class WriteAfterReadPropagator : public Propagator
                 schedule.fixed_offset_keys_by_var[changed] = {alloc.mem_space, key};
                 auto &max_size = schedule.max_fixed_allocation_size[alloc.mem_space];
                 max_size = std::max(max_size, alloc.size);
+                const auto &fixed_allocation = entries.at(key);
+                addSpatialAllocation(schedule.fixed_offset_spatial_index[alloc.mem_space], fixed_allocation);
             }
             schedule.spatial_dirty = false;
             return;
@@ -563,6 +772,7 @@ class WriteAfterReadPropagator : public Propagator
             space_entries.second.clear();
         schedule.fixed_offset_keys_by_var.clear();
         schedule.max_fixed_allocation_size.clear();
+        schedule.fixed_offset_spatial_index.clear();
         for (const auto &pair : state.selected_vars[b])
         {
             FixedAlloc alloc;
@@ -581,6 +791,7 @@ class WriteAfterReadPropagator : public Propagator
             schedule.fixed_offset_keys_by_var[alloc.offset_var] = {alloc.mem_space, key};
             auto &max_size = schedule.max_fixed_allocation_size[alloc.mem_space];
             max_size = std::max(max_size, alloc.size);
+            addSpatialAllocation(schedule.fixed_offset_spatial_index[alloc.mem_space], entries.at(key));
         }
 
         schedule.fixed_offset_index_initialized = true;
@@ -658,6 +869,23 @@ class WriteAfterReadPropagator : public Propagator
         return false;
     }
 
+    static bool isActiveViewOf(const SearchState &state, uint32_t b,
+                               EClassId base, EClassId view_cand)
+    {
+        if (base == view_cand)
+            return true;
+        const auto &class_info = state.propagation.write_after_read[b].class_info;
+        if (base.value < class_info.size() && view_cand.value < class_info.size() &&
+            class_info[base.value].is_active && class_info[view_cand.value].is_active)
+        {
+            const auto &base_info = class_info[base.value];
+            const auto &view_info = class_info[view_cand.value];
+            return base_info.view_tin <= view_info.view_tin &&
+                   view_info.view_tout <= base_info.view_tout;
+        }
+        return isViewOf(state, b, base, view_cand);
+    }
+
     static bool allActiveAlternativesRead(const SearchState &state, uint32_t b, EClassId producer,
                                           EClassId consumer)
     {
@@ -700,8 +928,8 @@ class WriteAfterReadPropagator : public Propagator
         if (A.is_view && B.is_view)
             return true;
 
-        bool b_is_view_of_a = isViewOf(state, A.bucket_idx, A.cid, B.cid);
-        bool a_is_view_of_b = isViewOf(state, A.bucket_idx, B.cid, A.cid);
+        bool b_is_view_of_a = isActiveViewOf(state, A.bucket_idx, A.cid, B.cid);
+        bool a_is_view_of_b = isActiveViewOf(state, A.bucket_idx, B.cid, A.cid);
         if (b_is_view_of_a || a_is_view_of_b)
             return true;
 
@@ -968,24 +1196,15 @@ class WriteAfterReadPropagator : public Propagator
 
             if (curr_offset_fixed)
             {
-                auto fixed_space = state.propagation.write_after_read[b].fixed_offset_allocations.find(curr.mem_space);
-                if (fixed_space != state.propagation.write_after_read[b].fixed_offset_allocations.end())
+                auto spatial_it = state.propagation.write_after_read[b].fixed_offset_spatial_index.find(curr.mem_space);
+                if (spatial_it != state.propagation.write_after_read[b].fixed_offset_spatial_index.end())
                 {
-                    const auto &fixed_allocations = fixed_space->second;
-                    const uint32_t max_size = state.propagation.write_after_read[b]
-                                                  .max_fixed_allocation_size[curr.mem_space];
-                    const uint32_t first_offset = curr.offset >= max_size
-                                                      ? curr.offset - max_size + 1
-                                                      : 0;
                     const uint64_t curr_end = static_cast<uint64_t>(curr.offset) + curr.size;
-                    auto candidate_it = fixed_allocations.lower_bound({first_offset, 0});
-                    for (; candidate_it != fixed_allocations.end() &&
-                           candidate_it->first.first < curr_end; ++candidate_it)
-                    {
-                        const auto &indexed_other = candidate_it->second;
+                    bool valid = true;
+                    auto processCandidate = [&](const FixedOffsetAllocation &indexed_other) {
                         const EClassId other_cid = indexed_other.cid;
                         if (other_cid == cid || !mayOverlapInTime(state, b, cid, other_cid))
-                            continue;
+                            return true;
                         FixedAlloc other;
                         other.cid = indexed_other.cid;
                         other.bucket_idx = b;
@@ -1000,21 +1219,27 @@ class WriteAfterReadPropagator : public Propagator
                         other.is_view = indexed_other.is_view;
                         other.is_input_or_cache = indexed_other.is_input_or_cache;
                         other.is_root = indexed_other.is_root;
-                        if (std::max(curr.offset, other.offset) >=
-                            std::min(curr.offset + curr.size, other.offset + other.size))
-                            continue;
 
                         bool pushed = false;
                         if (!canShare(state, curr, other))
                         {
                             if (!enforceDisjoint(state, other, curr, worklist, pushed))
+                            {
+                                valid = false;
                                 return false;
+                            }
                         }
                         else if (!checkPair(state, curr, other, worklist))
                         {
+                            valid = false;
                             return false;
                         }
-                    }
+                        return true;
+                    };
+                    visitSpatialOverlaps(spatial_it->second, spatial_it->second.root,
+                                         curr.offset, curr_end, processCandidate);
+                    if (!valid)
+                        return false;
                 }
             }
             else
@@ -1023,26 +1248,17 @@ class WriteAfterReadPropagator : public Propagator
                 while (pushed)
                 {
                     pushed = false;
-                    auto fixed_space = state.propagation.write_after_read[b].fixed_offset_allocations.find(curr.mem_space);
-                    if (fixed_space == state.propagation.write_after_read[b].fixed_offset_allocations.end())
+                    auto spatial_it = state.propagation.write_after_read[b].fixed_offset_spatial_index.find(curr.mem_space);
+                    if (spatial_it == state.propagation.write_after_read[b].fixed_offset_spatial_index.end())
                         break;
-                    const auto &fixed_allocations = fixed_space->second;
-                    const uint32_t max_size = state.propagation.write_after_read[b]
-                                                  .max_fixed_allocation_size[curr.mem_space];
                     const Domain &curr_offset_domain = state.domains[curr.offset_var];
-                    const uint32_t domain_min = static_cast<uint32_t>(curr_offset_domain.getMin());
-                    const uint32_t first_offset = domain_min >= max_size
-                                                      ? domain_min - max_size + 1
-                                                      : 0;
+                    const uint64_t domain_min = static_cast<uint64_t>(curr_offset_domain.getMin());
                     const uint64_t domain_end = static_cast<uint64_t>(curr_offset_domain.getMax()) + curr.size;
-                    auto candidate_it = fixed_allocations.lower_bound({first_offset, 0});
-                    for (; candidate_it != fixed_allocations.end() &&
-                           candidate_it->first.first < domain_end; ++candidate_it)
-                    {
-                        const auto &indexed_other = candidate_it->second;
+                    bool valid = true;
+                    auto processCandidate = [&](const FixedOffsetAllocation &indexed_other) {
                         const EClassId other_cid = indexed_other.cid;
                         if (other_cid == cid || !mayOverlapInTime(state, b, cid, other_cid))
-                            continue;
+                            return true;
                         FixedAlloc other;
                         other.cid = indexed_other.cid;
                         other.bucket_idx = b;
@@ -1060,18 +1276,25 @@ class WriteAfterReadPropagator : public Propagator
 
                         const int64_t before_threshold = static_cast<int64_t>(other.offset) - curr.size;
                         const uint64_t after_threshold = static_cast<uint64_t>(other.offset) + other.size;
-                        if (static_cast<uint64_t>(curr_offset_domain.getMin()) >= after_threshold ||
-                            curr_offset_domain.getMax() <= before_threshold)
-                            continue;
+                        if (domain_min >= after_threshold || curr_offset_domain.getMax() <= before_threshold)
+                            return true;
 
                         if (!canShare(state, curr, other))
                         {
                             if (!enforceDisjoint(state, other, curr, worklist, pushed))
+                            {
+                                valid = false;
                                 return false;
+                            }
                             if (pushed)
-                                break;
+                                return false;
                         }
-                    }
+                        return true;
+                    };
+                    visitSpatialOverlaps(spatial_it->second, spatial_it->second.root,
+                                         domain_min, domain_end, processCandidate);
+                    if (!valid)
+                        return false;
                 }
             }
 
@@ -1168,7 +1391,7 @@ class FixedOffsetStartPropagator : public Propagator
         // 2. Persistent check: persistent tensors (INPUT, CACHE, ROOT) can never share memory with non-views
         if (A.is_input_or_cache || A.is_root || B.is_input_or_cache || B.is_root)
         {
-            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [persistent overlap]: A(cid="
+            LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [persistent overlap]: A(cid="
                        << A.cid.value << ", in_cache=" << A.is_input_or_cache << ", root=" << A.is_root
                        << ", st=" << state.domains[A.start_var].toString() << ", off=" << A.offset << ", sz=" << A.size
                        << ") and B(cid=" << B.cid.value << ", in_cache=" << B.is_input_or_cache << ", root=" << B.is_root
@@ -1214,7 +1437,7 @@ class FixedOffsetStartPropagator : public Propagator
             if ((reads(A.cid, B.cid) && !canReadInPlace(A, B)) ||
                 (reads(B.cid, A.cid) && !canReadInPlace(B, A)))
             {
-                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [unsafe inplace before starts fixed] for A(cid="
+                LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [unsafe inplace before starts fixed] for A(cid="
                            << A.cid.value << ") and B(cid=" << B.cid.value << ")";
                 return false;
             }
@@ -1230,7 +1453,7 @@ class FixedOffsetStartPropagator : public Propagator
                 std::swap(A, B);
             else if (A.start == B.start)
             {
-                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [same start]: identical start=" << A.start
+                LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [same start]: identical start=" << A.start
                            << " for non-views A(cid=" << A.cid.value << ", off=" << A.offset << ", sz=" << A.size
                            << ") and B(cid=" << B.cid.value << ", off=" << B.offset << ", sz=" << B.size << ")";
                 return false;
@@ -1251,7 +1474,7 @@ class FixedOffsetStartPropagator : public Propagator
         {
             if (!canReadInPlace(A, B))
             {
-                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: unsafe inplace] for A(cid="
+                LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: unsafe inplace] for A(cid="
                            << A.cid.value << ") and B(cid=" << B.cid.value << ")";
                 return false;
             }
@@ -1290,7 +1513,7 @@ class FixedOffsetStartPropagator : public Propagator
                         {
                             if (new_c_dom.isEmpty())
                             {
-                                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: reader empty]: C(cid="
+                                LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: reader empty]: C(cid="
                                            << c_cid.value << ") domain empty after setMax(" << (b_st_dom.getMax() - 1) << ")";
                                 return false;
                             }
@@ -1305,7 +1528,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (b_st_dom.isEmpty())
                 {
-                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: B start empty]: B(cid="
+                    LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: B start empty]: B(cid="
                                << B.cid.value << ") domain empty after setMin(" << min_b_start << ")";
                     return false;
                 }
@@ -1320,7 +1543,7 @@ class FixedOffsetStartPropagator : public Propagator
         {
             if (!canReadInPlace(B, A))
             {
-                LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: unsafe inplace] for A(cid="
+                LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: unsafe inplace] for A(cid="
                            << A.cid.value << ") and B(cid=" << B.cid.value << ")";
                 return false;
             }
@@ -1330,7 +1553,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (b_st_dom.isEmpty())
                 {
-                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: B start empty]: B(cid="
+                    LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: B start empty]: B(cid="
                                << B.cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
                     return false;
                 }
@@ -1365,7 +1588,7 @@ class FixedOffsetStartPropagator : public Propagator
                     {
                         if (c_st_dom.isEmpty())
                         {
-                            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: reader empty]: C(cid="
+                            LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: reader empty]: C(cid="
                                        << c_cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
                             return false;
                         }
@@ -1450,7 +1673,7 @@ class FixedOffsetStartPropagator : public Propagator
 
         if (b_cannot_be_before_a && b_cannot_be_after_a)
         {
-            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint lifespans impossible]: A(cid="
+            LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint lifespans impossible]: A(cid="
                        << A.cid.value << ", st=" << A.start << ", t_after_a=" << t_after_a
                        << ") vs B(cid=" << B.cid.value << ", dom=" << b_st_dom.toString()
                        << "): b_cannot_be_before_a=1 && b_cannot_be_after_a=1";
@@ -1464,7 +1687,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (b_st_dom.isEmpty())
                 {
-                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMin empty]: B(cid="
+                    LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMin empty]: B(cid="
                                << B.cid.value << ") domain empty after setMin(" << t_after_a << ")";
                     return false;
                 }
@@ -1496,7 +1719,7 @@ class FixedOffsetStartPropagator : public Propagator
                     {
                         if (c_st_dom.isEmpty())
                         {
-                            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader C empty]: C(cid="
+                            LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader C empty]: C(cid="
                                        << c_cid.value << ") domain empty after setMax(" << (b_st_dom.getMax() - 1) << ")";
                             return false;
                         }
@@ -1512,7 +1735,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (b_st_dom.isEmpty())
                 {
-                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMax empty]: B(cid="
+                    LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMax empty]: B(cid="
                                << B.cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
                     return false;
                 }
@@ -1544,7 +1767,7 @@ class FixedOffsetStartPropagator : public Propagator
                     {
                         if (d_st_dom.isEmpty())
                         {
-                            LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader D empty]: D(cid="
+                            LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader D empty]: D(cid="
                                        << d_cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
                             return false;
                         }
@@ -1566,7 +1789,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 if (b_st_dom.isEmpty())
                 {
-                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: mask empty]: B(cid="
+                    LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: mask empty]: B(cid="
                                << B.cid.value << ") domain empty";
                     return false;
                 }
@@ -1669,7 +1892,7 @@ class FixedOffsetStartPropagator : public Propagator
 
                 if (!resolved)
                 {
-                    LOG(DEBUG) << "[FixedOffsetStartPropagator] Pruned left branch cid=" << cid.value
+                    LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Pruned left branch cid=" << cid.value
                                << " (start=" << curr.start << ") due to conflict with other_cid=" << candidate.cid.value
                                << " (other_start=" << state.domains[other.start_var].toString()
                                << ", other_off=" << other.offset << ", other_sz=" << other.size << ")";
@@ -1769,6 +1992,11 @@ class MemoryNoOverlapPropagator : public Propagator
     uint8_t interestedVarTypes() const override
     {
         return varTypeMask(VarType::START) | varTypeMask(VarType::OFFSET);
+    }
+
+    StartSelectionGuard startSelectionGuard() const override
+    {
+        return StartSelectionGuard::FIXED_OFFSET_FOR_START;
     }
 
     std::string name() const override

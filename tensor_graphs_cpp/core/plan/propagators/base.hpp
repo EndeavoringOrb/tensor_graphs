@@ -35,8 +35,12 @@ enum class StartSelectionGuard : uint8_t
     NONE,
     NON_OPTIONAL,
     FIXED_POSITIVE,
+    FIXED_START_POSITIVE,
+    FIXED_START_NON_OPTIONAL,
+    FIXED_OFFSET_FOR_START,
     NON_OPTIONAL_WITH_CONSUMERS,
-    FIXED_NON_OPTIONAL_WITH_CONSUMERS
+    FIXED_NON_OPTIONAL_WITH_CONSUMERS,
+    FIXED_START_NON_OPTIONAL_WITH_CONSUMERS
 };
 
 class Propagator
@@ -46,7 +50,6 @@ class Propagator
     virtual std::string name() const = 0;
     virtual uint8_t interestedVarTypes() const { return kAllVarTypesMask; }
     virtual StartSelectionGuard startSelectionGuard() const { return StartSelectionGuard::NONE; }
-
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;
 };

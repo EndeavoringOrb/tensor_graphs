@@ -546,6 +546,10 @@ struct PropagationState
         bool is_input_or_cache = false;
         bool is_root = false;
         EClassId view_parent{UINT32_MAX};
+        EClassId first_view_child{UINT32_MAX};
+        EClassId next_view_sibling{UINT32_MAX};
+        uint32_t view_tin = UINT32_MAX;
+        uint32_t view_tout = UINT32_MAX;
         EClassId base_cid{UINT32_MAX};
         uint32_t en_idx = 0;
         ENodeId en_id{UINT32_MAX};
@@ -585,9 +589,24 @@ struct PropagationState
             bool is_input_or_cache = false;
             bool is_root = false;
         };
+        struct SpatialIntervalNode
+        {
+            FixedOffsetAllocation allocation;
+            uint64_t max_end = 0;
+            uint64_t priority = 0;
+            int32_t left = -1;
+            int32_t right = -1;
+        };
+        struct SpatialIntervalIndex
+        {
+            std::vector<SpatialIntervalNode> nodes;
+            std::vector<int32_t> free_nodes;
+            int32_t root = -1;
+        };
         std::unordered_map<MemSpace,
                            std::map<std::pair<uint32_t, uint32_t>, FixedOffsetAllocation>>
             fixed_offset_allocations;
+        std::unordered_map<MemSpace, SpatialIntervalIndex> fixed_offset_spatial_index;
         std::unordered_map<VarId, std::pair<MemSpace, std::pair<uint32_t, uint32_t>>>
             fixed_offset_keys_by_var;
         std::unordered_map<MemSpace, uint32_t> max_fixed_allocation_size;

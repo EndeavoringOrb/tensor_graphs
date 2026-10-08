@@ -2287,7 +2287,7 @@ struct Planner
         auto brancher_impl = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
         plan::SearchEngine engine(std::move(search_state), selector, brancher_impl);
-        plan::addAllPropagators(engine, false, all_buckets_dag);
+        plan::addAllPropagators(engine, true, all_buckets_dag);
 
         LOG(DEBUG) << "[Planner.planAll] Launching SearchEngine solve (minCompileSeconds=" << minCompileSeconds << "s)...";
         bool solved = engine.solve(minCompileSeconds);

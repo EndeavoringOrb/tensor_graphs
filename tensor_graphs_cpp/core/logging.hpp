@@ -115,3 +115,13 @@ class LogMessage
 #define LOG(level)                                                                                                     \
     for (bool _tg_log_cond = (LOG_LEVEL_##level >= TG_LOG_LEVEL); _tg_log_cond; _tg_log_cond = false)                  \
     ::tg_log::LogMessage(::LogLevel::level)
+
+// Per-branch diagnostics can dominate profiled search runs because every log
+// flushes the stream. Keep these details in ordinary debug builds, while
+// profiling builds rely on aggregate search and propagator counters instead.
+#ifdef TG_PROFILE
+#define LOG_HOT_PATH(level) for (bool _tg_hot_log_cond = false; _tg_hot_log_cond; _tg_hot_log_cond = false)            \
+    ::tg_log::LogMessage(::LogLevel::level)
+#else
+#define LOG_HOT_PATH(level) LOG(level)
+#endif

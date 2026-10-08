@@ -191,6 +191,10 @@ class WriteAfterReadStartPropagator : public Propagator
 
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
+    StartSelectionGuard startSelectionGuard() const override
+    {
+        return StartSelectionGuard::FIXED_START_NON_OPTIONAL;
+    }
 
     std::string name() const override
     {

@@ -170,7 +170,7 @@ class ConsumerStartPrecedencePropagator : public Propagator
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
     StartSelectionGuard startSelectionGuard() const override
     {
-        return fixed_starts_only ? StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS
+        return fixed_starts_only ? StartSelectionGuard::FIXED_START_NON_OPTIONAL_WITH_CONSUMERS
                                  : StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS;
     }
 

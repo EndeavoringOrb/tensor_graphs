@@ -149,7 +149,7 @@ class SearchEngine
 #ifdef TG_PROFILE
                 auto bt_start = std::chrono::steady_clock::now();
 #endif
-                LOG(DEBUG) << "[SearchEngine] Pruned hyperbox node " << nid
+                LOG_HOT_PATH(DEBUG) << "[SearchEngine] Pruned hyperbox node " << nid
                            << " while restoring: " << conflict_reason;
                 current_node_id = (k < static_cast<int>(restore_target_path.size()) - 1) ? restore_target_path[k + 1] : lca;
                 state.backtrackTo(current_node_id == UINT32_MAX ? 0 : all_nodes[current_node_id]->trail_marker);
@@ -225,42 +225,71 @@ class SearchEngine
                                                                : &propagators_by_var_type[static_cast<uint8_t>(
                                                                      state.var_infos[next_changed].type)];
             const size_t propagator_count = initial_propagation ? propagators.size() : typed_propagators->size();
+            const bool changed_is_start =
+                !initial_propagation && state.var_infos[next_changed].type == VarType::START;
+            bool start_selection_optional = false;
+            bool start_selection_fixed_positive = false;
+            bool changed_start_fixed = false;
+            bool changed_offset_fixed = false;
+            bool changed_start_has_consumers = false;
+            if (changed_is_start)
+            {
+                const VarInfo &start_info = state.var_infos[next_changed];
+                const Domain &selection = state.domains[start_info.selection_var];
+                start_selection_optional = selection.contains(0);
+                start_selection_fixed_positive = selection.isFixed() && selection.fixedValue() > 0;
+                changed_start_fixed = state.domains[next_changed].isFixed();
+
+                auto offset_it = state.offset_vars[start_info.bucket_idx].find(start_info.eclass_id);
+                changed_offset_fixed = offset_it != state.offset_vars[start_info.bucket_idx].end() &&
+                                       state.domains[offset_it->second].isFixed();
+
+                if (start_info.bucket_idx < state.propagation.start_precedence.size())
+                {
+                    const auto &consumers_by_cid =
+                        state.propagation.start_precedence[start_info.bucket_idx].consumers_by_cid;
+                    changed_start_has_consumers = start_info.eclass_id.value < consumers_by_cid.size() &&
+                                                  !consumers_by_cid[start_info.eclass_id.value].empty();
+                }
+            }
             for (size_t prop_iter = 0; prop_iter < propagator_count; ++prop_iter)
             {
                 const size_t prop_idx = initial_propagation ? prop_iter : (*typed_propagators)[prop_iter];
-                if (next_changed != kInvalidVarId &&
-                    state.var_infos[next_changed].type == VarType::START)
+                if (changed_is_start)
                 {
                     const StartSelectionGuard guard = propagator_start_selection_guards[prop_idx];
                     if (guard != StartSelectionGuard::NONE)
                     {
-                        const Domain &selection = state.domains[state.var_infos[next_changed].selection_var];
                         const bool non_optional_guard =
                             guard == StartSelectionGuard::NON_OPTIONAL ||
+                            guard == StartSelectionGuard::FIXED_START_NON_OPTIONAL ||
                             guard == StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS ||
-                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS;
+                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS ||
+                            guard == StartSelectionGuard::FIXED_START_NON_OPTIONAL_WITH_CONSUMERS;
                         const bool fixed_positive_guard =
                             guard == StartSelectionGuard::FIXED_POSITIVE ||
+                            guard == StartSelectionGuard::FIXED_START_POSITIVE ||
                             guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS;
-                        if ((non_optional_guard && selection.contains(0)) ||
-                            (fixed_positive_guard && (!selection.isFixed() || selection.fixedValue() <= 0)))
+                        if ((non_optional_guard && start_selection_optional) ||
+                            (fixed_positive_guard && !start_selection_fixed_positive))
+                            continue;
+
+                        const bool fixed_start_guard =
+                            guard == StartSelectionGuard::FIXED_START_NON_OPTIONAL ||
+                            guard == StartSelectionGuard::FIXED_START_POSITIVE ||
+                            guard == StartSelectionGuard::FIXED_START_NON_OPTIONAL_WITH_CONSUMERS;
+                        if (fixed_start_guard && !changed_start_fixed)
+                            continue;
+
+                        if (guard == StartSelectionGuard::FIXED_OFFSET_FOR_START && !changed_offset_fixed)
                             continue;
 
                         const bool consumer_guard =
                             guard == StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS ||
-                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS;
-                        if (consumer_guard)
-                        {
-                            const uint32_t bucket_idx = state.var_infos[next_changed].bucket_idx;
-                            const uint32_t cid = state.var_infos[next_changed].eclass_id.value;
-                            if (bucket_idx < state.propagation.start_precedence.size())
-                            {
-                                const auto &consumers_by_cid =
-                                    state.propagation.start_precedence[bucket_idx].consumers_by_cid;
-                                if (cid < consumers_by_cid.size() && consumers_by_cid[cid].empty())
-                                    continue;
-                            }
-                        }
+                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS ||
+                            guard == StartSelectionGuard::FIXED_START_NON_OPTIONAL_WITH_CONSUMERS;
+                        if (consumer_guard && !changed_start_has_consumers)
+                            continue;
                     }
                 }
                 auto &prop = propagators[prop_idx];
@@ -774,12 +803,12 @@ class SearchEngine
             {
                 if (!left_ok)
                 {
-                    LOG(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
+                    LOG_HOT_PATH(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
                                << ": " << left_conflict;
                 }
                 else
                 {
-                    LOG(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
+                    LOG_HOT_PATH(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
                                << " by lower bound " << left_lb;
                 }
                 // Left branch failed, backtrack in place to parent node
