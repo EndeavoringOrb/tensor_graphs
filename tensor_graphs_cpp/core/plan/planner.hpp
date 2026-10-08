@@ -2144,12 +2144,15 @@ struct Planner
         std::ofstream cycleLogBeforeClean("egraph_cycles0.txt", std::ios::out | std::ios::trunc);
         std::ofstream cycleLogAfterClean("egraph_cycles1.txt", std::ios::out | std::ios::trunc);
         std::ofstream cycleLogAfterClean2("egraph_cycles2.txt", std::ios::out | std::ios::trunc);
+        std::ofstream cycleLogAfterClean3("egraph_cycles3.txt", std::ios::out | std::ios::trunc);
         if (!cycleLogBeforeClean)
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles0.txt for cycle diagnostics.";
         if (!cycleLogAfterClean)
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles1.txt for cycle diagnostics.";
         if (!cycleLogAfterClean2)
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
+        if (!cycleLogAfterClean3)
+            LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles3.txt for cycle diagnostics.";
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
             bucket_states[b].rebuild(true);
@@ -2163,6 +2166,7 @@ struct Planner
             {
                 cycleLogBeforeClean << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n";
                 printEGraphCycles(bucket_states[b], cycleLogBeforeClean);
+                cycleLogBeforeClean.flush();
             }
 
             const uint32_t removed_self_references = removeDirectSelfReferenceENodes(bucket_states[b]);
@@ -2173,6 +2177,7 @@ struct Planner
                                    << "[Planner.planAll] Removed " << removed_self_references
                                    << " enode(s) with direct self-references.\n";
                 printEGraphCycles(bucket_states[b], cycleLogAfterClean);
+                cycleLogAfterClean.flush();
             }
 
             const uint32_t removed_single_ext = removeSingleExternalConnectionCycleENodes(bucket_states[b]);
@@ -2183,6 +2188,18 @@ struct Planner
                                     << "[Planner.planAll] Removed " << removed_single_ext
                                     << " enode(s) from single-external-connection cycles.\n";
                 printEGraphCycles(bucket_states[b], cycleLogAfterClean2);
+                cycleLogAfterClean2.flush();
+            }
+
+            const uint32_t removed_single_input = removeSingleExternalInputCycleENodes(bucket_states[b]);
+            const uint32_t post_pass3_cycles = countCyclicComponents(bucket_states[b]);
+            if (cycleLogAfterClean3)
+            {
+                cycleLogAfterClean3 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                                    << "[Planner.planAll] Removed " << removed_single_input
+                                    << " enode(s) from single-external-input cycles.\n";
+                printEGraphCycles(bucket_states[b], cycleLogAfterClean3);
+                cycleLogAfterClean3.flush();
             }
 
             LOG(INFO) << "[Planner.planAll] Bucket " << b << " cycle reduction:";
@@ -2193,6 +2210,9 @@ struct Planner
             LOG(INFO) << "  Pass 2 (single-external connection): " << post_pass1_cycles << " -> " << post_pass2_cycles
                       << " (-" << (post_pass1_cycles - post_pass2_cycles) << ", removed "
                       << removed_single_ext << " enodes)";
+            LOG(INFO) << "  Pass 3 (single-external input): " << post_pass2_cycles << " -> " << post_pass3_cycles
+                      << " (-" << (post_pass2_cycles - post_pass3_cycles) << ", removed "
+                      << removed_single_input << " enodes)";
         }
 
         if (settings.saturate_only)
