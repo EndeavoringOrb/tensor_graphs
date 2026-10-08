@@ -40,6 +40,8 @@ class SelectionChildrenPropagator : public Propagator
     }
 
   public:
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+
     std::string name() const override
     {
         return "SelectionChildrenPropagator";

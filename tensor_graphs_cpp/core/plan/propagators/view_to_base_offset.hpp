@@ -41,6 +41,8 @@ class ViewToBaseOffsetPropagator : public Propagator
     }
 
   public:
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::OFFSET); }
+
     std::string name() const override
     {
         return "ViewToBaseOffsetPropagator";

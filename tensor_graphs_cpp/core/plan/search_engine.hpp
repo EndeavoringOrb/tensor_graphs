@@ -42,6 +42,8 @@ class SearchEngine
     std::shared_ptr<Selector> selector;
     std::shared_ptr<Brancher> brancher;
     std::vector<std::unique_ptr<Propagator>> propagators;
+    std::vector<StartSelectionGuard> propagator_start_selection_guards;
+    std::array<std::vector<size_t>, 4> propagators_by_var_type;
 
     std::vector<std::shared_ptr<SearchNode>> all_nodes;
     uint32_t current_node_id = UINT32_MAX;
@@ -65,7 +67,15 @@ class SearchEngine
 
     void addPropagator(std::unique_ptr<Propagator> prop)
     {
+        const uint8_t type_mask = prop->interestedVarTypes();
+        const size_t prop_idx = propagators.size();
+        propagator_start_selection_guards.push_back(prop->startSelectionGuard());
         propagators.push_back(std::move(prop));
+        for (uint8_t type = 0; type < propagators_by_var_type.size(); ++type)
+        {
+            if ((type_mask & (1u << type)) != 0)
+                propagators_by_var_type[type].push_back(prop_idx);
+        }
 #ifdef TG_PROFILE
         propagator_timings.emplace_back();
 #endif
@@ -196,6 +206,7 @@ class SearchEngine
 
         enqueue(changed);
         state.consumeDirtyDomains(enqueue);
+        size_t worklist_scan = prop_worklist.size();
 
         size_t worklist_head = 0;
         auto preservePendingWork = [&]() {
@@ -208,25 +219,89 @@ class SearchEngine
             const VarId next_changed = prop_worklist[worklist_head++];
             prop_queued_epoch[next_changed] = 0;
 
-            for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
+            const bool initial_propagation = next_changed == kInvalidVarId;
+            const std::vector<size_t> *typed_propagators = initial_propagation
+                                                               ? nullptr
+                                                               : &propagators_by_var_type[static_cast<uint8_t>(
+                                                                     state.var_infos[next_changed].type)];
+            const size_t propagator_count = initial_propagation ? propagators.size() : typed_propagators->size();
+            for (size_t prop_iter = 0; prop_iter < propagator_count; ++prop_iter)
             {
+                const size_t prop_idx = initial_propagation ? prop_iter : (*typed_propagators)[prop_iter];
+                if (next_changed != kInvalidVarId &&
+                    state.var_infos[next_changed].type == VarType::START)
+                {
+                    const StartSelectionGuard guard = propagator_start_selection_guards[prop_idx];
+                    if (guard != StartSelectionGuard::NONE)
+                    {
+                        const Domain &selection = state.domains[state.var_infos[next_changed].selection_var];
+                        const bool non_optional_guard =
+                            guard == StartSelectionGuard::NON_OPTIONAL ||
+                            guard == StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS ||
+                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS;
+                        const bool fixed_positive_guard =
+                            guard == StartSelectionGuard::FIXED_POSITIVE ||
+                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS;
+                        if ((non_optional_guard && selection.contains(0)) ||
+                            (fixed_positive_guard && (!selection.isFixed() || selection.fixedValue() <= 0)))
+                            continue;
+
+                        const bool consumer_guard =
+                            guard == StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS ||
+                            guard == StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS;
+                        if (consumer_guard)
+                        {
+                            const uint32_t bucket_idx = state.var_infos[next_changed].bucket_idx;
+                            const uint32_t cid = state.var_infos[next_changed].eclass_id.value;
+                            if (bucket_idx < state.propagation.start_precedence.size())
+                            {
+                                const auto &consumers_by_cid =
+                                    state.propagation.start_precedence[bucket_idx].consumers_by_cid;
+                                if (cid < consumers_by_cid.size() && consumers_by_cid[cid].empty())
+                                    continue;
+                            }
+                        }
+                    }
+                }
                 auto &prop = propagators[prop_idx];
 #ifdef TG_PROFILE
-                auto propagate_start = std::chrono::steady_clock::now();
+                auto &timing = propagator_timings[prop_idx];
+                const bool sample_propagator_timing = ((timing.propagate_calls + 1) % 16) == 0;
+                const auto propagate_start = sample_propagator_timing
+                                                 ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
 #endif
                 bool propagated = prop->propagate(state, next_changed, prop_worklist);
+                // Propagators append directly to the shared worklist. Coalesce
+                // duplicate pending variables before running the next item;
+                // every queued variable already exposes its latest domain.
+                size_t worklist_write = worklist_scan;
+                for (size_t worklist_read = worklist_scan; worklist_read < prop_worklist.size(); ++worklist_read)
+                {
+                    const VarId queued_var = prop_worklist[worklist_read];
+                    if (queued_var == kInvalidVarId || queued_var >= prop_queued_epoch.size() ||
+                        prop_queued_epoch[queued_var] == current_prop_epoch)
+                        continue;
+                    prop_queued_epoch[queued_var] = current_prop_epoch;
+                    prop_worklist[worklist_write++] = queued_var;
+                }
+                prop_worklist.resize(worklist_write);
+                worklist_scan = worklist_write;
 #ifdef TG_PROFILE
-                const uint64_t propagate_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - propagate_start)
-                        .count());
-                auto &timing = propagator_timings[prop_idx];
                 timing.propagate_calls++;
-                timing.propagate_ns += propagate_ns;
-                timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
+                if (sample_propagator_timing)
+                {
+                    const uint64_t propagate_ns = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - propagate_start)
+                            .count());
+                    const uint64_t estimated_propagate_ns = propagate_ns * 16;
+                    timing.propagate_ns += estimated_propagate_ns;
+                    timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
+                    prop_and_lb_ns_in_call += estimated_propagate_ns;
+                }
                 if (!propagated)
                     timing.contradictions++;
-                prop_and_lb_ns_in_call += propagate_ns;
 #endif
                 if (!propagated)
                 {
@@ -257,6 +332,7 @@ class SearchEngine
                     return false;
                 }
                 state.consumeDirtyDomains(enqueue);
+                worklist_scan = prop_worklist.size();
             }
         }
 
@@ -719,6 +795,39 @@ class SearchEngine
                   << search_elapsed_seconds << "s ("
                   << all_nodes.size() << " total nodes generated). Best cost: "
                   << (incumbent_best_cost < TGConstants::INF ? std::to_string(incumbent_best_cost) : "none");
+
+#ifdef TG_PROFILE
+        LOG(INFO) << "[SearchEngine profile] branch=" << search_timing.choose_branch_ns / 1.0e9
+                  << "s restore=" << search_timing.restore_node_ns / 1.0e9
+                  << "s propagation-overhead=" << search_timing.run_prop_overhead_ns / 1.0e9
+                  << "s leaf-evaluation=" << search_timing.leaf_eval_ns / 1.0e9
+                  << "s queue-push=" << search_timing.queue_push_ns / 1.0e9
+                  << "s queue-pop=" << search_timing.queue_pop_ns / 1.0e9 << "s";
+        for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
+        {
+            const auto &timing = propagator_timings[prop_idx];
+            LOG(INFO) << "[SearchEngine profile] propagator=" << propagators[prop_idx]->name()
+                      << " calls=" << timing.propagate_calls
+                      << " total=" << timing.propagate_ns / 1.0e9
+                      << "s max=" << timing.max_propagate_ns / 1.0e6 << "ms"
+                      << " contradictions=" << timing.contradictions;
+            if (auto *memory_prop = dynamic_cast<MemoryNoOverlapPropagator *>(propagators[prop_idx].get()))
+            {
+                LOG(INFO) << "[SearchEngine profile] memory-no-overlap parts: fixed-offset-start="
+                          << memory_prop->fixedOffsetProfileNs() / 1.0e9
+                          << "s write-after-read="
+                          << memory_prop->writeAfterReadProfileNs() / 1.0e9 << "s";
+                LOG(INFO) << "[SearchEngine profile] write-after-read paths: fixed-offset="
+                          << memory_prop->writeAfterReadFixedOffsetProfileNs() / 1.0e9
+                          << "s ranged-offset="
+                          << memory_prop->writeAfterReadRangedOffsetProfileNs() / 1.0e9
+                          << "s start="
+                          << memory_prop->writeAfterReadStartProfileNs() / 1.0e9
+                          << "s initial="
+                          << memory_prop->writeAfterReadInitialProfileNs() / 1.0e9 << "s";
+            }
+        }
+#endif
 
         return incumbent_best_cost < TGConstants::INF;
     }

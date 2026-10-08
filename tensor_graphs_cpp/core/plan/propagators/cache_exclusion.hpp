@@ -46,6 +46,8 @@ class CacheExclusionPropagator : public Propagator
     }
 
   public:
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::CACHED); }
+
     std::string name() const override
     {
         return "CacheExclusionPropagator";

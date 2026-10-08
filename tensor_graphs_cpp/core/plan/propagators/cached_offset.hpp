@@ -50,6 +50,11 @@ class CachedOffsetPropagator : public Propagator
     }
 
   public:
+    uint8_t interestedVarTypes() const override
+    {
+        return varTypeMask(VarType::CACHED) | varTypeMask(VarType::OFFSET);
+    }
+
     std::string name() const override
     {
         return "CachedOffsetPropagator";

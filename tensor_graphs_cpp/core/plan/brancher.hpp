@@ -270,6 +270,8 @@ class HeuristicBrancher : public Brancher
     mutable std::vector<uint32_t> sched_child_seen_epoch;
     mutable uint32_t current_sched_child_seen_epoch = 1;
     mutable uint64_t cached_selection_revision = UINT64_MAX;
+    mutable uint64_t required_selection_scan_revision = UINT64_MAX;
+    mutable uint64_t optional_selection_scan_revision = UINT64_MAX;
     mutable std::vector<std::vector<EClassId>> cached_sched_topo_orders;
     mutable std::vector<bool> cached_sched_topo_valid;
     mutable std::vector<size_t> sched_start_cursors;
@@ -539,6 +541,13 @@ class HeuristicBrancher : public Brancher
     bool chooseSelection(const SearchState &state, BranchDecision &out_decision,
                          bool required_only) const
     {
+        uint64_t &checked_revision = required_only
+                                         ? required_selection_scan_revision
+                                         : optional_selection_scan_revision;
+        const uint64_t selection_revision = state.getSelectionRevision();
+        if (checked_revision == selection_revision)
+            return false;
+
         static const std::vector<EClassId> empty_cids;
         VarId best_var = kInvalidVarId;
         uint32_t best_bucket = 0;
@@ -574,7 +583,10 @@ class HeuristicBrancher : public Brancher
         }
 
         if (best_var == kInvalidVarId)
+        {
+            checked_revision = selection_revision;
             return false;
+        }
 
         const Domain &domain = state.domains[best_var];
         int32_t preferred = required_only ? preferredENode(state, best_bucket, best_cid, domain) : 0;

@@ -21,11 +21,31 @@
 namespace plan
 {
 
+constexpr uint8_t varTypeMask(VarType type)
+{
+    return static_cast<uint8_t>(1u << static_cast<uint8_t>(type));
+}
+
+constexpr uint8_t kAllVarTypesMask =
+    varTypeMask(VarType::CACHED) | varTypeMask(VarType::SELECTED) |
+    varTypeMask(VarType::START) | varTypeMask(VarType::OFFSET);
+
+enum class StartSelectionGuard : uint8_t
+{
+    NONE,
+    NON_OPTIONAL,
+    FIXED_POSITIVE,
+    NON_OPTIONAL_WITH_CONSUMERS,
+    FIXED_NON_OPTIONAL_WITH_CONSUMERS
+};
+
 class Propagator
 {
   public:
     virtual ~Propagator() = default;
     virtual std::string name() const = 0;
+    virtual uint8_t interestedVarTypes() const { return kAllVarTypesMask; }
+    virtual StartSelectionGuard startSelectionGuard() const { return StartSelectionGuard::NONE; }
 
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;

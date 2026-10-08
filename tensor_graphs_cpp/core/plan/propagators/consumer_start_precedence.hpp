@@ -40,7 +40,7 @@ class ConsumerStartPrecedencePropagator : public Propagator
             for (const auto &consumer : consumers)
             {
                 const VarId p_sel_v = consumer.selection_var;
-                Domain p_sel_dom = state.domains[p_sel_v];
+                const Domain &p_sel_dom = state.domains[p_sel_v];
                 if (p_sel_dom.isFixed() && p_sel_dom.fixedValue() == 0)
                     continue;
 
@@ -50,17 +50,18 @@ class ConsumerStartPrecedencePropagator : public Propagator
 
                 if (cannot_start)
                 {
+                    Domain updated_selection = p_sel_dom;
                     bool domain_changed = false;
-                    if (p_sel_dom.is_mask && p_sel_dom.min_val == 0 && consumer.total_enodes <= 31)
+                    if (updated_selection.is_mask && updated_selection.min_val == 0 && consumer.total_enodes <= 31)
                     {
-                        const uint32_t cand_bits = p_sel_dom.mask >> 1;
+                        const uint32_t cand_bits = updated_selection.mask >> 1;
                         const uint32_t remove_bits = cand_bits & consumer.dep_mask;
                         if (remove_bits != 0)
                         {
-                            if (p_sel_dom.isFixed())
+                            if (updated_selection.isFixed())
                                 return false;
-                            p_sel_dom.mask &= ~(remove_bits << 1);
-                            if (p_sel_dom.mask == 0)
+                            updated_selection.mask &= ~(remove_bits << 1);
+                            if (updated_selection.mask == 0)
                                 return false;
                             domain_changed = true;
                         }
@@ -70,12 +71,12 @@ class ConsumerStartPrecedencePropagator : public Propagator
                         for (uint32_t dep_idx : consumer.dep_indices)
                         {
                             const int32_t sel_val = static_cast<int32_t>(dep_idx + 1);
-                            if (p_sel_dom.contains(sel_val))
+                            if (updated_selection.contains(sel_val))
                             {
-                                if (p_sel_dom.isFixed())
+                                if (updated_selection.isFixed())
                                     return false;
-                                p_sel_dom.remove(sel_val);
-                                if (p_sel_dom.isEmpty())
+                                updated_selection.remove(sel_val);
+                                if (updated_selection.isEmpty())
                                     return false;
                                 domain_changed = true;
                             }
@@ -83,7 +84,7 @@ class ConsumerStartPrecedencePropagator : public Propagator
                     }
                     if (domain_changed)
                     {
-                        state.setDomain(p_sel_v, p_sel_dom);
+                        state.setDomain(p_sel_v, updated_selection);
                     }
                 }
                 else
@@ -166,6 +167,13 @@ class ConsumerStartPrecedencePropagator : public Propagator
     {
     }
 
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
+    StartSelectionGuard startSelectionGuard() const override
+    {
+        return fixed_starts_only ? StartSelectionGuard::FIXED_NON_OPTIONAL_WITH_CONSUMERS
+                                 : StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS;
+    }
+
     std::string name() const override
     {
         return "ConsumerStartPrecedencePropagator";
@@ -173,7 +181,6 @@ class ConsumerStartPrecedencePropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
             if (state.var_infos[changed].type != VarType::START)
@@ -200,6 +207,7 @@ class ConsumerStartPrecedencePropagator : public Propagator
         }
         else
         {
+            state.ensurePropagationState();
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 for (const auto &pair : state.selected_vars[b])

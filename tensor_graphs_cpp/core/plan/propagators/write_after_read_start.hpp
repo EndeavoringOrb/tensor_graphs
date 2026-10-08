@@ -190,6 +190,8 @@ class WriteAfterReadStartPropagator : public Propagator
     }
 
   public:
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
+
     std::string name() const override
     {
         return "WriteAfterReadStartPropagator";

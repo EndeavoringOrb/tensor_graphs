@@ -14,6 +14,8 @@ class SelectionReachabilityPropagator : public Propagator
   public:
     explicit SelectionReachabilityPropagator(bool is_dag = false) : is_dag_(is_dag) {}
 
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+
     std::string name() const override
     {
         return "SelectionReachabilityPropagator";

@@ -73,6 +73,8 @@ class StartPrecedencePropagator : public Propagator
     {
     }
 
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+
     std::string name() const override
     {
         return "StartPrecedencePropagator";

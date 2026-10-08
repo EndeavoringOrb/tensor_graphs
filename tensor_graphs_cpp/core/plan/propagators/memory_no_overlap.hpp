@@ -1,6 +1,8 @@
 // tensor_graphs_cpp/core/plan/propagators/memory_no_overlap.hpp
 #pragma once
 
+#include <chrono>
+
 #include "core/plan/propagators/base.hpp"
 
 namespace plan
@@ -8,6 +10,13 @@ namespace plan
 
 class WriteAfterReadPropagator : public Propagator
 {
+#ifdef TG_PROFILE
+    uint64_t fixed_offset_profile_ns_ = 0;
+    uint64_t ranged_offset_profile_ns_ = 0;
+    uint64_t start_profile_ns_ = 0;
+    uint64_t initial_profile_ns_ = 0;
+#endif
+
   public:
     struct FixedAlloc
     {
@@ -152,6 +161,7 @@ class WriteAfterReadPropagator : public Propagator
                     info.is_root = false;
                     info.view_parent = EClassId{UINT32_MAX};
                     info.base_cid = EClassId{UINT32_MAX};
+                    info.start_min = -1;
                     info.start_max = -1;
                     info.max_reader_start_max = -1;
                     info.readers.clear();
@@ -222,10 +232,14 @@ class WriteAfterReadPropagator : public Propagator
                 info.view_parent = EClassId{UINT32_MAX};
             }
 
+            info.start_min = -1;
             info.start_max = -1;
             auto st_it = state.start_vars[b].find(cid);
             if (st_it != state.start_vars[b].end())
+            {
+                info.start_min = state.domains[st_it->second].getMin();
                 info.start_max = state.domains[st_it->second].getMax();
+            }
 
             info.max_reader_start_max = -1;
             info.readers.clear();
@@ -273,7 +287,10 @@ class WriteAfterReadPropagator : public Propagator
                 {
                     touched_cids.push_back(cand);
                 }
+                class_info[cand.value].start_min = -1;
                 class_info[cand.value].start_max = cand_st_max;
+                if (st_it != state.start_vars[b].end())
+                    class_info[cand.value].start_min = state.domains[st_it->second].getMin();
             }
 
             const EClass &cls = state.bucket_egraphs[b].getEClass(cand);
@@ -503,14 +520,48 @@ class WriteAfterReadPropagator : public Propagator
         schedule.dirty = false;
     }
 
-    static void buildFixedOffsetIndex(const SearchState &state, uint32_t b)
+    static void buildFixedOffsetIndex(const SearchState &state, uint32_t b, VarId changed)
     {
+        using FixedOffsetAllocation = PropagationState::WriteAfterReadBucket::FixedOffsetAllocation;
         auto &schedule = state.propagation.write_after_read[b];
-        if (!schedule.spatial_dirty)
+        const bool rebuild = !schedule.fixed_offset_index_initialized ||
+                             schedule.fixed_offset_structure_dirty;
+        if (!rebuild && changed < state.var_infos.size() &&
+            state.var_infos[changed].type == VarType::OFFSET)
+        {
+            auto old_key = schedule.fixed_offset_keys_by_var.find(changed);
+            if (old_key != schedule.fixed_offset_keys_by_var.end())
+            {
+                auto old_space = schedule.fixed_offset_allocations.find(old_key->second.first);
+                if (old_space != schedule.fixed_offset_allocations.end())
+                    old_space->second.erase(old_key->second.second);
+                schedule.fixed_offset_keys_by_var.erase(old_key);
+            }
+
+            const VarInfo &info = state.var_infos[changed];
+            FixedAlloc alloc;
+            if (getAlloc(state, info.bucket_idx, info.eclass_id, alloc,
+                         /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
+            {
+                const std::pair<uint32_t, uint32_t> key{alloc.offset, alloc.cid.value};
+                auto &entries = schedule.fixed_offset_allocations[alloc.mem_space];
+                entries.emplace(key, FixedOffsetAllocation{
+                                         alloc.cid, alloc.mem_space, alloc.offset,
+                                         static_cast<uint64_t>(alloc.offset) + alloc.size,
+                                         alloc.size, alloc.en_idx, alloc.en_id, alloc.start_var,
+                                         alloc.offset_var, alloc.is_view,
+                                         alloc.is_input_or_cache, alloc.is_root});
+                schedule.fixed_offset_keys_by_var[changed] = {alloc.mem_space, key};
+                auto &max_size = schedule.max_fixed_allocation_size[alloc.mem_space];
+                max_size = std::max(max_size, alloc.size);
+            }
+            schedule.spatial_dirty = false;
             return;
+        }
 
         for (auto &space_entries : schedule.fixed_offset_allocations)
             space_entries.second.clear();
+        schedule.fixed_offset_keys_by_var.clear();
         schedule.max_fixed_allocation_size.clear();
         for (const auto &pair : state.selected_vars[b])
         {
@@ -519,23 +570,21 @@ class WriteAfterReadPropagator : public Propagator
                           /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
                 continue;
 
+            const std::pair<uint32_t, uint32_t> key{alloc.offset, alloc.cid.value};
             auto &entries = schedule.fixed_offset_allocations[alloc.mem_space];
-            entries.push_back({alloc.cid, alloc.mem_space, alloc.offset,
-                               static_cast<uint64_t>(alloc.offset) + alloc.size,
-                               alloc.size, alloc.en_idx, alloc.en_id, alloc.start_var,
-                               alloc.offset_var, alloc.is_view,
-                               alloc.is_input_or_cache, alloc.is_root});
+            entries.emplace(key, FixedOffsetAllocation{
+                                     alloc.cid, alloc.mem_space, alloc.offset,
+                                     static_cast<uint64_t>(alloc.offset) + alloc.size,
+                                     alloc.size, alloc.en_idx, alloc.en_id, alloc.start_var,
+                                     alloc.offset_var, alloc.is_view,
+                                     alloc.is_input_or_cache, alloc.is_root});
+            schedule.fixed_offset_keys_by_var[alloc.offset_var] = {alloc.mem_space, key};
             auto &max_size = schedule.max_fixed_allocation_size[alloc.mem_space];
             max_size = std::max(max_size, alloc.size);
         }
 
-        for (auto &space_entries : schedule.fixed_offset_allocations)
-        {
-            auto &entries = space_entries.second;
-            std::sort(entries.begin(), entries.end(), [](const auto &lhs, const auto &rhs) {
-                return (lhs.offset != rhs.offset) ? lhs.offset < rhs.offset : lhs.cid.value < rhs.cid.value;
-            });
-        }
+        schedule.fixed_offset_index_initialized = true;
+        schedule.fixed_offset_structure_dirty = false;
         schedule.spatial_dirty = false;
     }
 
@@ -546,18 +595,14 @@ class WriteAfterReadPropagator : public Propagator
             return true;
         const auto &a_info = class_info[a_cid.value];
         const auto &c_info = class_info[c_cid.value];
-        const auto a_st_it = state.start_vars[b].find(a_cid);
-        const auto c_st_it = state.start_vars[b].find(c_cid);
-        const bool a_fixed = a_st_it != state.start_vars[b].end() &&
-                             state.domains[a_st_it->second].isFixed();
-        const bool c_fixed = c_st_it != state.start_vars[b].end() &&
-                             state.domains[c_st_it->second].isFixed();
+        const bool a_fixed = a_info.start_min >= 0 && a_info.start_min == a_info.start_max;
+        const bool c_fixed = c_info.start_min >= 0 && c_info.start_min == c_info.start_max;
         if (!a_fixed || !c_fixed || a_info.is_input_or_cache || a_info.is_root ||
             c_info.is_input_or_cache || c_info.is_root)
             return true;
 
-        const int32_t a_start = state.domains[a_st_it->second].fixedValue();
-        const int32_t c_start = state.domains[c_st_it->second].fixedValue();
+        const int32_t a_start = a_info.start_min;
+        const int32_t c_start = c_info.start_min;
         if (a_start == c_start)
             return true;
         if (a_start < c_start)
@@ -879,6 +924,29 @@ class WriteAfterReadPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+#ifdef TG_PROFILE
+        uint64_t *profile_ns = &initial_profile_ns_;
+        if (changed != kInvalidVarId && changed < state.var_infos.size())
+        {
+            const VarInfo &info = state.var_infos[changed];
+            if (info.type == VarType::OFFSET)
+                profile_ns = state.domains[changed].isFixed()
+                                 ? &fixed_offset_profile_ns_
+                                 : &ranged_offset_profile_ns_;
+            else if (info.type == VarType::START)
+                profile_ns = &start_profile_ns_;
+        }
+        struct ProfileScope
+        {
+            uint64_t &total_ns;
+            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            ~ProfileScope()
+            {
+                total_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start).count());
+            }
+        } profile_scope{*profile_ns};
+#endif
         state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
@@ -898,67 +966,118 @@ class WriteAfterReadPropagator : public Propagator
             buildBucketInfo(state, b);
             const auto &temporal_overlaps = state.propagation.write_after_read[b].temporal_overlaps;
 
-            bool pushed = true;
-            while (pushed)
+            if (curr_offset_fixed)
             {
-                pushed = false;
-                for (EClassId other_cid : temporal_overlaps[cid.value])
+                auto fixed_space = state.propagation.write_after_read[b].fixed_offset_allocations.find(curr.mem_space);
+                if (fixed_space != state.propagation.write_after_read[b].fixed_offset_allocations.end())
                 {
-                    if (other_cid == cid)
-                        continue;
-                    FixedAlloc other;
-                    if (!getAlloc(state, b, other_cid, other, /*require_fixed_offset=*/true))
-                        continue;
-                    if (curr.mem_space != other.mem_space)
-                        continue;
+                    const auto &fixed_allocations = fixed_space->second;
+                    const uint32_t max_size = state.propagation.write_after_read[b]
+                                                  .max_fixed_allocation_size[curr.mem_space];
+                    const uint32_t first_offset = curr.offset >= max_size
+                                                      ? curr.offset - max_size + 1
+                                                      : 0;
+                    const uint64_t curr_end = static_cast<uint64_t>(curr.offset) + curr.size;
+                    auto candidate_it = fixed_allocations.lower_bound({first_offset, 0});
+                    for (; candidate_it != fixed_allocations.end() &&
+                           candidate_it->first.first < curr_end; ++candidate_it)
+                    {
+                        const auto &indexed_other = candidate_it->second;
+                        const EClassId other_cid = indexed_other.cid;
+                        if (other_cid == cid || !mayOverlapInTime(state, b, cid, other_cid))
+                            continue;
+                        FixedAlloc other;
+                        other.cid = indexed_other.cid;
+                        other.bucket_idx = b;
+                        other.mem_space = indexed_other.mem_space;
+                        other.offset = indexed_other.offset;
+                        other.size = indexed_other.size;
+                        other.start = state.domains[indexed_other.start_var].getMin();
+                        other.en_idx = indexed_other.en_idx;
+                        other.en_id = indexed_other.en_id;
+                        other.start_var = indexed_other.start_var;
+                        other.offset_var = indexed_other.offset_var;
+                        other.is_view = indexed_other.is_view;
+                        other.is_input_or_cache = indexed_other.is_input_or_cache;
+                        other.is_root = indexed_other.is_root;
+                        if (std::max(curr.offset, other.offset) >=
+                            std::min(curr.offset + curr.size, other.offset + other.size))
+                            continue;
 
-                    if (!canShare(state, curr, other))
-                    {
-                        if (!enforceDisjoint(state, other, curr, worklist, pushed))
-                            return false;
-                        if (pushed)
-                            break;
-                    }
-                    else if (curr_offset_fixed)
-                    {
-                        if (std::max(curr.offset, other.offset) < std::min(curr.offset + curr.size, other.offset + other.size))
+                        bool pushed = false;
+                        if (!canShare(state, curr, other))
                         {
-                            if (!checkPair(state, curr, other, worklist))
+                            if (!enforceDisjoint(state, other, curr, worklist, pushed))
                                 return false;
+                        }
+                        else if (!checkPair(state, curr, other, worklist))
+                        {
+                            return false;
                         }
                     }
                 }
             }
-
-            if (curr_offset_fixed)
+            else
             {
-                for (EClassId other_cid : temporal_overlaps[cid.value])
+                bool pushed = true;
+                while (pushed)
                 {
-                    if (other_cid == cid)
-                        continue;
-                    FixedAlloc other;
-                    if (!getAlloc(state, b, other_cid, other, /*require_fixed_offset=*/false))
-                        continue;
-                    if (curr.mem_space != other.mem_space)
-                        continue;
-
-                    bool other_offset_fixed = state.domains[other.offset_var].isFixed();
-                    if (!other_offset_fixed)
+                    pushed = false;
+                    auto fixed_space = state.propagation.write_after_read[b].fixed_offset_allocations.find(curr.mem_space);
+                    if (fixed_space == state.propagation.write_after_read[b].fixed_offset_allocations.end())
+                        break;
+                    const auto &fixed_allocations = fixed_space->second;
+                    const uint32_t max_size = state.propagation.write_after_read[b]
+                                                  .max_fixed_allocation_size[curr.mem_space];
+                    const Domain &curr_offset_domain = state.domains[curr.offset_var];
+                    const uint32_t domain_min = static_cast<uint32_t>(curr_offset_domain.getMin());
+                    const uint32_t first_offset = domain_min >= max_size
+                                                      ? domain_min - max_size + 1
+                                                      : 0;
+                    const uint64_t domain_end = static_cast<uint64_t>(curr_offset_domain.getMax()) + curr.size;
+                    auto candidate_it = fixed_allocations.lower_bound({first_offset, 0});
+                    for (; candidate_it != fixed_allocations.end() &&
+                           candidate_it->first.first < domain_end; ++candidate_it)
                     {
-                        // Memory domain filter: if other is already placed after curr in memory
-                        const Domain &other_dom = state.domains[other.offset_var];
-                        if (other_dom.getMin() >= static_cast<int32_t>(curr.offset + curr.size))
+                        const auto &indexed_other = candidate_it->second;
+                        const EClassId other_cid = indexed_other.cid;
+                        if (other_cid == cid || !mayOverlapInTime(state, b, cid, other_cid))
+                            continue;
+                        FixedAlloc other;
+                        other.cid = indexed_other.cid;
+                        other.bucket_idx = b;
+                        other.mem_space = indexed_other.mem_space;
+                        other.offset = indexed_other.offset;
+                        other.size = indexed_other.size;
+                        other.start = state.domains[indexed_other.start_var].getMin();
+                        other.en_idx = indexed_other.en_idx;
+                        other.en_id = indexed_other.en_id;
+                        other.start_var = indexed_other.start_var;
+                        other.offset_var = indexed_other.offset_var;
+                        other.is_view = indexed_other.is_view;
+                        other.is_input_or_cache = indexed_other.is_input_or_cache;
+                        other.is_root = indexed_other.is_root;
+
+                        const int64_t before_threshold = static_cast<int64_t>(other.offset) - curr.size;
+                        const uint64_t after_threshold = static_cast<uint64_t>(other.offset) + other.size;
+                        if (static_cast<uint64_t>(curr_offset_domain.getMin()) >= after_threshold ||
+                            curr_offset_domain.getMax() <= before_threshold)
                             continue;
 
                         if (!canShare(state, curr, other))
                         {
-                            bool other_pushed = false;
-                            if (!enforceDisjoint(state, curr, other, worklist, other_pushed))
+                            if (!enforceDisjoint(state, other, curr, worklist, pushed))
                                 return false;
+                            if (pushed)
+                                break;
                         }
                     }
                 }
             }
+
+            // Unfixed offsets are not forward-pruned here. The brancher chooses
+            // each later offset against the fixed allocations, and this
+            // propagator checks the pair when that offset becomes fixed.
         }
         else
         {
@@ -1021,6 +1140,13 @@ class WriteAfterReadPropagator : public Propagator
         }
         return true;
     }
+
+#ifdef TG_PROFILE
+    uint64_t fixedOffsetProfileNs() const { return fixed_offset_profile_ns_; }
+    uint64_t rangedOffsetProfileNs() const { return ranged_offset_profile_ns_; }
+    uint64_t startProfileNs() const { return start_profile_ns_; }
+    uint64_t initialProfileNs() const { return initial_profile_ns_; }
+#endif
 };
 
 // FixedOffsetStartPropagator: see docs/core/propagators.md.
@@ -1467,12 +1593,16 @@ class FixedOffsetStartPropagator : public Propagator
             if (info.type != VarType::OFFSET && info.type != VarType::START)
                 return true;
 
+            uint32_t b = info.bucket_idx;
+            EClassId cid = info.eclass_id;
+            if (info.type == VarType::OFFSET ||
+                !state.propagation.write_after_read[b].fixed_offset_index_initialized ||
+                state.propagation.write_after_read[b].fixed_offset_structure_dirty)
+                WriteAfterReadPropagator::buildFixedOffsetIndex(state, b, changed);
+
             // If offset changed, it must be fixed to establish memory footprint
             if (info.type == VarType::OFFSET && !state.domains[changed].isFixed())
                 return true;
-
-            uint32_t b = info.bucket_idx;
-            EClassId cid = info.eclass_id;
 
             // Eclass must have fixed offset to establish memory footprint
             auto off_it = state.offset_vars[b].find(cid);
@@ -1484,7 +1614,6 @@ class FixedOffsetStartPropagator : public Propagator
                 return true;
 
             WriteAfterReadPropagator::buildBucketInfo(state, b);
-            WriteAfterReadPropagator::buildFixedOffsetIndex(state, b);
             auto &schedule = state.propagation.write_after_read[b];
             auto space_it = schedule.fixed_offset_allocations.find(curr.mem_space);
             if (space_it == schedule.fixed_offset_allocations.end())
@@ -1495,15 +1624,13 @@ class FixedOffsetStartPropagator : public Propagator
                                                        ? static_cast<uint64_t>(curr.offset) - max_size + 1
                                                        : 0;
             const uint64_t curr_end = static_cast<uint64_t>(curr.offset) + curr.size;
-            auto candidate_it = std::lower_bound(candidates.begin(), candidates.end(), first_possible_offset,
-                                                 [](const auto &candidate, uint64_t offset) {
-                                                     return candidate.offset < offset;
-                                                 });
+            auto candidate_it = candidates.lower_bound(
+                {static_cast<uint32_t>(first_possible_offset), 0});
 
             bool curr_start_fixed = state.domains[curr.start_var].isFixed();
-            for (; candidate_it != candidates.end() && candidate_it->offset < curr_end; ++candidate_it)
+            for (; candidate_it != candidates.end() && candidate_it->first.first < curr_end; ++candidate_it)
             {
-                const auto &candidate = *candidate_it;
+                const auto &candidate = candidate_it->second;
                 if (candidate.cid == cid || candidate.end <= curr.offset)
                     continue;
                 if (!WriteAfterReadPropagator::mayOverlapInTime(state, b, cid, candidate.cid))
@@ -1633,8 +1760,17 @@ class MemoryNoOverlapPropagator : public Propagator
 {
     FixedOffsetStartPropagator fixed_offset_prop_;
     WriteAfterReadPropagator write_after_read_prop_;
+#ifdef TG_PROFILE
+    uint64_t fixed_offset_ns_ = 0;
+    uint64_t write_after_read_ns_ = 0;
+#endif
 
   public:
+    uint8_t interestedVarTypes() const override
+    {
+        return varTypeMask(VarType::START) | varTypeMask(VarType::OFFSET);
+    }
+
     std::string name() const override
     {
         return "MemoryNoOverlapPropagator";
@@ -1642,12 +1778,58 @@ class MemoryNoOverlapPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        if (changed != kInvalidVarId)
+        {
+            const VarInfo &info = state.var_infos[changed];
+            if (info.type != VarType::OFFSET && info.type != VarType::START)
+                return true;
+            if (info.type == VarType::START)
+            {
+                auto offset_it = state.offset_vars[info.bucket_idx].find(info.eclass_id);
+                if (offset_it == state.offset_vars[info.bucket_idx].end() ||
+                    !state.domains[offset_it->second].isFixed())
+                return true;
+            }
+        }
+#ifdef TG_PROFILE
+        auto fixed_start = std::chrono::steady_clock::now();
+#endif
         if (!fixed_offset_prop_.propagate(state, changed, worklist))
+        {
+#ifdef TG_PROFILE
+            fixed_offset_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - fixed_start).count());
+#endif
             return false;
+        }
+#ifdef TG_PROFILE
+        fixed_offset_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - fixed_start).count());
+        auto write_after_read_start = std::chrono::steady_clock::now();
+#endif
         if (!write_after_read_prop_.propagate(state, changed, worklist))
+        {
+#ifdef TG_PROFILE
+            write_after_read_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - write_after_read_start).count());
+#endif
             return false;
+        }
+#ifdef TG_PROFILE
+        write_after_read_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - write_after_read_start).count());
+#endif
         return true;
     }
+
+#ifdef TG_PROFILE
+    uint64_t fixedOffsetProfileNs() const { return fixed_offset_ns_; }
+    uint64_t writeAfterReadProfileNs() const { return write_after_read_ns_; }
+    uint64_t writeAfterReadFixedOffsetProfileNs() const { return write_after_read_prop_.fixedOffsetProfileNs(); }
+    uint64_t writeAfterReadRangedOffsetProfileNs() const { return write_after_read_prop_.rangedOffsetProfileNs(); }
+    uint64_t writeAfterReadStartProfileNs() const { return write_after_read_prop_.startProfileNs(); }
+    uint64_t writeAfterReadInitialProfileNs() const { return write_after_read_prop_.initialProfileNs(); }
+#endif
 };
 
 } // namespace plan

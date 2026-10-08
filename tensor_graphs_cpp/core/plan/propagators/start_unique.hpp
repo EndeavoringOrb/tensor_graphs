@@ -37,6 +37,9 @@ class StartUniquePropagator : public Propagator
     }
 
   public:
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
+    StartSelectionGuard startSelectionGuard() const override { return StartSelectionGuard::FIXED_POSITIVE; }
+
     std::string name() const override
     {
         return "StartUniquePropagator";

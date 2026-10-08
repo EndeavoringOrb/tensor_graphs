@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -75,6 +76,7 @@ struct VarInfo
     std::string name;
     uint32_t bucket_idx = 0;
     EClassId eclass_id;
+    VarId selection_var = kInvalidVarId;
     BaseEClassId base_eclass_id;
     MemSpace mem_space;
     uint64_t size_bytes = 0;
@@ -547,6 +549,7 @@ struct PropagationState
         EClassId base_cid{UINT32_MAX};
         uint32_t en_idx = 0;
         ENodeId en_id{UINT32_MAX};
+        int32_t start_min = -1;
         int32_t start_max = -1;
         int32_t max_reader_start_max = -1;
         std::vector<EClassId> readers;
@@ -558,6 +561,8 @@ struct PropagationState
         bool dirty = true;
         bool structure_dirty = true;
         bool spatial_dirty = true;
+        bool fixed_offset_structure_dirty = true;
+        bool fixed_offset_index_initialized = false;
         std::vector<WriteAfterReadClassInfo> class_info;
         std::vector<std::vector<EClassId>> temporal_overlaps;
         std::vector<EClassId> active_cids;
@@ -580,7 +585,11 @@ struct PropagationState
             bool is_input_or_cache = false;
             bool is_root = false;
         };
-        std::unordered_map<MemSpace, std::vector<FixedOffsetAllocation>> fixed_offset_allocations;
+        std::unordered_map<MemSpace,
+                           std::map<std::pair<uint32_t, uint32_t>, FixedOffsetAllocation>>
+            fixed_offset_allocations;
+        std::unordered_map<VarId, std::pair<MemSpace, std::pair<uint32_t, uint32_t>>>
+            fixed_offset_keys_by_var;
         std::unordered_map<MemSpace, uint32_t> max_fixed_allocation_size;
     };
 
@@ -738,6 +747,7 @@ class SearchState
             write_after_read.dirty = true;
             write_after_read.structure_dirty = true;
             write_after_read.spatial_dirty = true;
+            write_after_read.fixed_offset_structure_dirty = true;
             write_after_read.dirty_start_cids.clear();
         }
         else if (info.type == VarType::START)
@@ -895,6 +905,7 @@ class SearchState
             st_info.type = VarType::START;
             st_info.bucket_idx = b;
             st_info.eclass_id = cid;
+            st_info.selection_var = sel_vid;
             st_info.name = "start_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
             VarId st_vid = addVar(st_info, Domain::makeRange(0, max_start));
