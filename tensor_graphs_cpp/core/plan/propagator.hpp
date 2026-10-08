@@ -61,9 +61,9 @@ class ViewOffsetPropagator : public Propagator
 // ============================================================================
 
 template <typename EngineT>
-inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false)
+inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false, bool is_dag = false)
 {
-    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(is_dag));
     engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     engine.addPropagator(std::make_unique<UnselectedStartOffsetPropagator>());
     engine.addPropagator(std::make_unique<CacheExclusionPropagator>());
@@ -94,9 +94,9 @@ inline void addExtraPropagators(EngineT &engine)
 }
 
 template <typename EngineT>
-inline void addAllPropagators(EngineT &engine, bool fixed_starts_only = false)
+inline void addAllPropagators(EngineT &engine, bool fixed_starts_only = false, bool is_dag = false)
 {
-    addBasePropagators(engine, fixed_starts_only);
+    addBasePropagators(engine, fixed_starts_only, is_dag);
     addExtraPropagators(engine);
 }
 

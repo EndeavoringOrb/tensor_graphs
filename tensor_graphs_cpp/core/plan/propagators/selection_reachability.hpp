@@ -9,10 +9,19 @@ namespace plan
 // SelectionReachabilityPropagator: see docs/core/propagators.md.
 class SelectionReachabilityPropagator : public Propagator
 {
+    bool is_dag_ = false;
+
   public:
+    explicit SelectionReachabilityPropagator(bool is_dag = false) : is_dag_(is_dag) {}
+
     std::string name() const override
     {
         return "SelectionReachabilityPropagator";
+    }
+
+    bool isDag() const
+    {
+        return is_dag_;
     }
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
@@ -22,7 +31,7 @@ class SelectionReachabilityPropagator : public Propagator
             if (state.var_infos[changed].type != VarType::SELECTED)
                 return true;
             std::vector<VarId> unreachable;
-            state.updateSelectionReachability(changed, unreachable);
+            state.updateSelectionReachability(changed, unreachable, is_dag_);
             for (VarId sel_v : unreachable)
             {
                 const Domain &sel_dom = state.domains[sel_v];
@@ -44,7 +53,7 @@ class SelectionReachabilityPropagator : public Propagator
                     continue;
                 VarId root_var = it->second;
                 std::vector<VarId> unreachable;
-                state.updateSelectionReachability(root_var, unreachable);
+                state.updateSelectionReachability(root_var, unreachable, is_dag_);
                 for (VarId sel_v : unreachable)
                 {
                     const Domain &sel_dom = state.domains[sel_v];

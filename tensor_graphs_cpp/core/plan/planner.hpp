@@ -2153,6 +2153,7 @@ struct Planner
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
         if (!cycleLogAfterClean3)
             LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles3.txt for cycle diagnostics.";
+        bool all_buckets_dag = true;
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
             bucket_states[b].rebuild(true);
@@ -2193,6 +2194,8 @@ struct Planner
 
             const uint32_t removed_single_input = removeSingleExternalInputCycleENodes(bucket_states[b]);
             const uint32_t post_pass3_cycles = countCyclicComponents(bucket_states[b]);
+            if (post_pass3_cycles > 0)
+                all_buckets_dag = false;
             if (cycleLogAfterClean3)
             {
                 cycleLogAfterClean3 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
@@ -2213,6 +2216,11 @@ struct Planner
             LOG(INFO) << "  Pass 3 (single-external input): " << post_pass2_cycles << " -> " << post_pass3_cycles
                       << " (-" << (post_pass2_cycles - post_pass3_cycles) << ", removed "
                       << removed_single_input << " enodes)";
+        }
+
+        if (all_buckets_dag)
+        {
+            LOG(INFO) << "[Planner.planAll] All buckets are acyclic (DAG). Enabling DAG-optimized reachability.";
         }
 
         if (settings.saturate_only)
@@ -2279,7 +2287,7 @@ struct Planner
         auto brancher_impl = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
         plan::SearchEngine engine(std::move(search_state), selector, brancher_impl);
-        plan::addAllPropagators(engine);
+        plan::addAllPropagators(engine, false, all_buckets_dag);
 
         LOG(DEBUG) << "[Planner.planAll] Launching SearchEngine solve (minCompileSeconds=" << minCompileSeconds << "s)...";
         bool solved = engine.solve(minCompileSeconds);

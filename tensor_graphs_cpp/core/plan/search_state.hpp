@@ -104,6 +104,7 @@ struct SelectionReachability
         bool queued = false;
         std::vector<uint32_t> incoming;
         std::vector<std::vector<uint32_t>> enode_edges;
+        uint32_t indegree = 0;
     };
 
     struct UndoEntry
@@ -122,6 +123,7 @@ struct SelectionReachability
     };
 
     bool initialized = false;
+    bool is_dag = false;
     uint32_t root = 0;
     std::unordered_map<VarId, uint32_t> node_indices;
     std::vector<Node> nodes;
@@ -132,11 +134,19 @@ struct SelectionReachability
     // Reused FIFO storage for update(). queued ensures at most one pending
     // entry per node, so this ring only needs one slot per node.
     std::vector<uint32_t> queue_buffer;
+    std::vector<uint32_t> dag_queue;
 
     void initialize(const EGraph &egraph, EClassId root_id,
                     const std::unordered_map<EClassId, VarId> &selected_vars,
-                    const std::vector<Domain> &domains, std::vector<VarId> &unreachable)
+                    const std::vector<Domain> &domains, std::vector<VarId> &unreachable,
+                    bool is_dag_mode = false)
     {
+        is_dag = is_dag_mode;
+        if (is_dag)
+        {
+            initializeDag(egraph, root_id, selected_vars, domains, unreachable);
+            return;
+        }
         const uint32_t infinity = static_cast<uint32_t>(selected_vars.size());
         for (const auto &[cid, var_id] : selected_vars)
         {
@@ -201,6 +211,77 @@ struct SelectionReachability
         initialized = true;
     }
 
+    void initializeDag(const EGraph &egraph, EClassId root_id,
+                       const std::unordered_map<EClassId, VarId> &selected_vars,
+                       const std::vector<Domain> &domains, std::vector<VarId> &unreachable)
+    {
+        for (const auto &[cid, var_id] : selected_vars)
+        {
+            node_indices.emplace(var_id, static_cast<uint32_t>(nodes.size()));
+            Node node;
+            node.var_id = var_id;
+            node.selection = domains[var_id];
+            node.level = 0;
+            node.indegree = 0;
+            nodes.push_back(std::move(node));
+        }
+        root = node_indices.at(selected_vars.at(root_id));
+        for (const auto &[cid, var_id] : selected_vars)
+        {
+            const uint32_t from = node_indices.at(var_id);
+            const EClass &cls = egraph.getEClass(cid);
+            nodes[from].enode_edges.resize(cls.enodes.size());
+            for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+            {
+                for (EClassId child : egraph.getENode(cls.enodes[en_idx]).getChildren())
+                {
+                    auto child_it = selected_vars.find(egraph.findConst(child));
+                    if (child_it == selected_vars.end())
+                        continue;
+                    const uint32_t to = node_indices.at(child_it->second);
+                    const uint32_t edge_id = static_cast<uint32_t>(edges.size());
+                    edges.push_back(Edge{from, to, false});
+                    nodes[from].enode_edges[en_idx].push_back(edge_id);
+                }
+            }
+        }
+
+        std::vector<bool> reachable(nodes.size(), false);
+        reachable[root] = true;
+        dag_queue.clear();
+        dag_queue.push_back(root);
+        for (size_t head = 0; head < dag_queue.size(); ++head)
+        {
+            const uint32_t from = dag_queue[head];
+            const Node &node = nodes[from];
+            for (uint32_t en_idx = 0; en_idx < node.enode_edges.size(); ++en_idx)
+            {
+                if (!node.selection.contains(static_cast<int32_t>(en_idx + 1)))
+                    continue;
+                for (uint32_t edge_id : node.enode_edges[en_idx])
+                {
+                    Edge &edge = edges[edge_id];
+                    edge.active = true;
+                    ++nodes[edge.to].indegree;
+                    if (!reachable[edge.to])
+                    {
+                        reachable[edge.to] = true;
+                        dag_queue.push_back(edge.to);
+                    }
+                }
+            }
+        }
+        for (uint32_t idx = 0; idx < nodes.size(); ++idx)
+        {
+            if (!reachable[idx])
+            {
+                unreachable.push_back(nodes[idx].var_id);
+            }
+        }
+        dag_queue.reserve(nodes.size());
+        initialized = true;
+    }
+
     bool supportsLevel(uint32_t edge_id, uint32_t level) const
     {
         const Edge &edge = edges[edge_id];
@@ -217,6 +298,11 @@ struct SelectionReachability
 
     void update(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable)
     {
+        if (is_dag)
+        {
+            updateDag(node_idx, selection, unreachable);
+            return;
+        }
         Node &changed = nodes[node_idx];
         ++current_undo_epoch;
         if (current_undo_epoch == 0)
@@ -305,6 +391,59 @@ struct SelectionReachability
         }
     }
 
+    void updateDag(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable)
+    {
+        Node &changed = nodes[node_idx];
+        undo.push_back(UndoEntry{UndoEntry::Kind::SELECTION, node_idx, changed.selection});
+        dag_queue.clear();
+        for (uint32_t en_idx = 0; en_idx < changed.enode_edges.size(); ++en_idx)
+        {
+            const int32_t value = static_cast<int32_t>(en_idx + 1);
+            assert(!selection.contains(value) || changed.selection.contains(value));
+            if (!changed.selection.contains(value) || selection.contains(value))
+                continue;
+            for (uint32_t edge_id : changed.enode_edges[en_idx])
+            {
+                if (!edges[edge_id].active)
+                    continue;
+                edges[edge_id].active = false;
+                undo.push_back(UndoEntry{UndoEntry::Kind::EDGE, edge_id, {}});
+                const uint32_t to = edges[edge_id].to;
+                assert(nodes[to].indegree > 0);
+                --nodes[to].indegree;
+                if (to != root && nodes[to].indegree == 0)
+                {
+                    unreachable.push_back(nodes[to].var_id);
+                    dag_queue.push_back(to);
+                }
+            }
+        }
+        changed.selection = selection;
+
+        for (size_t head = 0; head < dag_queue.size(); ++head)
+        {
+            const uint32_t curr = dag_queue[head];
+            for (const auto &enode_edges : nodes[curr].enode_edges)
+            {
+                for (uint32_t edge_id : enode_edges)
+                {
+                    if (!edges[edge_id].active)
+                        continue;
+                    edges[edge_id].active = false;
+                    undo.push_back(UndoEntry{UndoEntry::Kind::EDGE, edge_id, {}});
+                    const uint32_t to = edges[edge_id].to;
+                    assert(nodes[to].indegree > 0);
+                    --nodes[to].indegree;
+                    if (to != root && nodes[to].indegree == 0)
+                    {
+                        unreachable.push_back(nodes[to].var_id);
+                        dag_queue.push_back(to);
+                    }
+                }
+            }
+        }
+    }
+
     void backtrackTo(size_t marker)
     {
         while (undo.size() > marker)
@@ -317,6 +456,8 @@ struct SelectionReachability
                 break;
             case UndoEntry::Kind::EDGE:
                 edges[entry.index].active = true;
+                if (is_dag)
+                    ++nodes[edges[entry.index].to].indegree;
                 break;
             case UndoEntry::Kind::NODE:
                 nodes[entry.index].level = entry.level;
@@ -797,7 +938,7 @@ class SearchState
 
     // Called only for the changed SELECTED variable. The first call builds a
     // bucket once; later calls touch removed enodes and affected tree nodes.
-    void updateSelectionReachability(VarId changed, std::vector<VarId> &unreachable)
+    void updateSelectionReachability(VarId changed, std::vector<VarId> &unreachable, bool is_dag = false)
     {
         const uint32_t bucket_idx = var_infos[changed].bucket_idx;
         if (selection_reachability.size() < buckets.size())
@@ -807,7 +948,7 @@ class SearchState
         {
             trail.push_back(ReachabilityTrailEntry{bucket_idx, changed, 0, false});
             reachability.initialize(bucket_egraphs[bucket_idx], bucket_root_ids[bucket_idx],
-                                    selected_vars[bucket_idx], domains, unreachable);
+                                    selected_vars[bucket_idx], domains, unreachable, is_dag);
             return;
         }
         const uint32_t node_idx = reachability.node_indices.at(changed);

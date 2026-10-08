@@ -427,15 +427,170 @@ inline void testSearchNodeRestore()
     require(engine.restoreNode(sibling) && checkPropagation(engine), "Repeated sibling replay failed");
 }
 
+inline void testDagReachabilityBasic()
+{
+    // Diamond DAG: 0 -> 1 -> 3, 0 -> 2 -> 3, 0 -> {} (leaf alternative), 4 -> 5 (disconnected)
+    const GraphSpec spec = {
+        {{1}, {2}, {}}, // 0
+        {{3}},          // 1
+        {{3}},          // 2
+        {{}},           // 3
+        {{5}},          // 4
+        {{}}            // 5
+    };
+    SearchState state;
+    const auto vars = addBucket(state, spec);
+
+    SearchEngine engine(std::move(state));
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(true));
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
+
+    // Initial propagation: 4 and 5 should be pruned (unreachable from root 0).
+    require(checkPropagation(engine), "Initial DAG propagation failed");
+    require(engine.state.domains[vars[4]] == Domain::makeFixed(0, true), "Disconnected node 4 should be 0");
+    require(engine.state.domains[vars[5]] == Domain::makeFixed(0, true), "Disconnected node 5 should be 0");
+    require(!engine.state.domains[vars[1]].isFixed(), "Node 1 should be selectable");
+    require(!engine.state.domains[vars[2]].isFixed(), "Node 2 should be selectable");
+    require(!engine.state.domains[vars[3]].isFixed(), "Node 3 should be selectable");
+
+    const size_t marker = engine.state.getTrailMarker();
+    const auto initial_domains = engine.state.domains;
+
+    // Prune enode 1 from root 0, so root can only choose enode 2 (child 2) or enode 3 (no children)
+    Domain root_dom = engine.state.domains[vars[0]];
+    root_dom.remove(1);
+    engine.state.setDomain(vars[0], root_dom);
+    require(checkPropagation(engine), "Pruning root enode 1 failed");
+
+    // Node 1 is now unreachable because root only points to 2 or none!
+    require(engine.state.domains[vars[1]] == Domain::makeFixed(0, true), "Node 1 should be unreachable");
+    // Node 2 and Node 3 are still reachable via alternative 2!
+    require(!engine.state.domains[vars[2]].isFixed(), "Node 2 should still be selectable");
+    require(!engine.state.domains[vars[3]].isFixed(), "Node 3 should still be selectable");
+
+    // Now prune enode 2 from root as well (root now fixed to enode 3 with no children)
+    const size_t marker2 = engine.state.getTrailMarker();
+    root_dom.remove(2);
+    engine.state.setDomain(vars[0], root_dom);
+    require(checkPropagation(engine), "Pruning root enode 2 failed");
+
+    // Now both Node 2 and Node 3 have no paths from root, so both must become unreachable!
+    require(engine.state.domains[vars[2]] == Domain::makeFixed(0, true), "Node 2 should now be unreachable");
+    require(engine.state.domains[vars[3]] == Domain::makeFixed(0, true), "Node 3 should now be unreachable");
+
+    // Backtrack to marker2
+    engine.state.backtrackTo(marker2);
+    require(checkPropagation(engine), "Rollback to marker2 failed");
+    require(!engine.state.domains[vars[2]].isFixed(), "Node 2 should be selectable again after rollback");
+    require(!engine.state.domains[vars[3]].isFixed(), "Node 3 should be selectable again after rollback");
+
+    // Backtrack to initial marker
+    engine.state.backtrackTo(marker);
+    require(engine.state.domains == initial_domains, "Rollback to initial marker failed");
+    require(checkPropagation(engine), "Check propagation after rollback to initial failed");
+
+    // Test contradiction: require node 3, then disconnect all paths to node 3
+    {
+        const size_t marker_fail = engine.state.getTrailMarker();
+        engine.state.setDomain(vars[3], Domain::makeFixed(1, true));
+        // Prune all paths from root: root chooses alternative 3 (no children)
+        engine.state.setDomain(vars[0], Domain::makeFixed(3, true));
+        require(!checkPropagation(engine), "Selecting disconnected required node 3 should contradict");
+        engine.state.backtrackTo(marker_fail);
+        require(engine.state.domains == initial_domains, "Rollback after contradiction failed");
+        require(checkPropagation(engine), "Check propagation after contradiction rollback failed");
+    }
+}
+
+inline void testDagRandomBranches()
+{
+    std::mt19937 random(424242);
+    for (uint32_t trial = 0; trial < 80; ++trial)
+    {
+        const size_t num_nodes = 4 + random() % 6;
+        GraphSpec spec(num_nodes);
+        for (size_t i = 0; i < num_nodes; ++i)
+        {
+            const size_t num_enodes = 1 + random() % 3;
+            spec[i].resize(num_enodes);
+            for (auto &children : spec[i])
+            {
+                if (i + 1 < num_nodes)
+                {
+                    const size_t num_children = random() % 3;
+                    for (size_t c = 0; c < num_children; ++c)
+                    {
+                        const uint32_t child = static_cast<uint32_t>(i + 1 + (random() % (num_nodes - i - 1)));
+                        children.push_back(child);
+                    }
+                }
+            }
+        }
+        SearchState state;
+        addBucket(state, spec);
+        SearchEngine engine(std::move(state));
+        engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(true));
+        engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
+
+        std::function<void(uint32_t)> visit = [&](uint32_t depth) {
+            if (!checkPropagation(engine) || depth == 5)
+                return;
+            std::vector<VarId> candidates;
+            for (VarId var_id = 0; var_id < engine.state.numVars(); ++var_id)
+                if (!engine.state.domains[var_id].isFixed())
+                    candidates.push_back(var_id);
+            if (candidates.empty())
+                return;
+            const VarId var_id = candidates[random() % candidates.size()];
+            const Domain original = engine.state.domains[var_id];
+            std::vector<int32_t> values;
+            for (int32_t value = original.getMin(); value <= original.getMax(); ++value)
+                if (original.contains(value))
+                    values.push_back(value);
+            const int32_t value = values[random() % values.size()];
+            Domain remainder = original;
+            remainder.remove(value);
+            const size_t marker = engine.state.getTrailMarker();
+            const auto parent_domains = engine.state.domains;
+            for (const Domain &branch : {Domain::makeFixed(value, true), remainder})
+            {
+                engine.state.setDomain(var_id, branch);
+                visit(depth + 1);
+                engine.state.backtrackTo(marker);
+                require(engine.state.domains == parent_domains, "Random DAG branch rollback changed parent domains");
+            }
+        };
+        visit(0);
+    }
+}
+
 } // namespace selection_reachability_test
 
 inline void runSelectionReachabilityTests()
 {
-    selection_reachability_test::testStructuralVariables();
-    selection_reachability_test::testVariableDomainBoundaries();
-    selection_reachability_test::testRepairsAndUndo();
-    selection_reachability_test::testInitializationAndWorklist();
-    selection_reachability_test::testRandomBranches();
-    selection_reachability_test::testSearchNodeRestore();
-    std::cout << "selection reachability tests passed" << std::endl;
+    try
+    {
+        std::cout << "Running testStructuralVariables..." << std::endl;
+        selection_reachability_test::testStructuralVariables();
+        std::cout << "Running testVariableDomainBoundaries..." << std::endl;
+        selection_reachability_test::testVariableDomainBoundaries();
+        std::cout << "Running testRepairsAndUndo..." << std::endl;
+        selection_reachability_test::testRepairsAndUndo();
+        std::cout << "Running testInitializationAndWorklist..." << std::endl;
+        selection_reachability_test::testInitializationAndWorklist();
+        std::cout << "Running testRandomBranches..." << std::endl;
+        selection_reachability_test::testRandomBranches();
+        std::cout << "Running testSearchNodeRestore..." << std::endl;
+        selection_reachability_test::testSearchNodeRestore();
+        std::cout << "Running testDagReachabilityBasic..." << std::endl;
+        selection_reachability_test::testDagReachabilityBasic();
+        std::cout << "Running testDagRandomBranches..." << std::endl;
+        selection_reachability_test::testDagRandomBranches();
+        std::cout << "selection reachability tests passed" << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Test failed with exception: " << e.what() << std::endl;
+        throw;
+    }
 }

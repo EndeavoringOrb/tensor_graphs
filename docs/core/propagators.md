@@ -17,6 +17,9 @@ Plan search operates on four types of variables (`VarType` in `tensor_graphs_cpp
 
 When a selection variable changes, it may make some e-classes unreachable. Fix unreachable e-classes to `{0}`.
 
+- **Cyclic Mode (`is_dag = false`, default):** Uses a backtrackable decremental Even-Shiloach algorithm (level labels and incoming edge pointers) to maintain single-source reachability under edge deactivations and handle cyclic components.
+- **DAG Mode (`is_dag = true`):** When cycle reduction eliminates all cycles across buckets, the graph is a DAG. In DAG mode, reachability is maintained with lightweight indegree counters: deactivating an enode edge decrements the child's indegree counter. If a child's indegree reaches 0 (and it is not the root), the child is immediately unreachable, queued, and its outgoing edges are deactivated to propagate reachability loss down the DAG. On backtrack, reactivated edges increment target indegrees.
+
 #### Example
 
 Before selection in bucket 0, either e-node in `EClass 0` could be chosen, so both child connections are possible:
