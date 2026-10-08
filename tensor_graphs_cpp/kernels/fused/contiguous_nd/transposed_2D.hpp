@@ -101,6 +101,9 @@ inline void transpose8x8Avx2(const float *src, uint64_t src_stride, float *dst, 
 }
 #endif
 
+#if defined(TG_HAS_AVX2)
+__attribute__((target("avx2,fma")))
+#endif
 inline void transposeTile(const float *in, float *out, uint64_t m_dim, uint64_t n_dim,
                           uint64_t tm, uint64_t tn, uint64_t m_end, uint64_t n_end)
 {
@@ -167,7 +170,7 @@ inline void runContiguousTransposed2D(const KernelContext &ctx)
 
     uint32_t num_tasks = std::min<uint32_t>(num_threads, static_cast<uint32_t>(total_tiles));
 
-    ThreadPool::get().parallel_for(num_tasks, [=](uint32_t t) {
+    ThreadPool::get().parallel_for(num_tasks, [=](uint32_t t) __attribute__((target("avx2,fma"))) {
         uint64_t tiles_per_task = (total_tiles + num_tasks - 1) / num_tasks;
         uint64_t t_start = t * tiles_per_task;
         uint64_t t_end = std::min(t_start + tiles_per_task, total_tiles);

@@ -132,7 +132,7 @@ inline void runCastBF16_F32_AVX2_Stream(const KernelContext &ctx)
     uint64_t chunk = (num_elements + num_threads - 1) / num_threads;
     chunk = (chunk + 31) & ~31ULL;
 
-    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) __attribute__((target("avx2,fma"))) {
         uint64_t start = t * chunk;
         if (start >= num_elements)
             return;

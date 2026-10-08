@@ -63,6 +63,7 @@ reference_tensors
 
 # Profiling artifacts
 profile_output*
+perf.data*
 
 # Cache and Benchmarks
 benchmarks*

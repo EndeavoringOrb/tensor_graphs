@@ -110,7 +110,7 @@ inline void runMulF32_AVX2_Stream(const KernelContext &ctx)
     uint64_t chunk_size = (total_elements + num_threads - 1) / num_threads;
     chunk_size = (chunk_size + 15) & ~15ULL;
 
-    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) __attribute__((target("avx2,fma"))) {
         uint64_t start = t * chunk_size;
         if (start >= total_elements)
             return;
