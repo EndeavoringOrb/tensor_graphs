@@ -76,6 +76,8 @@ class SearchEngine
         if (current_node_id == target_node->id)
             return true;
 
+        brancher->onRestore();
+
 #ifdef TG_PROFILE
         search_timing.restore_node_calls++;
         auto lca_start = std::chrono::steady_clock::now();

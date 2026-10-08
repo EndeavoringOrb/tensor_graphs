@@ -672,6 +672,37 @@ class SearchState
     // independent incremental propagation data.
     std::vector<SelectionReachability> selection_reachability;
 
+    // Revisions let the brancher invalidate cached schedule and lifetime data
+    // only when the selected graph or start times change.
+    uint64_t selection_revision = 0;
+    uint64_t schedule_revision = 0;
+    std::vector<std::set<std::pair<int32_t, VarId>>> fixed_offset_vars;
+
+    void updateDomainIndexes(VarId var_id, const Domain &old_domain, const Domain &new_domain)
+    {
+        if (var_id >= var_infos.size())
+            return;
+
+        const VarInfo &info = var_infos[var_id];
+        if (info.type == VarType::SELECTED)
+        {
+            ++selection_revision;
+        }
+        else if (info.type == VarType::START)
+        {
+            ++schedule_revision;
+        }
+        else if (info.type == VarType::OFFSET)
+        {
+            if (fixed_offset_vars.size() <= info.bucket_idx)
+                fixed_offset_vars.resize(info.bucket_idx + 1);
+            if (old_domain.isFixed())
+                fixed_offset_vars[info.bucket_idx].erase({old_domain.fixedValue(), var_id});
+            if (new_domain.isFixed())
+                fixed_offset_vars[info.bucket_idx].insert({new_domain.fixedValue(), var_id});
+        }
+    }
+
     void updateEmptyDomainIndex(VarId var_id, bool was_empty, bool is_empty)
     {
         if (was_empty == is_empty)
@@ -787,6 +818,22 @@ class SearchState
 
     SearchState() = default;
 
+    uint64_t getSelectionRevision() const
+    {
+        return selection_revision;
+    }
+
+    uint64_t getScheduleRevision() const
+    {
+        return schedule_revision;
+    }
+
+    const std::set<std::pair<int32_t, VarId>> &getFixedOffsetVars(uint32_t bucket_idx) const
+    {
+        static const std::set<std::pair<int32_t, VarId>> empty;
+        return bucket_idx < fixed_offset_vars.size() ? fixed_offset_vars[bucket_idx] : empty;
+    }
+
     VarId addVar(VarInfo info, const Domain &initial_domain)
     {
         assert(!propagation.initialized);
@@ -794,6 +841,7 @@ class SearchState
         info.id = id;
         var_infos.push_back(std::move(info));
         domains.push_back(initial_domain);
+        updateDomainIndexes(id, Domain{}, initial_domain);
         if (initial_domain.isEmpty())
             empty_domains.insert(id);
         markDomainDirty(id);
@@ -904,6 +952,7 @@ class SearchState
             {
                 updatePropagationContribution(entry->var_id, false);
                 const bool was_empty = domains[entry->var_id].isEmpty();
+                updateDomainIndexes(entry->var_id, domains[entry->var_id], entry->prev_domain);
                 domains[entry->var_id] = entry->prev_domain;
                 invalidateWriteAfterRead(entry->var_id);
                 updatePropagationContribution(entry->var_id, true);
@@ -931,6 +980,7 @@ class SearchState
             updatePropagationContribution(var_id, false);
             const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
+            updateDomainIndexes(var_id, domains[var_id], new_domain);
             domains[var_id] = new_domain;
             invalidateWriteAfterRead(var_id);
             updatePropagationContribution(var_id, true);
