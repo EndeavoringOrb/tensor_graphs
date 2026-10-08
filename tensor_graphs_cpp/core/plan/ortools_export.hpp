@@ -226,8 +226,8 @@ inline json serializeProblem(
                 }
                 else if (is_input)
                 {
-                    if (eclass_to_logical.count(cls.id))
-                        lid = static_cast<int64_t>(eclass_to_logical.at(cls.id).value);
+                    if (cls.logical_id != LogicalId{})
+                        lid = static_cast<int64_t>(cls.logical_id.value);
                     enode_json["logical_id"] = lid;
                 }
 
