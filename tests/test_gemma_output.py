@@ -8,7 +8,7 @@ from utils.decode import load_tokenizer
 
 
 CONFIGS = {
-    "current": {
+    "full": {
         "compile_decode_buckets": False,
         "compile_no_weights_bucket": False,
     },

@@ -19,24 +19,19 @@ class CacheBudgetPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        if (changed != kInvalidVarId && state.var_infos[changed].type != VarType::CACHED)
-            return true;
-
-        std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
-        for (const auto &cand : state.candidates)
+        if (changed != kInvalidVarId)
         {
-            auto c_it = state.cached_vars.find(cand.base_eclass_id);
-            if (c_it != state.cached_vars.end())
-            {
-                VarId cv = c_it->second;
-                if (state.domains[cv].isFixed() && state.domains[cv].fixedValue() == 1)
-                {
-                    fixed_cache_bytes[cand.mem_space] += cand.size_bytes;
-                }
-            }
+            if (state.var_infos[changed].type != VarType::CACHED)
+                return true;
+            MemSpace space = state.var_infos[changed].mem_space;
+            auto it = state.fixed_cache_bytes.find(space);
+            uint64_t bytes = (it != state.fixed_cache_bytes.end()) ? it->second : 0;
+            if (bytes > state.getMemoryCap(space))
+                return false;
+            return true;
         }
 
-        for (const auto &pair : fixed_cache_bytes)
+        for (const auto &pair : state.fixed_cache_bytes)
         {
             uint64_t cap = state.getMemoryCap(pair.first);
             if (pair.second > cap)

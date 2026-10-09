@@ -215,7 +215,7 @@ inline void testAnalysisConstantsDoNotOverwriteViewStorage()
     Session session(graph, mem, out, "", 0, nullptr, true);
     session.ensureFullBucket();
     Bucket bucket = session.manualBuckets.at(session.fullBucketIdx);
-    CompiledGraph compiled = planner.plan(out, graph, bucket, {}, false);
+    CompiledGraph compiled = planner.plan(out, graph, bucket, false);
     if (compiled.constantStaging.count(ones_class))
         Error::throw_err("[Regression Test Failed] Broadcast analysis snapshot became a runtime constant!");
 

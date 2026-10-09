@@ -60,6 +60,8 @@ inline SearchState makeState(const GraphSpec &spec, uint32_t bucket_count = 1)
         VarInfo info;
         info.type = VarType::CACHED;
         info.base_eclass_id = BaseEClassId{node + 1};
+        info.mem_space = space;
+        info.size_bytes = 8;
         state.cached_vars[info.base_eclass_id] = state.addVar(info, Domain::makeMask(3));
         CacheCandidate candidate;
         candidate.base_eclass_id = info.base_eclass_id;

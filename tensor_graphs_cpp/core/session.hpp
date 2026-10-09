@@ -596,7 +596,7 @@ struct Session
         Planner &planner = state->planner;
         Graph temp_graph = graph;
         planner.initBaseEGraph(rootId, temp_graph, topo, repo, false);
-        state->full_state = planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], {}, doSaturate, repo);
+        state->full_state = planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], doSaturate, repo);
 
         state->bucket_states.resize(manualBuckets.size());
         state->bucket_states[fullBucketIdx] = state->full_state;
@@ -605,12 +605,11 @@ struct Session
                 return;
             Planner bucket_planner(costModel, settings);
             state->bucket_states[bucket_idx] = bucket_planner.saturateBucket(
-                rootId, graph, manualBuckets[bucket_idx], {}, false, repo, &state->full_state);
+                rootId, graph, manualBuckets[bucket_idx], false, repo, &state->full_state);
         });
 
         // Candidate cleanliness is derived from the same eclass DP used by the
-        // normal cache search. Runtime inputs remain candidates even when a
-        // bucket dirties them, because partial paths use their cached backing.
+        // normal cache search.
         if (!disableCaching)
         {
             for (const EClass &cls : state->full_state.getClasses())
@@ -619,19 +618,28 @@ struct Session
                     cls.mem_space.type == HandleType::STORAGE || getSizeBytes(cls.shape, cls.dtype) == 0)
                     continue;
 
-                bool runtime_input = false;
-                if (cls.logical_id != LogicalId{} && graph.hasNode(cls.logical_id))
+                if (cls.logical_id != LogicalId{} && graph.hasNode(cls.logical_id) &&
+                    graph.getNode(cls.logical_id).opType == OpType::INPUT)
+                    continue;
+
+                bool is_input_class = false;
+                for (ENodeId eid : cls.enodes)
                 {
-                    const TensorNode &node = graph.getNode(cls.logical_id);
-                    runtime_input = node.opType == OpType::INPUT &&
-                                    graph.getInputDataType(cls.logical_id) == InputDataType::RUNTIME;
+                    if (state->full_state.getENode(eid).getOpType() == OpType::INPUT)
+                    {
+                        is_input_class = true;
+                        break;
+                    }
                 }
+                if (is_input_class)
+                    continue;
+
                 const bool clean_in_any_bucket = std::any_of(
                     state->bucket_states.begin(), state->bucket_states.end(), [&](const EGraph &bucket_state) {
                         const EClassId eclass_id = bucket_state.findEClassByBaseId(cls.base_eclass_id);
                         return eclass_id != EClassId{} && bucket_state.getEClass(eclass_id).is_clean;
                     });
-                if (!runtime_input && !clean_in_any_bucket)
+                if (!clean_in_any_bucket)
                     continue;
 
                 state->candidates.push_back({cls.base_eclass_id, getSizeBytes(cls.shape, cls.dtype), cls.dtype,
@@ -650,7 +658,7 @@ struct Session
 
         // The solver needs input reservations before it chooses a cache set.
         // Resolve those through eclass ids, matching the normal path.
-        planner.preallocate(graph, state->full_state, {},
+        planner.preallocate(graph, state->full_state,
                             state->preallocated_buffers);
 
         Engine cpu = Engine{0, EngineType::CPU};
@@ -685,7 +693,7 @@ struct Session
 
             bucket_state.rebuild(true);
 
-            auto enode_infos = planner.computeENodeInfos(bucket_state, {}, false);
+            auto enode_infos = planner.computeENodeInfos(bucket_state);
             planner.pruneEGraph(bucket_state, enode_infos);
             state->bucket_root_eclass_ids.push_back(bucket_state.findEClassByLogicalId(rootId));
             state->bucket_egraphs.push_back(std::move(bucket_state));
@@ -702,7 +710,6 @@ struct Session
         Settings hint_settings = settings;
         hint_settings.cpu_only = true;
         Planner native_planner(costModel, hint_settings);
-        std::unordered_set<BaseEClassId> no_cached_nodes;
         std::unordered_set<EClassId> no_cached_eclasses;
         state->cpu_hint_extractions.reserve(state->bucket_egraphs.size());
         for (size_t bucket_idx = 0; bucket_idx < state->bucket_egraphs.size(); ++bucket_idx)
@@ -712,12 +719,10 @@ struct Session
             // OpenCL alternatives during dispatch and bufferization search.
             EGraph hint_egraph = state->bucket_egraphs[bucket_idx];
             auto native_infos = native_planner.computeENodeInfos(
-                hint_egraph,
-                no_cached_nodes, false);
+                hint_egraph);
             native_planner.pruneEGraph(hint_egraph, native_infos);
             ExtractionResult hint = native_planner.extractBest(
                 rootId, graph, hint_egraph,
-                no_cached_nodes,
                 hint_settings.min_compile_seconds == 0.0f, false, hint_settings.min_compile_seconds, brancher,
                 native_infos, &no_cached_eclasses);
 
@@ -839,7 +844,7 @@ struct Session
             auto &bucket_egraph = state.bucket_egraphs[b];
 
             auto enode_infos = thread_planner.computeENodeInfos(
-                bucket_egraph, selected_cached, /*strictCache=*/false);
+                bucket_egraph);
             thread_planner.pruneEGraph(bucket_egraph, enode_infos);
 
             std::unordered_set<EClassId> cached_eclasses;
@@ -850,7 +855,7 @@ struct Session
             }
 
             ExtractionResult extraction = thread_planner.extractBest(
-                rootId, graph, bucket_egraph, selected_cached,
+                rootId, graph, bucket_egraph,
                 minCompileSeconds == 0.0f, false, minCompileSeconds,
                 nullptr, enode_infos, &cached_eclasses);
             CompiledGraph cg = thread_planner.buildCompiledGraph(

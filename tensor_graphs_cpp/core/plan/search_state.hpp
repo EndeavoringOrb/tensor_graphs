@@ -729,6 +729,19 @@ class SearchState
             if (new_domain.isFixed())
                 fixed_offset_vars[info.bucket_idx].insert({new_domain.fixedValue(), var_id});
         }
+        else if (info.type == VarType::CACHED)
+        {
+            if (old_domain.isFixed() && old_domain.fixedValue() == 1)
+            {
+                fixed_cache_bytes[info.mem_space] -= info.size_bytes;
+                fixed_cached_vars.erase(var_id);
+            }
+            if (new_domain.isFixed() && new_domain.fixedValue() == 1)
+            {
+                fixed_cache_bytes[info.mem_space] += info.size_bytes;
+                fixed_cached_vars.insert(var_id);
+            }
+        }
     }
 
     void updateEmptyDomainIndex(VarId var_id, bool was_empty, bool is_empty)
@@ -813,6 +826,8 @@ class SearchState
     std::unordered_map<MemSpace, uint32_t> page_alignments;
     std::unordered_map<MemSpace, uint32_t> preallocated_pages;
     std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
+    std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
+    std::unordered_set<VarId> fixed_cached_vars;
 
     // The graph, metadata, capacities and weights are immutable after the first
     // propagation. All derived data is owned by this state, including in copies.

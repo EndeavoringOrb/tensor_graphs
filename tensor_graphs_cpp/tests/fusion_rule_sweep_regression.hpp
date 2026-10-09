@@ -114,7 +114,7 @@ inline void runFusionRuleSweepRegressionTests()
     // In Sweep 2, FusionRule re-evaluates root and successfully matches Silu_3D_1.
     // -------------------------------------------------------------------------
     Planner planner(costModel, settings);
-    const EGraph result = planner.saturateBucket(root, graph, fullBucket, {}, true);
+    const EGraph result = planner.saturateBucket(root, graph, fullBucket, true);
 
     bool found_fused_silu = false;
     for (const ENode &enode : result.getENodes())

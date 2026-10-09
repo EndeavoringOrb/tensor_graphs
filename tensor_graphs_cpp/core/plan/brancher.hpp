@@ -276,6 +276,8 @@ class HeuristicBrancher : public Brancher
     mutable std::vector<bool> cached_sched_topo_valid;
     mutable std::vector<size_t> sched_start_cursors;
     mutable std::vector<size_t> sched_offset_cursors;
+    mutable std::vector<size_t> selection_required_cursors;
+    mutable std::vector<size_t> selection_optional_cursors;
 
     struct CachedOffsetCandidate
     {
@@ -320,6 +322,8 @@ class HeuristicBrancher : public Brancher
         eclass_selected_vars_.resize(state.buckets.size());
         eclass_start_vars_.resize(state.buckets.size());
         eclass_offset_vars_.resize(state.buckets.size());
+        selection_required_cursors.resize(state.buckets.size(), 0);
+        selection_optional_cursors.resize(state.buckets.size(), 0);
 
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
@@ -634,8 +638,35 @@ class HeuristicBrancher : public Brancher
         {
             const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b] : empty_cids;
             const auto &sel_vars = eclass_selected_vars_[b];
-            for (EClassId cid : cids)
+            size_t &cursor = required_only ? selection_required_cursors[b] : selection_optional_cursors[b];
+            while (cursor < cids.size())
             {
+                EClassId cid = cids[cursor];
+                if (cid.value >= sel_vars.size())
+                {
+                    ++cursor;
+                    continue;
+                }
+                VarId var_id = sel_vars[cid.value];
+                if (var_id == kInvalidVarId)
+                {
+                    ++cursor;
+                    continue;
+                }
+                const Domain &domain = state.domains[var_id];
+                if (domain.isFixed())
+                {
+                    ++cursor;
+                    continue;
+                }
+                break;
+            }
+            if (cursor >= cids.size())
+                continue;
+
+            for (size_t idx = cursor; idx < cids.size(); ++idx)
+            {
+                EClassId cid = cids[idx];
                 if (cid.value >= sel_vars.size())
                     continue;
 
@@ -935,6 +966,8 @@ class HeuristicBrancher : public Brancher
     {
         std::fill(sched_start_cursors.begin(), sched_start_cursors.end(), 0);
         std::fill(sched_offset_cursors.begin(), sched_offset_cursors.end(), 0);
+        std::fill(selection_required_cursors.begin(), selection_required_cursors.end(), 0);
+        std::fill(selection_optional_cursors.begin(), selection_optional_cursors.end(), 0);
     }
 
     bool chooseBranch(const SearchState &state, BranchDecision &out_decision) override

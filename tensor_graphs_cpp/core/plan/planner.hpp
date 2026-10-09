@@ -265,7 +265,6 @@ struct Planner
     }
 
     void preallocate(const Graph &graph, const EGraph &egraph,
-                     const std::unordered_set<BaseEClassId> &cachedNodes,
                      std::unordered_map<BaseEClassId, ParallelBuffer> &out) const
     {
         out.clear();
@@ -300,17 +299,6 @@ struct Planner
             if (graph.input_data_types.at(node.id) == InputDataType::CONSTANT ||
                 graph.input_data_types.at(node.id) == InputDataType::RUNTIME)
                 add_input(node, node.id);
-        }
-
-        for (BaseEClassId baseEClassId : cachedNodes)
-        {
-            EClassId eclassId = egraph.findEClassByBaseId(baseEClassId);
-            if (eclassId == EClassId{})
-                continue;
-            const EClass &cls = egraph.getEClass(eclassId);
-            if (cls.mem_space == storage)
-                continue;
-            entries.push_back({baseEClassId, cls.mem_space, cls.shape, cls.dtype});
         }
 
         std::sort(entries.begin(), entries.end(),
@@ -1051,8 +1039,7 @@ struct Planner
         }
     }
 
-    std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph,
-                                             const std::unordered_set<BaseEClassId> &cachedNodes, bool strictCache)
+    std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
 
@@ -1072,16 +1059,6 @@ struct Planner
             if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
             {
                 info.cost = 0.0f;
-                if (strictCache && enode.getOpType() == OpType::CACHE)
-                {
-                    EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
-                    EClassId canonId = egraph.findConst(e_class_id);
-                    const EClass &cls = egraph.getEClass(canonId);
-                    if (cls.base_eclass_id == BaseEClassId{} || cachedNodes.count(cls.base_eclass_id) == 0)
-                        info.cost = TGConstants::INF;
-                    else if (enode.getMemSpace() != cls.mem_space)
-                        info.cost = TGConstants::INF;
-                }
             }
             else if (enode.getKernelId() != KernelId{0})
             {
@@ -1349,7 +1326,7 @@ struct Planner
     }
 
     bool injectPartialPath(EGraph &egraph, const Graph &graph, LogicalId logicalId,
-                           const std::vector<Region> &dirtyRegions, const std::unordered_set<BaseEClassId> &cachedNodes)
+                           const std::vector<Region> &dirtyRegions)
     {
         EClassId E_L = egraph.findEClassByLogicalId(logicalId);
         if (dirtyRegions.empty() || E_L == EClassId{})
@@ -1450,8 +1427,7 @@ struct Planner
     }
 
     bool injectInputPartialPaths(EGraph &egraph, const Graph &graph,
-                                 const std::unordered_map<LogicalId, std::vector<Region>> &dirtyOutputRegions,
-                                 const std::unordered_set<BaseEClassId> &cachedNodes)
+                                 const std::unordered_map<LogicalId, std::vector<Region>> &dirtyOutputRegions)
     {
         bool injected = false;
         for (const auto &kv : dirtyOutputRegions)
@@ -1462,7 +1438,7 @@ struct Planner
             const TensorNode &node = graph.getNode(nodeId);
             if (node.opType == OpType::INPUT && graph.constantStaging.count(nodeId) == 0 && !kv.second.empty())
             {
-                injected = injectPartialPath(egraph, graph, nodeId, kv.second, cachedNodes) ||
+                injected = injectPartialPath(egraph, graph, nodeId, kv.second) ||
                            injected;
             }
         }
@@ -1472,13 +1448,12 @@ struct Planner
     }
 
     bool injectOutputPartialPaths(EGraph &egraph, const Graph &graph, LogicalId rootId,
-                                  const std::vector<Region> &outputNeeded,
-                                  const std::unordered_set<BaseEClassId> &cachedNodes)
+                                  const std::vector<Region> &outputNeeded)
     {
         bool injected = false;
         if (!outputNeeded.empty() && egraph.findEClassByLogicalId(rootId) != EClassId{})
         {
-            injected = injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes);
+            injected = injectPartialPath(egraph, graph, rootId, outputNeeded);
         }
         if (injected)
             egraph.rebuild();
@@ -1486,7 +1461,7 @@ struct Planner
     }
 
     EGraph saturateBucket(const LogicalId rootId, const Graph &graph, const Bucket &bucket,
-                          const std::unordered_set<BaseEClassId> &cachedNodes = {}, bool doSaturate = true,
+                          bool doSaturate = true,
                           TGStore *repo = nullptr, const EGraph *startingState = nullptr)
     {
         using BucketClock = std::chrono::steady_clock;
@@ -1564,49 +1539,7 @@ struct Planner
                                                                          std::chrono::duration<double, std::milli>(BucketClock::now() - dirty_start).count()) +
                                                                      " ms");
 
-        Engine cpu = Engine{0, EngineType::CPU};
-        auto cache_seed_start = BucketClock::now();
-        uint64_t cache_enodes_added = 0;
-        for (BaseEClassId baseEClassId : cachedNodes)
-        {
-            EClassId eclassId = egraph.findEClassByBaseId(baseEClassId);
-            if (eclassId == EClassId{})
-                continue;
-
-            const EClass cls = egraph.getEClass(eclassId);
-            bool hasCache = false;
-            for (ENodeId enodeId : cls.enodes)
-            {
-                if (egraph.getENode(enodeId).getOpType() == OpType::CACHE &&
-                    egraph.getENode(enodeId).getMemSpace() == cls.mem_space)
-                {
-                    hasCache = true;
-                    break;
-                }
-            }
-            if (!hasCache)
-            {
-                ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space,
-                                {cpu}, std::to_string(baseEClassId.value));
-                egraph.addENode(eclassId, cacheNode);
-                ++cache_enodes_added;
-            }
-        }
-        report_bucket_timing("added requested cache enodes", "base IDs=" + std::to_string(cachedNodes.size()) +
-                                                                  ", enodes added=" +
-                                                                  std::to_string(cache_enodes_added) +
-                                                                  ", elapsed=" + std::to_string(
-                                                                      std::chrono::duration<double, std::milli>(BucketClock::now() - cache_seed_start).count()) +
-                                                                  " ms");
-
         std::unordered_set<EClassId> protectedEClasses;
-        for (BaseEClassId baseEClassId : cachedNodes)
-        {
-            EClassId eclassId = egraph.findEClassByBaseId(baseEClassId);
-            if (eclassId != EClassId{})
-                protectedEClasses.insert(eclassId);
-        }
-        report_bucket_timing("built protected class set", "classes=" + std::to_string(protectedEClasses.size()));
 
         auto isFullRegion = [](const Region &region, const std::vector<uint32_t> &shape) {
             if (region.region.size() != shape.size())
@@ -1649,10 +1582,10 @@ struct Planner
 
         auto inject_start = BucketClock::now();
         const bool dirtyInjected = hasPartialInputRegion &&
-                                   injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes);
+                                   injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions);
         const bool neededInjected = hasPartialOutputRegion &&
                                     injectOutputPartialPaths(egraph, graph, rootId,
-                                                            bucket.outputNeededRegion, cachedNodes);
+                                                            bucket.outputNeededRegion);
         report_bucket_timing("injected partial paths", "dirty=" + std::string(dirtyInjected ? "true" : "false") +
                                                              ", needed=" +
                                                              (neededInjected ? "true" : "false") +
@@ -2042,7 +1975,7 @@ struct Planner
             }
         }
 
-        const EGraph full_state = saturateBucket(rootId, graph, buckets[full_idx], {}, doSaturate, repo);
+        const EGraph full_state = saturateBucket(rootId, graph, buckets[full_idx], doSaturate, repo);
         std::vector<EGraph> bucket_states(buckets.size());
         bucket_states[full_idx] = full_state;
 
@@ -2050,7 +1983,7 @@ struct Planner
         {
             if (b != full_idx)
             {
-                bucket_states[b] = saturateBucket(rootId, graph, buckets[b], {}, false, repo, &full_state);
+                bucket_states[b] = saturateBucket(rootId, graph, buckets[b], false, repo, &full_state);
             }
         }
 
@@ -2082,6 +2015,22 @@ struct Planner
                     cls.mem_space.type == HandleType::STORAGE || getSizeBytes(cls.shape, cls.dtype) == 0)
                     continue;
 
+                LogicalId log_id = cls.logical_id;
+                if (log_id != LogicalId{} && graph.hasNode(log_id) && graph.getNode(log_id).opType == OpType::INPUT)
+                    continue;
+
+                bool is_input_class = false;
+                for (ENodeId eid : cls.enodes)
+                {
+                    if (full_state.getENode(eid).getOpType() == OpType::INPUT)
+                    {
+                        is_input_class = true;
+                        break;
+                    }
+                }
+                if (is_input_class)
+                    continue;
+
                 bool clean_in_any = false;
                 for (uint32_t b = 0; b < bucket_states.size(); ++b)
                 {
@@ -2094,14 +2043,7 @@ struct Planner
                         break;
                     }
                 }
-                bool runtime_input = false;
-                LogicalId log_id = cls.logical_id;
-                if (log_id != LogicalId{} && graph.hasNode(log_id))
-                {
-                    runtime_input = graph.getNode(log_id).opType == OpType::INPUT &&
-                                    graph.getInputDataType(log_id) == InputDataType::RUNTIME;
-                }
-                if (clean_in_any || runtime_input)
+                if (clean_in_any)
                 {
                     uint32_t n_users = (log_id != LogicalId{}) ? user_counts[log_id] : 0;
                     uint64_t max_cand_bytes = getSizeBytes(cls.shape, cls.dtype);
@@ -2174,7 +2116,7 @@ struct Planner
             bucket_states[b].rebuild(true);
 
             all_enode_infos[b] =
-                computeENodeInfos(bucket_states[b], {}, false);
+                computeENodeInfos(bucket_states[b]);
             pruneEGraph(bucket_states[b], all_enode_infos[b]);
 
             const uint32_t initial_cycles = countCyclicComponents(bucket_states[b]);
@@ -2259,7 +2201,7 @@ struct Planner
 
         // Preallocate constants and inputs
         std::unordered_map<BaseEClassId, ParallelBuffer> preallocated;
-        preallocate(graph, bucket_states[full_idx], {}, preallocated);
+        preallocate(graph, bucket_states[full_idx], preallocated);
 
         std::unordered_map<MemSpace, uint32_t> preallocated_pages;
         for (const auto &pair : preallocated)
@@ -2342,7 +2284,6 @@ struct Planner
     }
 
     ExtractionResult extractBest(const LogicalId rootId, const Graph &graph, const EGraph &egraph,
-                                 const std::unordered_set<BaseEClassId> &cachedNodes = {},
                                  bool stopOnFirstValid = true, bool strictCache = false, float minCompileSeconds = 0.0f,
                                  std::shared_ptr<plan::Brancher> brancher = nullptr,
                                  const std::vector<ENodeInfo> &enodeInfos = {},
@@ -2366,7 +2307,7 @@ struct Planner
     }
 
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
-                       const std::unordered_set<BaseEClassId> &cachedNodes = {}, bool doSaturate = true,
+                       bool doSaturate = true,
                        bool strictCache = false, TGStore *repo = nullptr, float minCompileSeconds = 0.0f,
                        std::shared_ptr<plan::Brancher> brancher = nullptr)
     {

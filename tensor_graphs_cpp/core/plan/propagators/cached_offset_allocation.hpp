@@ -26,8 +26,14 @@ class CachedOffsetAllocationPropagator : public Propagator
         offset_index_initialized_ = true;
     }
 
+    mutable std::unordered_map<BaseEClassId, uint32_t> max_size_pages_cache_;
+
     uint32_t getMaxSizePages(const SearchState &state, BaseEClassId base_id) const
     {
+        auto it = max_size_pages_cache_.find(base_id);
+        if (it != max_size_pages_cache_.end())
+            return it->second;
+
         uint32_t max_pages = 1;
         const auto cache_it = state.cached_vars.find(base_id);
         if (cache_it != state.cached_vars.end())
@@ -52,6 +58,7 @@ class CachedOffsetAllocationPropagator : public Propagator
                 max_pages = std::max(max_pages, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
             }
         }
+        max_size_pages_cache_[base_id] = max_pages;
         return max_pages;
     }
 
@@ -106,15 +113,14 @@ class CachedOffsetAllocationPropagator : public Propagator
         int64_t candidate = (prealloc_it != state.preallocated_pages.end()) ? prealloc_it->second : 0;
         candidate = std::max<int64_t>(candidate, min_offset);
 
-        for (const auto &other_cache : state.cached_vars)
+        for (VarId other_cached_vid : state.fixed_cached_vars)
         {
-            if (other_cache.first == base_id)
-                continue;
-            const Domain &cached_domain = state.domains[other_cache.second];
-            if (!cached_domain.isFixed() || cached_domain.fixedValue() != 1)
+            const VarInfo &other_info = state.var_infos[other_cached_vid];
+            BaseEClassId other_base = other_info.base_eclass_id;
+            if (other_base == base_id)
                 continue;
 
-            const auto other_offsets_it = offsets_by_base_.find(other_cache.first);
+            const auto other_offsets_it = offsets_by_base_.find(other_base);
             if (other_offsets_it == offsets_by_base_.end())
                 continue;
 
@@ -131,11 +137,10 @@ class CachedOffsetAllocationPropagator : public Propagator
             if (other_offset < 0)
                 continue;
 
-            const VarInfo &other_info = state.var_infos[other_cache.second];
             if (other_info.mem_space != cache_info.mem_space)
                 continue;
 
-            const uint32_t other_size = getMaxSizePages(state, other_cache.first);
+            const uint32_t other_size = getMaxSizePages(state, other_base);
             candidate = std::max<int64_t>(candidate, static_cast<int64_t>(other_offset) + other_size);
         }
 
@@ -179,11 +184,9 @@ class CachedOffsetAllocationPropagator : public Propagator
         if (changed == kInvalidVarId)
         {
             std::vector<BaseEClassId> active_caches;
-            for (const auto &cache_pair : state.cached_vars)
+            for (VarId cv : state.fixed_cached_vars)
             {
-                const Domain &domain = state.domains[cache_pair.second];
-                if (domain.isFixed() && domain.fixedValue() == 1)
-                    active_caches.push_back(cache_pair.first);
+                active_caches.push_back(state.var_infos[cv].base_eclass_id);
             }
             std::sort(active_caches.begin(), active_caches.end(), [](BaseEClassId a, BaseEClassId b) {
                 return a.value < b.value;

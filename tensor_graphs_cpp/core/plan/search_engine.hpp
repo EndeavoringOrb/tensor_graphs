@@ -92,33 +92,23 @@ class SearchEngine
         search_timing.restore_node_calls++;
         auto lca_start = std::chrono::steady_clock::now();
 #endif
-        // Path from current_node up to root
-        restore_current_path.clear();
-        uint32_t curr = current_node_id;
-        while (curr != UINT32_MAX)
-        {
-            restore_current_path.push_back(curr);
-            curr = all_nodes[curr]->parent_id;
-        }
-
-        // Path from target_node up to root
-        restore_target_path.clear();
-        uint32_t tgt = target_node->id;
-        while (tgt != UINT32_MAX)
-        {
-            restore_target_path.push_back(tgt);
-            tgt = all_nodes[tgt]->parent_id;
-        }
-
-        // Find Lowest Common Ancestor (LCA)
-        int i = static_cast<int>(restore_current_path.size()) - 1;
-        int j = static_cast<int>(restore_target_path.size()) - 1;
+        // Find Lowest Common Ancestor (LCA) using node depths in O(delta depth)
+        uint32_t u = current_node_id;
+        uint32_t v = target_node->id;
         uint32_t lca = UINT32_MAX;
-        while (i >= 0 && j >= 0 && restore_current_path[i] == restore_target_path[j])
+        if (u != UINT32_MAX && v != UINT32_MAX)
         {
-            lca = restore_current_path[i];
-            i--;
-            j--;
+            while (u != UINT32_MAX && v != UINT32_MAX && all_nodes[u]->depth > all_nodes[v]->depth)
+                u = all_nodes[u]->parent_id;
+            while (u != UINT32_MAX && v != UINT32_MAX && all_nodes[v]->depth > all_nodes[u]->depth)
+                v = all_nodes[v]->parent_id;
+            while (u != v && u != UINT32_MAX && v != UINT32_MAX)
+            {
+                u = all_nodes[u]->parent_id;
+                v = all_nodes[v]->parent_id;
+            }
+            if (u == v)
+                lca = u;
         }
 
         // Backtrack to LCA's trail marker
@@ -130,8 +120,17 @@ class SearchEngine
                 std::chrono::steady_clock::now() - lca_start).count());
 #endif
 
+        // Path from child of LCA down to target_node
+        restore_target_path.clear();
+        uint32_t curr = target_node->id;
+        while (curr != lca && curr != UINT32_MAX)
+        {
+            restore_target_path.push_back(curr);
+            curr = all_nodes[curr]->parent_id;
+        }
+
         // Play decisions and propagate from child of LCA down to target_node
-        for (int k = j; k >= 0; --k)
+        for (int k = static_cast<int>(restore_target_path.size()) - 1; k >= 0; --k)
         {
             uint32_t nid = restore_target_path[k];
 #ifdef TG_PROFILE

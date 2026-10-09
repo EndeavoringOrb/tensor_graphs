@@ -56,7 +56,7 @@ inline void testViewNotEmittedIntoInstructions()
     bucket.inputDirtyRegions[x] = {makeFull(graph.getNode(x).getShape())};
     bucket.outputNeededRegion = {makeFull(graph.getNode(out).getShape())};
 
-    CompiledGraph compiled = planner.plan(out, graph, bucket, {}, true, false, nullptr);
+    CompiledGraph compiled = planner.plan(out, graph, bucket, true, false, nullptr);
 
     if (compiled.cost() <= 0.0f)
     {
