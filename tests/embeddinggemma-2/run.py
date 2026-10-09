@@ -41,6 +41,14 @@ def parseArgs() -> argparse.Namespace:
     parser.add_argument("--audio", type=Path, default=ASSETS / "sample.wav")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--cosine-tolerance", type=float, default=0.99)
+    parser.add_argument(
+        "--cache-file",
+        "--cache",
+        dest="cache_file",
+        type=str,
+        default="",
+        help="Path to compiled cache file. If specified, enables compilation caching to/from this file.",
+    )
     return parser.parse_args()
 
 
@@ -180,8 +188,10 @@ def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace
     token_ids = native_input["token_ids"].tolist()
     kwargs = {
         "token_ids": token_ids,
+        "cache_file": args.cache_file,
         "compile_no_weights_bucket": options["compile_no_weights_bucket"],
         "compile_dirty_input_bucket": options["compile_dirty_input_bucket"],
+        "disable_compilation_caching": not bool(args.cache_file),
     }
     for shape_key in ("patch_count", "patch_grid_width", "mel_frames", "video_frames"):
         if shape_key in native_input:
