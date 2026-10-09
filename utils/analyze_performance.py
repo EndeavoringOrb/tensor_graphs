@@ -6,57 +6,68 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from binary import load_cache_file
 from common import format_ms, format_op_name, load_uids_from_cpp
 
 
 def calculate_makespan(instructions, node_costs):
-    """Match CompiledGraph.cost()'s dependency and engine scheduling model."""
+    """Match evaluateMakespan / CompiledGraph.cost()'s dependency and engine scheduling model."""
+    try:
+        import tensor_graphs
+        return tensor_graphs.calculate_makespan(instructions, node_costs)
+    except ImportError:
+        pass
+
     if not instructions:
         return sum(node_costs.values())
 
+    eclass_finish = {}
+    buffer_finish = {}
     engine_finish = {}
-    eclass_engines = {}
-    buffer_writers = {}
 
     for inst in instructions:
-        eclass_id = inst["eclassId"]
+        eclass_id = inst.get("eclassId", inst.get("eclass_id", 0))
         runtime = node_costs.get(eclass_id, 0.0)
+        if runtime == float("inf"):
+            runtime = 1.0
 
         children_finish = 0.0
         children = inst.get("children", [])
-        in_buffers = inst.get("inBuffers", [])
+        in_buffers = inst.get("inBuffers", inst.get("in_buffers", []))
         for index, child in enumerate(children):
-            child_engines = eclass_engines.get(child)
-            if child_engines is not None:
-                for engine in child_engines:
-                    children_finish = max(
-                        children_finish, engine_finish.get(engine, 0.0)
-                    )
+            if child in eclass_finish:
+                children_finish = max(children_finish, eclass_finish[child])
             elif index < len(in_buffers):
-                buffer_id = in_buffers[index].get("id", 0xFFFFFFFF)
-                if buffer_id != 0xFFFFFFFF:
-                    for engine in buffer_writers.get(buffer_id, []):
-                        children_finish = max(
-                            children_finish, engine_finish.get(engine, 0.0)
-                        )
+                b = in_buffers[index]
+                buf_id = b.get("id", 0xFFFFFFFF) if isinstance(b, dict) else b
+                if buf_id != 0xFFFFFFFF and buf_id in buffer_finish:
+                    children_finish = max(children_finish, buffer_finish[buf_id])
 
         engines = inst.get("engines", [])
         if not engines:
             engines = [{"idx": 0, "type": 0}]
-        engines = [(engine["idx"], engine["type"]) for engine in engines]
+        engine_tuples = [
+            (e["idx"], e["type"]) if isinstance(e, dict) else (e.idx, int(e.type))
+            for e in engines
+        ]
 
         engine_free = max(
-            (engine_finish.get(engine, 0.0) for engine in engines), default=0.0
+            (engine_finish.get(eng, 0.0) for eng in engine_tuples), default=0.0
         )
-        finish = max(children_finish, engine_free) + runtime
-        for engine in engines:
-            engine_finish[engine] = finish
+        start_time = max(children_finish, engine_free)
+        finish = start_time + runtime
 
-        eclass_engines[eclass_id] = engines
-        output_buffer_id = inst.get("outBuffer", {}).get("id", 0xFFFFFFFF)
-        if output_buffer_id != 0xFFFFFFFF:
-            buffer_writers[output_buffer_id] = engines
+        eclass_finish[eclass_id] = finish
+        out_buf = inst.get("outBuffer", inst.get("out_buffer", {}))
+        out_buf_id = (
+            out_buf.get("id", 0xFFFFFFFF) if isinstance(out_buf, dict) else out_buf
+        )
+        if out_buf_id != 0xFFFFFFFF:
+            buffer_finish[out_buf_id] = finish
+
+        for eng in engine_tuples:
+            engine_finish[eng] = finish
 
     return max(engine_finish.values(), default=0.0)
 

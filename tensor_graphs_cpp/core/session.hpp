@@ -229,6 +229,12 @@ struct Session
         manualBuckets.push_back(std::move(bucket));
     }
 
+    void updateFullBucketWeight()
+    {
+        if (fullBucketIdx < manualBuckets.size())
+            manualBuckets[fullBucketIdx].weight = manualBuckets.size() == 1 ? 1.0f : 0.0f;
+    }
+
     void setBucketWeights(const std::vector<float> &weights)
     {
         if (weights.size() != manualBuckets.size())
@@ -243,8 +249,7 @@ struct Session
         for (size_t i = 0; i < weights.size(); ++i)
             manualBuckets[i].weight = weights[i];
 
-        if (fullBucketIdx < manualBuckets.size())
-            manualBuckets[fullBucketIdx].weight = 0.0f;
+        updateFullBucketWeight();
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, TGStore *_repo = nullptr,
@@ -316,9 +321,9 @@ struct Session
             manualBuckets.push_back(bucket);
         }
 
-        // The native planner supplies the full-bucket witness. Its cost is
-        // not part of the weighted bucket objective used for cache planning.
-        manualBuckets[fullBucketIdx].weight = 0.0f;
+        // Include the full bucket in the objective only when it is the sole
+        // bucket, so search has a nonzero cost to optimize in that case.
+        updateFullBucketWeight();
     }
 
     void plan(bool doSaturate = true)
@@ -330,7 +335,7 @@ struct Session
         ensureFullBucket();
         if (!settings.bucket_weights.empty())
             setBucketWeights(settings.bucket_weights);
-        manualBuckets[fullBucketIdx].weight = 0.0f;
+        updateFullBucketWeight();
 
         const std::vector<float> requestedWeights = normalizedBucketWeights(manualBuckets);
         bool cacheMatchesBuckets =

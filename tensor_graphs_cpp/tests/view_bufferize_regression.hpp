@@ -226,6 +226,93 @@ inline void testCompiledGraphCost()
             Error::throw_err("[testCompiledGraphCost Failed] View buffer dependency makespan mismatch!");
         }
     }
+
+    // Test 5: Parallel execution with independent work on producer engine (no false serialization)
+    {
+        CompiledGraph g;
+        Engine gpu{0, EngineType::CUDA_GPU};
+        Engine cpu{0, EngineType::CPU};
+
+        // inst_1 on GPU takes 10.0ms, produces EClass 1 (Buffer 10)
+        OpInstruction inst_1;
+        inst_1.eclass_id = EClassId{1};
+        inst_1.engines = {gpu};
+        inst_1.outBuffer.id = BufferId{10};
+
+        // inst_2 on GPU takes 20.0ms, independent of inst_1, produces EClass 2 (Buffer 20)
+        OpInstruction inst_2;
+        inst_2.eclass_id = EClassId{2};
+        inst_2.engines = {gpu};
+        inst_2.outBuffer.id = BufferId{20};
+
+        // inst_3 on CPU takes 5.0ms, depends ONLY on inst_1
+        OpInstruction inst_3;
+        inst_3.eclass_id = EClassId{3};
+        inst_3.engines = {cpu};
+        inst_3.children = {EClassId{1}};
+        inst_3.inBuffers = {inst_1.outBuffer};
+        inst_3.outBuffer.id = BufferId{30};
+
+        g.instructions = {inst_1, inst_2, inst_3};
+        g.nodeCosts[EClassId{1}] = 10.0f;
+        g.nodeCosts[EClassId{2}] = 20.0f;
+        g.nodeCosts[EClassId{3}] = 5.0f;
+
+        // inst_1: t=0..10 on GPU
+        // inst_2: t=10..30 on GPU
+        // inst_3: depends on inst_1 (ready at 10), CPU is free at 0 => starts at 10, finishes at 15 on CPU
+        // Total makespan: max(30.0, 15.0) = 30.0ms (a buggy model that checks engine_finish[GPU] would give 35.0ms!)
+        if (std::abs(g.cost() - 30.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] Independent task on producer engine falsely serialized downstream consumer! Expected 30.0, got " + std::to_string(g.cost()));
+        }
+        if (std::abs(g.get_cost() - 30.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] get_cost mismatch! Expected 30.0, got " + std::to_string(g.get_cost()));
+        }
+    }
+
+    // Test 6: View dependency with independent work on producer engine
+    {
+        CompiledGraph g;
+        Engine gpu{0, EngineType::CUDA_GPU};
+        Engine cpu{0, EngineType::CPU};
+
+        // inst_1 on GPU takes 10.0ms, produces Buffer 10
+        OpInstruction inst_1;
+        inst_1.eclass_id = EClassId{1};
+        inst_1.engines = {gpu};
+        inst_1.outBuffer.id = BufferId{10};
+
+        // inst_2 on GPU takes 20.0ms, independent of inst_1
+        OpInstruction inst_2;
+        inst_2.eclass_id = EClassId{2};
+        inst_2.engines = {gpu};
+        inst_2.outBuffer.id = BufferId{20};
+
+        // EClass 4 is a view of EClass 1 (shares Buffer 10, not in instructions)
+        // inst_3 on CPU consumes EClass 4 via Buffer 10
+        OpInstruction inst_3;
+        inst_3.eclass_id = EClassId{3};
+        inst_3.engines = {cpu};
+        inst_3.children = {EClassId{4}};
+        ParallelBuffer view_in_buf;
+        view_in_buf.id = BufferId{10};
+        inst_3.inBuffers = {view_in_buf};
+        inst_3.outBuffer.id = BufferId{30};
+
+        g.instructions = {inst_1, inst_2, inst_3};
+        g.nodeCosts[EClassId{1}] = 10.0f;
+        g.nodeCosts[EClassId{2}] = 20.0f;
+        g.nodeCosts[EClassId{3}] = 5.0f;
+
+        // Buffer 10 is ready at 10.0ms. inst_3 starts at 10.0 on CPU, finishes at 15.0ms.
+        // GPU finishes at 30.0ms. Total makespan: 30.0ms.
+        if (std::abs(g.cost() - 30.0f) > 1e-5f)
+        {
+            Error::throw_err("[testCompiledGraphCost Failed] View buffer dependency with interleaved producer work failed! Expected 30.0, got " + std::to_string(g.cost()));
+        }
+    }
 }
 
 inline void runViewBufferizeRegressionTests()

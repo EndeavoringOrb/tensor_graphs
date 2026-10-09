@@ -108,6 +108,7 @@ inline SearchState makeState(const GraphSpec &spec, uint32_t bucket_count = 1)
                 state.bucket_enode_infos[b][en_id.value].is_view = alternative.is_view;
             }
             info.type = VarType::START;
+            info.selection_var = state.selected_vars[b][cid];
             state.start_vars[b][cid] = state.addVar(info, Domain::makeRange(0, spec.size() + 4));
             info.type = VarType::OFFSET;
             info.mem_space = space;

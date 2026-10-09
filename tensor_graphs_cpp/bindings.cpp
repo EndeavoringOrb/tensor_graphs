@@ -874,7 +874,142 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("nodeCosts", &CompiledGraph::nodeCosts)
         .def_readwrite("eclass_to_logical", &CompiledGraph::eclass_to_logical)
         .def_readwrite("logical_to_eclass", &CompiledGraph::logical_to_eclass)
-        .def("cost", &CompiledGraph::cost, py::arg("print_utilization") = false);
+        .def("cost", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("get_cost", &CompiledGraph::get_cost, py::arg("print_utilization") = false)
+        .def("getCost", &CompiledGraph::getCost, py::arg("print_utilization") = false)
+        .def("evaluate_makespan", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("evaluateMakespan", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("calculate_makespan", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("calculateMakespan", &CompiledGraph::cost, py::arg("print_utilization") = false);
+
+    auto pyCalculateMakespan = [](py::handle insts_obj, py::dict node_costs, bool print_utilization) -> float {
+        if (py::isinstance<CompiledGraph>(insts_obj)) {
+            return insts_obj.cast<const CompiledGraph &>().cost(print_utilization);
+        }
+        py::sequence instructions = insts_obj.cast<py::sequence>();
+        if (instructions.empty()) {
+            float sum = 0.0f;
+            for (auto item : node_costs) {
+                sum += item.second.cast<float>();
+            }
+            return sum;
+        }
+
+        MakespanSimulator sim;
+        for (auto inst_handle : instructions) {
+            py::dict inst = inst_handle.cast<py::dict>();
+
+            EClassId cid{0};
+            if (inst.contains("eclassId"))
+                cid = EClassId{inst["eclassId"].cast<uint32_t>()};
+            else if (inst.contains("eclass_id"))
+                cid = EClassId{inst["eclass_id"].cast<uint32_t>()};
+            else if (inst.contains("id"))
+                cid = EClassId{inst["id"].cast<uint32_t>()};
+
+            float inst_cost = 0.0f;
+            if (node_costs.contains(py::int_(cid.value))) {
+                inst_cost = node_costs[py::int_(cid.value)].cast<float>();
+            } else if (node_costs.contains(py::str(std::to_string(cid.value)))) {
+                inst_cost = node_costs[py::str(std::to_string(cid.value))].cast<float>();
+            }
+
+            std::vector<EClassId> children;
+            if (inst.contains("children")) {
+                for (auto c : inst["children"].cast<py::sequence>()) {
+                    children.push_back(EClassId{c.cast<uint32_t>()});
+                }
+            }
+
+            std::vector<uint32_t> in_bufs;
+            if (inst.contains("inBuffers")) {
+                for (auto b : inst["inBuffers"].cast<py::sequence>()) {
+                    if (py::isinstance<py::dict>(b)) {
+                        py::dict bdict = b.cast<py::dict>();
+                        in_bufs.push_back(bdict.contains("id") ? bdict["id"].cast<uint32_t>() : UINT32_MAX);
+                    } else if (py::isinstance<py::int_>(b)) {
+                        in_bufs.push_back(b.cast<uint32_t>());
+                    }
+                }
+            } else if (inst.contains("in_buffers")) {
+                for (auto b : inst["in_buffers"].cast<py::sequence>()) {
+                    if (py::isinstance<py::dict>(b)) {
+                        py::dict bdict = b.cast<py::dict>();
+                        in_bufs.push_back(bdict.contains("id") ? bdict["id"].cast<uint32_t>() : UINT32_MAX);
+                    } else if (py::isinstance<py::int_>(b)) {
+                        in_bufs.push_back(b.cast<uint32_t>());
+                    }
+                }
+            }
+
+            uint32_t out_buf = UINT32_MAX;
+            if (inst.contains("outBuffer")) {
+                auto ob = inst["outBuffer"];
+                if (py::isinstance<py::dict>(ob)) {
+                    py::dict obdict = ob.cast<py::dict>();
+                    if (obdict.contains("id"))
+                        out_buf = obdict["id"].cast<uint32_t>();
+                } else if (py::isinstance<py::int_>(ob)) {
+                    out_buf = ob.cast<uint32_t>();
+                }
+            } else if (inst.contains("out_buffer")) {
+                auto ob = inst["out_buffer"];
+                if (py::isinstance<py::dict>(ob)) {
+                    py::dict obdict = ob.cast<py::dict>();
+                    if (obdict.contains("id"))
+                        out_buf = obdict["id"].cast<uint32_t>();
+                } else if (py::isinstance<py::int_>(ob)) {
+                    out_buf = ob.cast<uint32_t>();
+                }
+            }
+
+            std::vector<Engine> engines;
+            if (inst.contains("engines")) {
+                for (auto e : inst["engines"].cast<py::sequence>()) {
+                    if (py::isinstance<py::dict>(e)) {
+                        py::dict edict = e.cast<py::dict>();
+                        uint32_t idx = edict.contains("idx") ? edict["idx"].cast<uint32_t>() : 0;
+                        EngineType type = EngineType::CPU;
+                        if (edict.contains("type")) {
+                            type = static_cast<EngineType>(edict["type"].cast<uint32_t>());
+                        }
+                        engines.push_back(Engine{idx, type});
+                    } else if (py::isinstance<Engine>(e)) {
+                        engines.push_back(e.cast<Engine>());
+                    }
+                }
+            }
+
+            bool is_view = false;
+            if (inst.contains("is_view"))
+                is_view = inst["is_view"].cast<bool>();
+            else if (inst.contains("isView"))
+                is_view = inst["isView"].cast<bool>();
+
+            sim.addOperation(cid, children, in_bufs, out_buf, engines, inst_cost, is_view);
+        }
+
+        float total_cost = sim.getMakespan();
+        if (print_utilization && total_cost > 0.0f) {
+            std::cout << "Total Execution Cost: " << total_cost << " ms\n";
+            for (const auto &kv : sim.engine_active_time) {
+                Engine eng = kv.first;
+                float active_duration = kv.second;
+                float percentage = (active_duration / total_cost) * 100.0f;
+                std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): " << std::fixed
+                          << std::setprecision(2) << percentage << "% "
+                          << "(" << active_duration << " ms active)\n";
+            }
+        }
+        return total_cost;
+    };
+
+    m.def("calculate_makespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("calculateMakespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("evaluate_makespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("evaluateMakespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("get_cost", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("getCost", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
 
     py::class_<Settings>(m, "Settings")
         .def(py::init<>(&Settings::get_default))

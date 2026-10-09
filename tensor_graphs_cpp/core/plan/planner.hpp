@@ -2055,7 +2055,7 @@ struct Planner
         }
 
         // Cache candidate discovery across saturated egraphs.  Cache choices
-        // only help weighted partial buckets; the zero-weight full bucket is
+        // only help weighted partial buckets; the full bucket is
         // the initialization path and must compute every value itself.
         std::vector<CacheCandidate> candidates;
         bool has_weighted_partial_bucket = false;
