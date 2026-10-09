@@ -10,6 +10,57 @@ from binary import load_cache_file
 from common import format_ms, format_op_name, load_uids_from_cpp
 
 
+def calculate_makespan(instructions, node_costs):
+    """Match CompiledGraph.cost()'s dependency and engine scheduling model."""
+    if not instructions:
+        return sum(node_costs.values())
+
+    engine_finish = {}
+    eclass_engines = {}
+    buffer_writers = {}
+
+    for inst in instructions:
+        eclass_id = inst["eclassId"]
+        runtime = node_costs.get(eclass_id, 0.0)
+
+        children_finish = 0.0
+        children = inst.get("children", [])
+        in_buffers = inst.get("inBuffers", [])
+        for index, child in enumerate(children):
+            child_engines = eclass_engines.get(child)
+            if child_engines is not None:
+                for engine in child_engines:
+                    children_finish = max(
+                        children_finish, engine_finish.get(engine, 0.0)
+                    )
+            elif index < len(in_buffers):
+                buffer_id = in_buffers[index].get("id", 0xFFFFFFFF)
+                if buffer_id != 0xFFFFFFFF:
+                    for engine in buffer_writers.get(buffer_id, []):
+                        children_finish = max(
+                            children_finish, engine_finish.get(engine, 0.0)
+                        )
+
+        engines = inst.get("engines", [])
+        if not engines:
+            engines = [{"idx": 0, "type": 0}]
+        engines = [(engine["idx"], engine["type"]) for engine in engines]
+
+        engine_free = max(
+            (engine_finish.get(engine, 0.0) for engine in engines), default=0.0
+        )
+        finish = max(children_finish, engine_free) + runtime
+        for engine in engines:
+            engine_finish[engine] = finish
+
+        eclass_engines[eclass_id] = engines
+        output_buffer_id = inst.get("outBuffer", {}).get("id", 0xFFFFFFFF)
+        if output_buffer_id != 0xFFFFFFFF:
+            buffer_writers[output_buffer_id] = engines
+
+    return max(engine_finish.values(), default=0.0)
+
+
 def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
     print(f"Loading compiled buckets from: {cache_file}")
     cache_entries = load_cache_file(cache_file)
@@ -77,7 +128,8 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
             )
             bucket_sequence.append({"identity": display_identity, "runtime": runtime})
             op_type_stats[op_name] += runtime
-            total_estimated_time += runtime
+
+        total_estimated_time += calculate_makespan(instructions, node_costs)
 
         if len(bucket_sequence) >= chain_len:
             for i in range(len(bucket_sequence) - chain_len + 1):

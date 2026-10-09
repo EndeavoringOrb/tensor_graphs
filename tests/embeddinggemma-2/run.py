@@ -42,6 +42,17 @@ def parseArgs() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--cosine-tolerance", type=float, default=0.99)
     parser.add_argument(
+        "--min-compile-time",
+        type=float,
+        default=1.0,
+        help="Minimum required compile time per bucket in seconds",
+    )
+    parser.add_argument(
+        "--saturate-only",
+        action="store_true",
+        help="Compile the selected modality/configuration graphs without running embeddings",
+    )
+    parser.add_argument(
         "--cache-file",
         "--cache",
         dest="cache_file",
@@ -181,22 +192,26 @@ def compareEmbedding(native_values: list[float], reference: torch.Tensor, modali
 
 
 def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace,
-                       reference_model: SentenceTransformer, processor: AutoProcessor) -> None:
+                       reference_model: SentenceTransformer | None, processor: AutoProcessor) -> None:
     options = CONFIGS[config_name]
     native_input = prepareNativeInput(processor, modality, args)
-    reference = encodeReference(reference_model, modality, args, native_input)
     token_ids = native_input["token_ids"].tolist()
     kwargs = {
         "token_ids": token_ids,
         "cache_file": args.cache_file,
         "compile_no_weights_bucket": options["compile_no_weights_bucket"],
         "compile_dirty_input_bucket": options["compile_dirty_input_bucket"],
-        "disable_compilation_caching": not bool(args.cache_file),
+        "disable_compilation_caching": args.saturate_only or not bool(args.cache_file),
+        "min_compile_seconds": args.min_compile_time,
     }
     for shape_key in ("patch_count", "patch_grid_width", "mel_frames", "video_frames"):
         if shape_key in native_input:
             kwargs[shape_key] = native_input[shape_key]
     session = tensor_graphs.EmbeddingGemma2(str(args.model_path), modality, **kwargs)
+    if args.saturate_only:
+        return
+
+    reference = encodeReference(reference_model, modality, args, native_input)
     if modality == "text":
         output = session.embed_text(token_ids)
     else:
@@ -211,7 +226,10 @@ def main() -> None:
         raise FileNotFoundError(f"Model directory does not exist: {args.model_path}")
     selected_modalities = MODALITIES if args.modality == "all" else (args.modality,)
     config_names = list(CONFIGS) if args.config == "all" else [args.config]
-    reference_model = SentenceTransformer(str(args.model_path), device=args.device)
+    reference_model = (
+        None if args.saturate_only
+        else SentenceTransformer(str(args.model_path), device=args.device)
+    )
     processor = AutoProcessor.from_pretrained(args.model_path)
 
     for config_name in config_names:
@@ -222,6 +240,9 @@ def main() -> None:
                 continue
             print(f"\n=== EmbeddingGemma 2 {config_name}: {modality} ===", flush=True)
             runEmbeddingGemma2(config_name, modality, args, reference_model, processor)
+
+    if args.saturate_only:
+        print("Saturate-only complete. Selected graphs compiled without running embeddings.", flush=True)
 
 
 if __name__ == "__main__":
