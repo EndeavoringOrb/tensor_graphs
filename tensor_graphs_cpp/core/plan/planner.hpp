@@ -2220,7 +2220,11 @@ struct Planner
 
             const uint32_t removed_single_consumer = removeSingleExternalConsumerCycleENodes(bucket_states[b]);
             const uint32_t post_pass4_cycles = countCyclicComponents(bucket_states[b]);
-            if (post_pass4_cycles > 0)
+
+            const uint32_t removed_single_compute_producer =
+                removeSingleExternalComputationalProducerCycleENodes(bucket_states[b]);
+            const uint32_t post_pass5_cycles = countCyclicComponents(bucket_states[b]);
+            if (post_pass5_cycles > 0)
                 all_buckets_dag = false;
 
             LOG(INFO) << "[Planner.planAll] Bucket " << b << " cycle reduction:";
@@ -2237,6 +2241,9 @@ struct Planner
             LOG(INFO) << "  Pass 4 (single-external consumer): " << post_pass3_cycles << " -> " << post_pass4_cycles
                       << " (-" << (post_pass3_cycles - post_pass4_cycles) << ", removed "
                       << removed_single_consumer << " enodes)";
+            LOG(INFO) << "  Pass 5 (single-external compute producer): " << post_pass4_cycles << " -> " << post_pass5_cycles
+                      << " (-" << (post_pass4_cycles - post_pass5_cycles) << ", removed "
+                      << removed_single_compute_producer << " enodes)";
         }
 
         if (all_buckets_dag)
