@@ -30,6 +30,7 @@ class StartUniquePropagator : public Propagator
                 if (!state.domains[pair.second].contains(0))
                     active.push_back(state.start_vars[b].at(pair.first));
             }
+            std::sort(active.begin(), active.end());
         }
         active_start_selection_revision_ = selection_revision;
     }
@@ -41,16 +42,16 @@ class StartUniquePropagator : public Propagator
         {
             if (other_st_v == source_st_v)
                 continue;
-            Domain other_st_dom = state.domains[other_st_v];
-            if (other_st_dom.contains(st_val))
-            {
-                if (other_st_dom.isFixed())
-                    return false;
-                other_st_dom.remove(st_val);
-                if (other_st_dom.isEmpty())
-                    return false;
-                state.setDomain(other_st_v, other_st_dom);
-            }
+            const Domain &other_st_dom = state.domains[other_st_v];
+            if (!other_st_dom.contains(st_val))
+                continue;
+            if (other_st_dom.isFixed())
+                return false;
+            Domain next_st_dom = other_st_dom;
+            next_st_dom.remove(st_val);
+            if (next_st_dom.isEmpty())
+                return false;
+            state.setDomain(other_st_v, next_st_dom);
         }
         return true;
     }

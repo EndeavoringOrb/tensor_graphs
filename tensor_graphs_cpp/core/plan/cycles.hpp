@@ -397,3 +397,86 @@ inline uint32_t removeSingleExternalInputCycleENodes(EGraph &egraph)
 
     return total_removed;
 }
+
+inline uint32_t removeSingleExternalConsumerCycleENodes(EGraph &egraph)
+{
+    uint32_t total_removed = 0;
+
+    while (true)
+    {
+        std::vector<std::vector<CycleEdge>> outgoing, incoming;
+        std::vector<uint8_t> canonical;
+        auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
+        if (cyclic_components.empty())
+            break;
+
+        uint32_t iter_removed = 0;
+
+        for (const auto &component : cyclic_components)
+        {
+            std::unordered_set<uint32_t> comp_set(component.begin(), component.end());
+
+            std::vector<uint32_t> external_consumers;
+            for (uint32_t member : component)
+            {
+                bool has_outside_consumer = false;
+                for (const CycleEdge &edge : incoming[member])
+                {
+                    if (comp_set.find(edge.from) == comp_set.end())
+                    {
+                        has_outside_consumer = true;
+                        break;
+                    }
+                }
+                if (has_outside_consumer)
+                {
+                    external_consumers.push_back(member);
+                }
+            }
+
+            if (external_consumers.size() != 1)
+                continue;
+
+            const uint32_t ext_consumer = external_consumers.front();
+            for (uint32_t member : component)
+            {
+                if (member == ext_consumer)
+                    continue;
+
+                EClass &int_eclass = egraph.getEClass(EClassId{member});
+                std::vector<ENodeId> kept_enodes;
+                kept_enodes.reserve(int_eclass.enodes.size());
+
+                for (ENodeId enode_id : int_eclass.enodes)
+                {
+                    const ENode &enode = egraph.getENode(enode_id);
+                    bool has_internal_child = false;
+                    for (EClassId child : enode.getChildren())
+                    {
+                        uint32_t canon_child = egraph.findConst(child).value;
+                        if (comp_set.count(canon_child))
+                        {
+                            has_internal_child = true;
+                            break;
+                        }
+                    }
+                    if (has_internal_child)
+                    {
+                        ++iter_removed;
+                    }
+                    else
+                    {
+                        kept_enodes.push_back(enode_id);
+                    }
+                }
+                int_eclass.enodes = std::move(kept_enodes);
+            }
+        }
+
+        if (iter_removed == 0)
+            break;
+        total_removed += iter_removed;
+    }
+
+    return total_removed;
+}

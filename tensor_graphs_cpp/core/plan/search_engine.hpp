@@ -832,6 +832,17 @@ class SearchEngine
                   << "s leaf-evaluation=" << search_timing.leaf_eval_ns / 1.0e9
                   << "s queue-push=" << search_timing.queue_push_ns / 1.0e9
                   << "s queue-pop=" << search_timing.queue_pop_ns / 1.0e9 << "s";
+        if (auto *hb = dynamic_cast<HeuristicBrancher *>(brancher.get()))
+        {
+            const auto &bt = hb->getTiming();
+            LOG(INFO) << "[SearchEngine profile] brancher parts: selection=" << bt.selection_ns / 1.0e9
+                      << "s cache=" << bt.cache_ns / 1.0e9
+                      << "s sched-topo=" << bt.sched_topo_ns / 1.0e9
+                      << "s sched-start=" << bt.sched_start_ns / 1.0e9
+                      << "s sched-offset=" << bt.sched_offset_ns / 1.0e9
+                      << "s (preferred-offset=" << bt.preferred_offset_ns / 1.0e9 << "s, "
+                      << bt.preferred_offset_calls << " calls)";
+        }
         for (size_t prop_idx = 0; prop_idx < propagators.size(); ++prop_idx)
         {
             const auto &timing = propagator_timings[prop_idx];

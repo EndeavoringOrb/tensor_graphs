@@ -352,6 +352,7 @@ struct FusionRule : public Rule
         std::vector<std::vector<uint32_t>> dummyShapes;
         Graph graph;
         std::string pattern_hash;
+        bool is_single_node = false;
     };
 
     struct MatchResult
@@ -361,8 +362,10 @@ struct FusionRule : public Rule
         std::vector<EClassId> variadicConcatTensorEClasses;
     };
 
-    std::unordered_map<OpType, std::vector<Pattern>> patternsByOp;
+    std::unordered_map<OpType, std::vector<Pattern>> singleNodePatternsByOp;
+    std::unordered_map<OpType, std::vector<Pattern>> multiNodePatternsByOp;
     std::vector<MatchResult> activeMatches;
+    std::unordered_set<uint32_t> single_node_visited;
 
     struct ApplicationKey
     {
@@ -433,7 +436,25 @@ struct FusionRule : public Rule
             pattern.dtypes = entry.dtypes;
             pattern.dummyShapes = entry.dummyShapes;
 
-            patternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+            bool is_single = true;
+            for (LogicalId cid : pattern.graph.getNode(pattern.rootId).child_ids)
+            {
+                if (pattern.graph.getNode(cid).opType != OpType::INPUT)
+                {
+                    is_single = false;
+                    break;
+                }
+            }
+            pattern.is_single_node = is_single;
+
+            if (is_single)
+            {
+                singleNodePatternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+            }
+            else
+            {
+                multiNodePatternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+            }
         }
     }
 
@@ -443,30 +464,59 @@ struct FusionRule : public Rule
         const EGraph &egraph = ctx.egraph;
         const ENode &eNode = egraph.getENode(ENodeId{eNodeIdx});
 
-        auto it = patternsByOp.find(eNode.getOpType());
-        if (it == patternsByOp.end())
-            return false;
-
-        for (const auto &pattern : it->second)
+        if (single_node_visited.insert(eNodeIdx).second)
         {
-            std::unordered_map<LogicalId, EClassId> binding;
-            if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
+            auto it_single = singleNodePatternsByOp.find(eNode.getOpType());
+            if (it_single != singleNodePatternsByOp.end())
             {
-                MatchResult mr;
-                mr.pattern = &pattern;
-                mr.binding = std::move(binding);
-
-                if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
+                for (const auto &pattern : it_single->second)
                 {
-                    for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
+                    std::unordered_map<LogicalId, EClassId> binding;
+                    if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
                     {
-                        mr.variadicConcatTensorEClasses.push_back(egraph.findConst(eNode.getChildren()[i]));
+                        MatchResult mr;
+                        mr.pattern = &pattern;
+                        mr.binding = std::move(binding);
+
+                        if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
+                        {
+                            for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
+                            {
+                                mr.variadicConcatTensorEClasses.push_back(egraph.findConst(eNode.getChildren()[i]));
+                            }
+                        }
+
+                        activeMatches.push_back(std::move(mr));
                     }
                 }
-
-                activeMatches.push_back(std::move(mr));
             }
         }
+
+        auto it_multi = multiNodePatternsByOp.find(eNode.getOpType());
+        if (it_multi != multiNodePatternsByOp.end())
+        {
+            for (const auto &pattern : it_multi->second)
+            {
+                std::unordered_map<LogicalId, EClassId> binding;
+                if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
+                {
+                    MatchResult mr;
+                    mr.pattern = &pattern;
+                    mr.binding = std::move(binding);
+
+                    if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
+                    {
+                        for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
+                        {
+                            mr.variadicConcatTensorEClasses.push_back(egraph.findConst(eNode.getChildren()[i]));
+                        }
+                    }
+
+                    activeMatches.push_back(std::move(mr));
+                }
+            }
+        }
+
         return !activeMatches.empty();
     }
 
@@ -1914,6 +1964,8 @@ struct DotSplitRule : public Rule
 // Remove unneeded contiguous ops. op(contiguous(x)) -> op(x)
 struct RemoveContiguous : public Rule
 {
+    std::unordered_set<uint32_t> visited;
+
     std::string name() const override
     {
         return "RemoveContiguous";
@@ -1921,6 +1973,9 @@ struct RemoveContiguous : public Rule
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        if (visited.count(eNodeIdx))
+            return false;
+
         const EGraph &egraph = ctx.egraph;
         if (eNodeIdx >= egraph.getENodes().size())
             return false;
@@ -1971,6 +2026,7 @@ struct RemoveContiguous : public Rule
 
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        visited.insert(eNodeIdx);
         EGraph &egraph = ctx.egraph;
 
         const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
@@ -2321,6 +2377,8 @@ struct ConsumerWeightReuseRule : public Rule
 // 3. Consumer Unwrapping: op(..., RESHAPE(x), ...) -> op(..., x, ...) when x.shape matches
 struct RemoveRedundantReshape : public Rule
 {
+    std::unordered_set<uint32_t> visited;
+
     std::string name() const override
     {
         return "RemoveRedundantReshape";
@@ -2328,6 +2386,9 @@ struct RemoveRedundantReshape : public Rule
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        if (visited.count(eNodeIdx))
+            return false;
+
         const EGraph &egraph = ctx.egraph;
         if (eNodeIdx >= egraph.getENodes().size())
             return false;
@@ -2397,6 +2458,7 @@ struct RemoveRedundantReshape : public Rule
 
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        visited.insert(eNodeIdx);
         EGraph &egraph = ctx.egraph;
         const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId e_class_id = egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx}));

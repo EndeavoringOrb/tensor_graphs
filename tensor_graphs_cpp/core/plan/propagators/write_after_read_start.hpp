@@ -55,14 +55,24 @@ class WriteAfterReadStartPropagator : public Propagator
 
     bool propagateBucket(SearchState &state, uint32_t b, std::vector<VarId> &worklist) const
     {
+        const auto &fixed_offset_vars = state.getFixedOffsetVars(b);
+        if (fixed_offset_vars.size() < 2)
+            return true;
+
         const size_t num_classes = state.bucket_egraphs[b].classes.size();
         std::vector<ActiveAllocation> active;
-        active.reserve(state.selected_vars[b].size());
+        active.reserve(fixed_offset_vars.size());
 
-        for (const auto &selected_pair : state.selected_vars[b])
+        for (const auto &pair : fixed_offset_vars)
         {
-            const EClassId cid = selected_pair.first;
-            const Domain &selection = state.domains[selected_pair.second];
+            const VarId offset_var = pair.second;
+            const VarInfo &off_info = state.var_infos[offset_var];
+            const EClassId cid = off_info.eclass_id;
+
+            const auto selected_it = state.selected_vars[b].find(cid);
+            if (selected_it == state.selected_vars[b].end())
+                continue;
+            const Domain &selection = state.domains[selected_it->second];
             if (!selection.isFixed() || selection.fixedValue() <= 0)
                 continue;
             const uint32_t en_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
@@ -70,12 +80,8 @@ class WriteAfterReadStartPropagator : public Propagator
             if (en_idx >= cls.enodes.size())
                 continue;
 
-            const auto offset_it = state.offset_vars[b].find(cid);
             const auto start_it = state.start_vars[b].find(cid);
-            if (offset_it == state.offset_vars[b].end() || start_it == state.start_vars[b].end())
-                continue;
-            const Domain &offset_domain = state.domains[offset_it->second];
-            if (!offset_domain.isFixed())
+            if (start_it == state.start_vars[b].end())
                 continue;
 
             const ENodeId en_id = cls.enodes[en_idx];
@@ -91,7 +97,7 @@ class WriteAfterReadStartPropagator : public Propagator
             const uint32_t size_pages = std::max<uint32_t>(
                 1, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
 
-            active.push_back({cid, cls.base_eclass_id, cls.mem_space, offset_domain.fixedValue(),
+            active.push_back({cid, cls.base_eclass_id, cls.mem_space, pair.first,
                               size_pages, start_it->second,
                               state.domains[start_it->second], is_view, is_persistent});
         }

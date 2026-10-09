@@ -7,6 +7,7 @@
 #include "tests/constant_view_regression.hpp"
 #include "tests/cuda_sync_regression.hpp"
 #include "tests/fused.hpp"
+#include "tests/fusion_rule_sweep_regression.hpp"
 #include "tests/input_hashcons.hpp"
 #include "tests/incremental_propagators.hpp"
 #include "tests/planner_structure.hpp"
@@ -29,6 +30,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
     parser.add_flag({"--incremental-propagators"}, "Run only incremental propagator equivalence tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
+    parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -47,6 +49,11 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--planner-structure"))
     {
         runPlannerStructureTests();
+        return 0;
+    }
+    if (parser.get_flag("--fusion-regression"))
+    {
+        FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         return 0;
     }
     if (parser.get_flag("--incremental-propagators"))
@@ -82,6 +89,7 @@ int main(int argc, char *argv[])
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
         runPlannerStructureTests();
+        FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         runSelectionReachabilityTests();
         runIncrementalPropagatorTests();
         runShapePropagationTests();

@@ -383,6 +383,7 @@ struct Planner
         {
             iterations++;
             uint32_t preUniqueNodes = egraph.getNumUniqueENodes();
+            uint32_t preMatches = nMatches;
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
                 for (const auto &rule : rules)
@@ -395,6 +396,20 @@ struct Planner
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
+            }
+            if (nMatches == preMatches)
+            {
+                changed = false;
+                std::stringstream ss;
+                ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
+                for (auto const &[name, count] : ruleMatchCounts)
+                {
+                    ss << "  " << name << ": " << count << " matches\n";
+                }
+                ss << "Total Matches: " << nMatches;
+                LOG(INFO) << ss.str();
+                timer.tick();
+                break;
             }
             egraph.rebuild();
             uint32_t postUniqueNodes = egraph.getNumUniqueENodes();
@@ -2194,8 +2209,6 @@ struct Planner
 
             const uint32_t removed_single_input = removeSingleExternalInputCycleENodes(bucket_states[b]);
             const uint32_t post_pass3_cycles = countCyclicComponents(bucket_states[b]);
-            if (post_pass3_cycles > 0)
-                all_buckets_dag = false;
             if (cycleLogAfterClean3)
             {
                 cycleLogAfterClean3 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
@@ -2204,6 +2217,11 @@ struct Planner
                 printEGraphCycles(bucket_states[b], cycleLogAfterClean3);
                 cycleLogAfterClean3.flush();
             }
+
+            const uint32_t removed_single_consumer = removeSingleExternalConsumerCycleENodes(bucket_states[b]);
+            const uint32_t post_pass4_cycles = countCyclicComponents(bucket_states[b]);
+            if (post_pass4_cycles > 0)
+                all_buckets_dag = false;
 
             LOG(INFO) << "[Planner.planAll] Bucket " << b << " cycle reduction:";
             LOG(INFO) << "  Initial cyclic components: " << initial_cycles;
@@ -2216,6 +2234,9 @@ struct Planner
             LOG(INFO) << "  Pass 3 (single-external input): " << post_pass2_cycles << " -> " << post_pass3_cycles
                       << " (-" << (post_pass2_cycles - post_pass3_cycles) << ", removed "
                       << removed_single_input << " enodes)";
+            LOG(INFO) << "  Pass 4 (single-external consumer): " << post_pass3_cycles << " -> " << post_pass4_cycles
+                      << " (-" << (post_pass3_cycles - post_pass4_cycles) << ", removed "
+                      << removed_single_consumer << " enodes)";
         }
 
         if (all_buckets_dag)

@@ -147,6 +147,7 @@ struct EGraph
 
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<EClassId>> constantHashIndex;
+    mutable std::unordered_map<const std::vector<uint8_t> *, uint64_t> constantDataHashCache;
 
     // Base eclass ID -> current canonical eclass ID.
     mutable std::unordered_map<BaseEClassId, EClassId> baseEClassToEClass;
@@ -437,6 +438,7 @@ struct EGraph
 
     void rebuild(bool compact = false)
     {
+        uint32_t total_merges = 0;
         while (true)
         {
             std::unordered_map<uint64_t, std::vector<ENodeId>> new_hash;
@@ -450,25 +452,29 @@ struct EGraph
                 ENodeId current_enode_id{i};
 
                 bool children_changed = false;
-                std::vector<EClassId> updated_children = node.getChildren();
-                for (EClassId &child : updated_children)
+                for (EClassId child : node.getChildren())
                 {
-                    EClassId c = find(child);
-                    if (c != child)
+                    if (find(child) != child)
                     {
-                        child = c;
                         children_changed = true;
+                        break;
                     }
                 }
                 if (children_changed)
                 {
+                    std::vector<EClassId> updated_children = node.getChildren();
+                    for (EClassId &child : updated_children)
+                    {
+                        child = find(child);
+                    }
                     node.setChildren(std::move(updated_children));
+                    node.setSig(computeSignature(node));
                 }
 
                 EClassId cls = find(nodeToEClass[i]);
                 nodeToEClass[i] = cls;
 
-                if (children_changed || node.getSig() == 0)
+                if (node.getSig() == 0)
                 {
                     node.setSig(computeSignature(node));
                 }
@@ -500,10 +506,15 @@ struct EGraph
             }
 
             hashcons = std::move(new_hash);
-            rebuildConstantHashIndex();
+            total_merges += n_merges;
 
-            if (!compact || n_merges == 0)
+            if (n_merges == 0)
                 break;
+        }
+
+        if (total_merges > 0)
+        {
+            rebuildConstantHashIndex();
         }
 
         if (!compact)
@@ -833,8 +844,8 @@ struct EGraph
         return h;
     }
 
-    static uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
-                                        DType dtype, const std::vector<uint8_t> &data) noexcept
+    uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                                 DType dtype, const std::vector<uint8_t> &data) const noexcept
     {
         uint64_t h = static_cast<uint64_t>(dtype);
 
@@ -844,26 +855,35 @@ struct EGraph
         for (uint64_t s : strides)
             hashCombine(h, s);
 
-        // Hash the data bytes efficiently - process 8 bytes at a time
-        const uint8_t *ptr = data.data();
-        uint64_t len = data.size();
-        uint64_t i = 0;
-
-        for (; i + 8 <= len; i += 8)
+        auto it = constantDataHashCache.find(&data);
+        uint64_t data_hash = 0;
+        if (it != constantDataHashCache.end())
         {
-            uint64_t val;
-            std::memcpy(&val, ptr + i, 8);
-            hashCombine(h, val);
+            data_hash = it->second;
+        }
+        else
+        {
+            const uint8_t *ptr = data.data();
+            uint64_t len = data.size();
+            uint64_t i = 0;
+
+            for (; i + 8 <= len; i += 8)
+            {
+                uint64_t val;
+                std::memcpy(&val, ptr + i, 8);
+                hashCombine(data_hash, val);
+            }
+
+            if (i < len)
+            {
+                uint64_t val = 0;
+                std::memcpy(&val, ptr + i, len - i);
+                hashCombine(data_hash, val);
+            }
+            constantDataHashCache[&data] = data_hash;
         }
 
-        // Handle remaining bytes
-        if (i < len)
-        {
-            uint64_t val = 0;
-            std::memcpy(&val, ptr + i, len - i);
-            hashCombine(h, val);
-        }
-
+        hashCombine(h, data_hash);
         return h;
     }
 

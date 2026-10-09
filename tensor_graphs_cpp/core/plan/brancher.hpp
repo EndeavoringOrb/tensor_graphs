@@ -287,6 +287,80 @@ class HeuristicBrancher : public Brancher
     mutable bool cached_offset_index_initialized = false;
     mutable std::vector<CachedOffsetCandidate> cached_offset_candidates;
 
+    mutable bool static_lookups_initialized_ = false;
+    mutable std::map<MemSpace, std::vector<Obstacle>> preallocated_obstacles_by_space_;
+    mutable std::vector<std::vector<uint32_t>> eclass_page_sizes_;
+    mutable std::vector<std::vector<MemSpace>> eclass_mem_spaces_;
+    mutable std::vector<std::vector<VarId>> eclass_selected_vars_;
+    mutable std::vector<std::vector<VarId>> eclass_start_vars_;
+    mutable std::vector<std::vector<VarId>> eclass_offset_vars_;
+
+    void ensureStaticLookups(const SearchState &state) const
+    {
+        if (static_lookups_initialized_)
+            return;
+
+        for (const auto &pair : state.preallocated_buffers)
+        {
+            MemSpace ms = pair.second.mem_space;
+            uint32_t align = state.getPageAlignment(ms);
+            uint32_t start_p = static_cast<uint32_t>(pair.second.offset / align);
+            uint32_t end_p = static_cast<uint32_t>((pair.second.offset + pair.second.size + align - 1) / align);
+            preallocated_obstacles_by_space_[ms].push_back({start_p, end_p});
+        }
+        for (auto &pair : preallocated_obstacles_by_space_)
+        {
+            std::sort(pair.second.begin(), pair.second.end(), [](const Obstacle &a, const Obstacle &b) {
+                return a.start < b.start;
+            });
+        }
+
+        eclass_page_sizes_.resize(state.buckets.size());
+        eclass_mem_spaces_.resize(state.buckets.size());
+        eclass_selected_vars_.resize(state.buckets.size());
+        eclass_start_vars_.resize(state.buckets.size());
+        eclass_offset_vars_.resize(state.buckets.size());
+
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            const size_t num_classes = state.bucket_egraphs[b].classes.size();
+            eclass_page_sizes_[b].resize(num_classes, 1);
+            eclass_mem_spaces_[b].resize(num_classes);
+            eclass_selected_vars_[b].resize(num_classes, kInvalidVarId);
+            eclass_start_vars_[b].resize(num_classes, kInvalidVarId);
+            eclass_offset_vars_[b].resize(num_classes, kInvalidVarId);
+
+            for (size_t c = 0; c < num_classes; ++c)
+            {
+                EClassId cid{static_cast<uint32_t>(c)};
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
+                eclass_page_sizes_[b][c] = (psize == 0) ? 1 : psize;
+                eclass_mem_spaces_[b][c] = cls.mem_space;
+
+                if (b < state.selected_vars.size())
+                {
+                    auto sel_it = state.selected_vars[b].find(cid);
+                    if (sel_it != state.selected_vars[b].end())
+                        eclass_selected_vars_[b][c] = sel_it->second;
+                }
+                if (b < state.start_vars.size())
+                {
+                    auto st_it = state.start_vars[b].find(cid);
+                    if (st_it != state.start_vars[b].end())
+                        eclass_start_vars_[b][c] = st_it->second;
+                }
+                if (b < state.offset_vars.size())
+                {
+                    auto off_it = state.offset_vars[b].find(cid);
+                    if (off_it != state.offset_vars[b].end())
+                        eclass_offset_vars_[b][c] = off_it->second;
+                }
+            }
+        }
+        static_lookups_initialized_ = true;
+    }
+
 #ifdef TG_PROFILE
     struct BrancherTiming
     {
@@ -311,17 +385,17 @@ class HeuristicBrancher : public Brancher
         auto pref_start = std::chrono::steady_clock::now();
         brancher_timing.preferred_offset_calls++;
 #endif
-        const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-        uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
-        uint32_t curr_size = (psize == 0) ? 1 : psize;
+        ensureStaticLookups(state);
+        const MemSpace mem_space = eclass_mem_spaces_[b][cid.value];
+        const uint32_t curr_size = eclass_page_sizes_[b][cid.value];
 
         EClassId base_cid = resolveBaseClass(state, b, cid);
         if (base_cid != cid)
         {
-            auto base_off_it = state.offset_vars[b].find(base_cid);
-            if (base_off_it != state.offset_vars[b].end())
+            VarId base_off_v = (base_cid.value < eclass_offset_vars_[b].size()) ? eclass_offset_vars_[b][base_cid.value] : kInvalidVarId;
+            if (base_off_v != kInvalidVarId)
             {
-                const Domain &base_dom = state.domains[base_off_it->second];
+                const Domain &base_dom = state.domains[base_off_v];
                 if (base_dom.isFixed() && offset_domain.contains(base_dom.fixedValue()))
                 {
 #ifdef TG_PROFILE
@@ -343,18 +417,11 @@ class HeuristicBrancher : public Brancher
             offset_eclass_end.resize(num_classes, 0);
         }
 
-        offset_obstacles.clear();
-        for (const auto &pair : state.preallocated_buffers)
-        {
-            if (pair.second.mem_space == cls.mem_space)
-            {
-                uint32_t align = state.getPageAlignment(cls.mem_space);
-                uint32_t start_p = static_cast<uint32_t>(pair.second.offset / align);
-                uint32_t end_p = static_cast<uint32_t>((pair.second.offset + pair.second.size + align - 1) / align);
-                offset_obstacles.push_back({start_p, end_p});
-            }
-        }
-        const size_t preallocated_obstacle_count = offset_obstacles.size();
+        auto obs_it = preallocated_obstacles_by_space_.find(mem_space);
+        if (obs_it != preallocated_obstacles_by_space_.end())
+            offset_obstacles = obs_it->second;
+        else
+            offset_obstacles.clear();
 
         const bool refresh_lifetimes = cached_preferred_offset_bucket != b ||
                                        cached_preferred_offset_selection_revision != state.getSelectionRevision() ||
@@ -389,10 +456,10 @@ class HeuristicBrancher : public Brancher
                 int32_t st_val = 0;
                 if (!is_input_or_cache && !is_root)
                 {
-                    auto st_it = state.start_vars[b].find(cand);
-                    if (st_it != state.start_vars[b].end())
+                    VarId st_v = (cand.value < eclass_start_vars_[b].size()) ? eclass_start_vars_[b][cand.value] : kInvalidVarId;
+                    if (st_v != kInvalidVarId)
                     {
-                        const Domain &st_dom = state.domains[st_it->second];
+                        const Domain &st_dom = state.domains[st_v];
                         if (st_dom.isFixed())
                             st_val = st_dom.fixedValue();
                     }
@@ -417,10 +484,10 @@ class HeuristicBrancher : public Brancher
                     continue;
 
                 int32_t r_finish = 1;
-                auto r_st_it = state.start_vars[b].find(r_cid);
-                if (r_st_it != state.start_vars[b].end())
+                VarId r_st_v = (r_cid.value < eclass_start_vars_[b].size()) ? eclass_start_vars_[b][r_cid.value] : kInvalidVarId;
+                if (r_st_v != kInvalidVarId)
                 {
-                    const Domain &r_st_dom = state.domains[r_st_it->second];
+                    const Domain &r_st_dom = state.domains[r_st_v];
                     r_finish = r_st_dom.isFixed() ? (r_st_dom.fixedValue() + 1) : (r_st_dom.getMax() + 1);
                 }
 
@@ -428,8 +495,8 @@ class HeuristicBrancher : public Brancher
                 for (EClassId ch : r_enode.getChildren())
                 {
                     EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
-                    auto it = state.selected_vars[b].find(canon_ch);
-                    EClassId base_ch = (it != state.selected_vars[b].end()) ? offset_base_cids[canon_ch.value] : canon_ch;
+                    VarId ch_sel_v = (canon_ch.value < eclass_selected_vars_[b].size()) ? eclass_selected_vars_[b][canon_ch.value] : kInvalidVarId;
+                    EClassId base_ch = (ch_sel_v != kInvalidVarId) ? offset_base_cids[canon_ch.value] : canon_ch;
                     if (base_ch != r_cid && offset_eclass_end[base_ch.value] != std::numeric_limits<int32_t>::max())
                         offset_eclass_end[base_ch.value] = std::max(offset_eclass_end[base_ch.value], r_finish);
                 }
@@ -449,22 +516,25 @@ class HeuristicBrancher : public Brancher
         const auto &fixed_offset_vars = state.getFixedOffsetVars(b);
         if (!fixed_offset_vars.empty())
         {
+            const auto &sel_vars = eclass_selected_vars_[b];
+            const auto &mem_spaces = eclass_mem_spaces_[b];
+            const auto &page_sizes = eclass_page_sizes_[b];
+
             for (const auto &[fixed_offset, other_offset_var] : fixed_offset_vars)
             {
                 const VarInfo &other_info = state.var_infos[other_offset_var];
                 EClassId other_cid = other_info.eclass_id;
-                if (other_cid == cid)
+                if (other_cid == cid || other_cid.value >= sel_vars.size())
                     continue;
 
-                auto selected_it = state.selected_vars[b].find(other_cid);
-                if (selected_it == state.selected_vars[b].end())
+                VarId sel_v = sel_vars[other_cid.value];
+                if (sel_v == kInvalidVarId)
                     continue;
-                const Domain &other_sel_dom = state.domains[selected_it->second];
+                const Domain &other_sel_dom = state.domains[sel_v];
                 if (other_sel_dom.isFixed() && other_sel_dom.fixedValue() == 0)
                     continue;
 
-                const EClass &other_cls = state.bucket_egraphs[b].getEClass(other_cid);
-                if (other_cls.mem_space != cls.mem_space)
+                if (mem_spaces[other_cid.value] != mem_space)
                     continue;
 
                 if (canon_base_cid == offset_base_cids[other_cid.value])
@@ -479,32 +549,37 @@ class HeuristicBrancher : public Brancher
                 if (!overlap)
                     continue;
 
-                uint32_t o_psize = state.bytesToPages(getSizeBytes(other_cls.shape, other_cls.dtype), other_cls.mem_space);
-                uint32_t other_size = (o_psize == 0) ? 1 : o_psize;
+                uint32_t other_size = page_sizes[other_cid.value];
                 uint32_t o_offset = static_cast<uint32_t>(fixed_offset);
                 offset_obstacles.push_back({o_offset, o_offset + other_size});
             }
         }
 
-        auto obstacle_order = [](const Obstacle &a, const Obstacle &b) {
+        std::sort(offset_obstacles.begin(), offset_obstacles.end(), [](const Obstacle &a, const Obstacle &b) {
             return a.start < b.start;
-        };
-        std::sort(offset_obstacles.begin(), offset_obstacles.begin() + preallocated_obstacle_count, obstacle_order);
-        std::inplace_merge(offset_obstacles.begin(), offset_obstacles.begin() + preallocated_obstacle_count,
-                           offset_obstacles.end(), obstacle_order);
+        });
+
+        // Merge into disjoint intervals
+        size_t write_idx = 0;
+        for (size_t read_idx = 0; read_idx < offset_obstacles.size(); ++read_idx)
+        {
+            if (write_idx > 0 && offset_obstacles[read_idx].start <= offset_obstacles[write_idx - 1].end)
+            {
+                offset_obstacles[write_idx - 1].end = std::max(offset_obstacles[write_idx - 1].end, offset_obstacles[read_idx].end);
+            }
+            else
+            {
+                offset_obstacles[write_idx++] = offset_obstacles[read_idx];
+            }
+        }
+        offset_obstacles.resize(write_idx);
 
         uint32_t p = static_cast<uint32_t>(offset_domain.getMin());
-        bool pushed = true;
-        while (pushed)
+        for (const auto &obs : offset_obstacles)
         {
-            pushed = false;
-            for (const auto &obs : offset_obstacles)
+            if (p < obs.end && p + curr_size > obs.start)
             {
-                if (p < obs.end && p + curr_size > obs.start)
-                {
-                    p = obs.end;
-                    pushed = true;
-                }
+                p = obs.end;
             }
         }
 
@@ -554,16 +629,20 @@ class HeuristicBrancher : public Brancher
         EClassId best_cid;
         int32_t best_size = std::numeric_limits<int32_t>::max();
 
+        ensureStaticLookups(state);
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
             const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b] : empty_cids;
+            const auto &sel_vars = eclass_selected_vars_[b];
             for (EClassId cid : cids)
             {
-                auto sel_it = state.selected_vars[b].find(cid);
-                if (sel_it == state.selected_vars[b].end())
+                if (cid.value >= sel_vars.size())
                     continue;
 
-                VarId var_id = sel_it->second;
+                VarId var_id = sel_vars[cid.value];
+                if (var_id == kInvalidVarId)
+                    continue;
+
                 const Domain &domain = state.domains[var_id];
                 if (domain.isFixed() || domain.isEmpty())
                     continue;
@@ -578,8 +657,12 @@ class HeuristicBrancher : public Brancher
                     best_bucket = b;
                     best_cid = cid;
                     best_size = domain.size();
+                    if (best_size == 2)
+                        break;
                 }
             }
+            if (best_size == 2)
+                break;
         }
 
         if (best_var == kInvalidVarId)
@@ -769,11 +852,14 @@ class HeuristicBrancher : public Brancher
             cached_selection_revision = state.getSelectionRevision();
         }
 
+        ensureStaticLookups(state);
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
             if (!cached_sched_topo_valid[b])
                 continue;
             const auto &topo_order = cached_sched_topo_orders[b];
+            const auto &start_vars = eclass_start_vars_[b];
+            const auto &offset_vars = eclass_offset_vars_[b];
 #ifdef TG_PROFILE
             auto start_vars_begin = std::chrono::steady_clock::now();
 #endif
@@ -781,14 +867,13 @@ class HeuristicBrancher : public Brancher
             while (start_cursor < topo_order.size())
             {
                 EClassId cid = topo_order[start_cursor];
-                auto start_it = state.start_vars[b].find(cid);
-                if (start_it == state.start_vars[b].end())
+                VarId start_var = (cid.value < start_vars.size()) ? start_vars[cid.value] : kInvalidVarId;
+                if (start_var == kInvalidVarId)
                 {
                     ++start_cursor;
                     continue;
                 }
 
-                VarId start_var = start_it->second;
                 const Domain &start_domain = state.domains[start_var];
                 if (!start_domain.isFixed())
                 {
@@ -812,14 +897,13 @@ class HeuristicBrancher : public Brancher
             while (offset_cursor < topo_order.size())
             {
                 EClassId cid = topo_order[offset_cursor];
-                auto offset_it = state.offset_vars[b].find(cid);
-                if (offset_it == state.offset_vars[b].end())
+                VarId offset_var = (cid.value < offset_vars.size()) ? offset_vars[cid.value] : kInvalidVarId;
+                if (offset_var == kInvalidVarId)
                 {
                     ++offset_cursor;
                     continue;
                 }
 
-                VarId offset_var = offset_it->second;
                 const Domain &offset_domain = state.domains[offset_var];
                 if (!offset_domain.isFixed())
                 {
@@ -843,6 +927,10 @@ class HeuristicBrancher : public Brancher
     }
 
   public:
+#ifdef TG_PROFILE
+    const BrancherTiming &getTiming() const { return brancher_timing; }
+#endif
+
     void onRestore() override
     {
         std::fill(sched_start_cursors.begin(), sched_start_cursors.end(), 0);
