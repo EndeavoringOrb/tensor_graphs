@@ -1,5 +1,7 @@
 # Search performance log
 
+## EmbeddingGemma 2 full text search
+
 Measurements use `.venv/bin/python tests/embeddinggemma-2/run.py text --config full`
 on the same workspace and machine. Wall time includes model setup, planning,
 search, and execution.
