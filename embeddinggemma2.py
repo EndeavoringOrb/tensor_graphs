@@ -577,7 +577,8 @@ class EmbeddingGemma2:
                  patch_grid_width=None, mel_frames=None, video_frames=None,
                  cache_file="", compile_no_weights_bucket=False,
                  compile_dirty_input_bucket=False, disable_node_caching=False,
-                 disable_compilation_caching=False, min_compile_seconds=1.0):
+                 disable_compilation_caching=False, min_compile_seconds=1.0,
+                 saturate_only=False):
         if modality not in ("text", "image", "video", "audio"):
             raise ValueError("EmbeddingGemma2 modality must be text, image, video, or audio")
         model_path = str(model_path)
@@ -658,6 +659,10 @@ class EmbeddingGemma2:
                 dirty[self.token_ids_id] = tg.make_full_regions(self.token_shape)
             out_regions = tg.make_full_regions(self.graph.getNode(self.root_id).shape)
             self.session.add_bucket(dirty, out_regions)
+        if saturate_only:
+            self.session.settings.saturate_only = True
+            self.session.plan(True)
+            return
         self.session.compile()
 
     def _merge_media(self, media_embeddings, seq_len: int):
