@@ -45,7 +45,12 @@ def parseArgs() -> argparse.Namespace:
         "--min-compile-time",
         type=float,
         default=1.0,
-        help="Minimum required compile time per bucket in seconds",
+        help="Search time budget in seconds (0 stops at the first feasible plan)",
+    )
+    parser.add_argument(
+        "--optimal",
+        action="store_true",
+        help="Search until the planner exhausts its search space",
     )
     parser.add_argument(
         "--saturate-only",
@@ -202,7 +207,7 @@ def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace
         "compile_no_weights_bucket": options["compile_no_weights_bucket"],
         "compile_dirty_input_bucket": options["compile_dirty_input_bucket"],
         "disable_compilation_caching": args.saturate_only or not bool(args.cache_file),
-        "min_compile_seconds": args.min_compile_time,
+        "min_compile_seconds": -1.0 if args.optimal else args.min_compile_time,
         "saturate_only": args.saturate_only,
     }
     for shape_key in ("patch_count", "patch_grid_width", "mel_frames", "video_frames"):

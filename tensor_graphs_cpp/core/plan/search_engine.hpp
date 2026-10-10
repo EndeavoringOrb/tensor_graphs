@@ -688,7 +688,9 @@ class SearchEngine
                 break;
             }
 
-            if (timeout_seconds <= 0.0f && incumbent_best_cost < TGConstants::INF)
+            // Zero requests the first feasible plan. Negative values have no
+            // deadline and keep searching until the queue is exhausted.
+            if (timeout_seconds == 0.0f && incumbent_best_cost < TGConstants::INF)
             {
                 LOG(INFO) << "[SearchEngine] Greedy solution found with cost: "
                           << incumbent_best_cost << " at iteration " << iterations

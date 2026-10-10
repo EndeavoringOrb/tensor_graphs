@@ -72,7 +72,12 @@ def main():
         "--min-compile-time",
         type=float,
         default=0.0,
-        help="Minimum required compile time per bucket in seconds",
+        help="Search time budget in seconds (0 stops at the first feasible plan)",
+    )
+    parser.add_argument(
+        "--optimal",
+        action="store_true",
+        help="Search until the planner exhausts its search space",
     )
     parser.add_argument(
         "--compile-decode-buckets",
@@ -204,7 +209,7 @@ def main():
         args.model,
         args.model_path,
         delegate,
-        min_compile_time=args.min_compile_time,
+        min_compile_time=-1.0 if args.optimal else args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
         compile_no_weights_bucket=args.compile_no_weights_bucket,
         cache_file=args.cache_file,

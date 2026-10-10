@@ -17,6 +17,7 @@
 #include "tests/shape_propagation.hpp"
 #include "tests/storage_output_regression.hpp"
 #include "tests/view_bufferize_regression.hpp"
+#include "tests/start_run_makespan.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -29,6 +30,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--const-view"}, "Run only constant and view regression tests.");
     parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
     parser.add_flag({"--incremental-propagators"}, "Run only incremental propagator equivalence tests.");
+    parser.add_flag({"--start-run-makespan"}, "Run only start-run makespan propagator tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
@@ -59,6 +61,11 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--incremental-propagators"))
     {
         runIncrementalPropagatorTests();
+        return 0;
+    }
+    if (parser.get_flag("--start-run-makespan"))
+    {
+        runStartRunMakespanTests();
         return 0;
     }
     if (parser.get_flag("--selection-reachability"))
@@ -92,6 +99,7 @@ int main(int argc, char *argv[])
         FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         runSelectionReachabilityTests();
         runIncrementalPropagatorTests();
+        runStartRunMakespanTests();
         runShapePropagationTests();
         runInputHashconsTests();
         testStorageOutputMatching();
