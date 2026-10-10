@@ -271,10 +271,11 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
         }
 
         TensorNode out_node_nc = node;
-        bool ignore_in_ms = (node.opType != OpType::COPY_TO);
+        // All reference inputs have been materialized in host buffers above.
+        const std::vector<MemSpace> input_mem_spaces(input_nodes.size(), MemSpace{1, HandleType::CPP});
         auto refs_nc = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName, input_nodes, out_node_nc, true, MemSpace{1, HandleType::CPP}, {},
-            {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
+            node.opType, node.opName, input_nodes, out_node_nc, true, MemSpace{1, HandleType::CPP}, input_mem_spaces,
+            {Engine{0, EngineType::CPU}}, false, false, false, true);
 
         TensorView chosen_out_view;
         KernelId chosen_kernel_uid = KernelId{0};
@@ -287,8 +288,8 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
         {
             TensorNode out_node_c = node;
             auto refs_c = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, input_nodes, out_node_c, true, MemSpace{1, HandleType::CPP}, {},
-                {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
+                node.opType, node.opName, input_nodes, out_node_c, true, MemSpace{1, HandleType::CPP}, input_mem_spaces,
+                {Engine{0, EngineType::CPU}}, false, false, false, true);
             if (refs_c.empty())
             {
                 Error::throw_err("No reference kernel found for node " + std::to_string(node_id.value) +

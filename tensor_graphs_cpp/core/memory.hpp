@@ -18,6 +18,25 @@
 #include <cuda_runtime.h>
 #endif
 
+// Shared by runtime buffers and prepared bench/test contexts. The view offset
+// passed here is relative to the tensor's start in the storage file.
+inline void setStorageInput(KernelContext &ctx, size_t input_idx, const TensorView &view, int fd,
+                            uint64_t data_offset)
+{
+    if (input_idx >= ctx.inputs.size() || input_idx >= ctx.inViews.size() ||
+        input_idx >= ctx.fd.size() || input_idx >= ctx.cl_inputs.size())
+        Error::throw_err("setStorageInput: input index out of bounds");
+    if (fd < 0)
+        Error::throw_err("setStorageInput: invalid file descriptor");
+    if (view.offset > UINT64_MAX - data_offset)
+        Error::throw_err("setStorageInput: file offset overflow");
+    ctx.inViews[input_idx] = view;
+    ctx.inViews[input_idx].offset += data_offset;
+    ctx.inputs[input_idx] = nullptr;
+    ctx.fd[input_idx] = fd;
+    ctx.cl_inputs[input_idx] = nullptr;
+}
+
 struct DeviceBuffer
 {
     MemSpace mem_space;
@@ -69,12 +88,12 @@ struct StorageBuffer : public DeviceBuffer
                              "Check that storage EClass was properly mapped to its source weight LogicalId.");
         }
         TensorMetadata meta = TensorResolver::get().getNodeMeta(logicalId);
-        TensorView v = view;
-        v.offset = meta.dataOffsetStart + view.offset;
-        ctx.inViews.push_back(v);
+        const size_t input_idx = ctx.inputs.size();
+        ctx.inViews.push_back(view);
         ctx.inputs.push_back(nullptr);
-        ctx.fd.push_back(TensorResolver::get().getNodeFd(logicalId));
+        ctx.fd.push_back(-1);
         ctx.cl_inputs.push_back(nullptr);
+        setStorageInput(ctx, input_idx, view, TensorResolver::get().getNodeFd(logicalId), meta.dataOffsetStart);
     }
     void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
