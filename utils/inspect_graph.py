@@ -264,7 +264,7 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
                     )
 
                 # Lifetime use-after-death check
-                if idx > c_buf.get("end", 0):
+                if c_buf.get("end", 0) > 0 and idx > c_buf.get("end", 0):
                     issues.append(
                         {
                             "severity": "WARNING",
@@ -364,20 +364,21 @@ def validate_graph(graph: dict, constants_map: dict, uid_map: dict) -> list[dict
                 if b2["offset"] >= b1["offset"] + b1["size"]:
                     break  # Sorted by offset; cannot overlap further
 
-                # Check lifetime overlap
-                if max(b1["start"], b2["start"]) <= min(b1["end"], b2["end"]):
-                    issues.append(
-                        {
-                            "severity": "CRITICAL",
-                            "inst": b2["first_def"],
-                            "op": "MEMORY_COLLISION",
-                            "msg": (
-                                f"Live buffers {b1['id']} (lifetime [{b1['start']}..{b1['end']}], 0x{b1['offset']:x}..0x{b1['offset'] + b1['size']:x}) "
-                                f"and {b2['id']} (lifetime [{b2['start']}..{b2['end']}], 0x{b2['offset']:x}..0x{b2['offset'] + b2['size']:x}) "
-                                f"collide in MemSpace {ms[0]}({ms[1]})"
-                            ),
-                        }
-                    )
+                # Check lifetime overlap (only if lifetimes are populated)
+                if (b1["start"] != 0 or b1["end"] != 0 or b2["start"] != 0 or b2["end"] != 0):
+                    if max(b1["start"], b2["start"]) <= min(b1["end"], b2["end"]):
+                        issues.append(
+                            {
+                                "severity": "CRITICAL",
+                                "inst": b2["first_def"],
+                                "op": "MEMORY_COLLISION",
+                                "msg": (
+                                    f"Live buffers {b1['id']} (lifetime [{b1['start']}..{b1['end']}], 0x{b1['offset']:x}..0x{b1['offset'] + b1['size']:x}) "
+                                    f"and {b2['id']} (lifetime [{b2['start']}..{b2['end']}], 0x{b2['offset']:x}..0x{b2['offset'] + b2['size']:x}) "
+                                    f"collide in MemSpace {ms[0]}({ms[1]})"
+                                ),
+                            }
+                        )
 
     return issues
 
@@ -806,7 +807,8 @@ def main() -> None:
             err_count = sum(1 for x in issues if x["severity"] in ("ERROR", "CRITICAL"))
             warn_count = sum(1 for x in issues if x["severity"] == "WARNING")
 
-            for issue in issues:
+            max_display = 50
+            for issue in issues[:max_display]:
                 color = (
                     "red" if issue["severity"] in ("ERROR", "CRITICAL") else "yellow"
                 )
@@ -818,6 +820,10 @@ def main() -> None:
                 )
 
             console.print(tbl)
+            if len(issues) > max_display:
+                console.print(
+                    f"[dim]... and {len(issues) - max_display} more issues omitted from table display.[/dim]"
+                )
             console.print(
                 f"[bold red]Found {err_count} critical error(s)[/bold red] and "
                 f"[bold yellow]{warn_count} warning(s)[/bold yellow] in compiled execution plan."

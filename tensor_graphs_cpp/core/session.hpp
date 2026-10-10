@@ -418,9 +418,10 @@ struct Session
 
         // Write all constants directly to their allocated offsets in memory
         // TODO: currently redundant with constant writing in Executor::run? we should try only write constants here
-        std::unordered_set<LogicalId> written;
+        size_t total_written = 0;
         for (const CompiledGraph &g : cachedGraphs)
         {
+            std::unordered_set<LogicalId> written;
             for (const auto &pair : g.eclass_to_logical)
             {
                 EClassId eclass_id = pair.first;
@@ -450,9 +451,10 @@ struct Session
                                      pair.second->size());
                 }
             }
+            total_written += written.size();
         }
-        std::cout << "Wrote " << written.size() << " constants to memory. Graph has " << graph.constantStaging.size()
-                  << " constants." << std::endl;
+        std::cout << "Wrote " << total_written << " constants to memory across " << cachedGraphs.size()
+                  << " graph(s). Graph has " << graph.constantStaging.size() << " constants." << std::endl;
 
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
@@ -536,18 +538,34 @@ struct Session
         const CompiledGraph &cg = cachedGraphs[graphIdx];
         executor->run(cg, debugCallback);
 
-        // Find the root node in CPU RAM
+        // Find the root node in CPU RAM or GPU RAM
         for (const auto &pair : cg.eclass_to_logical)
         {
             if (pair.second == rootId)
             {
                 EClassId eclass_id = pair.first;
+                for (const auto &inst : cg.instructions)
+                {
+                    if (inst.eclass_id == eclass_id || inst.logical_id == rootId)
+                    {
+                        DeviceBuffer *buf = memManager.getBuffer(inst.outBuffer.mem_space);
+                        if (buf && buf->getBasePtr())
+                        {
+                            std::cout << "[DEBUG_RUN] found root in instruction eclass=" << eclass_id.value
+                                      << " mem_space=" << inst.outBuffer.mem_space.idx
+                                      << " type=" << static_cast<int>(inst.outBuffer.mem_space.type)
+                                      << " offset=" << inst.outBuffer.offset << std::endl;
+                            return buf->getBasePtr() + inst.outBuffer.offset;
+                        }
+                    }
+                }
                 if (cg.nodeViews.count(eclass_id))
                 {
                     const TensorView &rootView = cg.nodeViews.at(eclass_id);
                     DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
                     if (buf && buf->getBasePtr())
                     {
+                        std::cout << "[DEBUG_RUN] fallback to nodeView MemSpace{1, CPP} offset=" << rootView.offset << std::endl;
                         return buf->getBasePtr() + rootView.offset;
                     }
                 }
@@ -560,6 +578,9 @@ struct Session
             DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
             if (buf && buf->getBasePtr())
             {
+                std::cout << "[DEBUG_RUN] fallback to lastInst mem_space=" << lastInst.outBuffer.mem_space.idx
+                          << " type=" << static_cast<int>(lastInst.outBuffer.mem_space.type)
+                          << " offset=" << lastInst.outBuffer.offset << std::endl;
                 return buf->getBasePtr() + lastInst.outBuffer.offset;
             }
         }

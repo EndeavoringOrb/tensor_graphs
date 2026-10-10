@@ -48,12 +48,14 @@ def run_gemma_output(config_name, cache_file=""):
     generated_string = ""
     while len(generated_string) <= len(expected_string):
         next_token = session.generate_step(conversation_tokens)
+        decoded = decode_tokens(tokenizer, [next_token]) if next_token != -1 else ""
+        print(f"[DEBUG_TOKEN] next_token={next_token} decoded={decoded!r}", flush=True)
         assert next_token != -1, (
             f"{config_name}: generation stopped at sequence length "
             f"{len(conversation_tokens)} after producing {generated_string!r}"
         )
         conversation_tokens.append(next_token)
-        generated_string += decode_tokens(tokenizer, [next_token])
+        generated_string += decoded
         assert generated_string.startswith(expected_string[: len(generated_string)]), (
             f"{config_name}: generated {generated_string!r}, expected prefix of "
             f"{expected_string!r}"

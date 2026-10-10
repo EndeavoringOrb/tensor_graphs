@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -110,6 +112,16 @@ class LogMessage
     std::ostringstream stream_;
 };
 
+// Keep a representative sample of hot-path diagnostics in profile builds.
+// The first events show the initial failure modes; periodic events show whether
+// the same paths continue to dominate during a long search.
+inline bool shouldLogHotPath()
+{
+    static std::atomic<uint64_t> event_count{0};
+    const uint64_t event = event_count.fetch_add(1, std::memory_order_relaxed);
+    return event < 100 || event % 1000 == 0;
+}
+
 } // namespace tg_log
 
 #define LOG(level)                                                                                                     \
@@ -120,7 +132,8 @@ class LogMessage
 // flushes the stream. Keep these details in ordinary debug builds, while
 // profiling builds rely on aggregate search and propagator counters instead.
 #ifdef TG_PROFILE
-#define LOG_HOT_PATH(level) for (bool _tg_hot_log_cond = false; _tg_hot_log_cond; _tg_hot_log_cond = false)            \
+#define LOG_HOT_PATH(level) for (bool _tg_hot_log_cond = (LOG_LEVEL_##level >= TG_LOG_LEVEL && ::tg_log::shouldLogHotPath()); \
+                                _tg_hot_log_cond; _tg_hot_log_cond = false)                                           \
     ::tg_log::LogMessage(::LogLevel::level)
 #else
 #define LOG_HOT_PATH(level) LOG(level)

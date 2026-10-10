@@ -19,6 +19,7 @@
 
 #include "core/common/constants.hpp"
 #include "core/cost_model.hpp"
+#include "core/debug.hpp"
 #include "core/egraph.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
@@ -1750,6 +1751,12 @@ struct Planner
             OpInstruction inst;
             inst.eclass_id = eclass_id;
             inst.logical_id = logical_id;
+            BaseEClassId base_id = cls.base_eclass_id;
+            if (base_id == BaseEClassId{})
+            {
+                base_id = egraph.getEClass(egraph.findConst(eclass_id)).base_eclass_id;
+            }
+            Debug::BaseRefVerifier::get().registerBase(eclass_id, base_id);
             inst.kernel_id = enode.getKernelId();
 
             for (EClassId child : enode.getChildren())
@@ -1930,6 +1937,11 @@ struct Planner
                 }
             }
 
+            if (cls.base_eclass_id != BaseEClassId{})
+            {
+                Debug::BaseRefVerifier::get().registerBase(cls.id, cls.base_eclass_id);
+            }
+
             if (!compiled.nodeViews.count(cls.id))
             {
                 auto out_buf_it = extraction.eclass_to_buf.find(cls.id);
@@ -1960,6 +1972,23 @@ struct Planner
             const std::vector<float> &bucket_weights, bool doSaturate = true, TGStore *repo = nullptr,
             float minCompileSeconds = 0.0f, std::shared_ptr<plan::Brancher> brancher = nullptr)
     {
+        LOG(INFO) << "[Planner.planAll] Planning " << buckets.size() << " bucket(s) with weights:";
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+        {
+            std::string duplicates;
+            for (uint32_t prior = 0; prior < b; ++prior)
+            {
+                if (buckets[b] == buckets[prior])
+                {
+                    duplicates = ", identical to bucket " + std::to_string(prior);
+                    break;
+                }
+            }
+            const float weight = b < bucket_weights.size() ? bucket_weights[b] : 1.0f;
+            LOG(INFO) << "[Planner.planAll]   bucket " << b << ": weight=" << weight << duplicates
+                      << " | " << buckets[b];
+        }
+
         // 1. SATURATE
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph temp_graph = graph;
@@ -2248,6 +2277,14 @@ struct Planner
         // Variables per bucket: omit structurally unreachable classes entirely.
         for (uint32_t b = 0; b < buckets.size(); ++b)
             search_state.addBucketVariables(b);
+
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+        {
+            LOG(INFO) << "[Planner.planAll] Search bucket " << b
+                      << ": reachable classes=" << search_state.reachable_cids[b].size()
+                      << ", egraph classes=" << search_state.bucket_egraphs[b].getClasses().size()
+                      << ", egraph enodes=" << search_state.bucket_egraphs[b].getENodes().size();
+        }
 
         // Set up SearchEngine with Propagators and Selector
         LOG(DEBUG) << "[Planner.planAll] Initializing SearchEngine with " << search_state.numVars()

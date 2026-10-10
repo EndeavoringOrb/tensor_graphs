@@ -296,6 +296,8 @@ class HeuristicBrancher : public Brancher
     mutable std::vector<std::vector<VarId>> eclass_selected_vars_;
     mutable std::vector<std::vector<VarId>> eclass_start_vars_;
     mutable std::vector<std::vector<VarId>> eclass_offset_vars_;
+    mutable std::vector<std::vector<uint32_t>> eclass_depths_;
+    mutable std::vector<std::vector<EClassId>> top_down_cids_;
 
     void ensureStaticLookups(const SearchState &state) const
     {
@@ -361,6 +363,50 @@ class HeuristicBrancher : public Brancher
                         eclass_offset_vars_[b][c] = off_it->second;
                 }
             }
+        }
+
+        eclass_depths_.resize(state.buckets.size());
+        top_down_cids_.resize(state.buckets.size());
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            const size_t num_classes = state.bucket_egraphs[b].classes.size();
+            eclass_depths_[b].assign(num_classes, UINT32_MAX);
+            if (b < state.bucket_root_ids.size())
+            {
+                EClassId root_cid = state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]);
+                if (root_cid.value < num_classes)
+                {
+                    eclass_depths_[b][root_cid.value] = 0;
+                    std::vector<EClassId> q = {root_cid};
+                    for (size_t head = 0; head < q.size(); ++head)
+                    {
+                        EClassId curr = q[head];
+                        uint32_t next_d = eclass_depths_[b][curr.value] + 1;
+                        const EClass &c_cls = state.bucket_egraphs[b].getEClass(curr);
+                        for (ENodeId en_id : c_cls.enodes)
+                        {
+                            const ENode &enode = state.bucket_egraphs[b].getENode(en_id);
+                            for (EClassId ch : enode.getChildren())
+                            {
+                                EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
+                                if (canon_ch.value < num_classes && eclass_depths_[b][canon_ch.value] > next_d)
+                                {
+                                    eclass_depths_[b][canon_ch.value] = next_d;
+                                    q.push_back(canon_ch);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            top_down_cids_[b] = (b < state.reachable_cids.size()) ? state.reachable_cids[b] : std::vector<EClassId>{};
+            std::sort(top_down_cids_[b].begin(), top_down_cids_[b].end(), [&](EClassId a, EClassId b_cid) {
+                uint32_t da = (a.value < eclass_depths_[b].size()) ? eclass_depths_[b][a.value] : UINT32_MAX;
+                uint32_t db = (b_cid.value < eclass_depths_[b].size()) ? eclass_depths_[b][b_cid.value] : UINT32_MAX;
+                if (da != db)
+                    return da < db;
+                return a.value < b_cid.value;
+            });
         }
         static_lookups_initialized_ = true;
     }
@@ -441,7 +487,8 @@ class HeuristicBrancher : public Brancher
                 offset_base_cids[cand.value] = cand_base;
 
                 const EClass &c_cls = state.bucket_egraphs[b].getEClass(cand);
-                bool is_input_or_cache = (c_cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(c_cls.base_eclass_id));
+                bool is_input_or_cache = (c_cls.base_eclass_id != BaseEClassId{} &&
+                                          (state.preallocated_buffers.count(c_cls.base_eclass_id) || state.isBaseFixedCached(c_cls.base_eclass_id)));
                 const Domain &sel_dom = state.domains[pair.second];
                 uint32_t en_idx = (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
                                       ? static_cast<uint32_t>(sel_dom.fixedValue() - 1)
@@ -636,8 +683,9 @@ class HeuristicBrancher : public Brancher
         ensureStaticLookups(state);
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            const auto &cids = (b < state.reachable_cids.size()) ? state.reachable_cids[b] : empty_cids;
+            const auto &cids = (b < top_down_cids_.size()) ? top_down_cids_[b] : empty_cids;
             const auto &sel_vars = eclass_selected_vars_[b];
+            const auto &depths = eclass_depths_[b];
             size_t &cursor = required_only ? selection_required_cursors[b] : selection_optional_cursors[b];
             while (cursor < cids.size())
             {
@@ -664,11 +712,20 @@ class HeuristicBrancher : public Brancher
             if (cursor >= cids.size())
                 continue;
 
+            VarId best_var = kInvalidVarId;
+            EClassId best_cid;
+            uint32_t best_depth = UINT32_MAX;
+            int32_t best_size = std::numeric_limits<int32_t>::max();
+
             for (size_t idx = cursor; idx < cids.size(); ++idx)
             {
                 EClassId cid = cids[idx];
                 if (cid.value >= sel_vars.size())
                     continue;
+
+                uint32_t d = (cid.value < depths.size()) ? depths[cid.value] : UINT32_MAX;
+                if (best_var != kInvalidVarId && d > best_depth)
+                    break;
 
                 VarId var_id = sel_vars[cid.value];
                 if (var_id == kInvalidVarId)
@@ -682,29 +739,28 @@ class HeuristicBrancher : public Brancher
                 if (required != required_only)
                     continue;
 
-                if (domain.size() < best_size)
+                int32_t sz = domain.size();
+                if (d < best_depth || sz < best_size)
                 {
                     best_var = var_id;
-                    best_bucket = b;
                     best_cid = cid;
-                    best_size = domain.size();
+                    best_depth = d;
+                    best_size = sz;
                     if (best_size == 2)
                         break;
                 }
             }
-            if (best_size == 2)
-                break;
+
+            if (best_var != kInvalidVarId)
+            {
+                const Domain &domain = state.domains[best_var];
+                int32_t preferred = required_only ? preferredENode(state, b, best_cid, domain) : 0;
+                return setBinaryDecision(domain, preferred, out_decision, best_var);
+            }
         }
 
-        if (best_var == kInvalidVarId)
-        {
-            checked_revision = selection_revision;
-            return false;
-        }
-
-        const Domain &domain = state.domains[best_var];
-        int32_t preferred = required_only ? preferredENode(state, best_bucket, best_cid, domain) : 0;
-        return setBinaryDecision(domain, preferred, out_decision, best_var);
+        checked_revision = selection_revision;
+        return false;
     }
 
     bool chooseCache(const SearchState &state, BranchDecision &out_decision) const

@@ -7,6 +7,7 @@
 #include <array>
 #include <iomanip>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -57,6 +58,9 @@ class SearchEngine
     float incumbent_best_cost = TGConstants::INF;
     std::vector<ExtractionResult> incumbent_extractions;
     std::unordered_set<BaseEClassId> incumbent_cached_nodes;
+    std::unordered_map<std::string, uint64_t> propagation_conflicts_by_name;
+    std::unordered_map<std::string, uint32_t> propagation_conflict_details_by_name;
+    uint64_t restore_conflict_log_count = 0;
 
     SearchEngine(SearchState state, std::shared_ptr<Selector> selector = nullptr,
                  std::shared_ptr<Brancher> brancher = nullptr)
@@ -148,8 +152,18 @@ class SearchEngine
 #ifdef TG_PROFILE
                 auto bt_start = std::chrono::steady_clock::now();
 #endif
-                LOG_HOT_PATH(DEBUG) << "[SearchEngine] Pruned hyperbox node " << nid
-                           << " while restoring: " << conflict_reason;
+                ++restore_conflict_log_count;
+                if (restore_conflict_log_count <= 20 || restore_conflict_log_count % 1000 == 0)
+                {
+                    const VarId branch_var = all_nodes[nid]->delta.first;
+                    LOG(INFO) << "[SearchEngine] Restore conflict " << restore_conflict_log_count
+                              << ": node=" << nid << ", parent=" << all_nodes[nid]->parent_id
+                              << ", branch=" << (branch_var < state.var_infos.size()
+                                                       ? state.var_infos[branch_var].name
+                                                       : std::string("<root>"))
+                              << " -> " << all_nodes[nid]->delta.second.toString()
+                              << "; " << conflict_reason;
+                }
                 current_node_id = (k < static_cast<int>(restore_target_path.size()) - 1) ? restore_target_path[k + 1] : lca;
                 state.backtrackTo(current_node_id == UINT32_MAX ? 0 : all_nodes[current_node_id]->trail_marker);
 #ifdef TG_PROFILE
@@ -200,6 +214,32 @@ class SearchEngine
             {
                 prop_queued_epoch[var_id] = current_prop_epoch;
                 prop_worklist.push_back(var_id);
+            }
+        };
+
+        auto describe_var = [&](VarId var_id) {
+            if (var_id == kInvalidVarId || var_id >= state.var_infos.size())
+                return std::string("<initial propagation>");
+            return state.var_infos[var_id].name + "=" + state.domains[var_id].toString();
+        };
+        auto describe_last_change = [&](uint64_t previous_revision) {
+            if (state.getDomainRevision() == previous_revision)
+                return std::string("no domain change in this propagator call");
+            const VarId changed_var = state.getLastDomainChangeVar();
+            if (changed_var == kInvalidVarId || changed_var >= state.var_infos.size())
+                return std::string("domain changed, variable unavailable");
+            return "last domain change: " + state.var_infos[changed_var].name + " " +
+                   state.getLastDomainChangeBefore().toString() + " -> " +
+                   state.getLastDomainChangeAfter().toString();
+        };
+        auto record_conflict = [&](const std::string &prop_name, const std::string &reason) {
+            const uint64_t count = ++propagation_conflicts_by_name[prop_name];
+            uint32_t &detail_count = propagation_conflict_details_by_name[prop_name];
+            if (detail_count < 3)
+            {
+                ++detail_count;
+                LOG(INFO) << "[SearchEngine conflict] propagator=" << prop_name
+                          << " occurrence=" << count << ": " << reason;
             }
         };
 
@@ -295,6 +335,7 @@ class SearchEngine
                     }
                 }
                 auto &prop = propagators[prop_idx];
+                const uint64_t domain_revision_before = state.getDomainRevision();
 #ifdef TG_PROFILE
                 auto &timing = propagator_timings[prop_idx];
                 const bool sample_propagator_timing = ((timing.propagate_calls + 1) % 16) == 0;
@@ -337,8 +378,13 @@ class SearchEngine
                 if (!propagated)
                 {
                     preservePendingWork();
+                    const std::string reason = "explicit contradiction while processing " +
+                                               describe_var(next_changed) + "; " +
+                                               describe_last_change(domain_revision_before) +
+                                               "; pending work=" + std::to_string(prop_worklist.size());
+                    record_conflict(prop->name(), reason);
                     if (out_conflict_reason)
-                        *out_conflict_reason = prop->name();
+                        *out_conflict_reason = prop->name() + ": " + reason;
 #ifdef TG_PROFILE
                     record_prop_overhead();
 #endif
@@ -353,10 +399,23 @@ class SearchEngine
                         VarId empty_var = state.getEmptyDomainVar();
                         *out_conflict_reason = prop->name() + " emptied ";
                         if (empty_var != kInvalidVarId && empty_var < state.var_infos.size())
-                            *out_conflict_reason += state.var_infos[empty_var].name;
+                            *out_conflict_reason += state.var_infos[empty_var].name + "=" +
+                                                    state.domains[empty_var].toString();
                         else
                             *out_conflict_reason += "a domain";
+                        *out_conflict_reason += " while processing " + describe_var(next_changed) + "; " +
+                                               describe_last_change(domain_revision_before) +
+                                               "; pending work=" + std::to_string(prop_worklist.size());
                     }
+                    VarId empty_var = state.getEmptyDomainVar();
+                    const std::string empty_detail =
+                        empty_var != kInvalidVarId && empty_var < state.var_infos.size()
+                            ? state.var_infos[empty_var].name + "=" + state.domains[empty_var].toString()
+                            : std::string("unknown empty domain");
+                    record_conflict(prop->name(), "emptied " + empty_detail + " while processing " +
+                                                       describe_var(next_changed) + "; " +
+                                                       describe_last_change(domain_revision_before) +
+                                                       "; pending work=" + std::to_string(prop_worklist.size()));
 #ifdef TG_PROFILE
                     record_prop_overhead();
 #endif
@@ -375,7 +434,11 @@ class SearchEngine
         if (state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
         {
             if (out_conflict_reason)
-                *out_conflict_reason = "CostLowerBoundPropagator";
+                *out_conflict_reason = "CostLowerBoundPropagator: lower bound=" +
+                                       std::to_string(state.lower_bound) + ", best=" +
+                                       std::to_string(state.best_cost);
+            record_conflict("CostLowerBoundPropagator", "lower bound=" + std::to_string(state.lower_bound) +
+                                                            " >= best=" + std::to_string(state.best_cost));
             return false;
         }
         return true;
@@ -558,6 +621,21 @@ class SearchEngine
                    << ", buckets=" << state.buckets.size()
                    << ", timeout=" << timeout_seconds << "s";
 
+        constexpr std::array<const char *, 4> var_type_names = {"cached", "selected", "start", "offset"};
+        std::vector<std::array<uint32_t, 4>> vars_by_bucket(state.buckets.size());
+        for (const VarInfo &info : state.var_infos)
+        {
+            const size_t type_idx = static_cast<size_t>(info.type);
+            if (info.bucket_idx < vars_by_bucket.size() && type_idx < var_type_names.size())
+                vars_by_bucket[info.bucket_idx][type_idx]++;
+        }
+        for (uint32_t b = 0; b < vars_by_bucket.size(); ++b)
+        {
+            LOG(INFO) << "[SearchEngine] Bucket " << b << " search variables: cached=" << vars_by_bucket[b][0]
+                      << ", selected=" << vars_by_bucket[b][1] << ", start=" << vars_by_bucket[b][2]
+                      << ", offset=" << vars_by_bucket[b][3];
+        }
+
         // 1. Root node
         auto root_node = std::make_shared<SearchNode>(0, UINT32_MAX, std::make_pair(kInvalidVarId, Domain{}), 0.0f,
                                                       0.0f, 0);
@@ -594,6 +672,10 @@ class SearchEngine
 #endif
 
         uint32_t iterations = 0;
+        uint64_t restore_conflicts = 0;
+        uint64_t left_branch_conflicts = 0;
+        uint64_t lower_bound_prunes = 0;
+        std::array<uint64_t, 4> branch_counts = {};
         while (!selector->empty())
         {
             if (timer.is_expired() && incumbent_best_cost < TGConstants::INF)
@@ -621,8 +703,17 @@ class SearchEngine
 #else
             auto node = selector->pop();
 #endif
-            if (!node || node->lower_bound >= incumbent_best_cost)
+            if (!node)
                 continue;
+            if (node->lower_bound >= incumbent_best_cost)
+            {
+                ++lower_bound_prunes;
+                if (lower_bound_prunes <= 10 || lower_bound_prunes % 1000 == 0)
+                    LOG(INFO) << "[SearchEngine] Lower-bound prune " << lower_bound_prunes
+                              << ": node=" << node->id << ", node_lb=" << node->lower_bound
+                              << ", incumbent=" << incumbent_best_cost;
+                continue;
+            }
 
             iterations++;
             if (iterations < 50 || iterations % 50 == 0)
@@ -636,10 +727,7 @@ class SearchEngine
 
             if (!restoreNode(node))
             {
-                if (iterations <= 20 || iterations % 50 == 0)
-                {
-                    LOG(DEBUG) << "[SearchEngine] Iter " << iterations << ": backtrack due to propagation conflict";
-                }
+                restore_conflicts++;
                 continue;
             }
 
@@ -711,6 +799,38 @@ class SearchEngine
                             << ", Right: " << decision.right_delta.second.toString();
             }
 
+            const size_t branch_type = static_cast<size_t>(state.var_infos[decision.left_delta.first].type);
+            if (branch_type < branch_counts.size())
+                branch_counts[branch_type]++;
+            if (iterations % 1000 == 0)
+            {
+                const double elapsed_seconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - search_start_time).count();
+                std::ostringstream conflict_summary;
+                bool first_conflict = true;
+                for (const auto &entry : propagation_conflicts_by_name)
+                {
+                    if (!first_conflict)
+                        conflict_summary << ", ";
+                    first_conflict = false;
+                    conflict_summary << entry.first << "=" << entry.second;
+                }
+                LOG(INFO) << "[SearchEngine progress] iterations=" << iterations
+                          << " elapsed=" << std::fixed << std::setprecision(1) << elapsed_seconds << "s"
+                          << " rate=" << (elapsed_seconds > 0.0 ? iterations / elapsed_seconds : 0.0) << "/s"
+                          << " queue=" << selector->size() << " depth=" << node->depth
+                          << " nodes=" << all_nodes.size()
+                          << " restore-conflicts=" << restore_conflicts
+                          << " left-conflicts=" << left_branch_conflicts
+                          << " lower-bound-prunes=" << lower_bound_prunes
+                          << " branches(cached/selected/start/offset)=" << branch_counts[0] << "/"
+                          << branch_counts[1] << "/" << branch_counts[2] << "/" << branch_counts[3]
+                          << " conflicts{" << (first_conflict ? "none" : conflict_summary.str()) << "}"
+                          << " best=" << (incumbent_best_cost < TGConstants::INF
+                                               ? std::to_string(incumbent_best_cost)
+                                               : "inf");
+            }
+
             // 1. Create Right Child (lazy alternative, pushed to queue without upfront propagation)
             uint32_t right_id = static_cast<uint32_t>(all_nodes.size());
             float right_lb = node->lower_bound;
@@ -764,13 +884,25 @@ class SearchEngine
             {
                 if (!left_ok)
                 {
-                    LOG_HOT_PATH(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
-                               << ": " << left_conflict;
+                    left_branch_conflicts++;
+                    if (left_branch_conflicts <= 20 || left_branch_conflicts % 1000 == 0)
+                    {
+                        LOG(INFO) << "[SearchEngine] Left-branch conflict " << left_branch_conflicts
+                                  << " at iter " << iterations << ", parent=" << node->id
+                                  << ", branch=" << state.var_infos[decision.left_delta.first].name
+                                  << " -> " << decision.left_delta.second.toString()
+                                  << ": " << left_conflict;
+                    }
                 }
                 else
                 {
-                    LOG_HOT_PATH(DEBUG) << "[SearchEngine] Pruned left hyperbox from node " << node->id
-                               << " by lower bound " << left_lb;
+                    ++lower_bound_prunes;
+                    if (lower_bound_prunes <= 10 || lower_bound_prunes % 1000 == 0)
+                        LOG(INFO) << "[SearchEngine] Left-branch lower-bound prune " << lower_bound_prunes
+                                  << ": parent=" << node->id
+                                  << ", branch=" << state.var_infos[decision.left_delta.first].name
+                                  << " -> " << decision.left_delta.second.toString()
+                                  << ", child_lb=" << left_lb << ", incumbent=" << incumbent_best_cost;
                 }
                 // Left branch failed, backtrack in place to parent node
                 state.backtrackTo(node->trail_marker);

@@ -304,6 +304,8 @@ class LLMSession
     std::string referenceFile;
     std::string compareReferenceFile;
     bool runFullGraph = false;
+    bool compileNoWeightsBucket = false;
+    bool has_run = false;
 
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
@@ -316,6 +318,7 @@ class LLMSession
                 bool disable_compilation_caching = false, bool ref_only = false,
                bool compile_no_weights_bucket = false, bool saturate_only = false)
     {
+        compileNoWeightsBucket = compile_no_weights_bucket;
         referenceFile = write_refs;
         compareReferenceFile = compare_refs;
         runFullGraph = !referenceFile.empty() || !compareReferenceFile.empty();
@@ -494,9 +497,11 @@ class LLMSession
             referenceVerifier.verify(logicalId, kernel_name, ctx, data, g.get());
         };
         const bool verifyTensors = !referenceFile.empty() || !compareReferenceFile.empty();
+        const bool use_full_bucket = runFullGraph || (compileNoWeightsBucket && !has_run);
         const float *device_output = static_cast<const float *>(session->run(
-            runFullGraph ? Bucket{} : b, verifyTensors ? Debug::Callback(debugCallback) : Debug::Callback{},
-            !runFullGraph));
+            use_full_bucket ? Bucket{} : b, verifyTensors ? Debug::Callback(debugCallback) : Debug::Callback{},
+            !use_full_bucket));
+        has_run = true;
 
         std::vector<float> host_output;
 #ifdef TG_USE_CUDA
@@ -524,6 +529,10 @@ class LLMSession
             }
         }
 
+        std::cout << "[DEBUG_LOGITS] max_val=" << max_val << " argmax_idx=" << argmax_idx
+                  << " host_output[0]=" << host_output[0] << " host_output[1]=" << host_output[1]
+                  << " host_output[563]=" << (563 < host_output.size() ? host_output[563] : -999.0f)
+                  << " tokIdx=" << tokIdx << std::endl;
         prev_tokens = tokens;
         return argmax_idx;
     }

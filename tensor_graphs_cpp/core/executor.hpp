@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include "core/debug.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
@@ -25,6 +26,7 @@ class Executor
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
+        int nan_report_count = 0;
 
         // TODO: we should write constants for all buckets once in Session::compile
         for (const auto &pair : compiled.constantStaging)
@@ -35,6 +37,14 @@ class Executor
                 const TensorView &view = compiled.nodeViews.at(eclass_id);
                 memManager.write(MemSpace{1, HandleType::CPP}, view.offset, pair.second->data(), pair.second->size());
             }
+        }
+
+        const char *dump_path = std::getenv("TG_DUMP_BASE_REFS");
+        const char *compare_path = std::getenv("TG_COMPARE_BASE_REFS");
+        const char *check_nan_env = std::getenv("TG_CHECK_NAN");
+        if (compare_path && *compare_path)
+        {
+            Debug::BaseRefVerifier::get().loadFromFile(compare_path);
         }
 
         Synchronizer sync;
@@ -127,6 +137,132 @@ class Executor
 
             sync.markExecuted(inst, inst_engines, issued_work);
 
+            if (check_nan_env && *check_nan_env && issued_work && outView.dtype == DType::FLOAT32 && nan_report_count < 10)
+            {
+                sync.syncEngines(inst_engines);
+                const void *nan_check_ptr = nullptr;
+                std::vector<uint8_t> tmp_nan_host;
+                if (outBufObj->mem_space.type == HandleType::CPP)
+                {
+                    nan_check_ptr = ctx.outputs[0];
+                }
+#ifdef TG_USE_CUDA
+                else if (outBufObj->mem_space.type == HandleType::CUDA)
+                {
+                    uint64_t sz = getRequiredBufferSize(outView) * getDTypeSize(outView.dtype);
+                    tmp_nan_host.resize(sz);
+                    cudaSetDevice(outBufObj->mem_space.idx);
+                    cudaMemcpy(tmp_nan_host.data(), ctx.outputs[0], sz, cudaMemcpyDeviceToHost);
+                    nan_check_ptr = tmp_nan_host.data();
+                }
+#endif
+                if (nan_check_ptr)
+                {
+                    const float *fvals = static_cast<const float *>(nan_check_ptr);
+                    uint64_t n_elems = countElements(outView);
+                    bool has_nan = false;
+                    for (uint64_t k = 0; k < n_elems; ++k)
+                    {
+                        if (std::isnan(fvals[k]))
+                        {
+                            has_nan = true;
+                            nan_report_count++;
+                            std::cerr << "[NAN DETECTED] inst=" << idx << "/" << nInst
+                                      << " kernel=" << kernel_name << " eclass=" << inst.eclass_id.value
+                                      << " logical=" << inst.logical_id.value
+                                      << " origin=" << inst.debugOrigin
+                                      << " first_nan_idx=" << k << "/" << n_elems
+                                      << " out_offset=" << inst.outBuffer.offset
+                                      << " out_size=" << inst.outBuffer.size << std::endl;
+                            break;
+                        }
+                    }
+                    if (has_nan)
+                    {
+                        for (size_t c = 0; c < inst.children.size(); ++c)
+                        {
+                            const TensorView &cView = compiled.nodeViews.at(inst.children[c]);
+                            std::cerr << "  child[" << c << "] eclass=" << inst.children[c].value
+                                      << " buf_offset=" << inst.inBuffers[c].offset
+                                      << " buf_size=" << inst.inBuffers[c].size
+                                      << " dtype=" << static_cast<int>(cView.dtype);
+                            if (cView.dtype == DType::FLOAT32 && ctx.inputs[c])
+                            {
+                                const float *in_f = nullptr;
+                                std::vector<uint8_t> tmp_in;
+                                if (inst.inBuffers[c].mem_space.type == HandleType::CPP)
+                                {
+                                    in_f = static_cast<const float *>(ctx.inputs[c]);
+                                }
+#ifdef TG_USE_CUDA
+                                else if (inst.inBuffers[c].mem_space.type == HandleType::CUDA)
+                                {
+                                    uint64_t in_sz = getRequiredBufferSize(cView) * getDTypeSize(cView.dtype);
+                                    tmp_in.resize(in_sz);
+                                    cudaSetDevice(inst.inBuffers[c].mem_space.idx);
+                                    cudaMemcpy(tmp_in.data(), ctx.inputs[c], in_sz, cudaMemcpyDeviceToHost);
+                                    in_f = reinterpret_cast<const float *>(tmp_in.data());
+                                }
+#endif
+                                if (in_f)
+                                {
+                                    uint64_t in_n = countElements(cView);
+                                    bool in_has_nan = false;
+                                    for (uint64_t ik = 0; ik < in_n; ++ik)
+                                    {
+                                        if (std::isnan(in_f[ik]))
+                                        {
+                                            in_has_nan = true;
+                                            break;
+                                        }
+                                    }
+                                    std::cerr << " has_nan=" << (in_has_nan ? "YES" : "NO")
+                                              << " sample[0]=" << in_f[0];
+                                }
+                            }
+                            std::cerr << std::endl;
+                        }
+                    }
+                }
+            }
+
+            if ((dump_path && *dump_path) || (compare_path && *compare_path))
+            {
+                sync.syncEngines(inst_engines);
+                const void *host_ptr = nullptr;
+                std::vector<uint8_t> tmp_cuda_host;
+                if (outBufObj->mem_space.type == HandleType::CPP)
+                {
+                    host_ptr = ctx.outputs[0];
+                }
+#ifdef TG_USE_CUDA
+                else if (outBufObj->mem_space.type == HandleType::CUDA)
+                {
+                    uint64_t sz = getRequiredBufferSize(outView) * getDTypeSize(outView.dtype);
+                    tmp_cuda_host.resize(sz);
+                    cudaSetDevice(outBufObj->mem_space.idx);
+                    cudaMemcpy(tmp_cuda_host.data(), ctx.outputs[0], sz, cudaMemcpyDeviceToHost);
+                    host_ptr = tmp_cuda_host.data();
+                }
+#endif
+                if (host_ptr)
+                {
+                    uint32_t base_id = Debug::BaseRefVerifier::get().getBase(inst.eclass_id).value;
+                    if (dump_path && *dump_path)
+                    {
+                        Debug::BaseRefVerifier::get().record(
+                            base_id, kernel_name, inst.debugOrigin,
+                            outView.getShape(), outView.strides, outView.dtype, host_ptr);
+                    }
+                    if (compare_path && *compare_path)
+                    {
+                        Debug::BaseRefVerifier::get().compare(
+                            base_id, kernel_name, inst.debugOrigin,
+                            outView.getShape(), outView.strides, outView.dtype, host_ptr, idx, inst.eclass_id.value);
+                    }
+                }
+            }
+
             if (debugCallback)
             {
                 sync.syncEngines(inst_engines);
@@ -155,5 +291,15 @@ class Executor
         }
 
         sync.syncAll();
+
+        if (dump_path && *dump_path)
+        {
+            Debug::BaseRefVerifier::get().dumpToFile(dump_path);
+        }
+        if (compare_path && *compare_path)
+        {
+            std::cout << "[BaseRefVerifier SUMMARY] Matches: " << Debug::BaseRefVerifier::get().matchCount
+                      << ", Mismatches: " << Debug::BaseRefVerifier::get().mismatchCount << std::endl;
+        }
     }
 };

@@ -33,7 +33,8 @@ class SelectionReachabilityPropagator : public Propagator
             if (state.var_infos[changed].type != VarType::SELECTED)
                 return true;
             std::vector<VarId> unreachable;
-            state.updateSelectionReachability(changed, unreachable, is_dag_);
+            std::vector<std::pair<VarId, int32_t>> forced_parents;
+            state.updateSelectionReachability(changed, unreachable, is_dag_, &forced_parents);
             for (VarId sel_v : unreachable)
             {
                 const Domain &sel_dom = state.domains[sel_v];
@@ -41,6 +42,17 @@ class SelectionReachabilityPropagator : public Propagator
                     return false;
                 if (!sel_dom.isFixed())
                     state.setDomain(sel_v, Domain::makeFixed(0, sel_dom.is_mask));
+            }
+            for (const auto &[p_var, req_val] : forced_parents)
+            {
+                const Domain &p_dom = state.domains[p_var];
+                if (!p_dom.contains(req_val))
+                    return false;
+                if (!p_dom.isFixed() || p_dom.fixedValue() != req_val)
+                {
+                    state.setDomain(p_var, Domain::makeFixed(req_val, p_dom.is_mask));
+                    worklist.push_back(p_var);
+                }
             }
         }
         else
@@ -55,7 +67,8 @@ class SelectionReachabilityPropagator : public Propagator
                     continue;
                 VarId root_var = it->second;
                 std::vector<VarId> unreachable;
-                state.updateSelectionReachability(root_var, unreachable, is_dag_);
+                std::vector<std::pair<VarId, int32_t>> forced_parents;
+                state.updateSelectionReachability(root_var, unreachable, is_dag_, &forced_parents);
                 for (VarId sel_v : unreachable)
                 {
                     const Domain &sel_dom = state.domains[sel_v];
@@ -63,6 +76,17 @@ class SelectionReachabilityPropagator : public Propagator
                         return false;
                     if (!sel_dom.isFixed())
                         state.setDomain(sel_v, Domain::makeFixed(0, sel_dom.is_mask));
+                }
+                for (const auto &[p_var, req_val] : forced_parents)
+                {
+                    const Domain &p_dom = state.domains[p_var];
+                    if (!p_dom.contains(req_val))
+                        return false;
+                    if (!p_dom.isFixed() || p_dom.fixedValue() != req_val)
+                    {
+                        state.setDomain(p_var, Domain::makeFixed(req_val, p_dom.is_mask));
+                        worklist.push_back(p_var);
+                    }
                 }
             }
         }

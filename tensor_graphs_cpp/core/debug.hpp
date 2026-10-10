@@ -498,4 +498,212 @@ class ReferenceVerifier
         }
     }
 };
+
+struct BaseRefRecord
+{
+    uint32_t base_id = 0;
+    std::string kernel_name;
+    std::string origin;
+    std::vector<uint32_t> shape;
+    std::vector<uint64_t> strides;
+    DType dtype = DType::FLOAT32;
+    std::vector<float> data;
+};
+
+class BaseRefVerifier
+{
+  public:
+    static BaseRefVerifier &get()
+    {
+        static BaseRefVerifier instance;
+        return instance;
+    }
+
+    std::unordered_map<uint32_t, BaseRefRecord> recorded;
+    std::unordered_map<uint32_t, BaseRefRecord> reference;
+    std::unordered_map<EClassId, BaseEClassId> eclass_to_base;
+    bool isLoaded = false;
+    uint32_t mismatchCount = 0;
+    uint32_t matchCount = 0;
+
+    void registerBase(EClassId eid, BaseEClassId bid)
+    {
+        if (bid != BaseEClassId{})
+            eclass_to_base[eid] = bid;
+    }
+
+    BaseEClassId getBase(EClassId eid) const
+    {
+        auto it = eclass_to_base.find(eid);
+        return it != eclass_to_base.end() ? it->second : BaseEClassId{};
+    }
+
+    void record(uint32_t base_id, const std::string &kernel_name, const std::string &origin,
+                const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                DType dtype, const void *host_ptr)
+    {
+        if (base_id == 0 || !host_ptr)
+            return;
+        BaseRefRecord rec;
+        rec.base_id = base_id;
+        rec.kernel_name = kernel_name;
+        rec.origin = origin;
+        rec.shape = shape;
+        rec.strides = strides;
+        rec.dtype = dtype;
+        rec.data = flattenOutput(host_ptr, shape, strides, dtype);
+        recorded[base_id] = std::move(rec);
+    }
+
+    void dumpToFile(const std::string &filename)
+    {
+        std::ofstream out(filename, std::ios::binary);
+        if (!out)
+        {
+            std::cerr << "[BaseRefVerifier] Error opening " << filename << " for writing\n";
+            return;
+        }
+        uint64_t count = recorded.size();
+        out.write("TGBASEREF1", 10);
+        out.write(reinterpret_cast<const char *>(&count), sizeof(count));
+        for (const auto &pair : recorded)
+        {
+            const auto &r = pair.second;
+            out.write(reinterpret_cast<const char *>(&r.base_id), sizeof(r.base_id));
+            uint32_t klen = r.kernel_name.size();
+            out.write(reinterpret_cast<const char *>(&klen), sizeof(klen));
+            out.write(r.kernel_name.data(), klen);
+            uint32_t olen = r.origin.size();
+            out.write(reinterpret_cast<const char *>(&olen), sizeof(olen));
+            out.write(r.origin.data(), olen);
+            uint32_t dt = static_cast<uint32_t>(r.dtype);
+            out.write(reinterpret_cast<const char *>(&dt), sizeof(dt));
+            uint32_t ndims = r.shape.size();
+            out.write(reinterpret_cast<const char *>(&ndims), sizeof(ndims));
+            out.write(reinterpret_cast<const char *>(r.shape.data()), ndims * sizeof(uint32_t));
+            out.write(reinterpret_cast<const char *>(r.strides.data()), ndims * sizeof(uint64_t));
+            uint64_t nElems = r.data.size();
+            out.write(reinterpret_cast<const char *>(&nElems), sizeof(nElems));
+            out.write(reinterpret_cast<const char *>(r.data.data()), nElems * sizeof(float));
+        }
+        std::cout << "[BaseRefVerifier] Successfully dumped " << count << " reference tensors to " << filename << std::endl;
+    }
+
+    bool loadFromFile(const std::string &filename)
+    {
+        if (isLoaded)
+            return true;
+        std::ifstream in(filename, std::ios::binary);
+        if (!in)
+        {
+            std::cerr << "[BaseRefVerifier] Error opening " << filename << " for reading\n";
+            return false;
+        }
+        char magic[10];
+        in.read(magic, 10);
+        if (std::string(magic, 10) != "TGBASEREF1")
+        {
+            std::cerr << "[BaseRefVerifier] Invalid magic header in " << filename << "\n";
+            return false;
+        }
+        uint64_t count = 0;
+        in.read(reinterpret_cast<char *>(&count), sizeof(count));
+        reference.clear();
+        for (uint64_t i = 0; i < count; ++i)
+        {
+            BaseRefRecord r;
+            in.read(reinterpret_cast<char *>(&r.base_id), sizeof(r.base_id));
+            uint32_t klen = 0;
+            in.read(reinterpret_cast<char *>(&klen), sizeof(klen));
+            r.kernel_name.resize(klen);
+            in.read(&r.kernel_name[0], klen);
+            uint32_t olen = 0;
+            in.read(reinterpret_cast<char *>(&olen), sizeof(olen));
+            r.origin.resize(olen);
+            in.read(&r.origin[0], olen);
+            uint32_t dt = 0;
+            in.read(reinterpret_cast<char *>(&dt), sizeof(dt));
+            r.dtype = static_cast<DType>(dt);
+            uint32_t ndims = 0;
+            in.read(reinterpret_cast<char *>(&ndims), sizeof(ndims));
+            r.shape.resize(ndims);
+            r.strides.resize(ndims);
+            in.read(reinterpret_cast<char *>(r.shape.data()), ndims * sizeof(uint32_t));
+            in.read(reinterpret_cast<char *>(r.strides.data()), ndims * sizeof(uint64_t));
+            uint64_t nElems = 0;
+            in.read(reinterpret_cast<char *>(&nElems), sizeof(nElems));
+            r.data.resize(nElems);
+            in.read(reinterpret_cast<char *>(r.data.data()), nElems * sizeof(float));
+            reference[r.base_id] = std::move(r);
+        }
+        isLoaded = true;
+        std::cout << "[BaseRefVerifier] Successfully loaded " << reference.size() << " reference tensors from " << filename << std::endl;
+        return true;
+    }
+
+    bool compare(uint32_t base_id, const std::string &kernel_name, const std::string &origin,
+                 const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                 DType dtype, const void *host_ptr, uint64_t idx, uint32_t eclass_id)
+    {
+        if (base_id == 0 || !host_ptr)
+            return true;
+        auto it = reference.find(base_id);
+        if (it == reference.end())
+            return true;
+
+        const auto &ref = it->second;
+        std::vector<float> act = flattenOutput(host_ptr, shape, strides, dtype);
+        if (act.size() != ref.data.size())
+        {
+            std::cerr << "[REF_DIFF_SIZE] idx=" << idx << " base_id=" << base_id << " eclass=" << eclass_id
+                      << " kernel=" << kernel_name << " (ref_kernel=" << ref.kernel_name << ")\n"
+                      << "  act_size=" << act.size() << " ref_size=" << ref.data.size() << std::endl;
+            mismatchCount++;
+            return false;
+        }
+
+        float max_abs = 0.0f;
+        uint64_t max_idx = 0;
+        bool act_nan = false;
+        bool act_inf = false;
+        float ref_min = 1e30f, ref_max = -1e30f;
+        float act_min = 1e30f, act_max = -1e30f;
+
+        for (uint64_t i = 0; i < act.size(); ++i)
+        {
+            float a = act[i];
+            float r = ref.data[i];
+            if (std::isnan(a)) act_nan = true;
+            if (std::isinf(a)) act_inf = true;
+            if (a < act_min) act_min = a;
+            if (a > act_max) act_max = a;
+            if (r < ref_min) ref_min = r;
+            if (r > ref_max) ref_max = r;
+
+            float diff = std::abs(a - r);
+            if (diff > max_abs)
+            {
+                max_abs = diff;
+                max_idx = i;
+            }
+        }
+
+        if (act_nan || act_inf || max_abs > 1e-3f)
+        {
+            mismatchCount++;
+            std::cerr << "[REF_DIFF] idx=" << idx << " base_id=" << base_id << " eclass=" << eclass_id
+                      << " kernel=" << kernel_name << " (ref_kernel=" << ref.kernel_name << ")\n"
+                      << "  origin=" << origin << " (ref_origin=" << ref.origin << ")\n"
+                      << "  shape=" << toString(shape) << " dtype=" << toString(dtype) << "\n"
+                      << "  act: min=" << act_min << " max=" << act_max << " nan=" << act_nan << " inf=" << act_inf << "\n"
+                      << "  ref: min=" << ref_min << " max=" << ref_max << "\n"
+                      << "  max_diff=" << max_abs << " at elem " << max_idx
+                      << " (act=" << act[max_idx] << " vs ref=" << ref.data[max_idx] << ")\n" << std::endl;
+            return false;
+        }
+
+        matchCount++;
+        return true;
+    }
+};
 } // namespace Debug

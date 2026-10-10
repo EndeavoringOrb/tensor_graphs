@@ -93,7 +93,8 @@ class WriteAfterReadStartPropagator : public Propagator
                                      state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]);
             const bool is_persistent = is_root || enode.getOpType() == OpType::INPUT ||
                                        enode.getOpType() == OpType::CACHE ||
-                                       state.preallocated_buffers.count(cls.base_eclass_id) != 0;
+                                       (cls.base_eclass_id != BaseEClassId{} &&
+                                        (state.preallocated_buffers.count(cls.base_eclass_id) != 0 || state.isBaseFixedCached(cls.base_eclass_id)));
             const uint32_t size_pages = std::max<uint32_t>(
                 1, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
 

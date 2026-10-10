@@ -21,6 +21,7 @@
 #include "core/plan/propagators/parent_removal.hpp"
 #include "core/plan/propagators/cache_requirement.hpp"
 #include "core/plan/propagators/cache_freshness.hpp"
+#include "core/plan/propagators/required_reachability.hpp"
 #include "core/plan/propagators/cached_offset.hpp"
 #include "core/plan/propagators/cached_offset_allocation.hpp"
 #include "core/plan/propagators/critical_path.hpp"
@@ -86,6 +87,7 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false, 
     engine.addPropagator(std::make_unique<ParentRemovalPropagator>());
     engine.addPropagator(std::make_unique<CacheRequirementPropagator>());
     engine.addPropagator(std::make_unique<CacheFreshnessPropagator>());
+    engine.addPropagator(std::make_unique<RequiredReachabilityPropagator>());
     engine.addPropagator(std::make_unique<CachedOffsetPropagator>());
 }
 

@@ -94,6 +94,7 @@ struct SelectionReachability
     {
         uint32_t from;
         uint32_t to;
+        uint32_t en_idx;
         bool active;
     };
 
@@ -170,7 +171,7 @@ struct SelectionReachability
                         continue;
                     const uint32_t to = node_indices.at(child_it->second);
                     const uint32_t edge_id = static_cast<uint32_t>(edges.size());
-                    edges.push_back(Edge{from, to, domains[var_id].contains(en_idx + 1)});
+                    edges.push_back(Edge{from, to, en_idx, domains[var_id].contains(en_idx + 1)});
                     nodes[from].enode_edges[en_idx].push_back(edge_id);
                     nodes[to].incoming.push_back(edge_id);
                 }
@@ -242,8 +243,9 @@ struct SelectionReachability
                         continue;
                     const uint32_t to = node_indices.at(child_it->second);
                     const uint32_t edge_id = static_cast<uint32_t>(edges.size());
-                    edges.push_back(Edge{from, to, false});
+                    edges.push_back(Edge{from, to, en_idx, false});
                     nodes[from].enode_edges[en_idx].push_back(edge_id);
+                    nodes[to].incoming.push_back(edge_id);
                 }
             }
         }
@@ -298,11 +300,48 @@ struct SelectionReachability
                node.next_incoming < node.incoming.size() && node.incoming[node.next_incoming] == edge_id;
     }
 
-    void update(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable)
+    void checkForcedParent(uint32_t node_idx, const std::vector<Domain> &domains,
+                           std::vector<std::pair<VarId, int32_t>> &forced_selections) const
+    {
+        if (node_idx == root || nodes[node_idx].indegree == 0)
+            return;
+
+        const Domain &dom = domains[nodes[node_idx].var_id];
+        if (dom.contains(0))
+            return;
+
+        uint32_t active_from = UINT32_MAX;
+        uint32_t active_en_idx = UINT32_MAX;
+        for (uint32_t edge_id : nodes[node_idx].incoming)
+        {
+            if (!edges[edge_id].active)
+                continue;
+            if (active_from == UINT32_MAX)
+            {
+                active_from = edges[edge_id].from;
+                active_en_idx = edges[edge_id].en_idx;
+            }
+            else if (edges[edge_id].from != active_from || edges[edge_id].en_idx != active_en_idx)
+            {
+                return;
+            }
+        }
+
+        if (active_from != UINT32_MAX)
+        {
+            VarId p_var = nodes[active_from].var_id;
+            int32_t required_val = static_cast<int32_t>(active_en_idx + 1);
+            forced_selections.push_back({p_var, required_val});
+        }
+    }
+
+    void update(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable,
+                const std::vector<Domain> *domains = nullptr,
+                std::vector<std::pair<VarId, int32_t>> *forced_parents = nullptr)
     {
         if (is_dag)
         {
-            updateDag(node_idx, selection, unreachable);
+            updateDag(node_idx, selection, unreachable, domains, forced_parents);
             return;
         }
         Node &changed = nodes[node_idx];
@@ -393,7 +432,9 @@ struct SelectionReachability
         }
     }
 
-    void updateDag(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable)
+    void updateDag(uint32_t node_idx, const Domain &selection, std::vector<VarId> &unreachable,
+                   const std::vector<Domain> *domains = nullptr,
+                   std::vector<std::pair<VarId, int32_t>> *forced_parents = nullptr)
     {
         Node &changed = nodes[node_idx];
         undo.push_back(UndoEntry{UndoEntry::Kind::SELECTION, node_idx, changed.selection});
@@ -413,10 +454,17 @@ struct SelectionReachability
                 const uint32_t to = edges[edge_id].to;
                 assert(nodes[to].indegree > 0);
                 --nodes[to].indegree;
-                if (to != root && nodes[to].indegree == 0)
+                if (to != root)
                 {
-                    unreachable.push_back(nodes[to].var_id);
-                    dag_queue.push_back(to);
+                    if (nodes[to].indegree == 0)
+                    {
+                        unreachable.push_back(nodes[to].var_id);
+                        dag_queue.push_back(to);
+                    }
+                    else if (forced_parents && domains)
+                    {
+                        checkForcedParent(to, *domains, *forced_parents);
+                    }
                 }
             }
         }
@@ -436,10 +484,17 @@ struct SelectionReachability
                     const uint32_t to = edges[edge_id].to;
                     assert(nodes[to].indegree > 0);
                     --nodes[to].indegree;
-                    if (to != root && nodes[to].indegree == 0)
+                    if (to != root)
                     {
-                        unreachable.push_back(nodes[to].var_id);
-                        dag_queue.push_back(to);
+                        if (nodes[to].indegree == 0)
+                        {
+                            unreachable.push_back(nodes[to].var_id);
+                            dag_queue.push_back(to);
+                        }
+                        else if (forced_parents && domains)
+                        {
+                            checkForcedParent(to, *domains, *forced_parents);
+                        }
                     }
                 }
             }
@@ -568,7 +623,6 @@ struct PropagationState
         bool fixed_offset_structure_dirty = true;
         bool fixed_offset_index_initialized = false;
         std::vector<WriteAfterReadClassInfo> class_info;
-        std::vector<std::vector<EClassId>> temporal_overlaps;
         std::vector<EClassId> active_cids;
         std::vector<EClassId> touched_cids;
         std::vector<EClassId> dirty_start_cids;
@@ -690,6 +744,11 @@ class SearchState
     // Kept incrementally so SearchEngine can detect contradictions without
     // scanning every domain after each propagator invocation.
     std::unordered_set<VarId> empty_domains;
+
+    uint64_t domain_revision = 0;
+    VarId last_domain_change_var = kInvalidVarId;
+    Domain last_domain_change_before;
+    Domain last_domain_change_after;
 
     // Domain changes are consumed by SearchEngine's propagator worklist.
     std::vector<VarId> dirty_domains;
@@ -828,6 +887,14 @@ class SearchState
     std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
     std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
     std::unordered_set<VarId> fixed_cached_vars;
+
+    bool isBaseFixedCached(BaseEClassId base_id) const
+    {
+        if (base_id == BaseEClassId{})
+            return false;
+        auto it = cached_vars.find(base_id);
+        return it != cached_vars.end() && fixed_cached_vars.count(it->second);
+    }
 
     // The graph, metadata, capacities and weights are immutable after the first
     // propagation. All derived data is owned by this state, including in copies.
@@ -979,6 +1046,26 @@ class SearchState
         return trail.size();
     }
 
+    uint64_t getDomainRevision() const
+    {
+        return domain_revision;
+    }
+
+    VarId getLastDomainChangeVar() const
+    {
+        return last_domain_change_var;
+    }
+
+    const Domain &getLastDomainChangeBefore() const
+    {
+        return last_domain_change_before;
+    }
+
+    const Domain &getLastDomainChangeAfter() const
+    {
+        return last_domain_change_after;
+    }
+
     bool hasEmptyDomain() const
     {
         return !empty_domains.empty();
@@ -1022,6 +1109,10 @@ class SearchState
     {
         if (domains[var_id] != new_domain)
         {
+            last_domain_change_var = var_id;
+            last_domain_change_before = domains[var_id];
+            last_domain_change_after = new_domain;
+            domain_revision++;
             updatePropagationContribution(var_id, false);
             const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
@@ -1038,7 +1129,8 @@ class SearchState
 
     // Called only for the changed SELECTED variable. The first call builds a
     // bucket once; later calls touch removed enodes and affected tree nodes.
-    void updateSelectionReachability(VarId changed, std::vector<VarId> &unreachable, bool is_dag = false)
+    void updateSelectionReachability(VarId changed, std::vector<VarId> &unreachable, bool is_dag = false,
+                                     std::vector<std::pair<VarId, int32_t>> *forced_parents = nullptr)
     {
         const uint32_t bucket_idx = var_infos[changed].bucket_idx;
         if (selection_reachability.size() < buckets.size())
@@ -1052,10 +1144,14 @@ class SearchState
             return;
         }
         const uint32_t node_idx = reachability.node_indices.at(changed);
+        if (forced_parents && !domains[changed].contains(0))
+        {
+            reachability.checkForcedParent(node_idx, domains, *forced_parents);
+        }
         if (reachability.nodes[node_idx].selection == domains[changed])
             return;
         trail.push_back(ReachabilityTrailEntry{bucket_idx, changed, reachability.undo.size(), true});
-        reachability.update(node_idx, domains[changed], unreachable);
+        reachability.update(node_idx, domains[changed], unreachable, &domains, forced_parents);
     }
 
     template <typename F>

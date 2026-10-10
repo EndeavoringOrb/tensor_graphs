@@ -114,7 +114,8 @@ class WriteAfterReadPropagator : public Propagator
         out.is_view = en_id.value < state.bucket_enode_infos[b].size() &&
                      state.bucket_enode_infos[b][en_id.value].is_view;
         out.is_input_or_cache = (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE ||
-                                (cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(cls.base_eclass_id)));
+                                (cls.base_eclass_id != BaseEClassId{} &&
+                                 (state.preallocated_buffers.count(cls.base_eclass_id) || state.isBaseFixedCached(cls.base_eclass_id))));
         out.is_root = (b < state.bucket_root_ids.size() &&
                       state.bucket_egraphs[b].findConst(cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
         return true;
@@ -138,15 +139,6 @@ class WriteAfterReadPropagator : public Propagator
         const size_t num_classes = state.bucket_egraphs[b].classes.size();
         if (class_info.size() < num_classes)
             class_info.resize(num_classes);
-        schedule.temporal_overlaps.resize(num_classes);
-        if (rebuild_structure)
-        {
-            for (EClassId cid : active_cids)
-            {
-                if (cid.value < schedule.temporal_overlaps.size())
-                    schedule.temporal_overlaps[cid.value].clear();
-            }
-        }
 
         if (rebuild_structure)
         {
@@ -223,7 +215,8 @@ class WriteAfterReadPropagator : public Propagator
             info.is_view = en_id.value < state.bucket_enode_infos[b].size() &&
                            state.bucket_enode_infos[b][en_id.value].is_view;
             info.is_input_or_cache = (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE ||
-                                     (cls.base_eclass_id != BaseEClassId{} && state.preallocated_buffers.count(cls.base_eclass_id)));
+                                     (cls.base_eclass_id != BaseEClassId{} &&
+                                      (state.preallocated_buffers.count(cls.base_eclass_id) || state.isBaseFixedCached(cls.base_eclass_id))));
             info.is_root = (b < state.bucket_root_ids.size() &&
                            state.bucket_egraphs[b].findConst(cid) == state.bucket_egraphs[b].findConst(state.bucket_root_ids[b]));
 
@@ -385,13 +378,24 @@ class WriteAfterReadPropagator : public Propagator
                         class_info[reader.value].reader_dependents.push_back(cid);
                 }
             }
+
+            for (EClassId cid : active_cids)
+            {
+                auto &info = class_info[cid.value];
+                info.max_reader_start_max = -1;
+                for (EClassId reader : info.readers)
+                {
+                    if (reader.value < class_info.size())
+                        info.max_reader_start_max = std::max(info.max_reader_start_max,
+                                                             class_info[reader.value].start_max);
+                }
+            }
             schedule.structure_dirty = false;
         }
         else
         {
             // A start-domain change only affects its eclass start maximum,
-            // the latest-reader bounds of values it reads, and overlap rows
-            // for those affected classes.
+            // the latest-reader bounds of values it reads, and affected classes.
             schedule.affected_stamp.resize(num_classes, 0);
             ++schedule.affected_epoch;
             if (schedule.affected_epoch == 0)
@@ -410,7 +414,6 @@ class WriteAfterReadPropagator : public Propagator
                 auto sel_it = state.selected_vars[b].find(cid);
                 if (sel_it == state.selected_vars[b].end())
                     continue;
-                const Domain &selection = state.domains[sel_it->second];
                 int32_t start_max = -1;
                 auto st_it = state.start_vars[b].find(cid);
                 if (st_it != state.start_vars[b].end())
@@ -438,129 +441,6 @@ class WriteAfterReadPropagator : public Propagator
             }
         }
 
-        // A structural rebuild starts with every temporal row invalid. A
-        // start-only update clears just the rows whose interval changed.
-        if (!rebuild_structure)
-        {
-            for (EClassId cid : affected_cids)
-            {
-                if (cid.value >= num_classes || !class_info[cid.value].is_active)
-                    continue;
-                auto &row = schedule.temporal_overlaps[cid.value];
-                for (EClassId neighbor : row)
-                {
-                    if (neighbor.value >= schedule.temporal_overlaps.size())
-                        continue;
-                    auto &neighbor_row = schedule.temporal_overlaps[neighbor.value];
-                    neighbor_row.erase(std::remove(neighbor_row.begin(), neighbor_row.end(), cid), neighbor_row.end());
-                }
-                row.clear();
-            }
-        }
-        else
-        {
-            for (EClassId cid : active_cids)
-            {
-                auto &info = class_info[cid.value];
-                info.max_reader_start_max = -1;
-                for (EClassId reader : info.readers)
-                {
-                    if (reader.value < class_info.size())
-                        info.max_reader_start_max = std::max(info.max_reader_start_max,
-                                                             class_info[reader.value].start_max);
-                }
-            }
-        }
-
-        auto addTemporalPair = [&](EClassId a, EClassId c) {
-            schedule.temporal_overlaps[a.value].push_back(c);
-            schedule.temporal_overlaps[c.value].push_back(a);
-        };
-
-        auto temporalPairOverlaps = [&](EClassId a_cid, EClassId c_cid) {
-            return mayOverlapInTime(state, b, a_cid, c_cid);
-        };
-
-        if (rebuild_structure)
-        {
-            // Fixed, non-persistent lifetimes form intervals in dispatch
-            // order. Sweep them instead of testing every active pair.
-            struct TemporalCandidate
-            {
-                EClassId cid;
-                int32_t start;
-                int32_t last_reader_start;
-                bool is_broad;
-            };
-            std::vector<TemporalCandidate> temporal_candidates;
-            temporal_candidates.reserve(active_cids.size());
-            std::vector<size_t> broad_candidates;
-            std::vector<size_t> fixed_candidates;
-            for (EClassId cid : active_cids)
-            {
-                const auto &info = class_info[cid.value];
-                const auto st_it = state.start_vars[b].find(cid);
-                const bool start_fixed = st_it != state.start_vars[b].end() &&
-                                         state.domains[st_it->second].isFixed();
-                const bool broad = !start_fixed || info.is_input_or_cache || info.is_root;
-                int32_t start = 0;
-                if (start_fixed)
-                    start = state.domains[st_it->second].fixedValue();
-                temporal_candidates.push_back({cid, start, info.max_reader_start_max, broad});
-                const size_t idx = temporal_candidates.size() - 1;
-                (broad ? broad_candidates : fixed_candidates).push_back(idx);
-            }
-
-            // Pairs involving a broad candidate are retained unconditionally,
-            // matching the previous conservative behavior.
-            for (size_t broad_idx : broad_candidates)
-            {
-                const EClassId broad_cid = temporal_candidates[broad_idx].cid;
-                for (const auto &candidate : temporal_candidates)
-                {
-                    if (broad_cid != candidate.cid &&
-                        (!candidate.is_broad || broad_cid.value < candidate.cid.value))
-                        addTemporalPair(broad_cid, candidate.cid);
-                }
-            }
-
-            std::sort(fixed_candidates.begin(), fixed_candidates.end(), [&](size_t lhs, size_t rhs) {
-                const auto &a = temporal_candidates[lhs];
-                const auto &c = temporal_candidates[rhs];
-                return (a.start != c.start) ? a.start < c.start : a.cid.value < c.cid.value;
-            });
-            for (size_t i = 0; i < fixed_candidates.size(); ++i)
-            {
-                const auto &earlier = temporal_candidates[fixed_candidates[i]];
-                for (size_t j = i + 1; j < fixed_candidates.size(); ++j)
-                {
-                    const auto &later = temporal_candidates[fixed_candidates[j]];
-                    // Equal starts were conservatively considered overlapping.
-                    if (later.start != earlier.start && later.start > earlier.last_reader_start)
-                        break;
-                    addTemporalPair(earlier.cid, later.cid);
-                }
-            }
-        }
-        else
-        {
-            // Rebuild only overlap rows touched by a changed start bound.
-            for (EClassId cid : affected_cids)
-            {
-                if (cid.value >= class_info.size() || !class_info[cid.value].is_active)
-                    continue;
-                for (EClassId other : active_cids)
-                {
-                    if (other == cid)
-                        continue;
-                    if (schedule.affected_stamp[other.value] == schedule.affected_epoch &&
-                        cid.value > other.value)
-                        continue;
-                    if (temporalPairOverlaps(cid, other))
-                        addTemporalPair(cid, other);
-                }
-            }
-        }
         schedule.dirty_start_cids.clear();
         schedule.dirty = false;
     }
@@ -1192,7 +1072,6 @@ class WriteAfterReadPropagator : public Propagator
                 return true;
 
             buildBucketInfo(state, b);
-            const auto &temporal_overlaps = state.propagation.write_after_read[b].temporal_overlaps;
 
             if (curr_offset_fixed)
             {
@@ -1307,10 +1186,8 @@ class WriteAfterReadPropagator : public Propagator
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 buildBucketInfo(state, b);
-                const auto &temporal_overlaps = state.propagation.write_after_read[b].temporal_overlaps;
                 std::vector<FixedAlloc> fixed_allocs;
                 std::vector<FixedAlloc> all_allocs;
-                std::vector<int32_t> fixed_alloc_index(state.bucket_egraphs[b].classes.size(), -1);
                 for (const auto &pair : state.selected_vars[b])
                 {
                     FixedAlloc a;
@@ -1319,7 +1196,6 @@ class WriteAfterReadPropagator : public Propagator
                         all_allocs.push_back(a);
                         if (state.domains[a.offset_var].isFixed())
                         {
-                            fixed_alloc_index[a.cid.value] = static_cast<int32_t>(fixed_allocs.size());
                             fixed_allocs.push_back(a);
                         }
                     }
@@ -1331,14 +1207,13 @@ class WriteAfterReadPropagator : public Propagator
                     while (pushed)
                     {
                         pushed = false;
-                        for (EClassId fixed_cid : temporal_overlaps[target.cid.value])
+                        for (const FixedAlloc &fixed : fixed_allocs)
                         {
-                            if (fixed_cid.value >= fixed_alloc_index.size() || fixed_alloc_index[fixed_cid.value] < 0)
-                                continue;
-                            const FixedAlloc &fixed = fixed_allocs[fixed_alloc_index[fixed_cid.value]];
                             if (target.cid == fixed.cid)
                                 continue;
                             if (target.mem_space != fixed.mem_space)
+                                continue;
+                            if (!mayOverlapInTime(state, b, target.cid, fixed.cid))
                                 continue;
 
                             if (!canShare(state, target, fixed))
@@ -1991,7 +1866,7 @@ class MemoryNoOverlapPropagator : public Propagator
   public:
     uint8_t interestedVarTypes() const override
     {
-        return varTypeMask(VarType::START) | varTypeMask(VarType::OFFSET);
+        return varTypeMask(VarType::START) | varTypeMask(VarType::OFFSET) | varTypeMask(VarType::CACHED);
     }
 
     StartSelectionGuard startSelectionGuard() const override
@@ -2006,12 +1881,23 @@ class MemoryNoOverlapPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        state.ensurePropagationState();
+        VarId eff_changed = changed;
         if (changed != kInvalidVarId)
         {
             const VarInfo &info = state.var_infos[changed];
-            if (info.type != VarType::OFFSET && info.type != VarType::START)
+            if (info.type != VarType::OFFSET && info.type != VarType::START && info.type != VarType::CACHED)
                 return true;
-            if (info.type == VarType::START)
+            if (info.type == VarType::CACHED)
+            {
+                for (uint32_t b = 0; b < state.buckets.size(); ++b)
+                {
+                    state.propagation.write_after_read[b].structure_dirty = true;
+                    state.propagation.write_after_read[b].dirty = true;
+                }
+                eff_changed = kInvalidVarId;
+            }
+            else if (info.type == VarType::START)
             {
                 auto offset_it = state.offset_vars[info.bucket_idx].find(info.eclass_id);
                 if (offset_it == state.offset_vars[info.bucket_idx].end() ||
@@ -2022,7 +1908,7 @@ class MemoryNoOverlapPropagator : public Propagator
 #ifdef TG_PROFILE
         auto fixed_start = std::chrono::steady_clock::now();
 #endif
-        if (!fixed_offset_prop_.propagate(state, changed, worklist))
+        if (!fixed_offset_prop_.propagate(state, eff_changed, worklist))
         {
 #ifdef TG_PROFILE
             fixed_offset_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2035,7 +1921,7 @@ class MemoryNoOverlapPropagator : public Propagator
             std::chrono::steady_clock::now() - fixed_start).count());
         auto write_after_read_start = std::chrono::steady_clock::now();
 #endif
-        if (!write_after_read_prop_.propagate(state, changed, worklist))
+        if (!write_after_read_prop_.propagate(state, eff_changed, worklist))
         {
 #ifdef TG_PROFILE
             write_after_read_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(

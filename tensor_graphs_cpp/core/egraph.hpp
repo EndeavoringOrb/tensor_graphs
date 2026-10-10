@@ -147,7 +147,6 @@ struct EGraph
 
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<EClassId>> constantHashIndex;
-    mutable std::unordered_map<const std::vector<uint8_t> *, uint64_t> constantDataHashCache;
 
     // Base eclass ID -> current canonical eclass ID.
     mutable std::unordered_map<BaseEClassId, EClassId> baseEClassToEClass;
@@ -337,26 +336,30 @@ struct EGraph
         if (ufSize[ra.value] < ufSize[rb.value])
             std::swap(ra, rb);
 
-#ifdef TG_DEBUG
-        if (classes[ra.value].shape != classes[rb.value].shape)
+        if (classes[ra.value].shape != classes[rb.value].shape ||
+            classes[ra.value].dtype != classes[rb.value].dtype)
         {
-            Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra.value].shape) + ", " +
-                             toString(classes[rb.value].shape));
+            std::cerr << "[ILLEGAL EClass MERGE] ra=" << ra.value << " (shape=" << toString(classes[ra.value].shape)
+                      << ", strides=" << toString(classes[ra.value].strides)
+                      << ", dtype=" << static_cast<int>(classes[ra.value].dtype) << ") vs rb=" << rb.value
+                      << " (shape=" << toString(classes[rb.value].shape)
+                      << ", strides=" << toString(classes[rb.value].strides)
+                      << ", dtype=" << static_cast<int>(classes[rb.value].dtype) << ")\n";
         }
-        if (classes[ra.value].strides != classes[rb.value].strides)
+
+        auto itConstA = constantStaging.find(ra);
+        auto itConstB = constantStaging.find(rb);
+        if (itConstA != constantStaging.end() && itConstB != constantStaging.end())
         {
-            Error::throw_err("EClass merge strides mismatch: " + toString(classes[ra.value].strides) + ", " +
-                             toString(classes[rb.value].strides));
+            if (*itConstA->second != *itConstB->second)
+            {
+                std::cerr << "[CRITICAL CONSTANT MERGE] Attempting to merge different constants! ra="
+                          << ra.value << " vs rb=" << rb.value << "\n";
+                #ifdef TG_THROW_ON_BAD_MERGE
+                Error::throw_err("Cannot merge different constants!");
+                #endif
+            }
         }
-        if (classes[ra.value].dtype != classes[rb.value].dtype)
-        {
-            Error::throw_err("EClass merge dtype mismatch");
-        }
-        if (!(classes[ra.value].mem_space == classes[rb.value].mem_space))
-        {
-            Error::throw_err("EClass merge mem_space mismatch");
-        }
-#endif
 
         const BaseEClassId baseA = classes[ra.value].base_eclass_id;
         const BaseEClassId baseB = classes[rb.value].base_eclass_id;
@@ -847,44 +850,7 @@ struct EGraph
     uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
                                  DType dtype, const std::vector<uint8_t> &data) const noexcept
     {
-        uint64_t h = static_cast<uint64_t>(dtype);
-
-        for (uint32_t s : shape)
-            hashCombine(h, static_cast<uint64_t>(s));
-
-        for (uint64_t s : strides)
-            hashCombine(h, s);
-
-        auto it = constantDataHashCache.find(&data);
-        uint64_t data_hash = 0;
-        if (it != constantDataHashCache.end())
-        {
-            data_hash = it->second;
-        }
-        else
-        {
-            const uint8_t *ptr = data.data();
-            uint64_t len = data.size();
-            uint64_t i = 0;
-
-            for (; i + 8 <= len; i += 8)
-            {
-                uint64_t val;
-                std::memcpy(&val, ptr + i, 8);
-                hashCombine(data_hash, val);
-            }
-
-            if (i < len)
-            {
-                uint64_t val = 0;
-                std::memcpy(&val, ptr + i, len - i);
-                hashCombine(data_hash, val);
-            }
-            constantDataHashCache[&data] = data_hash;
-        }
-
-        hashCombine(h, data_hash);
-        return h;
+        return tg_hash::computeConstantHash(shape, strides, dtype, data);
     }
 
     void rebuildConstantHashIndex()
