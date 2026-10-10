@@ -875,6 +875,7 @@ class SearchState
     std::vector<std::unordered_map<Engine, float>> engine_work;
     std::vector<std::unordered_map<Engine, float>> selected_engine_work;
     bool engine_work_initialized = false;
+    std::vector<float> bucket_start_run_lower_bounds;
     std::vector<EGraph> bucket_egraphs;
     std::vector<EClassId> bucket_root_ids;
     std::vector<std::vector<ENodeInfo>> bucket_enode_infos;
@@ -910,14 +911,20 @@ class SearchState
 
     void updateLowerBoundBucket(uint32_t bucket_idx)
     {
+        if (bucket_idx >= buckets.size())
+            Error::throw_err("bucket_idx " + std::to_string(bucket_idx) + " out of bounds (" +
+                             std::to_string(buckets.size()) + ") in updateLowerBoundBucket");
         if (bucket_lower_bounds.size() < buckets.size())
             bucket_lower_bounds.resize(buckets.size(), 0.0f);
         if (bucket_critical_path_lower_bounds.size() < buckets.size())
             bucket_critical_path_lower_bounds.resize(buckets.size(), 0.0f);
         if (bucket_engine_work_lower_bounds.size() < buckets.size())
             bucket_engine_work_lower_bounds.resize(buckets.size(), 0.0f);
-        bucket_lower_bounds[bucket_idx] = std::max(bucket_critical_path_lower_bounds[bucket_idx],
-                                                   bucket_engine_work_lower_bounds[bucket_idx]);
+        if (bucket_start_run_lower_bounds.size() < buckets.size())
+            bucket_start_run_lower_bounds.resize(buckets.size(), 0.0f);
+        bucket_lower_bounds[bucket_idx] = std::max({bucket_critical_path_lower_bounds[bucket_idx],
+                                                    bucket_engine_work_lower_bounds[bucket_idx],
+                                                    bucket_start_run_lower_bounds[bucket_idx]});
         lower_bound = 0.0f;
         for (size_t b = 0; b < bucket_lower_bounds.size(); ++b)
         {

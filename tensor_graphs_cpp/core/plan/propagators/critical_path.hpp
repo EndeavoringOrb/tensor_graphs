@@ -125,21 +125,25 @@ class CriticalPathPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        if (state.best_cost == TGConstants::INF)
-            return true;
         if (!state.critical_path_lower_bound_initialized)
             initialize(state);
         if (changed != kInvalidVarId && state.var_infos[changed].type != VarType::SELECTED)
             return true;
         if (changed != kInvalidVarId)
         {
+            if (changed >= state.var_infos.size())
+                Error::throw_err("changed VarId " + std::to_string(changed) + " out of bounds in CriticalPathPropagator");
             const uint32_t bucket_idx = state.var_infos[changed].bucket_idx;
+            if (bucket_idx >= state.buckets.size())
+                Error::throw_err("bucket_idx " + std::to_string(bucket_idx) + " out of bounds in CriticalPathPropagator");
             if (bucket_idx < state.bucket_critical_path_lower_bounds.size())
             {
                 state.bucket_critical_path_lower_bounds[bucket_idx] = computeBucketCriticalPath(state, bucket_idx);
                 state.updateLowerBoundBucket(bucket_idx);
             }
         }
+        if (state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
+            return false;
         return true;
     }
 };

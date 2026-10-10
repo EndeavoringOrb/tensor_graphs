@@ -29,6 +29,7 @@
 #include "core/plan/propagators/early_cache_budget.hpp"
 #include "core/plan/propagators/engine_workload.hpp"
 #include "core/plan/propagators/write_after_read_start.hpp"
+#include "core/plan/propagators/start_run_makespan.hpp"
 
 namespace plan
 {
@@ -87,7 +88,6 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false, 
     engine.addPropagator(std::make_unique<ParentRemovalPropagator>());
     engine.addPropagator(std::make_unique<CacheRequirementPropagator>());
     engine.addPropagator(std::make_unique<CacheFreshnessPropagator>());
-    engine.addPropagator(std::make_unique<RequiredReachabilityPropagator>());
     engine.addPropagator(std::make_unique<CachedOffsetPropagator>());
 }
 
@@ -100,6 +100,8 @@ inline void addExtraPropagators(EngineT &engine)
     engine.addPropagator(std::make_unique<EngineWorkloadPropagator>());
     engine.addPropagator(std::make_unique<WriteAfterReadStartPropagator>());
     engine.addPropagator(std::make_unique<CachedOffsetAllocationPropagator>());
+    engine.addPropagator(std::make_unique<RequiredReachabilityPropagator>());
+    engine.addPropagator(std::make_unique<StartRunMakespanPropagator>());
 }
 
 template <typename EngineT>

@@ -38,19 +38,23 @@ class EngineWorkloadPropagator : public Propagator
   public:
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
-        if (state.best_cost == TGConstants::INF)
-            return true;
         if (!state.engine_work_initialized)
             initialize(state);
         if (changed != kInvalidVarId && state.var_infos[changed].type != VarType::SELECTED)
             return true;
         if (changed != kInvalidVarId && state.engine_work_initialized)
         {
+            if (changed >= state.var_infos.size())
+                Error::throw_err("changed VarId " + std::to_string(changed) + " out of bounds in EngineWorkloadPropagator");
             const uint32_t bucket_idx = state.var_infos[changed].bucket_idx;
+            if (bucket_idx >= state.buckets.size())
+                Error::throw_err("bucket_idx " + std::to_string(bucket_idx) + " out of bounds in EngineWorkloadPropagator");
             updateSelectedWork(state, changed);
             state.bucket_engine_work_lower_bounds[bucket_idx] = bucketEngineWorkLowerBound(state.engine_work[bucket_idx]);
             state.updateLowerBoundBucket(bucket_idx);
         }
+        if (state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
+            return false;
         return true;
     }
 

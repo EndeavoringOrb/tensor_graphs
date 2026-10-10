@@ -101,7 +101,12 @@ def main():
         "--min-compile-time",
         type=float,
         default=0.0,
-        help="Minimum required compile time per bucket in seconds",
+        help="Search time budget in seconds (0 stops at the first feasible plan)",
+    )
+    parser.add_argument(
+        "--optimal",
+        action="store_true",
+        help="Search until the planner exhausts its search space",
     )
     parser.add_argument("--max-time-seconds", type=float, default=None,
                         help="Maximum time in seconds for the OR-Tools solver")
@@ -201,7 +206,7 @@ def main():
         steps=args.steps,
         mu=args.mu,
         brancher=None,
-        min_compile_time=args.min_compile_time,
+        min_compile_time=-1.0 if args.optimal else args.min_compile_time,
         disable_node_caching=args.disable_node_caching,
         disable_compilation_caching=args.disable_compilation_caching,
         threads=args.threads,

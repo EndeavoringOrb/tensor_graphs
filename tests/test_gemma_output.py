@@ -92,7 +92,12 @@ def main():
         "--min-compile-time",
         type=float,
         default=0.0,
-        help="Minimum required compile time per bucket in seconds",
+        help="Search time budget in seconds (0 stops at the first feasible plan)",
+    )
+    parser.add_argument(
+        "--optimal",
+        action="store_true",
+        help="Search until the planner exhausts its search space",
     )
     args = parser.parse_args()
 
@@ -102,7 +107,7 @@ def main():
         run_gemma_output(
             config_name,
             cache_file=args.cache_file,
-            min_compile_time=args.min_compile_time,
+            min_compile_time=-1.0 if args.optimal else args.min_compile_time,
         )
 
 
