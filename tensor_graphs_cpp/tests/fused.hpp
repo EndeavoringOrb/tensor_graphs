@@ -433,10 +433,10 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             view.strides = rec.inputStrides[i];
 
             uint64_t elements = countElements(view.getShape());
-            uint64_t bufElements = getRequiredBufferSize(view);
+            uint64_t span_bytes = getStorageSpanBytes(view);
             uint64_t dtypeSize = getDTypeSize(rec.inputDTypes[i]);
 
-            rawData[i].resize(bufElements * dtypeSize);
+            rawData[i].resize(span_bytes);
 
             // Contiguous array for executeReferenceGraph standard scattering
             std::vector<uint8_t> contiguousData(elements * dtypeSize);
@@ -602,10 +602,10 @@ bool runNonReferenceKernelTests(const std::string &targetKernel = "", bool useRe
                     view.setShape(node.getShape());
                     view.strides = node.strides;
                     uint64_t elements = countElements(view.getShape());
-                    uint64_t bufElements = getRequiredBufferSize(view);
+                    uint64_t span_bytes = getStorageSpanBytes(view);
                     uint64_t dtypeSize = getDTypeSize(node.dtype);
 
-                    std::vector<uint8_t> newRawData(bufElements * dtypeSize, 0);
+                    std::vector<uint8_t> newRawData(span_bytes, 0);
                     std::vector<uint8_t> &logicalData = refInputs.rawInputData[id];
 
                     for (uint64_t k = 0; k < elements; ++k)

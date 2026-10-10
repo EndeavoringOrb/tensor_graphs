@@ -96,7 +96,7 @@ class WriteAfterReadStartPropagator : public Propagator
                                        (cls.base_eclass_id != BaseEClassId{} &&
                                         (state.preallocated_buffers.count(cls.base_eclass_id) != 0 || state.isBaseFixedCached(cls.base_eclass_id)));
             const uint32_t size_pages = std::max<uint32_t>(
-                1, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
+                1, state.bytesToPages(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()), cls.mem_space));
 
             active.push_back({cid, cls.base_eclass_id, cls.mem_space, pair.first,
                               size_pages, start_it->second,

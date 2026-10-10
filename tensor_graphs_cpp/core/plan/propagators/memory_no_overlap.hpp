@@ -39,32 +39,6 @@ class WriteAfterReadPropagator : public Propagator
 
     static inline const std::vector<EClassId> empty_readers{};
 
-    static uint64_t getAllocationSpanBytes(const ENode &enode)
-    {
-        const auto &shape = enode.getShape();
-        const auto &strides = enode.getStrides();
-        if (shape.size() != strides.size())
-            Error::throw_err("Allocation footprint: shape and strides have different ranks");
-        for (uint32_t extent : shape)
-            if (extent == 0)
-                return 0;
-
-        // Strides are in elements. Broadcast dimensions contribute no span.
-        uint64_t span_elements = 1;
-        const uint64_t max_value = std::numeric_limits<uint64_t>::max();
-        for (size_t i = 0; i < shape.size(); ++i)
-        {
-            const uint64_t extent = shape[i] - 1;
-            if (extent != 0 && strides[i] > (max_value - span_elements) / extent)
-                Error::throw_err("Allocation footprint: strided element span overflow");
-            span_elements += extent * strides[i];
-        }
-        const uint64_t element_bytes = getDTypeSize(enode.getDType());
-        if (element_bytes != 0 && span_elements > max_value / element_bytes)
-            Error::throw_err("Allocation footprint: byte span overflow");
-        return span_elements * element_bytes;
-    }
-
     static bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
                          bool require_fixed_offset = true, bool require_fixed_start = true)
     {
@@ -132,7 +106,7 @@ class WriteAfterReadPropagator : public Propagator
         out.bucket_idx = b;
         out.mem_space = cls.mem_space;
         out.offset = static_cast<uint32_t>(off_dom.getMin());
-        const uint64_t span_bytes = getAllocationSpanBytes(enode);
+        const uint64_t span_bytes = getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType());
         const uint64_t alignment = state.getPageAlignment(cls.mem_space);
         const uint64_t span_pages = span_bytes / alignment + (span_bytes % alignment != 0);
         if (span_pages > std::numeric_limits<uint32_t>::max())

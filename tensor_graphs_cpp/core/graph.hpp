@@ -87,7 +87,7 @@ struct Graph
     LogicalId constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype,
                        SourceLocation loc = SourceLocation::current())
     {
-        uint64_t sizeBytes = getSizeBytes(shape, dtype);
+        uint64_t sizeBytes = getLogicalSizeBytes(shape, dtype);
         uint64_t dataHash = tg_hash::computeConstantHash(shape, dtype, dataPtr, sizeBytes);
 
         auto it = constantHashIndex.find(dataHash);

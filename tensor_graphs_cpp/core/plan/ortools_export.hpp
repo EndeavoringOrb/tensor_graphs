@@ -179,9 +179,9 @@ inline json serializeProblem(
             cls_json["shape"] = cls.shape;
             cls_json["dtype"] = static_cast<int>(cls.dtype);
             cls_json["mem_space"] = memSpaceToJson(cls.mem_space);
-            uint64_t size_bytes = (getSizeBytes(cls.shape, cls.dtype) + 4095) & ~4095ULL;
+            uint64_t size_bytes = (getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) + 4095) & ~4095ULL;
             cls_json["size_bytes"] = size_bytes;
-            cls_json["raw_size_bytes"] = getSizeBytes(cls.shape, cls.dtype);
+            cls_json["raw_size_bytes"] = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
 
             json enodes_json = json::array();
             for (size_t e_idx = 0; e_idx < cls.enodes.size(); ++e_idx)

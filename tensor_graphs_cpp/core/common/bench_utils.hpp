@@ -346,8 +346,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out.is_open())
             {
-                std::cerr << "Failed to create dummy storage file: " << path << std::endl;
-                continue;
+                Error::throw_err("Failed to create dummy storage file: " + path);
             }
 
             // Write prepared host-side data if available; otherwise, write fallback
@@ -368,6 +367,8 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
             }
             out.close();
             sf.paths.push_back(path);
+            if (!out)
+                Error::throw_err("Failed to write dummy storage file: " + path);
 
             int fd = -1;
 #ifdef TG_OS_WINDOWS
@@ -377,7 +378,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
 #endif
             if (fd < 0)
             {
-                std::cerr << "Failed to open dummy storage file for reading: " << path << std::endl;
+                Error::throw_err("Failed to open dummy storage file for reading: " + path);
             }
             sf.fds.push_back(fd);
         }
@@ -727,10 +728,9 @@ struct PreparedKernel
 
             if (b.type == HandleType::STORAGE)
             {
-                if (storageInIdx < sf.fds.size())
-                {
-                    ctx.fd[idx] = sf.fds[storageInIdx++];
-                }
+                if (storageInIdx >= sf.fds.size())
+                    Error::throw_err("PreparedKernel::updateStorageContext: missing storage file descriptor");
+                setStorageInput(ctx, idx, inViews[idx], sf.fds[storageInIdx++], 0);
             }
         }
     }

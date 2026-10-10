@@ -38,7 +38,7 @@ inline void _checkValues(const std::vector<const void *> &ptrs, const std::vecto
         cudaPointerAttributes attrs;
         if (cudaPointerGetAttributes(&attrs, ptrs[i]) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
         {
-            uint64_t sizeBytes = getRequiredBufferSize(views[i]) * getDTypeSize(views[i].dtype);
+            uint64_t sizeBytes = getStorageSpanBytes(views[i]);
             temp_host_data.resize(sizeBytes);
             cudaMemcpy(temp_host_data.data(), ptrs[i], sizeBytes, cudaMemcpyDeviceToHost);
             host_ptr = temp_host_data.data();
@@ -120,7 +120,7 @@ inline void checkValues(const std::vector<const void *> &out_ptrs, const std::ve
                 if (cudaPointerGetAttributes(&in_attrs, in_ptrs[in_i]) == cudaSuccess &&
                     in_attrs.type == cudaMemoryTypeDevice)
                 {
-                    uint64_t inSizeBytes = getRequiredBufferSize(in_views[in_i]) * getDTypeSize(in_views[in_i].dtype);
+                    uint64_t inSizeBytes = getStorageSpanBytes(in_views[in_i]);
                     temp_in_host_data.resize(inSizeBytes);
                     cudaMemcpy(temp_in_host_data.data(), in_ptrs[in_i], inSizeBytes, cudaMemcpyDeviceToHost);
                     in_host_ptr = temp_in_host_data.data();

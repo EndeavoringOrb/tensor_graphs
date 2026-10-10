@@ -60,7 +60,7 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
 
     uint64_t cap = ctx.mem_caps.at(ms);
     uint32_t out_align = plan::SearchState::getDefaultPageAlignment(ms);
-    uint64_t out_size = (getSizeBytes(enode.getShape(), enode.getDType()) + out_align - 1) & ~static_cast<uint64_t>(out_align - 1);
+    uint64_t out_size = (getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()) + out_align - 1) & ~static_cast<uint64_t>(out_align - 1);
 
     if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
     {
@@ -85,7 +85,7 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
                 if (cls.mem_space == ms)
                 {
                     uint32_t in_align = plan::SearchState::getDefaultPageAlignment(cls.mem_space);
-                    uint64_t in_size = (getSizeBytes(cls.shape, cls.dtype) + in_align - 1) & ~static_cast<uint64_t>(in_align - 1);
+                    uint64_t in_size = (getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) + in_align - 1) & ~static_cast<uint64_t>(in_align - 1);
                     if (out_size <= in_size)
                     {
                         can_be_inplace = true;
@@ -107,7 +107,7 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
             if (cls.mem_space == ms)
             {
                 uint32_t in_align = plan::SearchState::getDefaultPageAlignment(cls.mem_space);
-                sum_inputs_in_ms += (getSizeBytes(cls.shape, cls.dtype) + in_align - 1) & ~static_cast<uint64_t>(in_align - 1);
+                sum_inputs_in_ms += (getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) + in_align - 1) & ~static_cast<uint64_t>(in_align - 1);
             }
         }
     }
@@ -275,6 +275,7 @@ struct Planner
             BaseEClassId baseEClassId;
             MemSpace memSpace;
             std::vector<uint32_t> shape;
+            std::vector<uint64_t> strides;
             DType dtype;
         };
         std::vector<PreAllocEntry> entries;
@@ -289,7 +290,7 @@ struct Planner
             const EClass &cls = egraph.getEClass(cid);
             if (cls.base_eclass_id == BaseEClassId{} || cls.mem_space == storage)
                 return;
-            entries.push_back({cls.base_eclass_id, ram, node.getShape(), node.dtype});
+            entries.push_back({cls.base_eclass_id, ram, node.getShape(), node.strides, node.dtype});
         };
 
         for (const auto &pair : graph.nodes)
@@ -316,7 +317,7 @@ struct Planner
             if (e.memSpace == storage)
                 continue;
 
-            uint64_t size_bytes = getSizeBytes(e.shape, e.dtype);
+            uint64_t size_bytes = getStorageSpanBytes(e.shape, e.strides, e.dtype);
             if (size_bytes == 0)
                 continue;
             uint32_t align = plan::SearchState::getDefaultPageAlignment(e.memSpace);
@@ -552,7 +553,7 @@ struct Planner
                 if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
                     continue;
 
-                const float node_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                const float node_size = static_cast<float>(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()));
                 eclass_dp_cost[i] = 0.0f;
                 eclass_dp_cp_cost[i] = 0.0f;
                 eclass_dp_mem[i] = std::min(eclass_dp_mem[i], node_size);
@@ -615,7 +616,7 @@ struct Planner
                     for (EClassId child : child_classes)
                     {
                         const EClass &child_class = egraph.getEClass(child);
-                        const float child_size = static_cast<float>(getSizeBytes(child_class.shape, child_class.dtype));
+                        const float child_size = static_cast<float>(getStorageSpanBytes(child_class.shape, child_class.strides, child_class.dtype));
                         child_mems.push_back({eclass_dp_mem[child.value], child_size});
                         sum_child_sizes += child_size;
                     }
@@ -631,7 +632,7 @@ struct Planner
                         accumulated_outputs += child_mem.output;
                     }
 
-                    const float output_size = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                    const float output_size = static_cast<float>(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()));
                     bool can_be_inplace = enodeInfos[i].is_view;
                     if (!can_be_inplace && enode.getKernelId().value != 0 &&
                         KernelRegistry::get().hasKernel(enode.getKernelId()))
@@ -643,7 +644,7 @@ struct Planner
                                 continue;
                             EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
                             const EClass &child_class = egraph.getEClass(child);
-                            const float input_size = static_cast<float>(getSizeBytes(child_class.shape, child_class.dtype));
+                            const float input_size = static_cast<float>(getStorageSpanBytes(child_class.shape, child_class.strides, child_class.dtype));
                             if (child_class.mem_space == enode.getMemSpace() && output_size <= input_size)
                             {
                                 can_be_inplace = true;
@@ -656,7 +657,7 @@ struct Planner
                 }
                 else
                 {
-                    total_mem = static_cast<float>(getSizeBytes(enode.getShape(), enode.getDType()));
+                    total_mem = static_cast<float>(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()));
                 }
 
                 const float total_cost = cost + sum_child_cost;
@@ -2041,7 +2042,7 @@ struct Planner
             for (const EClass &cls : full_state.getClasses())
             {
                 if (full_state.findConst(cls.id) != cls.id || cls.base_eclass_id == BaseEClassId{} ||
-                    cls.mem_space.type == HandleType::STORAGE || getSizeBytes(cls.shape, cls.dtype) == 0)
+                    cls.mem_space.type == HandleType::STORAGE || getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) == 0)
                     continue;
 
                 LogicalId log_id = cls.logical_id;
@@ -2086,14 +2087,14 @@ struct Planner
                 if (clean_in_any)
                 {
                     uint32_t n_users = (log_id != LogicalId{}) ? user_counts[log_id] : 0;
-                    uint64_t max_cand_bytes = getSizeBytes(cls.shape, cls.dtype);
+                    uint64_t max_cand_bytes = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
                     for (uint32_t b = 0; b < bucket_states.size(); ++b)
                     {
                         EClassId bid = bucket_states[b].findEClassByBaseId(cls.base_eclass_id);
                         if (bid != EClassId{})
                         {
                             const EClass &b_cls = bucket_states[b].getEClass(bid);
-                            max_cand_bytes = std::max(max_cand_bytes, getSizeBytes(b_cls.shape, b_cls.dtype));
+                            max_cand_bytes = std::max(max_cand_bytes, getStorageSpanBytes(b_cls.shape, b_cls.strides, b_cls.dtype));
                         }
                     }
                     candidates.push_back(
