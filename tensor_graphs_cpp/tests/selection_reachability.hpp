@@ -7,6 +7,7 @@
 
 #include "core/misc.hpp"
 #include "core/plan/search_engine.hpp"
+#include "core/plan/propagators/selection_parent_support.hpp"
 
 namespace selection_reachability_test
 {
@@ -517,6 +518,49 @@ inline void testDagReachabilityBasic()
     }
 }
 
+inline void testParentSupport()
+{
+    // Duplicate child edges are one logical support, not two alternatives.
+    for (bool duplicate : {false, true})
+    {
+        SearchState state;
+        const auto vars = addBucket(state, {{duplicate ? std::vector<uint32_t>{1, 1} :
+                                                        std::vector<uint32_t>{1}, {}}, {{}}});
+        SearchEngine engine(std::move(state));
+        engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(true));
+        engine.addPropagator(std::make_unique<SelectionParentSupportPropagator>());
+        engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
+        require(engine.runPropagators(kInvalidVarId), "Parent support initialization failed");
+        const auto original = engine.state.domains;
+        const size_t marker = engine.state.getTrailMarker();
+        engine.state.setDomain(vars[1], Domain::makeFixed(1, true));
+        require(engine.runPropagators(kInvalidVarId), "Single parent support failed");
+        require(engine.state.domains[vars[0]] == Domain::makeFixed(1, true),
+                "Required child did not force its sole parent alternative");
+        engine.state.backtrackTo(marker);
+        require(engine.state.domains == original, "Parent support rollback failed");
+        engine.state.setDomain(vars[0], Domain::makeFixed(2, true));
+        require(engine.runPropagators(kInvalidVarId) && engine.state.domains[vars[1]].fixedValue() == 0,
+                "Stale parent support proposal affected sibling");
+    }
+    // Two alternatives from the same parent remain distinct supports.
+    SearchState state;
+    const auto vars = addBucket(state, {{{1}, {1}, {}}, {{}}});
+    SearchEngine engine(std::move(state));
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(true));
+    engine.addPropagator(std::make_unique<SelectionParentSupportPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
+    require(engine.runPropagators(kInvalidVarId), "Multiple support initialization failed");
+    engine.state.setDomain(vars[1], Domain::makeFixed(1, true));
+    require(engine.runPropagators(kInvalidVarId) && engine.state.domains[vars[0]].size() == 3,
+            "Multiple parent alternatives were incorrectly forced");
+    Domain root_domain = engine.state.domains[vars[0]];
+    root_domain.remove(1);
+    engine.state.setDomain(vars[0], root_domain);
+    require(engine.runPropagators(kInvalidVarId) && engine.state.domains[vars[0]].fixedValue() == 2,
+            "Removing a support did not force the remaining alternative");
+}
+
 inline void testDagRandomBranches()
 {
     std::mt19937 random(424242);
@@ -599,6 +643,8 @@ inline void runSelectionReachabilityTests()
         selection_reachability_test::testSearchNodeRestore();
         std::cout << "Running testDagReachabilityBasic..." << std::endl;
         selection_reachability_test::testDagReachabilityBasic();
+        std::cout << "Running testParentSupport..." << std::endl;
+        selection_reachability_test::testParentSupport();
         std::cout << "Running testDagRandomBranches..." << std::endl;
         selection_reachability_test::testDagRandomBranches();
         std::cout << "selection reachability tests passed" << std::endl;

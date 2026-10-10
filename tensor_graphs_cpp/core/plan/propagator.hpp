@@ -6,6 +6,7 @@
 
 #include "core/plan/propagators/selection_reachability.hpp"
 #include "core/plan/propagators/selection_children.hpp"
+#include "core/plan/propagators/selection_parent_support.hpp"
 #include "core/plan/propagators/unselected_start_offset.hpp"
 #include "core/plan/propagators/cache_exclusion.hpp"
 #include "core/plan/propagators/input_prune_start_precedence.hpp"
@@ -67,6 +68,7 @@ template <typename EngineT>
 inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false, bool is_dag = false)
 {
     engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(is_dag));
+    engine.addPropagator(std::make_unique<SelectionParentSupportPropagator>());
     engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
     engine.addPropagator(std::make_unique<UnselectedStartOffsetPropagator>());
     engine.addPropagator(std::make_unique<CacheExclusionPropagator>());

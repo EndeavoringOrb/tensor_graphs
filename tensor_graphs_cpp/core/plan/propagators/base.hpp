@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -43,14 +44,47 @@ enum class StartSelectionGuard : uint8_t
     FIXED_START_NON_OPTIONAL_WITH_CONSUMERS
 };
 
+enum class PropagationBatch : uint8_t
+{
+    NONE,
+    SKIP,
+    BUCKET,
+    GLOBAL
+};
+
 class Propagator
 {
+#ifdef TG_PROFILE
+  protected:
+    mutable uint64_t initialization_profile_ns_ = 0;
+
+    class InitializationProfileScope
+    {
+        uint64_t &total_ns_;
+        std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
+
+      public:
+        explicit InitializationProfileScope(uint64_t &total_ns) : total_ns_(total_ns) {}
+        ~InitializationProfileScope()
+        {
+            total_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - start_).count());
+        }
+    };
+#endif
+
   public:
+#ifdef TG_PROFILE
+    uint64_t initializationProfileNs() const { return initialization_profile_ns_; }
+#endif
     virtual ~Propagator() = default;
     virtual std::string name() const = 0;
     virtual std::string conflictReason() const { return {}; }
     virtual uint8_t interestedVarTypes() const { return kAllVarTypesMask; }
     virtual StartSelectionGuard startSelectionGuard() const { return StartSelectionGuard::NONE; }
+    // Domain-changing batches run before bound-only batches at quiescence.
+    virtual PropagationBatch propagationBatch(const SearchState &, VarId) const { return PropagationBatch::NONE; }
+    virtual bool changesDomains() const { return true; }
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;
 };

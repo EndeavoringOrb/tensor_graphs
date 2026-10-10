@@ -303,7 +303,6 @@ struct SelectionReachability
     void checkForcedParent(uint32_t node_idx, const std::vector<Domain> &domains,
                            std::vector<std::pair<VarId, int32_t>> &forced_selections) const
     {
-        return;
         if (node_idx == root || nodes[node_idx].indegree == 0)
             return;
 
@@ -831,6 +830,21 @@ class SearchState
         if (!propagation.initialized)
             return;
         const VarInfo &info = var_infos[var_id];
+        if (info.type == VarType::CACHED)
+        {
+            // Cache decisions change persistence in every bucket. Invalidate
+            // immediately, even though full validation is batched: intervening
+            // OFFSET/START checks must not read metadata from the old decision.
+            for (auto &schedule : propagation.write_after_read)
+            {
+                schedule.dirty = true;
+                schedule.structure_dirty = true;
+                schedule.spatial_dirty = true;
+                schedule.fixed_offset_structure_dirty = true;
+                schedule.dirty_start_cids.clear();
+            }
+            return;
+        }
         if (info.bucket_idx >= propagation.write_after_read.size())
             return;
         auto &write_after_read = propagation.write_after_read[info.bucket_idx];
@@ -903,6 +917,8 @@ class SearchState
     mutable PropagationState propagation;
     // The incumbent is global to this search, so backtracking must retain it.
     float best_cost = TGConstants::INF;
+    // Batched bounds can be stale until all dirty buckets have been refreshed.
+    bool lower_bounds_pending = false;
 
     void ensurePropagationState() const;
     void updatePropagationContribution(VarId var_id, bool add) const;
@@ -1144,6 +1160,15 @@ class SearchState
             return true;
         }
         return false;
+    }
+
+    // Ephemeral proposals from the reachability update, consumed by the next
+    // propagator. Never replayed across propagation calls or backtracking.
+    std::vector<std::pair<VarId, int32_t>> pending_parent_selections;
+
+    const SelectionReachability &selectionReachability(uint32_t bucket_idx) const
+    {
+        return selection_reachability.at(bucket_idx);
     }
 
     // Called only for the changed SELECTED variable. The first call builds a

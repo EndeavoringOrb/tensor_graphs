@@ -17,6 +17,9 @@ class BaseToViewOffsetPropagator : public Propagator
     {
         if (initialized && bucket_view_users.size() == state.buckets.size())
             return;
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
         ViewOffsetHelpers::buildBucketViewUsers(state, bucket_view_users);
         initialized = true;
     }

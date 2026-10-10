@@ -16,6 +16,9 @@ class CacheFreshnessPropagator : public Propagator
     {
         if (initialized_)
             return;
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
         for (const auto &[base_id, cached_vid] : state.cached_vars)
         {
             for (uint32_t b = 0; b < state.buckets.size(); ++b)

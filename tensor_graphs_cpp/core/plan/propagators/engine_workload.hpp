@@ -19,6 +19,9 @@ class EngineWorkloadPropagator : public Propagator
   private:
     void initialize(SearchState &state) const
     {
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
         state.engine_work.assign(state.buckets.size(), {});
         state.selected_engine_work.assign(state.numVars(), {});
         state.bucket_engine_work_lower_bounds.assign(state.buckets.size(), 0.0f);
@@ -53,7 +56,7 @@ class EngineWorkloadPropagator : public Propagator
             state.bucket_engine_work_lower_bounds[bucket_idx] = bucketEngineWorkLowerBound(state.engine_work[bucket_idx]);
             state.updateLowerBoundBucket(bucket_idx);
         }
-        if (state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
+        if (!state.lower_bounds_pending && state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
             return false;
         return true;
     }

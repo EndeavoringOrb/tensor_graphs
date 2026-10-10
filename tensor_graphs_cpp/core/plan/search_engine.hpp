@@ -2,6 +2,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <array>
@@ -183,6 +184,17 @@ class SearchEngine
 
     bool runPropagators(VarId changed, std::string *out_conflict_reason = nullptr)
     {
+        struct BoundBatchScope
+        {
+            SearchState &state;
+            bool previous_pending;
+            explicit BoundBatchScope(SearchState &search_state)
+                : state(search_state), previous_pending(search_state.lower_bounds_pending)
+            {
+                state.lower_bounds_pending = true;
+            }
+            ~BoundBatchScope() { state.lower_bounds_pending = previous_pending; }
+        } bound_batch_scope(state);
         if (out_conflict_reason)
             out_conflict_reason->clear();
 
@@ -248,22 +260,65 @@ class SearchEngine
         size_t worklist_scan = prop_worklist.size();
 
         size_t worklist_head = 0;
-        auto preservePendingWork = [&]() {
-            for (size_t i = worklist_head - 1; i < prop_worklist.size(); ++i)
-                state.schedulePropagation(prop_worklist[i]);
-        };
-        while (worklist_head < prop_worklist.size())
+        struct DeferredCall
         {
+            VarId changed = kInvalidVarId;
+            bool pending = false;
+        };
+        const size_t batch_slots = state.buckets.size() + 1;
+        std::vector<DeferredCall> deferred_calls(propagators.size() * batch_slots);
+        size_t deferred_count = 0;
+        VarId active_changed = kInvalidVarId;
+        auto preservePendingWork = [&]() {
+            if (active_changed != kInvalidVarId)
+                state.schedulePropagation(active_changed);
+            for (size_t i = worklist_head; i < prop_worklist.size(); ++i)
+                state.schedulePropagation(prop_worklist[i]);
+            for (const auto &call : deferred_calls)
+                if (call.pending && call.changed != kInvalidVarId)
+                    state.schedulePropagation(call.changed);
+        };
+        while (worklist_head < prop_worklist.size() || deferred_count != 0)
+        {
+            const bool flushing_deferred = worklist_head == prop_worklist.size();
+            size_t deferred_prop_idx = 0;
+            VarId next_changed;
+            if (flushing_deferred)
+            {
+                // Memory batches can shrink domains. Finish them (and their
+                // consequences) before computing bucket bounds.
+                size_t chosen_slot = deferred_calls.size();
+                for (size_t slot = 0; slot < deferred_calls.size(); ++slot)
+                {
+                    if (!deferred_calls[slot].pending)
+                        continue;
+                    if (chosen_slot == deferred_calls.size())
+                        chosen_slot = slot;
+                    if (propagators[slot / batch_slots]->changesDomains())
+                    {
+                        chosen_slot = slot;
+                        break;
+                    }
+                }
+                deferred_prop_idx = chosen_slot / batch_slots;
+                next_changed = deferred_calls[chosen_slot].changed;
+                deferred_calls[chosen_slot].pending = false;
+                --deferred_count;
+            }
+            else
+            {
+                next_changed = prop_worklist[worklist_head++];
+                prop_queued_epoch[next_changed] = 0;
+            }
+            active_changed = next_changed;
             // LOG(DEBUG) << "propagator worklist pos: " << worklist_head << "/" << prop_worklist.size();
-            const VarId next_changed = prop_worklist[worklist_head++];
-            prop_queued_epoch[next_changed] = 0;
 
             const bool initial_propagation = next_changed == kInvalidVarId;
             const std::vector<size_t> *typed_propagators = initial_propagation
                                                                ? nullptr
                                                                : &propagators_by_var_type[static_cast<uint8_t>(
                                                                      state.var_infos[next_changed].type)];
-            const size_t propagator_count = initial_propagation ? propagators.size() : typed_propagators->size();
+            const size_t propagator_count = flushing_deferred ? 1 : initial_propagation ? propagators.size() : typed_propagators->size();
             const bool changed_is_start =
                 !initial_propagation && state.var_infos[next_changed].type == VarType::START;
             bool start_selection_optional = false;
@@ -296,7 +351,22 @@ class SearchEngine
             }
             for (size_t prop_iter = 0; prop_iter < propagator_count; ++prop_iter)
             {
-                const size_t prop_idx = initial_propagation ? prop_iter : (*typed_propagators)[prop_iter];
+                const size_t prop_idx = flushing_deferred ? deferred_prop_idx : initial_propagation ? prop_iter : (*typed_propagators)[prop_iter];
+#ifdef TG_PROFILE
+                auto &timing = propagator_timings[prop_idx];
+                if (timing.by_bucket.empty())
+                    timing.by_bucket.resize(state.buckets.size() + 1);
+                const size_t bucket_slot = initial_propagation || state.var_infos[next_changed].type == VarType::CACHED
+                                               ? state.buckets.size() : state.var_infos[next_changed].bucket_idx;
+                if (bucket_slot >= timing.by_bucket.size())
+                    Error::throw_err("Invalid profiling bucket index");
+                auto &bucket_timing = timing.by_bucket[bucket_slot];
+                if (!flushing_deferred)
+                {
+                    ++timing.matched_calls;
+                    ++bucket_timing.matched_calls;
+                }
+#endif
                 if (changed_is_start)
                 {
                     const StartSelectionGuard guard = propagator_start_selection_guards[prop_idx];
@@ -335,10 +405,30 @@ class SearchEngine
                     }
                 }
                 auto &prop = propagators[prop_idx];
+                if (!flushing_deferred)
+                {
+                    const PropagationBatch batch = prop->propagationBatch(state, next_changed);
+                    if (batch == PropagationBatch::SKIP)
+                        continue;
+                    if (batch != PropagationBatch::NONE)
+                    {
+                        const size_t bucket_slot = batch == PropagationBatch::GLOBAL
+                                                       ? state.buckets.size() : state.var_infos.at(next_changed).bucket_idx;
+                        if (bucket_slot >= batch_slots)
+                            Error::throw_err("Invalid deferred propagation bucket");
+                        auto &call = deferred_calls[prop_idx * batch_slots + bucket_slot];
+                        if (!call.pending)
+                        {
+                            call = {next_changed, true};
+                            ++deferred_count;
+                        }
+                        continue;
+                    }
+                }
                 const uint64_t domain_revision_before = state.getDomainRevision();
 #ifdef TG_PROFILE
-                auto &timing = propagator_timings[prop_idx];
-                const bool sample_propagator_timing = ((timing.propagate_calls + 1) % 16) == 0;
+                const uint64_t initialization_ns_before = prop->initializationProfileNs();
+                const bool sample_propagator_timing = ((bucket_timing.propagate_calls + 1) % 16) == 0 || initial_propagation;
                 const auto propagate_start = sample_propagator_timing
                                                  ? std::chrono::steady_clock::now()
                                                  : std::chrono::steady_clock::time_point{};
@@ -361,14 +451,23 @@ class SearchEngine
                 worklist_scan = worklist_write;
 #ifdef TG_PROFILE
                 timing.propagate_calls++;
+                bucket_timing.propagate_calls++;
+                const uint64_t initialization_ns = prop->initializationProfileNs() - initialization_ns_before;
+                timing.propagate_ns += initialization_ns;
+                bucket_timing.propagate_ns += initialization_ns;
+                bucket_timing.initialization_ns += initialization_ns;
+                prop_and_lb_ns_in_call += initialization_ns;
                 if (sample_propagator_timing)
                 {
                     const uint64_t propagate_ns = static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - propagate_start)
                             .count());
-                    const uint64_t estimated_propagate_ns = propagate_ns * 16;
+                    const uint64_t steady_propagate_ns = propagate_ns > initialization_ns ? propagate_ns - initialization_ns : 0;
+                    const uint64_t estimated_propagate_ns = steady_propagate_ns * (initial_propagation ? 1 : 16);
                     timing.propagate_ns += estimated_propagate_ns;
+                    bucket_timing.propagate_ns += estimated_propagate_ns;
+                    bucket_timing.max_propagate_ns = std::max(bucket_timing.max_propagate_ns, propagate_ns);
                     timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
                     prop_and_lb_ns_in_call += estimated_propagate_ns;
                 }
@@ -675,12 +774,23 @@ class SearchEngine
 #endif
 
         uint32_t iterations = 0;
+#ifdef TG_PROFILE
+        uint32_t last_profile_iteration = 0;
+#endif
         uint64_t restore_conflicts = 0;
         uint64_t left_branch_conflicts = 0;
         uint64_t lower_bound_prunes = 0;
         std::array<uint64_t, 4> branch_counts = {};
         while (!selector->empty())
         {
+#ifdef TG_PROFILE
+            if (iterations > 0 && iterations % 10000 == 0 && iterations != last_profile_iteration)
+            {
+                LOG(INFO) << "[SearchEngine profile] iterations=" << iterations << " cumulative=true";
+                reportProfile();
+                last_profile_iteration = iterations;
+            }
+#endif
             if (timer.is_expired() && incumbent_best_cost < TGConstants::INF)
             {
                 LOG(INFO) << "[SearchEngine] Timeout reached with feasible incumbent best cost: "
@@ -924,6 +1034,16 @@ class SearchEngine
                   << (incumbent_best_cost < TGConstants::INF ? std::to_string(incumbent_best_cost) : "none");
 
 #ifdef TG_PROFILE
+        reportProfile();
+#endif
+
+        return incumbent_best_cost < TGConstants::INF;
+    }
+
+  private:
+#ifdef TG_PROFILE
+    void reportProfile()
+    {
         LOG(INFO) << "[SearchEngine profile] branch=" << search_timing.choose_branch_ns / 1.0e9
                   << "s restore=" << search_timing.restore_node_ns / 1.0e9
                   << "s propagation-overhead=" << search_timing.run_prop_overhead_ns / 1.0e9
@@ -945,10 +1065,23 @@ class SearchEngine
         {
             const auto &timing = propagator_timings[prop_idx];
             LOG(INFO) << "[SearchEngine profile] propagator=" << propagators[prop_idx]->name()
+                      << " matched=" << timing.matched_calls
                       << " calls=" << timing.propagate_calls
+                      << " initialization=" << propagators[prop_idx]->initializationProfileNs() / 1.0e9 << "s"
                       << " total=" << timing.propagate_ns / 1.0e9
                       << "s max=" << timing.max_propagate_ns / 1.0e6 << "ms"
                       << " contradictions=" << timing.contradictions;
+            for (size_t bucket_slot = 0; bucket_slot < timing.by_bucket.size(); ++bucket_slot)
+            {
+                const auto &bucket_timing = timing.by_bucket[bucket_slot];
+                LOG(INFO) << "[SearchEngine profile] propagator=" << propagators[prop_idx]->name()
+                          << " bucket=" << (bucket_slot < state.buckets.size() ? std::to_string(bucket_slot) : "global/initial")
+                          << " matched=" << bucket_timing.matched_calls
+                          << " calls=" << bucket_timing.propagate_calls
+                          << " initialization=" << bucket_timing.initialization_ns / 1.0e9 << "s"
+                          << " total=" << bucket_timing.propagate_ns / 1.0e9 << "s"
+                          << " max=" << bucket_timing.max_propagate_ns / 1.0e6 << "ms";
+            }
             if (auto *memory_prop = dynamic_cast<MemoryNoOverlapPropagator *>(propagators[prop_idx].get()))
             {
                 LOG(INFO) << "[SearchEngine profile] memory-no-overlap parts: fixed-offset-start="
@@ -965,15 +1098,21 @@ class SearchEngine
                           << memory_prop->writeAfterReadInitialProfileNs() / 1.0e9 << "s";
             }
         }
-#endif
-
-        return incumbent_best_cost < TGConstants::INF;
     }
 
-  private:
-#ifdef TG_PROFILE
+    struct BucketPropagatorTiming
+    {
+        uint64_t initialization_ns = 0;
+        uint64_t matched_calls = 0;
+        uint64_t propagate_calls = 0;
+        uint64_t propagate_ns = 0;
+        uint64_t max_propagate_ns = 0;
+    };
+
     struct PropagatorTiming
     {
+        uint64_t matched_calls = 0;
+        std::vector<BucketPropagatorTiming> by_bucket;
         uint64_t propagate_calls = 0;
         uint64_t propagate_ns = 0;
         uint64_t max_propagate_ns = 0;

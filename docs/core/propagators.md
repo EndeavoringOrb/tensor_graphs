@@ -108,6 +108,79 @@ flowchart LR
     e2_0_after --> e1_2_after
 ```
 
+### `SelectionParentSupportPropagator`
+
+A required class with exactly one remaining incoming parent-and-alternative
+support forces that parent to select the supporting alternative. Duplicate edges
+from the same alternative count as one support; different alternatives count as
+separate supports.
+
+Register immediately after `SelectionReachabilityPropagator`. It consumes
+incremental proposals from the shared reachability graph, without another graph
+scan. Proposals are temporary; domain changes use the normal trail and worklist.
+The existing support notifications cover DAG edge removals and classes becoming
+required. This is a sufficient single-support rule, not full reverse reachability
+propagation for cyclic graphs.
+
+#### Example
+
+`EClass 1` is required (`0` is absent from its domain). Only root alternative
+`e1` connects to it, so choosing root alternative `e2` would disconnect a required
+class. Parent support forces `selected_0_0 = {1}` before the search branches.
+
+**Before parent support**
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 60, "rankSpacing": 65}}}%%
+flowchart LR
+    subgraph c0_before["selected_0_0 = {1, 2}"]
+        direction TB
+        e1_0_before((e1))
+        e2_0_before((e2))
+    end
+    subgraph c1_before["selected_0_1 = {1} — required"]
+        e1_1_before((e1))
+    end
+    subgraph c2_before["selected_0_2 = {0, 1}"]
+        e1_2_before((e1))
+    end
+    e1_0_before -. possible .-> e1_1_before
+    e2_0_before -. possible .-> e1_2_before
+```
+
+**After parent support**
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 60, "rankSpacing": 65}}}%%
+flowchart LR
+    subgraph c0_after["selected_0_0 = {1}"]
+        direction TB
+        e1_0_after((e1))
+        e2_0_after((e2))
+    end
+    subgraph c1_after["selected_0_1 = {1} — required"]
+        e1_1_after((e1))
+    end
+    subgraph c2_after["selected_0_2 = {0, 1}"]
+        e1_2_after((e1))
+    end
+    e1_0_after --> e1_1_after
+    e2_0_after -. X .-> e1_2_after
+```
+
+Both diagrams retain every e-class and alternative. The solid arrow is the forced
+support; `X` marks the disabled alternative. `EClass 2` remains `{0, 1}` here:
+fixing it to `{0}` is a subsequent deduction by `SelectionReachabilityPropagator`.
+
+
+If both `e1` and `e2` connect to the required child, neither alternative is
+forced by this rule. Repeating the child twice within `e1` still counts as only
+one supporting alternative.
+
+Tests are separate from the BFS domain-equivalence oracle for reachability:
+`testParentSupport` exercises forcing, duplicate edges, multiple alternatives,
+removing a support, rollback, and sibling propagation.
+
 ### `SelectionChildrenPropagator`
 
 When an e-class is fixed to a selected e-node, every child e-class of that e-node must be selected. Remove `0` from each child's selection domain. An invalid selected e-node index is a conflict.
@@ -186,50 +259,89 @@ When a selected e-class's start is fixed, remove that start value from the start
 
 ### `MemoryNoOverlapPropagator`
 
-When active allocations in the same bucket and memory space have fixed offsets that overlap in physical page ranges:
+This combines two paths: `FixedOffsetStartPropagator` validates memory reuse and
+narrows start domains; `WriteAfterReadPropagator` also checks offset placement and
+narrows the changed offset domain against indexed fixed allocations when sharing
+is unsafe. Both paths run on initialization, offset changes, and cache changes.
+Start changes run only the first path, and only when that allocation's offset is
+fixed. Cache changes rebuild the affected bucket information.
+
+The flowchart below describes the **fixed-offset start path**. Allocation pairs
+must be in the same bucket and memory space, with selected operations and fixed
+offsets whose physical page ranges overlap:
+
 $$\max(offset_A, offset_B) < \min(offset_A + size_A, offset_B + size_B)$$
 
-Enforce physical memory safety by validating allocations and narrowing `start` domains before and during dispatch step assignments:
+1. **View aliases:** Allow sharing when the allocations are views of each other
+   or have the same base e-class.
+2. **Persistent buffers:** Otherwise, overlapping `INPUT`, `CACHE`, or `ROOT`
+   buffers conflict, regardless of start assignments.
+3. **Neither start fixed:** Reject a guaranteed producer-consumer dependency
+   if in-place reuse is unsafe. Otherwise defer start pruning until at least one
+   start is fixed; this path does not choose an order using two unfixed starts.
+4. **At least one start fixed:** Label a fixed allocation $A$. If both starts
+   are fixed, label the earlier allocation $A$; equal starts conflict.
+   - **$B$ reads $A$:** Require a kernel-declared safe in-place input and require
+     $B$'s footprint to fit inside $A$'s buffer. Set
+     $start_{min}(B) \ge \max(start(A), \max_{C\in R(A)\setminus\{B\}}start_{min}(C)) + 1$.
+     Narrow each other required reader's upper bound to $start_{max}(B)-1$.
+   - **$A$ reads $B$:** Apply the symmetric safety and containment checks.
+     Set $start_{max}(B) \le start(A)-1$, and every other required reader of
+     $B$ must also have $start_{max}(C) \le start(A)-1$.
+   - **Neither reads the other:** Test the two possible reuse orders. For
+     $A$ before $B$, let
+     $t_{after A}=\max(start(A),\max_{C\in R(A)}start_{min}(C))+1$.
+     This order is impossible if $start_{max}(B)<t_{after A}$.
+     $B$ before $A$ is impossible if $start_{min}(B)\ge start(A)$, or a required
+     reader of $B$ cannot execute before $A$ (including the minimum one-step
+     producer-to-reader separation).
+     - **Only $A$ before $B$ possible:** Raise $start_{min}(B)$ to $t_{after A}$
+       and cap each required reader of $A$ at $start_{max}(B)-1$.
+     - **Only $B$ before $A$ possible:** Cap $start_{max}(B)$ and each required
+       reader of $B$ at $start(A)-1$.
+     - **Both possible:** Keep both orders. For a mask domain, remove forbidden
+       $B$ start values in $[start(A),t_{after A})$ within the implementation's
+       $[0,31]$ removal window. A range domain is left unchanged because it
+       cannot represent that interior gap.
+     - **Neither possible:** Report conflict.
 
-1. **View Aliases:** If $A$ and $B$ are views of each other (or share the same base e-class), ignore (valid alias sharing storage).
-2. **Persistent Buffers:** If either $A$ or $B$ is persistent (`INPUT`, `CACHE`, or `ROOT`), report conflict (persistent buffers cannot share storage with non-view allocations).
-3. **Producer-Consumer Overlap ($B$ reads $A$):**
-   - If $B$ is not declared a safe in-place reader of $A$, or does not fit within $A$'s buffer ($offset_B < offset_A$ or $offset_B + size_B > offset_A + size_A$), report conflict.
-   - Otherwise, $B$ must execute after $A$ and after all other readers of $A$:
-     - Narrow $A$ and $B$: $\text{start}_{\min}(B) \ge \text{start}_{\min}(A) + 1$, $\text{start}_{\max}(A) \le \text{start}_{\max}(B) - 1$.
-     - For every other reader $C \in R(A) \setminus \{B\}$: $\text{start}_{\max}(C) \le \text{start}_{\max}(B) - 1$, and $\text{start}_{\min}(B) \ge \text{start}_{\min}(C) + 1$.
-   *(The case where $A$ reads $B$ is symmetric).*
-4. **General Buffer Reuse (Neither reads the other):**
-   Allocations $A$ and $B$ must have completely disjoint execution lifespans:
-   - **If order is determined ($A$ precedes $B$):** $B$ can only start after ALL readers of $A$ ($R(A)$) have finished:
-     $$\text{start}_{\min}(B) \ge \max_{C \in R(A)}(\text{start}_{\min}(C)) + 1$$
-     And for all $C \in R(A)$: $\text{start}_{\max}(C) \le \text{start}_{\max}(B) - 1$.
-   - **If order is determined ($B$ precedes $A$):** Symmetric ($A$ can only start after all readers of $B$ have finished).
-   - **If order is not yet determined:** If bounds make one ordering impossible (e.g., $B$ cannot precede $A$), enforce the remaining order and narrow bounds. If neither ordering is possible, report conflict.
-5. **Fixed Start Validation:** When starts are already fixed, these conditions act as conflict checks (if $start(B) \le start(A)$ or any required reader finishes at or after $B$ starts, report conflict).
+Here $R(X)$ includes only required readers: their selection excludes `0`, and
+all remaining active alternatives read $X$. An optional reader or an alternative
+that might avoid reading $X$ does not justify unconditional reader-bound pruning.
+Starts are dispatch positions; strict inequalities model the ordering needed to
+finish a read before overwriting the buffer. Any narrowing that empties a domain
+is a conflict. Fixed starts are validated by these same checks.
 
 ```mermaid
 flowchart TD
-    Overlap["Active allocations A and B<br/>overlap in memory (fixed offsets)"] --> ViewCheck{"Are A and B views<br/>of each other?"}
-    ViewCheck -- Yes --> Safe["Valid<br/>(views share buffer)"]
-    ViewCheck -- No --> PersCheck{"Is either A or B persistent?<br/>(INPUT, CACHE, ROOT)"}
-    PersCheck -- Yes --> Conflict1["Conflict!<br/>(Persistent buffers cannot be overwritten)"]
-    PersCheck -- No --> DepCheck{"Does B read A<br/>or A read B?"}
-    
-    DepCheck -- "B reads A" --> InplaceCheck{"Is B a safe in-place reader<br/>and fits in A's buffer?"}
-    InplaceCheck -- No --> Conflict2["Conflict!<br/>(Unsafe in-place reuse)"]
-    InplaceCheck -- Yes --> TightenInplace["Required readers to clear: R(A) excluding B<br/>Tighten: start(B) > reader(A)"]
-
-    DepCheck -- "Neither reads<br/>the other" --> OrderCheck{"Determine order:<br/>A before B or B before A?"}
-    OrderCheck -- "A before B" --> TightenReuseA["Required readers to clear: ALL R(A)<br/>Tighten: start(B) > ALL readers of A"]
-    OrderCheck -- "B before A" --> TightenReuseB["Required readers to clear: ALL R(B)<br/>Tighten: start(A) > ALL readers of B"]
-    OrderCheck -- "Neither possible" --> Conflict3["Conflict!<br/>(Disjoint lifespans impossible)"]
-
-    TightenInplace --> CheckFixed{"Are starts fixed?<br/>(Validation)"}
-    TightenReuseA --> CheckFixed
-    TightenReuseB --> CheckFixed
-    CheckFixed -- "start(B) <= reader" --> Conflict4["Conflict!<br/>(Write-After-Read Hazard)"]
-    CheckFixed -- "Valid bounds" --> Done["Narrow start domains<br/>or confirm valid"]
+    Overlap["Selected allocations A and B<br/>same bucket and memory space<br/>overlapping fixed page ranges"] --> ViewCheck{"Views of each other<br/>or same base?"}
+    ViewCheck -- Yes --> Alias["Allow alias sharing"]
+    ViewCheck -- No --> PersCheck{"Either persistent?<br/>INPUT, CACHE, ROOT"}
+    PersCheck -- Yes --> Conflict["Conflict"]
+    PersCheck -- No --> StartCheck{"At least one<br/>start fixed?"}
+    StartCheck -- No --> EarlyCheck{"Guaranteed dependency<br/>with unsafe in-place reuse?"}
+    EarlyCheck -- Yes --> Conflict
+    EarlyCheck -- No --> Defer["Defer start pruning"]
+    StartCheck -- Yes --> Label["Label fixed allocation A<br/>If both fixed: A is earlier"]
+    Label --> EqualCheck{"Both starts fixed<br/>and equal?"}
+    EqualCheck -- Yes --> Conflict
+    EqualCheck -- No --> DepCheck{"Guaranteed read<br/>dependency?"}
+    DepCheck -- "B reads A" --> SafeB{"B safe in-place<br/>and fits inside A?"}
+    SafeB -- No --> Conflict
+    SafeB -- Yes --> After["B after A and all other<br/>required readers of A"]
+    DepCheck -- "A reads B" --> SafeA{"A safe in-place<br/>and fits inside B?"}
+    SafeA -- No --> Conflict
+    SafeA -- Yes --> Before["B and its other required<br/>readers before A"]
+    DepCheck -- Neither --> OrderCheck{"Determine possible orders<br/>using start and reader bounds"}
+    OrderCheck -- "Only A before B" --> ReuseA["B after A and ALL<br/>required readers of A"]
+    OrderCheck -- "Only B before A" --> ReuseB["B and ALL its required<br/>readers before A"]
+    OrderCheck -- "Both possible" --> Both["Keep both orders<br/>Mask: remove forbidden gap<br/>Range: defer"]
+    OrderCheck -- "Neither possible" --> Conflict
+    After --> Validate["Apply domain narrowing<br/>Empty domain means conflict"]
+    Before --> Validate
+    ReuseA --> Validate
+    ReuseB --> Validate
+    Both --> Validate
 ```
 
 ### `ViewSelectOffsetPropagator`
