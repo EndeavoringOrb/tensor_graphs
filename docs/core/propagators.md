@@ -18,7 +18,7 @@ Plan search operates on four types of variables (`VarType` in `tensor_graphs_cpp
 When a selection variable changes, it may make some e-classes unreachable. Fix unreachable e-classes to `{0}`.
 
 - **Cyclic Mode (`is_dag = false`, default):** Uses a backtrackable decremental Even-Shiloach algorithm (level labels and incoming edge pointers) to maintain single-source reachability under edge deactivations and handle cyclic components.
-- **DAG Mode (`is_dag = true`):** When cycle reduction eliminates all cycles across buckets, the graph is a DAG. In DAG mode, reachability is maintained with lightweight indegree counters: deactivating an enode edge decrements the child's indegree counter. If a child's indegree reaches 0 (and it is not the root), the child is immediately unreachable, queued, and its outgoing edges are deactivated to propagate reachability loss down the DAG. On backtrack, reactivated edges increment target indegrees.
+- **DAG Mode (`is_dag = true`):** When cycle reduction eliminates all cycles across buckets, the graph is a DAG. In DAG mode, reachability is maintained with lightweight indegree counters: deactivating an enode edge decrements the child's indegree counter. If a child's indegree reaches 0 (and it is not the root), the child is immediately unreachable, queued, and its outgoing edges are deactivated to propagate reachability loss down the DAG. On backtrack, reactivated edges increment target indegrees. Additionally, when a required e-class ($0 \notin \text{domain}$) has only one remaining active incoming parent edge/candidate, the propagator forces the parent to select that candidate to preserve reachability.
 
 #### Example
 
@@ -58,6 +58,54 @@ flowchart LR
     end
     e1_0_after --> e1_1_after
     e2_0_after -. X .-> e1_2_after
+```
+
+### `RequiredReachabilityPropagator`
+
+When an e-class is required ($0 \notin \text{domain}(\text{selected}_C)$), prune candidate root e-nodes that cannot reach that e-class from the root's selection domain.
+
+- **Trigger:** Runs whenever a selection variable domain loses `0` (indicating that the e-class must be executed in that bucket), as well as during initial search propagation.
+- **Index:** Statically precomputes the set of transitively reachable e-classes from each candidate e-node of the bucket root e-class (`reachable_from_root_enode_[b][en_idx]`) via BFS traversal through candidate e-nodes and child e-classes.
+- **Pruning:** For any required e-class $C$, if candidate root e-node $e$ cannot reach $C$ under any downstream candidate choices, remove $e$ from $\text{selected}_{\text{root}}$'s domain. If $\text{selected}_{\text{root}}$ becomes empty, report conflict.
+
+#### Example
+
+Before root selection in bucket 0, either e-node in root `EClass 0` could be chosen. Candidate `e1` reaches `EClass 1`, while candidate `e2` reaches `EClass 2`:
+
+```mermaid
+flowchart LR
+    subgraph c0_before["selected_0_0 = {1, 2}"]
+        direction TB
+        e1_0_before((e1))
+        e2_0_before((e2))
+    end
+    subgraph c1_before["selected_0_1 = {0, 1}"]
+        e1_1_before((e1))
+    end
+    subgraph c2_before["selected_0_2 = {1}"]
+        e1_2_before((e1))
+    end
+    e1_0_before -. reaches .-> e1_1_before
+    e2_0_before -. reaches .-> e1_2_before
+```
+
+Because `EClass 2` is required (`selected_0_2 = {1}`, with `0` not in domain), selecting candidate `e1` would leave `EClass 2` unreachable. `RequiredReachabilityPropagator` immediately prunes `1` from `selected_0_0`, fixing the root selection to `{2}`:
+
+```mermaid
+flowchart LR
+    subgraph c0_after["selected_0_0 = {2}"]
+        direction TB
+        e1_0_after((e1))
+        e2_0_after((e2))
+    end
+    subgraph c1_after["selected_0_1 = {0, 1}"]
+        e1_1_after((e1))
+    end
+    subgraph c2_after["selected_0_2 = {1}"]
+        e1_2_after((e1))
+    end
+    e1_0_after -. X .-> e1_1_after
+    e2_0_after --> e1_2_after
 ```
 
 ### `SelectionChildrenPropagator`

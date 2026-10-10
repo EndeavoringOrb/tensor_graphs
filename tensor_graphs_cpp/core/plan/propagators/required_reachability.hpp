@@ -7,6 +7,7 @@
 namespace plan
 {
 
+// RequiredReachabilityPropagator: see docs/core/propagators.md.
 class RequiredReachabilityPropagator : public Propagator
 {
     std::vector<std::vector<std::vector<uint8_t>>> reachable_from_root_enode_;
