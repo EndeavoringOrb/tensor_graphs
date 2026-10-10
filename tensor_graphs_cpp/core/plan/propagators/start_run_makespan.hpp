@@ -18,6 +18,34 @@ namespace plan
 class StartRunMakespanPropagator : public Propagator
 {
   public:
+    PropagationBatch propagationBatch(const SearchState &state, VarId changed) const override
+    {
+        if (changed == kInvalidVarId)
+            return PropagationBatch::GLOBAL;
+        const auto &info = state.var_infos.at(changed);
+        // A positive bound can contain operations from a previous branch, so
+        // refresh it even when the triggering operation is no longer scheduled.
+        const bool has_bound = info.bucket_idx < state.bucket_start_run_lower_bounds.size() &&
+                               state.bucket_start_run_lower_bounds[info.bucket_idx] != 0.0f;
+        if (info.type == VarType::SELECTED)
+        {
+            const auto start_it = state.start_vars.at(info.bucket_idx).find(info.eclass_id);
+            const Domain &selection = state.domains[changed];
+            if (!has_bound && (start_it == state.start_vars[info.bucket_idx].end() ||
+                               !state.domains[start_it->second].isFixed() ||
+                               !selection.isFixed() || selection.fixedValue() <= 0))
+                return PropagationBatch::SKIP;
+        }
+        else if (info.type == VarType::START && !has_bound)
+        {
+            const Domain &selection = state.domains.at(info.selection_var);
+            if (!state.domains[changed].isFixed() || !selection.isFixed() || selection.fixedValue() <= 0)
+                return PropagationBatch::SKIP;
+        }
+        return PropagationBatch::BUCKET;
+    }
+    bool changesDomains() const override { return false; }
+
     struct ScheduledOp
     {
         int32_t start_val = 0;
@@ -200,6 +228,9 @@ class StartRunMakespanPropagator : public Propagator
 
         if (needs_init)
         {
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
             bucket_data_.resize(state.buckets.size());
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
@@ -400,7 +431,7 @@ class StartRunMakespanPropagator : public Propagator
 
     StartSelectionGuard startSelectionGuard() const override
     {
-        return StartSelectionGuard::FIXED_START_POSITIVE;
+        return StartSelectionGuard::NONE;
     }
 
     std::string name() const override
@@ -423,10 +454,6 @@ class StartRunMakespanPropagator : public Propagator
             if (b >= state.buckets.size())
                 Error::throw_err("bucket_idx " + std::to_string(b) + " out of bounds in StartRunMakespanPropagator");
 
-            // Fast prune: an unfixed START variable cannot affect scheduled operations
-            if (var_info.type == VarType::START && !state.domains[changed].isFixed())
-                return true;
-
             if (state.bucket_start_run_lower_bounds.size() < state.buckets.size())
                 state.bucket_start_run_lower_bounds.resize(state.buckets.size(), 0.0f);
 
@@ -445,7 +472,7 @@ class StartRunMakespanPropagator : public Propagator
             }
         }
 
-        if (state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
+        if (!state.lower_bounds_pending && state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
         {
             return false;
         }

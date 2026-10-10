@@ -129,6 +129,185 @@ inline void selectAll(SearchState &state)
             state.setDomain(var_id, Domain::makeFixed(1, true));
 }
 
+// Count actual executions, not matched events, to verify batching behavior.
+template <typename Impl>
+class CountingPropagator : public Impl
+{
+  public:
+    size_t calls = 0;
+    size_t cache_calls = 0;
+    std::vector<size_t> bucket_calls;
+
+    bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
+    {
+        ++calls;
+        bucket_calls.resize(state.buckets.size(), 0);
+        if (changed != kInvalidVarId)
+        {
+            const auto &info = state.var_infos.at(changed);
+            if (info.type == VarType::CACHED)
+                ++cache_calls;
+            else
+                ++bucket_calls.at(info.bucket_idx);
+        }
+        return Impl::propagate(state, changed, worklist);
+    }
+};
+
+inline void testPropagationBatches()
+{
+    const GraphSpec spec = {
+        {AlternativeSpec({1}, {}, 2.0f), AlternativeSpec({1}, {}, 30.0f)},
+        {AlternativeSpec({2}, {}, 3.0f)},
+        {AlternativeSpec({}, {}, 5.0f)}
+    };
+    SearchEngine engine(makeState(spec, 2));
+    auto cp = std::make_unique<CountingPropagator<CriticalPathPropagator>>();
+    auto memory = std::make_unique<CountingPropagator<MemoryNoOverlapPropagator>>();
+    auto makespan = std::make_unique<CountingPropagator<StartRunMakespanPropagator>>();
+    auto *cp_ptr = cp.get();
+    auto *memory_ptr = memory.get();
+    auto *makespan_ptr = makespan.get();
+    // Deliberately register bound batches before the domain-changing batch.
+    engine.addPropagator(std::move(cp));
+    engine.addPropagator(std::move(makespan));
+    engine.addPropagator(std::move(memory));
+    engine.addPropagator(std::make_unique<EngineWorkloadPropagator>());
+    selectAll(engine.state);
+    for (const auto &[base_id, var_id] : engine.state.cached_vars)
+        engine.state.setDomain(var_id, Domain::makeFixed(0, true));
+    require(engine.runPropagators(kInvalidVarId), "Initial batched propagation failed");
+    require(cp_ptr->calls == 2 && cp_ptr->bucket_calls == std::vector<size_t>({1, 1}),
+            "Critical path must execute once per dirty bucket");
+    require(memory_ptr->cache_calls == 1, "Cache changes must share one global memory validation");
+    require(makespan_ptr->calls == 0, "Unfixed starts with zero bounds must skip makespan scans");
+    require(engine.state.bucket_critical_path_lower_bounds == std::vector<float>({10.0f, 10.0f}),
+            "Batched critical path has incorrect bounds");
+
+    const size_t marker = engine.state.getTrailMarker();
+    for (uint32_t b = 0; b < 2; ++b)
+        for (uint32_t node = 0; node < 3; ++node)
+            engine.state.setDomain(start(engine.state, node, b), Domain::makeFixed(2 - node, false));
+    require(engine.runPropagators(kInvalidVarId), "Batched start propagation failed");
+    require(makespan_ptr->calls == 2 && makespan_ptr->bucket_calls == std::vector<size_t>({1, 1}),
+            "Makespan must execute once per dirty bucket");
+    require(engine.state.bucket_start_run_lower_bounds == std::vector<float>({10.0f, 10.0f}),
+            "Batched makespan has incorrect bounds");
+    engine.state.backtrackTo(marker);
+    // Stale makespan bounds would prune here if checked before both buckets refresh.
+    engine.state.best_cost = 1.0f;
+    engine.state.bucket_critical_path_lower_bounds.assign(2, 0.0f);
+    require(engine.runPropagators(kInvalidVarId), "Stale makespan bound pruned a restored state");
+    require(engine.state.bucket_start_run_lower_bounds == std::vector<float>({0.0f, 0.0f}),
+            "Backtracking to unfixed starts must clear makespan bounds");
+    require(!engine.state.lower_bounds_pending, "Bound batching scope leaked");
+
+    // Keep an expensive bound from a previous branch, then restore cheaper selections.
+    SearchEngine restored(makeState(spec, 2));
+    restored.addPropagator(std::make_unique<CriticalPathPropagator>());
+    restored.addPropagator(std::make_unique<EngineWorkloadPropagator>());
+    const size_t root_marker = restored.state.getTrailMarker();
+    selectAll(restored.state);
+    for (uint32_t b = 0; b < 2; ++b)
+        restored.state.setDomain(selection(restored.state, 0, b), Domain::makeFixed(2, true));
+    require(restored.runPropagators(kInvalidVarId), "Expensive branch propagation failed");
+    restored.state.backtrackTo(root_marker);
+    selectAll(restored.state);
+    restored.state.best_cost = 20.0f;
+    require(restored.runPropagators(kInvalidVarId), "Stale critical path pruned a cheaper restored branch");
+    require(std::abs(restored.state.lower_bound - 13.75f) < 1.0e-6f, "Restored critical path is incorrect");
+    restored.state.best_cost = 10.0f;
+    require(!restored.runPropagators(kInvalidVarId), "Refreshed bounds must still prune against incumbent");
+    require(!restored.state.lower_bounds_pending, "Failed propagation leaked bound batching scope");
+
+    class FailOncePropagator : public Propagator
+    {
+      public:
+        bool fail = true;
+        std::string name() const override { return "FailOncePropagator"; }
+        uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+        bool propagate(SearchState &, VarId, std::vector<VarId> &) override
+        {
+            if (!fail)
+                return true;
+            fail = false;
+            return false;
+        }
+    };
+    SearchEngine retry(makeState(spec));
+    retry.addPropagator(std::make_unique<CriticalPathPropagator>());
+    retry.addPropagator(std::make_unique<FailOncePropagator>());
+    selectAll(retry.state);
+    require(!retry.runPropagators(kInvalidVarId), "Expected an early cheap contradiction");
+    require(retry.runPropagators(kInvalidVarId), "Pending bound batch was not preserved after conflict");
+    require(retry.state.bucket_critical_path_lower_bounds.at(0) == 10.0f,
+            "Retry failed to refresh pending critical path");
+
+    // Cache metadata must be invalidated before a deferred scan executes, also
+    // when backtracking widens a cache decision shared by several buckets.
+    auto cache_state = makeState(spec, 2);
+    selectAll(cache_state);
+    cache_state.ensurePropagationState();
+    for (uint32_t b = 0; b < 2; ++b)
+        WriteAfterReadPropagator::buildBucketInfo(cache_state, b);
+    const size_t cache_marker = cache_state.getTrailMarker();
+    cache_state.setDomain(cache_state.cached_vars.at(BaseEClassId{2}), Domain::makeFixed(1, true));
+    for (uint32_t b = 0; b < 2; ++b)
+    {
+        require(cache_state.propagation.write_after_read[b].structure_dirty,
+                "Deferred cache change left stale memory metadata");
+        WriteAfterReadPropagator::buildBucketInfo(cache_state, b);
+        require(cache_state.propagation.write_after_read[b].class_info.at(1).is_input_or_cache,
+                "Memory metadata did not reflect the cache decision");
+    }
+    cache_state.backtrackTo(cache_marker);
+    for (uint32_t b = 0; b < 2; ++b)
+    {
+        require(cache_state.propagation.write_after_read[b].structure_dirty,
+                "Restored cache decision did not invalidate all buckets");
+        WriteAfterReadPropagator::buildBucketInfo(cache_state, b);
+        require(!cache_state.propagation.write_after_read[b].class_info.at(1).is_input_or_cache,
+                "Memory metadata retained a cache decision after backtracking");
+    }
+}
+
+inline void testCompactCriticalPath()
+{
+    // Multiple alternatives, shared children, views, optional nodes, and cycles.
+    const GraphSpec spec = {
+        {AlternativeSpec({1, 2}, {}, 2.0f), AlternativeSpec({2}, {}, 4.0f)},
+        {AlternativeSpec({2}, {}, 3.0f)},
+        {AlternativeSpec({}, {}, 5.0f)}
+    };
+    auto state = makeState(spec);
+    selectAll(state);
+    state.setDomain(selection(state, 0), Domain::makeMask(6));
+    CriticalPathPropagator prop;
+    std::vector<VarId> worklist;
+    require(prop.propagate(state, selection(state, 0), worklist), "Compact critical path failed");
+    require(state.bucket_critical_path_lower_bounds.at(0) == 9.0f, "Alternative minimum is incorrect");
+    const size_t marker = state.getTrailMarker();
+    state.setDomain(selection(state, 0), Domain::makeFixed(1, true));
+    prop.propagate(state, selection(state, 0), worklist);
+    require(state.bucket_critical_path_lower_bounds.at(0) == 10.0f, "Fixed critical path is incorrect");
+    state.backtrackTo(marker);
+    prop.propagate(state, selection(state, 0), worklist);
+    require(state.bucket_critical_path_lower_bounds.at(0) == 9.0f, "Epoch memo survived backtracking incorrectly");
+
+    auto cyclic = makeState({{AlternativeSpec({1}, {}, 2.0f)}, {AlternativeSpec({0}, {}, 3.0f)}});
+    selectAll(cyclic);
+    CriticalPathPropagator cycle_prop;
+    cycle_prop.propagate(cyclic, selection(cyclic, 0), worklist);
+    require(cyclic.bucket_critical_path_lower_bounds.at(0) == 5.0f, "Cycle handling changed");
+
+    auto views = makeState({{AlternativeSpec({1}, {}, 100.0f, true)},
+                            {AlternativeSpec({}, {}, 100.0f, false, OpType::INPUT)}});
+    selectAll(views);
+    CriticalPathPropagator view_prop;
+    view_prop.propagate(views, selection(views, 0), worklist);
+    require(views.bucket_critical_path_lower_bounds.at(0) == 0.0f, "Views and inputs must have zero cost");
+}
+
 // ============================================================================
 // BASE 11 CORRECTNESS TESTS
 // ============================================================================
@@ -547,6 +726,8 @@ inline void testExtraAgainstBaseReference()
 inline void runIncrementalPropagatorTests()
 {
     using namespace incremental_propagator_test;
+    testPropagationBatches();
+    testCompactCriticalPath();
     testBaseCorrectness();
     testWriteAfterReadMinAssumption();
     testExtraAgainstBaseReference();

@@ -15,6 +15,9 @@ class CachedOffsetPropagator : public Propagator
     {
         if (offset_index_initialized_)
             return;
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
             for (const auto &offset_pair : state.offset_vars[b])

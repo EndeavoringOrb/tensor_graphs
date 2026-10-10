@@ -1986,6 +1986,12 @@ class MemoryNoOverlapPropagator : public Propagator
 #endif
 
   public:
+    PropagationBatch propagationBatch(const SearchState &state, VarId changed) const override
+    {
+        return changed == kInvalidVarId || state.var_infos.at(changed).type == VarType::CACHED
+                   ? PropagationBatch::GLOBAL : PropagationBatch::NONE;
+    }
+
     std::string conflictReason() const override { return conflict_reason_; }
 
     uint8_t interestedVarTypes() const override

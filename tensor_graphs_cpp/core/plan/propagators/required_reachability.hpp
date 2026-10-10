@@ -18,6 +18,9 @@ class RequiredReachabilityPropagator : public Propagator
     {
         if (initialized_)
             return;
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
 
         const size_t num_buckets = state.buckets.size();
         reachable_from_root_enode_.resize(num_buckets);

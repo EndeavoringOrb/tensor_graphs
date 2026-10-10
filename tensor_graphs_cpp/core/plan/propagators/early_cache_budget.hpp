@@ -21,6 +21,9 @@ class EarlyCacheBudgetPropagator : public Propagator
     {
         if (initialized_)
             return;
+#ifdef TG_PROFILE
+        InitializationProfileScope initialization_scope(initialization_profile_ns_);
+#endif
         for (const auto &cand : state.candidates)
         {
             auto c_it = state.cached_vars.find(cand.base_eclass_id);
