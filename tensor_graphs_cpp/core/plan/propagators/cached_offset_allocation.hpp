@@ -55,7 +55,7 @@ class CachedOffsetAllocationPropagator : public Propagator
             if (cid != EClassId{})
             {
                 const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                max_pages = std::max(max_pages, state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space));
+                max_pages = std::max(max_pages, state.bytesToPages(getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.mem_space));
             }
         }
         max_size_pages_cache_[base_id] = max_pages;

@@ -564,7 +564,7 @@ class SearchEngine
                     ParallelBuffer pb;
                     pb.id = BufferId{buf_counter++};
                     pb.mem_space = cls.mem_space;
-                    pb.size = getSizeBytes(cls.shape, cls.dtype);
+                    pb.size = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
                     pb.offset = -1;
                     res.buffers.push_back(pb);
                     res.eclass_to_buf[target_cid] = pb.id;
@@ -583,7 +583,7 @@ class SearchEngine
                 ParallelBuffer pb;
                 pb.id = BufferId{buf_counter++};
                 pb.mem_space = cls.mem_space;
-                pb.size = getSizeBytes(cls.shape, cls.dtype);
+                pb.size = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
                 pb.offset = byte_offset;
                 res.buffers.push_back(pb);
                 res.eclass_to_buf[target_cid] = pb.id;

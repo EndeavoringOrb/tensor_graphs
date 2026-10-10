@@ -435,7 +435,7 @@ struct Session
                             const TensorNode &node = graph.getNode(logical_id);
                             const TensorView &view = g.nodeViews.at(eclass_id);
                             memManager.write(MemSpace{1, HandleType::CPP}, view.offset,
-                                             graph.constantStaging.at(logical_id)->data(), node.getSizeBytes());
+                                             graph.constantStaging.at(logical_id)->data(), node.getLogicalSizeBytes());
                         }
                     }
                 }
@@ -636,7 +636,7 @@ struct Session
             for (const EClass &cls : state->full_state.getClasses())
             {
                 if (state->full_state.findConst(cls.id) != cls.id || cls.base_eclass_id == BaseEClassId{} ||
-                    cls.mem_space.type == HandleType::STORAGE || getSizeBytes(cls.shape, cls.dtype) == 0)
+                    cls.mem_space.type == HandleType::STORAGE || getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) == 0)
                     continue;
 
                 if (cls.logical_id != LogicalId{} && graph.hasNode(cls.logical_id) &&
@@ -663,7 +663,7 @@ struct Session
                 if (!clean_in_any_bucket)
                     continue;
 
-                state->candidates.push_back({cls.base_eclass_id, getSizeBytes(cls.shape, cls.dtype), cls.dtype,
+                state->candidates.push_back({cls.base_eclass_id, getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.dtype,
                                              cls.mem_space, 0});
                 std::vector<uint32_t> clean_buckets;
                 for (uint32_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)

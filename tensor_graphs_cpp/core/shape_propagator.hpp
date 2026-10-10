@@ -153,7 +153,7 @@ inline WorkloadMetrics computeWorkloadFromRefFactory(
             DType dt = (i < in_dtypes.size()) ? in_dtypes[i] : DType::FLOAT32;
             const std::vector<uint8_t> *provided =
                 (i < in_constants.size() && !in_constants[i].empty()) ? &in_constants[i] : nullptr;
-            uint64_t expected_bytes = getSizeBytes(in_shapes[i], dt);
+            uint64_t expected_bytes = getLogicalSizeBytes(in_shapes[i], dt);
 
             // Reference factories perform shape inference on control inputs.
             // Represent known constant inputs as Graph::constant nodes so the
@@ -213,7 +213,7 @@ inline WorkloadMetrics computeWorkloadFromRefFactory(
                 auto staging_it = ref_graph.constantStaging.find(child_id);
                 if (staging_it == ref_graph.constantStaging.end() || !ref_graph.hasNode(child_id) ||
                     staging_it->second->size() !=
-                        getSizeBytes(ref_graph.getNode(child_id).getShape(), ref_graph.getNode(child_id).dtype))
+                        getLogicalSizeBytes(ref_graph.getNode(child_id).getShape(), ref_graph.getNode(child_id).dtype))
                 {
                     return op_common::defaultWorkload(in_shapes, in_dtypes, out_shape, out_dtype, 0.0);
                 }

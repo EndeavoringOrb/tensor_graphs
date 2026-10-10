@@ -340,7 +340,7 @@ class HeuristicBrancher : public Brancher
             {
                 EClassId cid{static_cast<uint32_t>(c)};
                 const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
+                uint32_t psize = state.bytesToPages(getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.mem_space);
                 eclass_page_sizes_[b][c] = (psize == 0) ? 1 : psize;
                 eclass_mem_spaces_[b][c] = cls.mem_space;
 

@@ -163,8 +163,8 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                     s *= 2;
             }
             views[node_id] = view;
-            uint64_t buf_elements = getRequiredBufferSize(view);
-            results[node_id].resize(buf_elements * elem_size, 0);
+            uint64_t span_bytes = getStorageSpanBytes(view);
+            results[node_id].resize(span_bytes, 0);
 
             std::vector<uint8_t> raw_bytes;
             if (options.raw_input_data && options.raw_input_data->count(node_id))
@@ -243,7 +243,7 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                                  ", strides=" + toString(input_view.strides) + ")");
             }
             const uint64_t input_buffer_size = results[pid].size();
-            const uint64_t input_required_size = getRequiredBufferSize(input_view) * input_elem_size;
+            const uint64_t input_required_size = getStorageSpanBytes(input_view);
             if (input_view.offset > input_buffer_size ||
                 input_required_size > input_buffer_size - input_view.offset)
             {
@@ -345,7 +345,7 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                                  toString(chosen_out_view.getShape()) + ", strides=" +
                                  toString(chosen_out_view.strides) + ")");
             }
-            const uint64_t view_required_size = getRequiredBufferSize(chosen_out_view) * elem_size;
+            const uint64_t view_required_size = getStorageSpanBytes(chosen_out_view);
             if (chosen_out_view.offset > parent_buffer_size ||
                 view_required_size > parent_buffer_size - chosen_out_view.offset)
             {
@@ -377,8 +377,8 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
         }
 
         views[node_id] = chosen_out_view;
-        uint64_t buf_elements = getRequiredBufferSize(chosen_out_view);
-        results[node_id].resize(buf_elements * elem_size, 0);
+        uint64_t span_bytes = getStorageSpanBytes(chosen_out_view);
+        results[node_id].resize(span_bytes, 0);
         std::vector<void *> output_ptrs = {results[node_id].data()};
         std::vector<TensorView> output_views = {chosen_out_view};
 

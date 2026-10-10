@@ -291,7 +291,7 @@ struct OpenCLBuffer : public DeviceBuffer
         ctx.inputs.push_back(nullptr);
         ctx.fd.push_back(-1);
 
-        uint64_t size = getRequiredBufferSize(view) * getDTypeSize(view.dtype);
+        uint64_t size = getStorageSpanBytes(view);
         if (size == 0)
             size = 1;
 
@@ -326,7 +326,7 @@ struct OpenCLBuffer : public DeviceBuffer
         ctx.outViews.push_back(v);
         ctx.outputs.push_back(nullptr);
 
-        uint64_t size = getRequiredBufferSize(view) * getDTypeSize(view.dtype);
+        uint64_t size = getStorageSpanBytes(view);
         if (size == 0)
             size = 1;
 

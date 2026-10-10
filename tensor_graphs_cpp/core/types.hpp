@@ -760,7 +760,7 @@ struct TensorNode
         strides = calcContiguousStrides(_shape);
     }
 
-    uint64_t getSizeBytes() const
+    uint64_t getLogicalSizeBytes() const
     {
         return countElements(getShape()) * getDTypeSize(dtype);
     }
@@ -1217,10 +1217,40 @@ inline bool isContiguous(const TensorView &view)
     return isContiguous(view.strides, view.getShape());
 }
 
-inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape,
-                             DType dtype) // TODO: redundant with TensorNode::getSizeBytes?
+inline uint64_t getLogicalSizeBytes(const std::vector<uint32_t> &shape,
+                                    DType dtype)
 {
     return countElements(shape) * getDTypeSize(dtype);
+}
+
+// Logical bytes describe a packed tensor; storage span includes stride gaps.
+inline uint64_t getStorageSpanBytes(const std::vector<uint32_t> &shape,
+                                   const std::vector<uint64_t> &strides, DType dtype)
+{
+    if (shape.size() != strides.size())
+        Error::throw_err("Storage span: shape and strides have different ranks");
+    for (uint32_t extent : shape)
+        if (extent == 0)
+            return 0;
+
+    uint64_t span_elements = 1;
+    const uint64_t max_value = std::numeric_limits<uint64_t>::max();
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        const uint64_t extent = shape[i] - 1;
+        if (extent != 0 && strides[i] > (max_value - span_elements) / extent)
+            Error::throw_err("Storage span: strided element span overflow");
+        span_elements += extent * strides[i];
+    }
+    const uint64_t element_bytes = getDTypeSize(dtype);
+    if (element_bytes != 0 && span_elements > max_value / element_bytes)
+        Error::throw_err("Storage span: byte span overflow");
+    return span_elements * element_bytes;
+}
+
+inline uint64_t getStorageSpanBytes(const TensorView &view)
+{
+    return getStorageSpanBytes(view.getShape(), view.strides, view.dtype);
 }
 
 template <typename T> inline std::string toString(const std::vector<T> &vec)
@@ -2123,18 +2153,3 @@ struct KernelContext
         return cuda_streams[idx];
     }
 };
-
-inline uint64_t getRequiredBufferSize(const TensorView &view)
-{
-    if (view.getShape().empty())
-        return 1;
-    uint64_t maxOffset = 0;
-    for (uint64_t i = 0; i < view.getShape().size(); ++i)
-    {
-        if (view.getShape()[i] > 0)
-        {
-            maxOffset += (view.getShape()[i] - 1) * view.strides[i];
-        }
-    }
-    return maxOffset + 1;
-}

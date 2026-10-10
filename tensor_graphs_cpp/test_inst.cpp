@@ -422,7 +422,7 @@ int main(int argc, char *argv[])
 
         // Output details
         const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
-        uint64_t out_extent = getRequiredBufferSize(outView) * getDTypeSize(outView.dtype);
+        uint64_t out_extent = getStorageSpanBytes(outView);
         std::cout << "Output:\n";
         std::cout << "  EClass: " << inst.eclass_id.value << " | LogicalId: " << inst.logical_id.value << "\n";
         std::cout << "  Buffer: ID " << inst.outBuffer.id.value << " | " << inst.outBuffer.mem_space << " | Offset: 0x"
@@ -441,7 +441,7 @@ int main(int argc, char *argv[])
             EClassId c_id = inst.children[i];
             const TensorView &inView = compiled.nodeViews.at(c_id);
             const ParallelBuffer &inBuf = inst.inBuffers[i];
-            uint64_t in_extent = getRequiredBufferSize(inView) * getDTypeSize(inView.dtype);
+            uint64_t in_extent = getStorageSpanBytes(inView);
 
             std::string const_desc = "";
             if (compiled.constantStaging.count(c_id))

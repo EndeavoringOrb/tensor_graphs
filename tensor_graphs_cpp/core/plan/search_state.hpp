@@ -1029,7 +1029,7 @@ class SearchState
                 off_info.bucket_idx = b;
                 off_info.eclass_id = cid;
                 off_info.mem_space = cls.mem_space;
-                off_info.size_bytes = getSizeBytes(cls.shape, cls.dtype);
+                off_info.size_bytes = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
                 off_info.size_pages = bytesToPages(off_info.size_bytes, cls.mem_space);
                 off_info.name = "offset_" + std::to_string(b) + "_" + std::to_string(cid.value);
 

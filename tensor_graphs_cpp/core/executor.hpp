@@ -158,7 +158,7 @@ class Executor
 #ifdef TG_USE_CUDA
                 else if (outBufObj->mem_space.type == HandleType::CUDA)
                 {
-                    uint64_t sz = getRequiredBufferSize(outView) * getDTypeSize(outView.dtype);
+                    uint64_t sz = getStorageSpanBytes(outView);
                     tmp_nan_host.resize(sz);
                     cudaSetDevice(outBufObj->mem_space.idx);
                     cudaMemcpy(tmp_nan_host.data(), ctx.outputs[0], sz, cudaMemcpyDeviceToHost);
@@ -206,7 +206,7 @@ class Executor
 #ifdef TG_USE_CUDA
                                 else if (inst.inBuffers[c].mem_space.type == HandleType::CUDA)
                                 {
-                                    uint64_t in_sz = getRequiredBufferSize(cView) * getDTypeSize(cView.dtype);
+                                    uint64_t in_sz = getStorageSpanBytes(cView);
                                     tmp_in.resize(in_sz);
                                     cudaSetDevice(inst.inBuffers[c].mem_space.idx);
                                     cudaMemcpy(tmp_in.data(), ctx.inputs[c], in_sz, cudaMemcpyDeviceToHost);
@@ -247,7 +247,7 @@ class Executor
 #ifdef TG_USE_CUDA
                 else if (outBufObj->mem_space.type == HandleType::CUDA)
                 {
-                    uint64_t sz = getRequiredBufferSize(outView) * getDTypeSize(outView.dtype);
+                    uint64_t sz = getStorageSpanBytes(outView);
                     tmp_cuda_host.resize(sz);
                     cudaSetDevice(outBufObj->mem_space.idx);
                     cudaMemcpy(tmp_cuda_host.data(), ctx.outputs[0], sz, cudaMemcpyDeviceToHost);
