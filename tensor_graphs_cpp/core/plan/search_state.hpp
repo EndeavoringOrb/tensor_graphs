@@ -303,6 +303,7 @@ struct SelectionReachability
     void checkForcedParent(uint32_t node_idx, const std::vector<Domain> &domains,
                            std::vector<std::pair<VarId, int32_t>> &forced_selections) const
     {
+        return;
         if (node_idx == root || nodes[node_idx].indegree == 0)
             return;
 
@@ -1012,7 +1013,8 @@ class SearchState
             VarId st_vid = addVar(st_info, Domain::makeRange(0, max_start));
             start_vars[b][cid] = st_vid;
 
-            // offset_<bucket_id>_<eclass_id> in [preallocated_pages, max_pages]
+            // Views may alias the preallocated region; preallocated eclasses
+            // must use their physical buffer offsets.
             if (cls.mem_space.type != HandleType::STORAGE)
             {
                 VarInfo off_info;
@@ -1027,10 +1029,20 @@ class SearchState
                 uint32_t align = getPageAlignment(cls.mem_space);
                 uint64_t cap = getMemoryCap(cls.mem_space);
                 uint32_t max_p = (cap > off_info.size_bytes) ? static_cast<uint32_t>((cap - off_info.size_bytes) / align) : 0;
-                const auto prealloc_it = preallocated_pages.find(cls.mem_space);
-                uint32_t min_p = prealloc_it == preallocated_pages.end() ? 0 : prealloc_it->second;
+                Domain offset_domain = Domain::makeRange(0, max_p);
+                const auto prealloc_it = preallocated_buffers.find(cls.base_eclass_id);
+                if (prealloc_it != preallocated_buffers.end())
+                {
+                    const ParallelBuffer &buffer = prealloc_it->second;
+                    if (!(buffer.mem_space == cls.mem_space) || buffer.offset < 0 ||
+                        buffer.offset % align != 0 || buffer.offset / align > INT32_MAX)
+                    {
+                        Error::throw_err("Invalid preallocated buffer offset for EClass " + std::to_string(cid.value));
+                    }
+                    offset_domain = Domain::makeFixed(static_cast<int32_t>(buffer.offset / align));
+                }
 
-                VarId off_vid = addVar(off_info, Domain::makeRange(min_p, std::max(min_p, max_p)));
+                VarId off_vid = addVar(off_info, offset_domain);
                 offset_vars[b][cid] = off_vid;
             }
         }

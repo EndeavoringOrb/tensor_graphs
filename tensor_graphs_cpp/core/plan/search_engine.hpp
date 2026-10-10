@@ -378,10 +378,13 @@ class SearchEngine
                 if (!propagated)
                 {
                     preservePendingWork();
-                    const std::string reason = "explicit contradiction while processing " +
+                    std::string reason = "explicit contradiction while processing " +
                                                describe_var(next_changed) + "; " +
                                                describe_last_change(domain_revision_before) +
                                                "; pending work=" + std::to_string(prop_worklist.size());
+                    const std::string detail = prop->conflictReason();
+                    if (!detail.empty())
+                        reason += "; " + detail;
                     record_conflict(prop->name(), reason);
                     if (out_conflict_reason)
                         *out_conflict_reason = prop->name() + ": " + reason;

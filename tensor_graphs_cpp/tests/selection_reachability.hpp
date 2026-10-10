@@ -132,7 +132,22 @@ inline bool checkPropagation(SearchEngine &engine)
     const bool actual = engine.runPropagators(kInvalidVarId);
     require(actual == expected, "Incremental reachability disagrees with BFS on feasibility");
     if (actual)
-        require(engine.state.domains == reference.domains, "Incremental reachability disagrees with BFS on domains");
+    {
+        if (engine.state.domains != reference.domains)
+        {
+            std::cout << "MISMATCH: engine.state.domains.size()=" << engine.state.domains.size() << std::endl;
+            for (size_t i = 0; i < engine.state.domains.size(); ++i)
+            {
+                if (engine.state.domains[i] != reference.domains[i])
+                {
+                    std::cout << "Var " << i << " (cid=" << engine.state.var_infos[i].eclass_id.value
+                              << "): engine=" << engine.state.domains[i].toString()
+                              << " vs ref=" << reference.domains[i].toString() << std::endl;
+                }
+            }
+            require(false, "Incremental reachability disagrees with BFS on domains");
+        }
+    }
     return actual;
 }
 

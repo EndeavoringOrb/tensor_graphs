@@ -24,6 +24,10 @@ class UnselectedStartOffsetPropagator : public Propagator
         {
             VarId off_v = off_it->second;
             const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+            // The physical location of a preallocated buffer is independent
+            // of whether this bucket selects its eclass.
+            if (state.preallocated_buffers.count(cls.base_eclass_id))
+                return true;
             const auto prealloc_it = state.preallocated_pages.find(cls.mem_space);
             uint32_t min_p = (prealloc_it == state.preallocated_pages.end()) ? 0 : prealloc_it->second;
             const Domain &off_dom = state.domains[off_v];

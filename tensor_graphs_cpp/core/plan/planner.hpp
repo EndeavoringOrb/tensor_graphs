@@ -2049,15 +2049,26 @@ struct Planner
                     continue;
 
                 bool is_input_class = false;
+                bool has_non_view = false;
                 for (ENodeId eid : cls.enodes)
                 {
-                    if (full_state.getENode(eid).getOpType() == OpType::INPUT)
+                    const ENode &enode = full_state.getENode(eid);
+                    if (enode.getOpType() == OpType::INPUT)
                     {
                         is_input_class = true;
                         break;
                     }
+                    bool is_view = false;
+                    if (enode.getKernelId().value != 0)
+                    {
+                        is_view = KernelRegistry::get().getKernel(enode.getKernelId()).is_view;
+                    }
+                    if (!is_view)
+                    {
+                        has_non_view = true;
+                    }
                 }
-                if (is_input_class)
+                if (is_input_class || !has_non_view)
                     continue;
 
                 bool clean_in_any = false;

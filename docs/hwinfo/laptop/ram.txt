@@ -1,0 +1,41 @@
+﻿================================================================================
+MEMORY PROFILE - LENOVO THINKPAD T14s GEN 6 (SNAPDRAGON)
+Installed system memory and vendor-published platform bandwidth.
+================================================================================
+
+OBSERVED CONFIGURATION
+--------------------------------------------------------------------------------
+- Capacity: 32 GiB (34,359,738,368 bytes reported by Windows).
+- Type: LPDDR5X, on-board / soldered; no DIMM slots or user-upgrade path.
+- Configured data rate: 8448 MT/s (Windows Win32_PhysicalMemory reports
+  ConfiguredClockSpeed = 8448).
+- Lenovo PSREF notes the installed LPDDR5X-8533 memory runs at 8448 MT/s due to
+  the platform limit.
+- Lenovo's specification lists 32 GB as the installed configuration for this
+  machine type; the Snapdragon X platform supports up to 64 GB on systems built
+  with that capacity.
+
+MEMORY SUBSYSTEM FACTS
+--------------------------------------------------------------------------------
+- Qualcomm specifies up to 135 GB/s memory bandwidth for the Snapdragon X Elite
+  platform. This is a theoretical platform peak, not a measured laptop result.
+- CPU, integrated Adreno GPU, and Hexagon NPU are integrated in the Snapdragon X
+  SoC and use the system LPDDR5X memory subsystem. The 135 GB/s value is a
+  platform-wide specified peak, not an independent bandwidth figure per engine.
+- This system has no discrete GPU VRAM device; Windows reports 32 GiB installed
+  system physical memory and the Adreno GPU is integrated.
+- Measured CPU streaming bandwidth on this laptop using 512 MiB arrays:
+  12-thread read 96.4 GB/s, copy 60.4 GB/s, and triad 70.2 GB/s; one-thread
+  read 67.5 GB/s, copy 51.4 GB/s, and triad 52.9 GB/s. The benchmark source
+  and byte-count convention are documented in `cpu.txt` and
+  `cpu_microbench.cpp`. These are measured CPU access patterns, not
+  independent CPU/GPU/NPU bandwidth limits.
+
+SOURCES
+--------------------------------------------------------------------------------
+- Lenovo ThinkPad T14s Gen 6 (Snapdragon) PSREF:
+  https://psref.lenovo.com/Product/ThinkPad/ThinkPad_T14s_Gen_6_Snapdragon?tab=model
+- Lenovo PSREF specification PDF (installed memory rate note):
+  https://psref.lenovo.com/syspool/Sys/PDF/ThinkPad/ThinkPad_T14s_Gen_6_Snapdragon/ThinkPad_T14s_Gen_6_Snapdragon_Spec.PDF
+- Qualcomm Snapdragon X Elite specifications (135 GB/s platform bandwidth):
+  https://www.qualcomm.com/laptops/products/snapdragon-x-elite

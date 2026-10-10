@@ -300,6 +300,90 @@ inline void testBaseCorrectness()
 }
 
 // ============================================================================
+// TEST: WriteAfterReadPropagator getMin() ASSUMPTION BREAKAGE
+// ============================================================================
+
+inline void testWriteAfterReadMinAssumption()
+{
+    std::cout << "Running WriteAfterReadPropagator min-assumption test..." << std::endl;
+    // Graph structure:
+    // Node 0: Root, inputs {4, 3}
+    // Node 1: Allocation A (no inputs)
+    // Node 4: Reader of A (input {1})
+    // Node 2: Allocation B (no inputs)
+    // Node 3: Reader of B (input {2})
+    GraphSpec spec = {
+        {AlternativeSpec({4, 3})},
+        {AlternativeSpec{}},
+        {AlternativeSpec{}},
+        {AlternativeSpec({2})},
+        {AlternativeSpec({1})}
+    };
+
+    // Part 1: Verify Ground Truth.
+    // A complete valid schedule exists and MUST pass all base propagators:
+    // Node 1 starts at 5, Node 4 at 6 -> Buffer A live on [5, 7)
+    // Node 2 starts at 10, Node 3 at 12 -> Buffer B live on [10, 13)
+    // Both share offset 0. Since [5, 7) and [10, 13) are disjoint, no hazard exists!
+    {
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        selectAll(engine.state);
+
+        for (uint32_t i = 0; i < 5; ++i)
+            engine.state.setDomain(start(engine.state, i), Domain::makeRange(0, 30));
+
+        engine.state.setDomain(offset(engine.state, 1), Domain::makeFixed(0));
+        engine.state.setDomain(offset(engine.state, 2), Domain::makeFixed(0));
+        engine.state.setDomain(offset(engine.state, 3), Domain::makeFixed(4));
+        engine.state.setDomain(offset(engine.state, 4), Domain::makeFixed(8));
+        engine.state.setDomain(offset(engine.state, 0), Domain::makeFixed(12));
+
+        engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(5));
+        engine.state.setDomain(start(engine.state, 4), Domain::makeFixed(6));
+        engine.state.setDomain(start(engine.state, 2), Domain::makeFixed(10));
+        engine.state.setDomain(start(engine.state, 3), Domain::makeFixed(12));
+        engine.state.setDomain(start(engine.state, 0), Domain::makeFixed(15));
+
+        std::string conflict;
+        bool ok = engine.runPropagators(kInvalidVarId, &conflict);
+        require(ok, "Ground truth plan should be accepted, but failed with: " + conflict);
+    }
+
+    // Part 2: Verify sound handling of partial start assignments without false conflict.
+    // When fixing Node 1 to 5 while Node 2's start domain is still unfixed ([0..30]):
+    // Node 2 can execute after Node 1 finishes, so the partial assignment must be accepted.
+    {
+        SearchEngine engine(makeState(spec, 1));
+        addBasePropagators(engine);
+        selectAll(engine.state);
+
+        for (uint32_t i = 0; i < 5; ++i)
+            engine.state.setDomain(start(engine.state, i), Domain::makeRange(0, 30));
+
+        engine.state.setDomain(offset(engine.state, 1), Domain::makeFixed(0));
+        engine.state.setDomain(offset(engine.state, 2), Domain::makeFixed(0));
+        engine.state.setDomain(offset(engine.state, 3), Domain::makeFixed(4));
+        engine.state.setDomain(offset(engine.state, 4), Domain::makeFixed(8));
+        engine.state.setDomain(offset(engine.state, 0), Domain::makeFixed(12));
+
+        require(engine.runPropagators(kInvalidVarId), "Initial propagation failed");
+
+        engine.state.setDomain(start(engine.state, 4), Domain::makeFixed(6));
+        require(engine.runPropagators(start(engine.state, 4)), "Fixing node 4 start failed");
+
+        // Setting Node 1 to 5 (a completely valid partial assignment towards the valid plan above)
+        engine.state.setDomain(start(engine.state, 1), Domain::makeFixed(5));
+        std::string conflict;
+        bool ok = engine.runPropagators(start(engine.state, 1), &conflict);
+
+        // A sound propagator MUST accept this partial assignment (ok == true).
+        require(ok, "Partial assignment start(Node 1) = 5 must be accepted when Node 2 can run after Node 1! Conflict: " + conflict);
+    }
+}
+
+
+// ============================================================================
 // TESTING EXTRA PROPAGATORS (12-15) USING BASE 11 AS REFERENCE
 // ============================================================================
 
@@ -464,6 +548,7 @@ inline void runIncrementalPropagatorTests()
 {
     using namespace incremental_propagator_test;
     testBaseCorrectness();
+    testWriteAfterReadMinAssumption();
     testExtraAgainstBaseReference();
     std::cout << "All 15 propagator tests passed (Base 11 reference + EXTRA)" << std::endl;
 }

@@ -48,6 +48,7 @@ class Propagator
   public:
     virtual ~Propagator() = default;
     virtual std::string name() const = 0;
+    virtual std::string conflictReason() const { return {}; }
     virtual uint8_t interestedVarTypes() const { return kAllVarTypesMask; }
     virtual StartSelectionGuard startSelectionGuard() const { return StartSelectionGuard::NONE; }
     // Shrinks variable domains in state. Returns false on contradiction.

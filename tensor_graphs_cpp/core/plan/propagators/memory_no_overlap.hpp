@@ -2,6 +2,7 @@
 #pragma once
 
 #include <chrono>
+#include <limits>
 
 #include "core/plan/propagators/base.hpp"
 
@@ -10,6 +11,7 @@ namespace plan
 
 class WriteAfterReadPropagator : public Propagator
 {
+    std::string conflict_reason_;
 #ifdef TG_PROFILE
     uint64_t fixed_offset_profile_ns_ = 0;
     uint64_t ranged_offset_profile_ns_ = 0;
@@ -36,6 +38,32 @@ class WriteAfterReadPropagator : public Propagator
     };
 
     static inline const std::vector<EClassId> empty_readers{};
+
+    static uint64_t getAllocationSpanBytes(const ENode &enode)
+    {
+        const auto &shape = enode.getShape();
+        const auto &strides = enode.getStrides();
+        if (shape.size() != strides.size())
+            Error::throw_err("Allocation footprint: shape and strides have different ranks");
+        for (uint32_t extent : shape)
+            if (extent == 0)
+                return 0;
+
+        // Strides are in elements. Broadcast dimensions contribute no span.
+        uint64_t span_elements = 1;
+        const uint64_t max_value = std::numeric_limits<uint64_t>::max();
+        for (size_t i = 0; i < shape.size(); ++i)
+        {
+            const uint64_t extent = shape[i] - 1;
+            if (extent != 0 && strides[i] > (max_value - span_elements) / extent)
+                Error::throw_err("Allocation footprint: strided element span overflow");
+            span_elements += extent * strides[i];
+        }
+        const uint64_t element_bytes = getDTypeSize(enode.getDType());
+        if (element_bytes != 0 && span_elements > max_value / element_bytes)
+            Error::throw_err("Allocation footprint: byte span overflow");
+        return span_elements * element_bytes;
+    }
 
     static bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
                          bool require_fixed_offset = true, bool require_fixed_start = true)
@@ -104,7 +132,12 @@ class WriteAfterReadPropagator : public Propagator
         out.bucket_idx = b;
         out.mem_space = cls.mem_space;
         out.offset = static_cast<uint32_t>(off_dom.getMin());
-        uint32_t psize = state.bytesToPages(getSizeBytes(cls.shape, cls.dtype), cls.mem_space);
+        const uint64_t span_bytes = getAllocationSpanBytes(enode);
+        const uint64_t alignment = state.getPageAlignment(cls.mem_space);
+        const uint64_t span_pages = span_bytes / alignment + (span_bytes % alignment != 0);
+        if (span_pages > std::numeric_limits<uint32_t>::max())
+            Error::throw_err("Allocation footprint exceeds the page count range");
+        uint32_t psize = static_cast<uint32_t>(span_pages);
         out.size = (psize == 0) ? 1 : psize;
         out.start = st_dom.isFixed() ? st_dom.fixedValue() : st_dom.getMin();
         out.en_idx = en_idx;
@@ -801,8 +834,33 @@ class WriteAfterReadPropagator : public Propagator
     }
 
   private:
-    bool canShare(const SearchState &state, FixedAlloc A, FixedAlloc B) const
+    static std::string describePair(const SearchState &state, const FixedAlloc &A, const FixedAlloc &B,
+                                    const std::string &cause)
     {
+        return cause + "; A(cid=" + std::to_string(A.cid.value) + ", start=" +
+               state.var_infos[A.start_var].name + "=" + state.domains[A.start_var].toString() +
+               ", offset=" + state.var_infos[A.offset_var].name + "=" +
+               state.domains[A.offset_var].toString() + ", size_pages=" + std::to_string(A.size) +
+               ") B(cid=" + std::to_string(B.cid.value) + ", start=" +
+               state.var_infos[B.start_var].name + "=" + state.domains[B.start_var].toString() +
+               ", offset=" + state.var_infos[B.offset_var].name + "=" +
+               state.domains[B.offset_var].toString() + ", size_pages=" + std::to_string(B.size) +
+               ") mem_space=" + toString(A.mem_space);
+    }
+
+    bool canShare(const SearchState &state, FixedAlloc A, FixedAlloc B,
+                  std::string *out_reason = nullptr) const
+    {
+        auto reject = [&](const char *reason) {
+            if (out_reason)
+                *out_reason = reason;
+            return false;
+        };
+        auto reject_detail = [&](const std::string &reason) {
+            if (out_reason)
+                *out_reason = reason;
+            return false;
+        };
         const auto &class_info = state.propagation.write_after_read[A.bucket_idx].class_info;
         // - if both A and B are views, return true. ignore
         if (A.is_view && B.is_view)
@@ -816,11 +874,11 @@ class WriteAfterReadPropagator : public Propagator
         if (A.start > B.start)
             std::swap(A, B);
         else if (A.start == B.start)
-            return false;
+            return reject("Fixed start validation: both allocations start at the same step");
 
         // - if A is INPUT/CACHE/ROOT, or B is INPUT/CACHE/ROOT, return false.
         if (A.is_input_or_cache || A.is_root || B.is_input_or_cache || B.is_root)
-            return false;
+            return reject("Persistent buffers: an overlapping allocation is INPUT, CACHE, or ROOT");
 
         int32_t a_max_reader = (A.cid.value < class_info.size() && class_info[A.cid.value].is_active)
                                    ? class_info[A.cid.value].max_reader_start_max
@@ -844,7 +902,7 @@ class WriteAfterReadPropagator : public Propagator
             const ENode &b_enode = state.bucket_egraphs[B.bucket_idx].getENode(b_cls.enodes[B.en_idx]);
             KernelId b_kid = b_enode.getKernelId();
             if (b_kid.value == 0 || !KernelRegistry::get().hasKernel(b_kid))
-                return false;
+                return reject("Producer-consumer overlap: reader kernel is missing, so safe in-place use cannot be verified");
             const auto &safe_inplace = KernelRegistry::get().getKernel(b_kid).safe_inplace_idxs;
 
             bool found_safe = false;
@@ -861,7 +919,7 @@ class WriteAfterReadPropagator : public Propagator
                 }
             }
             if (!found_safe)
-                return false;
+                return reject("Producer-consumer overlap: consumer is not declared safe for in-place use of producer");
 
             // - if B is a reader, but not (B.offset >= A.offset && B.offset + B.size <= A.offset + A.size) return false.
             if (state.domains[A.offset_var].isFixed())
@@ -870,13 +928,13 @@ class WriteAfterReadPropagator : public Propagator
                 if (b_off_dom.isFixed())
                 {
                     if (!(B.offset >= A.offset && B.offset + B.size <= A.offset + A.size))
-                        return false;
+                        return reject("Producer-consumer overlap: consumer allocation does not fit inside producer buffer");
                 }
                 else
                 {
                     if (b_off_dom.getMin() > static_cast<int32_t>(A.offset) ||
                         b_off_dom.getMin() + B.size > A.offset + A.size)
-                        return false;
+                        return reject("Producer-consumer overlap: consumer offset domain cannot fit inside producer buffer");
                 }
             }
         }
@@ -884,7 +942,7 @@ class WriteAfterReadPropagator : public Propagator
         {
             // B is not a reader of A, but B.start <= a_max_reader.
             // B overlaps in time with A's readers -> cannot share buffer.
-            return false;
+            return reject("General buffer reuse: allocation starts before all readers of the earlier allocation finish");
         }
 
         // - for every reader C = R(A)/B, we need B.start > C.start
@@ -898,7 +956,11 @@ class WriteAfterReadPropagator : public Propagator
                                    ? class_info[c_cid.value].start_max
                                    : -1;
             if (B.start <= c_st_max)
-                return false;
+                return reject_detail("Producer-consumer overlap: required reader C cid=" +
+                                     std::to_string(c_cid.value) + " has start_max=" +
+                                     std::to_string(c_st_max) + " while consumer B cid=" +
+                                     std::to_string(B.cid.value) + " starts at " +
+                                     std::to_string(B.start));
         }
         return true;
     }
@@ -906,8 +968,12 @@ class WriteAfterReadPropagator : public Propagator
     bool checkPair(SearchState &state, FixedAlloc A, FixedAlloc B, std::vector<VarId> &worklist)
     {
         const auto &class_info = state.propagation.write_after_read[A.bucket_idx].class_info;
-        if (!canShare(state, A, B))
+        std::string share_reason;
+        if (!canShare(state, A, B, &share_reason))
+        {
+            conflict_reason_ = describePair(state, A, B, share_reason);
             return false;
+        }
 
         if ((A.is_view && B.is_view) ||
             isViewOf(state, A.bucket_idx, A.cid, B.cid) ||
@@ -949,14 +1015,27 @@ class WriteAfterReadPropagator : public Propagator
                 if (b_st_dom.setMin(c_st_dom.getMin() + 1))
                 {
                     if (b_st_dom.isEmpty())
+                    {
+                        conflict_reason_ = describePair(state, A, B,
+                                                       "Producer-consumer overlap: consumer start domain emptied by required reader C cid=" +
+                                                           std::to_string(c_cid.value) + " start=" + c_st_dom.toString() +
+                                                           "; required minimum=" + std::to_string(c_st_dom.getMin() + 1));
                         return false;
+                    }
                     state.setDomain(B.start_var, b_st_dom);
                     worklist.push_back(B.start_var);
                 }
                 if (c_st_dom.setMax(B.start - 1))
                 {
                     if (c_st_dom.isEmpty())
+                    {
+                        conflict_reason_ = describePair(state, A, B,
+                                                       "Producer-consumer overlap: required reader C cid=" +
+                                                           std::to_string(c_cid.value) + " start domain emptied by consumer B start=" +
+                                                           std::to_string(B.start) + "; required maximum=" +
+                                                           std::to_string(B.start - 1));
                         return false;
+                    }
                     state.setDomain(c_st_v, c_st_dom);
                     worklist.push_back(c_st_v);
                 }
@@ -966,12 +1045,18 @@ class WriteAfterReadPropagator : public Propagator
     }
 
     bool enforceDisjoint(SearchState &state, const FixedAlloc &fixed_alloc, FixedAlloc &target,
-                         std::vector<VarId> &worklist, bool &out_pushed)
+                         std::vector<VarId> &worklist, bool &out_pushed,
+                         std::string *out_failure = nullptr)
     {
+        auto fail = [&](const std::string &reason) {
+            if (out_failure)
+                *out_failure = reason;
+            return false;
+        };
         out_pushed = false;
         Domain target_dom = state.domains[target.offset_var];
         if (target_dom.isEmpty())
-            return false;
+            return fail("target offset domain is already empty");
 
         uint32_t O = fixed_alloc.offset;
         uint32_t S = fixed_alloc.size;
@@ -990,7 +1075,7 @@ class WriteAfterReadPropagator : public Propagator
                 if (target_dom.setMin(static_cast<int32_t>(after_threshold)))
                 {
                     if (target_dom.isEmpty())
-                        return false;
+                        return fail("target offset has no value at or after " + std::to_string(after_threshold));
                     state.setDomain(target.offset_var, target_dom);
                     target.offset = static_cast<uint32_t>(target_dom.getMin());
                     worklist.push_back(target.offset_var);
@@ -1005,12 +1090,13 @@ class WriteAfterReadPropagator : public Propagator
                 {
                     target_dom = Domain::makeEmpty(target_dom.is_mask);
                     state.setDomain(target.offset_var, target_dom);
-                    return false;
+                    return fail("target cannot fit before fixed allocation: required max offset <= " +
+                                std::to_string(before_threshold) + ", and no nonnegative offset can satisfy it");
                 }
                 if (target_dom.setMax(static_cast<int32_t>(before_threshold)))
                 {
                     if (target_dom.isEmpty())
-                        return false;
+                        return fail("target offset has no value at or before " + std::to_string(before_threshold));
                     state.setDomain(target.offset_var, target_dom);
                     worklist.push_back(target.offset_var);
                     out_pushed = true;
@@ -1018,13 +1104,17 @@ class WriteAfterReadPropagator : public Propagator
             }
             else if (target_dom.isFixed())
             {
-                return false;
+                return fail("fixed target offset " + std::to_string(target_dom.fixedValue()) +
+                            " overlaps fixed allocation range [" + std::to_string(O) + ", " +
+                            std::to_string(after_threshold) + ")");
             }
         }
         return true;
     }
 
   public:
+    std::string conflictReason() const override { return conflict_reason_; }
+
     std::string name() const override
     {
         return "WriteAfterReadPropagator";
@@ -1032,6 +1122,7 @@ class WriteAfterReadPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        conflict_reason_.clear();
 #ifdef TG_PROFILE
         uint64_t *profile_ns = &initial_profile_ns_;
         if (changed != kInvalidVarId && changed < state.var_infos.size())
@@ -1059,7 +1150,9 @@ class WriteAfterReadPropagator : public Propagator
         if (changed != kInvalidVarId)
         {
             VarType type = state.var_infos[changed].type;
-            if (type != VarType::OFFSET && type != VarType::START)
+            // WriteAfterReadPropagator only prunes offset domains when offsets change.
+            // Temporal start validation and pruning for fixed-offset pairs is handled by FixedOffsetStartPropagator.
+            if (type != VarType::OFFSET)
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
@@ -1068,8 +1161,6 @@ class WriteAfterReadPropagator : public Propagator
                 return true;
 
             bool curr_offset_fixed = state.domains[curr.offset_var].isFixed();
-            if (type == VarType::START && !curr_offset_fixed)
-                return true;
 
             buildBucketInfo(state, b);
 
@@ -1100,10 +1191,15 @@ class WriteAfterReadPropagator : public Propagator
                         other.is_root = indexed_other.is_root;
 
                         bool pushed = false;
-                        if (!canShare(state, curr, other))
+                        std::string share_reason;
+                        if (!canShare(state, curr, other, &share_reason))
                         {
-                            if (!enforceDisjoint(state, other, curr, worklist, pushed))
+                            std::string offset_failure;
+                            if (!enforceDisjoint(state, other, curr, worklist, pushed, &offset_failure))
                             {
+                                conflict_reason_ = describePair(
+                                    state, curr, other,
+                                    share_reason + "; offset disjointness failed: " + offset_failure);
                                 valid = false;
                                 return false;
                             }
@@ -1158,10 +1254,15 @@ class WriteAfterReadPropagator : public Propagator
                         if (domain_min >= after_threshold || curr_offset_domain.getMax() <= before_threshold)
                             return true;
 
-                        if (!canShare(state, curr, other))
+                        std::string share_reason;
+                        if (!canShare(state, curr, other, &share_reason))
                         {
-                            if (!enforceDisjoint(state, other, curr, worklist, pushed))
+                            std::string offset_failure;
+                            if (!enforceDisjoint(state, other, curr, worklist, pushed, &offset_failure))
                             {
+                                conflict_reason_ = describePair(
+                                    state, curr, other,
+                                    share_reason + "; offset disjointness failed: " + offset_failure);
                                 valid = false;
                                 return false;
                             }
@@ -1216,10 +1317,17 @@ class WriteAfterReadPropagator : public Propagator
                             if (!mayOverlapInTime(state, b, target.cid, fixed.cid))
                                 continue;
 
-                            if (!canShare(state, target, fixed))
+                            std::string share_reason;
+                            if (!canShare(state, target, fixed, &share_reason))
                             {
-                                if (!enforceDisjoint(state, fixed, target, worklist, pushed))
+                                std::string offset_failure;
+                                if (!enforceDisjoint(state, fixed, target, worklist, pushed, &offset_failure))
+                                {
+                                    conflict_reason_ = describePair(
+                                        state, target, fixed,
+                                        share_reason + "; offset disjointness failed: " + offset_failure);
                                     return false;
+                                }
                                 if (pushed)
                                     break;
                             }
@@ -1251,10 +1359,20 @@ class WriteAfterReadPropagator : public Propagator
 class FixedOffsetStartPropagator : public Propagator
 {
     using FixedAlloc = WriteAfterReadPropagator::FixedAlloc;
+    std::string conflict_reason_;
+    std::string conflict_pair_context_;
+
+    bool conflict(const std::string &reason)
+    {
+        conflict_reason_ = reason + conflict_pair_context_;
+        return false;
+    }
 
     bool resolvePair(SearchState &state, uint32_t b, FixedAlloc A, FixedAlloc B,
                      std::vector<VarId> &worklist)
     {
+        conflict_pair_context_ = " (overlapping allocations A cid=" + std::to_string(A.cid.value) +
+                                 ", B cid=" + std::to_string(B.cid.value) + ")";
         // 1. Views check: if both are views, or either is view of the other, they can safely share
         if ((A.is_view && B.is_view) ||
             WriteAfterReadPropagator::isViewOf(state, b, A.cid, B.cid) ||
@@ -1271,7 +1389,7 @@ class FixedOffsetStartPropagator : public Propagator
                        << ", st=" << state.domains[A.start_var].toString() << ", off=" << A.offset << ", sz=" << A.size
                        << ") and B(cid=" << B.cid.value << ", in_cache=" << B.is_input_or_cache << ", root=" << B.is_root
                        << ", st=" << state.domains[B.start_var].toString() << ", off=" << B.offset << ", sz=" << B.size << ")";
-            return false;
+            return conflict("Persistent buffers: overlapping non-view allocations include INPUT, CACHE, or ROOT");
         }
 
         const auto &class_info = state.propagation.write_after_read[b].class_info;
@@ -1314,7 +1432,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [unsafe inplace before starts fixed] for A(cid="
                            << A.cid.value << ") and B(cid=" << B.cid.value << ")";
-                return false;
+                return conflict("Producer-consumer overlap: unsafe in-place reuse before starts are fixed");
             }
             return true;
         }
@@ -1331,7 +1449,7 @@ class FixedOffsetStartPropagator : public Propagator
                 LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [same start]: identical start=" << A.start
                            << " for non-views A(cid=" << A.cid.value << ", off=" << A.offset << ", sz=" << A.size
                            << ") and B(cid=" << B.cid.value << ", off=" << B.offset << ", sz=" << B.size << ")";
-                return false;
+                return conflict("Fixed start validation: overlapping allocations have the same start (write-after-read hazard)");
             }
         }
 
@@ -1351,7 +1469,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: unsafe inplace] for A(cid="
                            << A.cid.value << ") and B(cid=" << B.cid.value << ")";
-                return false;
+                return conflict("Producer-consumer overlap (B reads A): unsafe in-place reuse or B does not fit in A's buffer");
             }
 
             int32_t min_b_start = A.start + 1;
@@ -1390,7 +1508,7 @@ class FixedOffsetStartPropagator : public Propagator
                             {
                                 LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: reader empty]: C(cid="
                                            << c_cid.value << ") domain empty after setMax(" << (b_st_dom.getMax() - 1) << ")";
-                                return false;
+                                return conflict("Producer-consumer overlap (B reads A): a required reader cannot finish before B starts");
                             }
                             state.setDomain(c_st_v, new_c_dom);
                             worklist.push_back(c_st_v);
@@ -1405,7 +1523,7 @@ class FixedOffsetStartPropagator : public Propagator
                 {
                     LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [B reads A: B start empty]: B(cid="
                                << B.cid.value << ") domain empty after setMin(" << min_b_start << ")";
-                    return false;
+                    return conflict("Producer-consumer overlap (B reads A): B cannot start after A and its other readers");
                 }
                 state.setDomain(B.start_var, b_st_dom);
                 worklist.push_back(B.start_var);
@@ -1420,7 +1538,7 @@ class FixedOffsetStartPropagator : public Propagator
             {
                 LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: unsafe inplace] for A(cid="
                            << A.cid.value << ") and B(cid=" << B.cid.value << ")";
-                return false;
+                return conflict("Producer-consumer overlap (A reads B): unsafe in-place reuse or A does not fit in B's buffer");
             }
 
             Domain b_st_dom = state.domains[B.start_var];
@@ -1430,7 +1548,7 @@ class FixedOffsetStartPropagator : public Propagator
                 {
                     LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: B start empty]: B(cid="
                                << B.cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
-                    return false;
+                    return conflict("Producer-consumer overlap (A reads B): B cannot precede A");
                 }
                 state.setDomain(B.start_var, b_st_dom);
                 worklist.push_back(B.start_var);
@@ -1465,7 +1583,7 @@ class FixedOffsetStartPropagator : public Propagator
                         {
                             LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [A reads B: reader empty]: C(cid="
                                        << c_cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
-                            return false;
+                            return conflict("Producer-consumer overlap (A reads B): a required reader cannot finish before A starts");
                         }
                         state.setDomain(c_st_v, c_st_dom);
                         worklist.push_back(c_st_v);
@@ -1552,7 +1670,7 @@ class FixedOffsetStartPropagator : public Propagator
                        << A.cid.value << ", st=" << A.start << ", t_after_a=" << t_after_a
                        << ") vs B(cid=" << B.cid.value << ", dom=" << b_st_dom.toString()
                        << "): b_cannot_be_before_a=1 && b_cannot_be_after_a=1";
-            return false;
+            return conflict("General buffer reuse: neither execution order gives disjoint lifespans");
         }
 
 
@@ -1564,7 +1682,7 @@ class FixedOffsetStartPropagator : public Propagator
                 {
                     LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMin empty]: B(cid="
                                << B.cid.value << ") domain empty after setMin(" << t_after_a << ")";
-                    return false;
+                    return conflict("General buffer reuse: required later start is outside the current start domain");
                 }
                 state.setDomain(B.start_var, b_st_dom);
                 worklist.push_back(B.start_var);
@@ -1596,7 +1714,7 @@ class FixedOffsetStartPropagator : public Propagator
                         {
                             LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader C empty]: C(cid="
                                        << c_cid.value << ") domain empty after setMax(" << (b_st_dom.getMax() - 1) << ")";
-                            return false;
+                            return conflict("General buffer reuse: a required reader cannot finish before the later allocation starts");
                         }
                         state.setDomain(c_st_v, c_st_dom);
                         worklist.push_back(c_st_v);
@@ -1612,7 +1730,7 @@ class FixedOffsetStartPropagator : public Propagator
                 {
                     LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: B setMax empty]: B(cid="
                                << B.cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
-                    return false;
+                    return conflict("General buffer reuse: required earlier start is outside the current start domain");
                 }
                 state.setDomain(B.start_var, b_st_dom);
                 worklist.push_back(B.start_var);
@@ -1644,7 +1762,7 @@ class FixedOffsetStartPropagator : public Propagator
                         {
                             LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: reader D empty]: D(cid="
                                        << d_cid.value << ") domain empty after setMax(" << (A.start - 1) << ")";
-                            return false;
+                            return conflict("General buffer reuse: a required reader cannot finish before the earlier allocation starts");
                         }
                         state.setDomain(d_st_v, d_st_dom);
                         worklist.push_back(d_st_v);
@@ -1666,7 +1784,7 @@ class FixedOffsetStartPropagator : public Propagator
                 {
                     LOG_HOT_PATH(DEBUG) << "[FixedOffsetStartPropagator] Conflict [disjoint: mask empty]: B(cid="
                                << B.cid.value << ") domain empty";
-                    return false;
+                    return conflict("General buffer reuse: removing overlapping start values leaves no valid start");
                 }
                 state.setDomain(B.start_var, b_st_dom);
                 worklist.push_back(B.start_var);
@@ -1677,6 +1795,8 @@ class FixedOffsetStartPropagator : public Propagator
     }
 
   public:
+    std::string conflictReason() const override { return conflict_reason_; }
+
     std::string name() const override
     {
         return "FixedOffsetStartPropagator";
@@ -1684,6 +1804,7 @@ class FixedOffsetStartPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        conflict_reason_.clear();
         state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
@@ -1858,12 +1979,15 @@ class MemoryNoOverlapPropagator : public Propagator
 {
     FixedOffsetStartPropagator fixed_offset_prop_;
     WriteAfterReadPropagator write_after_read_prop_;
+    std::string conflict_reason_;
 #ifdef TG_PROFILE
     uint64_t fixed_offset_ns_ = 0;
     uint64_t write_after_read_ns_ = 0;
 #endif
 
   public:
+    std::string conflictReason() const override { return conflict_reason_; }
+
     uint8_t interestedVarTypes() const override
     {
         return varTypeMask(VarType::START) | varTypeMask(VarType::OFFSET) | varTypeMask(VarType::CACHED);
@@ -1881,6 +2005,7 @@ class MemoryNoOverlapPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        conflict_reason_.clear();
         state.ensurePropagationState();
         VarId eff_changed = changed;
         if (changed != kInvalidVarId)
@@ -1910,6 +2035,7 @@ class MemoryNoOverlapPropagator : public Propagator
 #endif
         if (!fixed_offset_prop_.propagate(state, eff_changed, worklist))
         {
+            conflict_reason_ = "Fixed-offset start validation: " + fixed_offset_prop_.conflictReason();
 #ifdef TG_PROFILE
             fixed_offset_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - fixed_start).count());
@@ -1919,20 +2045,31 @@ class MemoryNoOverlapPropagator : public Propagator
 #ifdef TG_PROFILE
         fixed_offset_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - fixed_start).count());
-        auto write_after_read_start = std::chrono::steady_clock::now();
 #endif
-        if (!write_after_read_prop_.propagate(state, eff_changed, worklist))
+        bool should_run_war = (changed == kInvalidVarId ||
+                               state.var_infos[changed].type == VarType::OFFSET ||
+                               state.var_infos[changed].type == VarType::CACHED);
+        if (should_run_war)
         {
+#ifdef TG_PROFILE
+            auto write_after_read_start = std::chrono::steady_clock::now();
+#endif
+            if (!write_after_read_prop_.propagate(state, eff_changed, worklist))
+            {
+                conflict_reason_ = "Write-after-read path: " + write_after_read_prop_.conflictReason();
+                if (write_after_read_prop_.conflictReason().empty())
+                    conflict_reason_ = "Write-after-read path: contradiction while checking overlapping allocations";
+#ifdef TG_PROFILE
+                write_after_read_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - write_after_read_start).count());
+#endif
+                return false;
+            }
 #ifdef TG_PROFILE
             write_after_read_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - write_after_read_start).count());
 #endif
-            return false;
         }
-#ifdef TG_PROFILE
-        write_after_read_ns_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - write_after_read_start).count());
-#endif
         return true;
     }
 

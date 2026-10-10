@@ -17,6 +17,9 @@ lns_selectors/gnn/samples
 flux-klein-4b
 malloc_heuristic/build
 egraph_cycles*.txt
+tmp*
+tools
+scratch
 patching
 out.log
 run*.txt

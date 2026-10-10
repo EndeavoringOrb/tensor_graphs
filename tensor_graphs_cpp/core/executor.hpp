@@ -42,6 +42,15 @@ class Executor
         const char *dump_path = std::getenv("TG_DUMP_BASE_REFS");
         const char *compare_path = std::getenv("TG_COMPARE_BASE_REFS");
         const char *check_nan_env = std::getenv("TG_CHECK_NAN");
+        static int global_step = 0;
+        int current_step = global_step++;
+        const char *step_env = std::getenv("TG_BASE_REF_STEP");
+        int target_step = (step_env && *step_env) ? std::atoi(step_env) : -1;
+        if (target_step >= 0 && target_step != current_step)
+        {
+            dump_path = nullptr;
+            compare_path = nullptr;
+        }
         if (compare_path && *compare_path)
         {
             Debug::BaseRefVerifier::get().loadFromFile(compare_path);
@@ -247,7 +256,9 @@ class Executor
 #endif
                 if (host_ptr)
                 {
-                    uint32_t base_id = Debug::BaseRefVerifier::get().getBase(inst.eclass_id).value;
+                    uint32_t base_id = (inst.logical_id.value != UINT32_MAX)
+                                           ? inst.logical_id.value
+                                           : Debug::BaseRefVerifier::get().getBase(inst.eclass_id).value;
                     if (dump_path && *dump_path)
                     {
                         Debug::BaseRefVerifier::get().record(
