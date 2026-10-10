@@ -1,6 +1,7 @@
 #include "kernels/fused/softmax_4d/ref.hpp"
-// tensor_graphs_cpp/kernels/fused/softmax_4d/opencl/F32_4D_OpenCL.hpp
 #pragma once
+
+#ifdef TG_USE_OPENCL
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 #include "kernels/utils/opencl_utils.hpp"
@@ -36,3 +37,4 @@ REGISTER_KERNEL("Softmax_4D_OpenCL", 1, 1, matchSoftmaxF32_4D_OpenCL, runSoftmax
                 refFactorySoftmax4D, {0}, MemSpace(1, HandleType::OPENCL),
                 {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true},
                 {{MemSpace(1, HandleType::OPENCL)}});
+#endif

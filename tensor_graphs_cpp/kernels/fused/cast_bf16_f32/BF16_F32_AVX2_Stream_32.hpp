@@ -17,40 +17,35 @@
 #include <immintrin.h>
 
 /**
- * KERNEL: Cast_BF16_F32_AVX2_Stream
+ * KERNEL: Cast_BF16_F32_AVX2_Stream_32
  *
  * Highly optimized BF16 -> FP32 conversion using AVX2 SIMD and non-temporal streaming stores (_mm256_stream_ps).
  * Multi-threaded across all available CPU threads via ThreadPool without input-size branching.
  * Writes bypass the CPU cache hierarchy directly to write-combining buffers, avoiding write-allocate (RFO) overhead.
  */
 
-inline bool matchCastBF16_F32_AVX2_Stream(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchCastBF16_F32_AVX2_Stream_32(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (!HardwareCaps::get().has_avx2)
-        return false;
     if (output.dtype != DType::FLOAT32)
         return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
     if (!isContiguous(output))
         return false;
+    // CPP arenas are 4096-byte aligned and the planner assigns CPP buffers on
+    // 64-byte boundaries. Require full 32-element blocks so worker starts and
+    // the final store are aligned without peeling or scalar/SIMD tails.
+    if ((countElements(output.getShape()) & 31ULL) != 0)
+        return false;
     return true;
 }
 
 __attribute__((always_inline, target("avx2,fma")))
-inline void castBf16F32Avx2StreamRange(const uint16_t *src, float *dst, uint64_t start, uint64_t end)
+inline void castBf16F32Avx2StreamRange_32(const uint16_t *src, float *dst, uint64_t start, uint64_t end)
 {
+    // The matcher guarantees a multiple of 32 elements. Worker chunks are
+    // rounded up to 32 elements, and CPP output pointers are 64-byte aligned.
     uint64_t i = start;
-
-    // Peel head elements until dst + i is 32-byte aligned for _mm256_stream_ps
-    while (i < end && ((reinterpret_cast<uintptr_t>(dst + i) & 31) != 0))
-    {
-        uint32_t val32 = static_cast<uint32_t>(src[i]) << 16;
-        std::memcpy(&dst[i], &val32, sizeof(float));
-        ++i;
-    }
-
-    // Process 32 elements at a time (64 bytes BF16 in, 128 bytes FP32 out = 2 cache lines out)
     for (; i + 32 <= end; i += 32)
     {
         __m256i raw0 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i));
@@ -72,40 +67,11 @@ inline void castBf16F32Avx2StreamRange(const uint16_t *src, float *dst, uint64_t
         _mm256_stream_ps(dst + i + 24, _mm256_castsi256_ps(f32_3));
     }
 
-    // Process remaining 16 elements (32 bytes BF16 in, 64 bytes FP32 out = 1 cache line out)
-    for (; i + 16 <= end; i += 16)
-    {
-        __m256i raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i));
-        __m128i lo = _mm256_castsi256_si128(raw);
-        __m128i hi = _mm256_extracti128_si256(raw, 1);
-
-        __m256i f32_0 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(lo), 16);
-        __m256i f32_1 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(hi), 16);
-
-        _mm256_stream_ps(dst + i, _mm256_castsi256_ps(f32_0));
-        _mm256_stream_ps(dst + i + 8, _mm256_castsi256_ps(f32_1));
-    }
-
-    // Process remaining 8 elements (16 bytes BF16 in, 32 bytes FP32 out)
-    for (; i + 8 <= end; i += 8)
-    {
-        __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i));
-        __m256i f32_0 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(raw), 16);
-        _mm256_stream_ps(dst + i, _mm256_castsi256_ps(f32_0));
-    }
-
-    // Scalar tail loop
-    for (; i < end; ++i)
-    {
-        uint32_t val32 = static_cast<uint32_t>(src[i]) << 16;
-        std::memcpy(&dst[i], &val32, sizeof(float));
-    }
-
     // Store fence to ensure streaming stores are visible to subsequent reads
     _mm_sfence();
 }
 
-inline void runCastBF16_F32_AVX2_Stream(const KernelContext &ctx)
+inline void runCastBF16_F32_AVX2_Stream_32(const KernelContext &ctx)
 {
     const uint16_t *src = static_cast<const uint16_t *>(ctx.inputs[0]);
     float *dst = static_cast<float *>(ctx.outputs[0]);
@@ -126,13 +92,13 @@ inline void runCastBF16_F32_AVX2_Stream(const KernelContext &ctx)
         if (start >= num_elements)
             return;
         uint64_t end = std::min(start + chunk, num_elements);
-        castBf16F32Avx2StreamRange(src, dst, start, end);
+        castBf16F32Avx2StreamRange_32(src, dst, start, end);
     });
 }
 
 
 
-REGISTER_KERNEL("Cast_BF16_F32_AVX2_Stream", 1, 1, matchCastBF16_F32_AVX2_Stream, runCastBF16_F32_AVX2_Stream,
+REGISTER_KERNEL("Cast_BF16_F32_AVX2_Stream_32", 1, 1, matchCastBF16_F32_AVX2_Stream_32, runCastBF16_F32_AVX2_Stream_32,
                 refFactoryCastBF16_F32, {0}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::BF16}, {{2048, 640}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});

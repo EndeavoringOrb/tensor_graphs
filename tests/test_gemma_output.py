@@ -23,7 +23,7 @@ CONFIGS = {
 }
 
 
-def run_gemma_output(config_name, cache_file=""):
+def run_gemma_output(config_name, cache_file="", min_compile_time=0.0):
     if config_name not in CONFIGS:
         raise ValueError(f"Unknown Gemma test config: {config_name}")
 
@@ -38,6 +38,7 @@ def run_gemma_output(config_name, cache_file=""):
         "gemma-3-270m",
         str(model_path),
         tensor_graphs.HeuristicSearchDelegate(),
+        min_compile_time=min_compile_time,
         max_sequence_length=16,
         **CONFIGS[config_name],
         cache_file=cache_file,
@@ -62,9 +63,13 @@ def run_gemma_output(config_name, cache_file=""):
         )
 
 
-def test_gemma_output(cache_file=""):
+def test_gemma_output(cache_file="", min_compile_time=0.0):
     for config_name in CONFIGS:
-        run_gemma_output(config_name, cache_file=cache_file)
+        run_gemma_output(
+            config_name,
+            cache_file=cache_file,
+            min_compile_time=min_compile_time,
+        )
 
 
 def main():
@@ -83,12 +88,22 @@ def main():
         default="",
         help="Path to compiled cache file. If specified, enables compilation caching to/from this file.",
     )
+    parser.add_argument(
+        "--min-compile-time",
+        type=float,
+        default=0.0,
+        help="Minimum required compile time per bucket in seconds",
+    )
     args = parser.parse_args()
 
     config_names = CONFIGS if args.config == "all" else [args.config]
     for config_name in config_names:
         print(f"\n=== Gemma output config: {config_name} ===", flush=True)
-        run_gemma_output(config_name, cache_file=args.cache_file)
+        run_gemma_output(
+            config_name,
+            cache_file=args.cache_file,
+            min_compile_time=args.min_compile_time,
+        )
 
 
 if __name__ == "__main__":

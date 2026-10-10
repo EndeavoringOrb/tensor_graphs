@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,7 @@ struct BenchBuffer
     MemSpace mem_space = {1, HandleType::CPP};
     uint64_t bytes = 0;
     std::vector<uint8_t> hostData;
+    std::unique_ptr<CppBuffer> cppBuffer;
     void *devicePtr = nullptr;
     cl_mem clMem = nullptr;
 
@@ -63,6 +65,7 @@ struct BenchBuffer
             mem_space = o.mem_space;
             bytes = o.bytes;
             hostData = std::move(o.hostData);
+            cppBuffer = std::move(o.cppBuffer);
             devicePtr = o.devicePtr;
             clMem = o.clMem;
             o.devicePtr = nullptr;
@@ -120,6 +123,15 @@ struct BenchBuffer
             Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
         }
+        else if (mem_space.type == HandleType::CPP)
+        {
+            // Use the same page-rounded, 4096-byte-aligned arena as executor runs.
+            // Some CPU kernels use aligned non-temporal stores and cannot safely
+            // run against std::vector<uint8_t>'s weaker alignment guarantee.
+            cppBuffer = std::make_unique<CppBuffer>(mem_space, bytes);
+            cppBuffer->init();
+            devicePtr = cppBuffer->getBasePtr();
+        }
         else
         {
             devicePtr = hostData.data();
@@ -128,7 +140,13 @@ struct BenchBuffer
 
     void upload()
     {
-        if (mem_space.type == HandleType::CUDA)
+        if (mem_space.type == HandleType::CPP)
+        {
+            if (!cppBuffer)
+                Error::throw_err("CPU benchmark buffer was not initialized.");
+            cppBuffer->write(0, hostData.data(), bytes);
+        }
+        else if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
             cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
@@ -166,7 +184,13 @@ struct BenchBuffer
 
     void download()
     {
-        if (mem_space.type == HandleType::CUDA)
+        if (mem_space.type == HandleType::CPP)
+        {
+            if (!cppBuffer || !devicePtr)
+                Error::throw_err("CPU benchmark buffer was not initialized.");
+            std::memcpy(hostData.data(), devicePtr, bytes);
+        }
+        else if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
             cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
@@ -204,6 +228,7 @@ struct BenchBuffer
 
     void free()
     {
+        cppBuffer.reset();
         if (devicePtr)
         {
             if (mem_space.type == HandleType::CUDA)

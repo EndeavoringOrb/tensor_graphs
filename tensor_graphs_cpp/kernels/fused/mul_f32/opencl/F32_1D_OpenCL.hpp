@@ -1,4 +1,6 @@
 #pragma once
+
+#ifdef TG_USE_OPENCL
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 #include "kernels/utils/opencl_utils.hpp"
@@ -41,3 +43,4 @@ REGISTER_KERNEL("Mul_F32_1D_OpenCL", 2, 2, matchMulF32_OpenCL_1D, runMulF32_Open
                 {0, 1}, MemSpace(1, HandleType::OPENCL), {Engine(1, EngineType::QUALCOMM_IGPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true},
                 {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});
+#endif

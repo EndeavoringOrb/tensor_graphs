@@ -12,16 +12,11 @@
 #include "core/types.hpp"
 #include "kernels/fused/flash_attention_generic_3d/ref.hpp"
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(TG_HAS_AVX2)
 #include <immintrin.h>
-#define TG_FLASH_AVX2_X86 1
-#else
-#define TG_FLASH_AVX2_X86 0
-#endif
 
 inline bool matchFlashAttentionAVX2_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-#if TG_FLASH_AVX2_X86
     if (output.dtype != DType::FLOAT32)
         return false;
 
@@ -32,14 +27,8 @@ inline bool matchFlashAttentionAVX2_3D(const std::vector<TensorNode> &inputs, co
         return false;
 
     return true;
-#else
-    (void)inputs;
-    (void)output;
-    return false;
-#endif
 }
 
-#if TG_FLASH_AVX2_X86
 __attribute__((target("avx2,fma")))
 inline __m256 flashExpAVX2(__m256 x)
 {
@@ -164,11 +153,9 @@ inline void runFlashAttentionAVX2Range(const float *q_base, const float *k_base,
         _mm256_storeu_ps(out_row + 56, o7);
     }
 }
-#endif
 
 inline void runFlashAttentionAVX2_3D(const KernelContext &ctx)
 {
-#if TG_FLASH_AVX2_X86
     const float *q = static_cast<const float *>(ctx.inputs[0]);
     const float *k = static_cast<const float *>(ctx.inputs[1]);
     const float *v = static_cast<const float *>(ctx.inputs[2]);
@@ -191,9 +178,6 @@ inline void runFlashAttentionAVX2_3D(const KernelContext &ctx)
                 runFlashAttentionAVX2Range(q, k, v, out, batch, start, end);
         });
     }
-#else
-    (void)ctx;
-#endif
 }
 
 REGISTER_KERNEL("Flash_Attention_AVX2_3D", 3, 3, matchFlashAttentionAVX2_3D, runFlashAttentionAVX2_3D,
@@ -202,4 +186,4 @@ REGISTER_KERNEL("Flash_Attention_AVX2_3D", 3, 3, matchFlashAttentionAVX2_3D, run
                 {true, true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
-#undef TG_FLASH_AVX2_X86
+#endif

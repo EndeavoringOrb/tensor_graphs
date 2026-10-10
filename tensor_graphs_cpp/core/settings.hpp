@@ -13,7 +13,7 @@
 #include <json.hpp>
 
 #include "core/argparse.hpp"
-#include "core/hardware.hpp"
+#include "core/hardware/hardware.hpp"
 #include "core/logging.hpp"
 #include "core/types.hpp"
 

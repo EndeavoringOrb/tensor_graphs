@@ -11,12 +11,10 @@
 #include "core/types.hpp"
 
 #include "kernels/fused/cast_bf16_f32/ref.hpp"
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(TG_HAS_AVX2)
 #pragma GCC push_options
 #pragma GCC target("avx2,fma")
 #include <immintrin.h>
-#define TG_HAS_AVX2 1
-#endif
 
 inline bool matchCastBF16_F32_AVX2(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -29,12 +27,9 @@ inline bool matchCastBF16_F32_AVX2(const std::vector<TensorNode> &inputs, const 
     return true;
 }
 
-#if defined(TG_HAS_AVX2)
 __attribute__((always_inline, target("avx2,fma")))
-#endif
 inline void castBf16F32Avx2Range(const uint16_t *src, float *dst, uint64_t start, uint64_t end)
 {
-#if defined(TG_HAS_AVX2)
     uint64_t i = start;
     for (; i + 32 <= end; i += 32)
     {
@@ -81,15 +76,6 @@ inline void castBf16F32Avx2Range(const uint16_t *src, float *dst, uint64_t start
         std::memcpy(&val, &bits, sizeof(float));
         dst[i] = val;
     }
-#else
-    for (uint64_t i = start; i < end; ++i)
-    {
-        uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
-        float val;
-        std::memcpy(&val, &bits, sizeof(float));
-        dst[i] = val;
-    }
-#endif
 }
 
 inline void runCastBF16_F32_AVX2(const KernelContext &ctx)
@@ -123,6 +109,5 @@ REGISTER_KERNEL("Cast_BF16_F32_AVX2", 1, 1, matchCastBF16_F32_AVX2, runCastBF16_
                 refFactoryCastBF16_F32, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::BF16}, {{2048, 640}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
-#if defined(__x86_64__) || defined(_M_X64)
 #pragma GCC pop_options
 #endif

@@ -10,12 +10,10 @@
 #include "core/types.hpp"
 
 #include "kernels/fused/mul_f32/ref.hpp"
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(TG_HAS_AVX2)
 #pragma GCC push_options
 #pragma GCC target("avx2,fma")
 #include <immintrin.h>
-#define TG_HAS_AVX2 1
-#endif
 
 /**
  * KERNEL: Mul_F32_AVX2_Stream
@@ -36,12 +34,9 @@ inline bool matchMulF32_AVX2_Stream(const std::vector<TensorNode> &inputs, const
     return true;
 }
 
-#if defined(TG_HAS_AVX2)
 __attribute__((always_inline, target("avx2,fma")))
-#endif
 inline void mulF32Avx2StreamRange(const float *a, const float *b, float *out, uint64_t start, uint64_t end)
 {
-#if defined(TG_HAS_AVX2)
     uint64_t i = start;
 
     // Peel head elements until out + i is 32-byte aligned for _mm256_stream_ps
@@ -84,12 +79,6 @@ inline void mulF32Avx2StreamRange(const float *a, const float *b, float *out, ui
 
     // Store fence to flush write-combining buffers to memory
     _mm_sfence();
-#else
-    for (uint64_t i = start; i < end; ++i)
-    {
-        out[i] = a[i] * b[i];
-    }
-#endif
 }
 
 inline void runMulF32_AVX2_Stream(const KernelContext &ctx)
@@ -127,6 +116,5 @@ REGISTER_KERNEL("Mul_F32_AVX2_Stream", 2, 2, matchMulF32_AVX2_Stream, runMulF32_
                 {{1, 16, 640}, {1, 16, 640}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
-#if defined(TG_HAS_AVX2)
 #pragma GCC pop_options
 #endif

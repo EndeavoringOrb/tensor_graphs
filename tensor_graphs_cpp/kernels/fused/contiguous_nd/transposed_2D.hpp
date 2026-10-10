@@ -9,12 +9,10 @@
 #include "core/types.hpp"
 
 #include "kernels/fused/contiguous_nd/ref.hpp"
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(TG_HAS_AVX2)
 #pragma GCC push_options
 #pragma GCC target("avx2,fma")
 #include <immintrin.h>
-#define TG_HAS_AVX2 1
-#endif
 
 /**
  * Highly optimized multi-threaded cache-blocked 2D Transposition / Contiguous kernel.
@@ -50,7 +48,6 @@ inline bool matchContiguousTransposed2D(const std::vector<TensorNode> &inputs, c
     return true;
 }
 
-#if defined(TG_HAS_AVX2)
 __attribute__((always_inline, target("avx2,fma")))
 inline void transpose8x8Avx2(const float *src, uint64_t src_stride, float *dst, uint64_t dst_stride)
 {
@@ -99,15 +96,11 @@ inline void transpose8x8Avx2(const float *src, uint64_t src_stride, float *dst, 
     _mm256_storeu_ps(dst + 6 * dst_stride, col6);
     _mm256_storeu_ps(dst + 7 * dst_stride, col7);
 }
-#endif
 
-#if defined(TG_HAS_AVX2)
 __attribute__((target("avx2,fma")))
-#endif
 inline void transposeTile(const float *in, float *out, uint64_t m_dim, uint64_t n_dim,
                           uint64_t tm, uint64_t tn, uint64_t m_end, uint64_t n_end)
 {
-#if defined(TG_HAS_AVX2)
     uint64_t m_vec_end = tm + ((m_end - tm) / 8) * 8;
     uint64_t n_vec_end = tn + ((n_end - tn) / 8) * 8;
 
@@ -133,15 +126,6 @@ inline void transposeTile(const float *in, float *out, uint64_t m_dim, uint64_t 
             out[m * n_dim + n] = in[n * m_dim + m];
         }
     }
-#else
-    for (uint64_t m = tm; m < m_end; ++m)
-    {
-        for (uint64_t n = tn; n < n_end; ++n)
-        {
-            out[m * n_dim + n] = in[n * m_dim + m];
-        }
-    }
-#endif
 }
 
 inline void runContiguousTransposed2D(const KernelContext &ctx)
@@ -195,6 +179,5 @@ REGISTER_KERNEL("Contiguous_Transposed_2D", 1, 1, matchContiguousTransposed2D, r
                 refFactoryContiguous, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32}, {{640, 2048}}, {false}, {{MemSpace(1, HandleType::CPP)}});
 
-#if defined(__x86_64__) || defined(_M_X64)
 #pragma GCC pop_options
 #endif

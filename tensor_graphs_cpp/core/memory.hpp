@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/hardware.hpp"
+#include "core/hardware/hardware.hpp"
 #include "core/loaders/resolver.hpp"
 #include "core/types.hpp"
 

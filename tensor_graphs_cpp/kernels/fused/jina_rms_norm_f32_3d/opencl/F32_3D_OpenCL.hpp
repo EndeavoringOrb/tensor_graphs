@@ -1,6 +1,8 @@
 #include "kernels/fused/jina_rms_norm_f32_3d/ref.hpp"
 // tensor_graphs_cpp/kernels/fused/jina_rms_norm_f32_3d/opencl/F32_3D_OpenCL.hpp
 #pragma once
+
+#ifdef TG_USE_OPENCL
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 #include "kernels/utils/opencl_utils.hpp"
@@ -45,3 +47,4 @@ REGISTER_KERNEL("JinaRMSNorm_F32_3D_OpenCL", 2, 2, matchJinaRMSNorm_F32_3D_OpenC
                 refFactoryJinaRMSNorm_F32_3D, {0}, MemSpace(1, HandleType::OPENCL),
                 {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}},
                 {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});
+#endif

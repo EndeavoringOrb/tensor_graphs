@@ -1,4 +1,6 @@
 #pragma once
+
+#ifdef TG_USE_OPENCL
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 #include "kernels/utils/opencl_utils.hpp"
@@ -78,3 +80,4 @@ REGISTER_KERNEL("Contiguous_OpenCL_ND", 1, 1, matchContiguous_OpenCL_ND, runCont
                 {false},                                              // Input does NOT require contiguity
                 {{MemSpace(1, HandleType::OPENCL)}}                   // Input backends
 );
+#endif

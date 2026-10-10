@@ -1214,7 +1214,8 @@ class Toolchain:
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
                 )
             elif not target_arm64:
-                flags.extend(["-target", "x86_64-pc-windows-msvc"])
+                # Build x86 binaries for this machine's instruction set.
+                flags.extend(["-target", "x86_64-pc-windows-msvc", "-march=native"])
 
             if self.config.debug:
                 flags.extend(["-g", "-O0", "-DTG_DEBUG"])
@@ -1225,6 +1226,9 @@ class Toolchain:
         else:
             if target_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
+            else:
+                # Build x86 binaries for this machine's instruction set.
+                flags.append("-march=native")
 
             if self.config.debug:
                 flags.extend(["-g", "-O0", "-DTG_DEBUG", "-fno-omit-frame-pointer"])

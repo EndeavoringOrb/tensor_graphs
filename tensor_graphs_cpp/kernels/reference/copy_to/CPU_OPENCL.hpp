@@ -1,7 +1,7 @@
 #pragma once
 #include <cstring>
 
-#include "core/hardware.hpp"
+#include "core/hardware/hardware.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 

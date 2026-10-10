@@ -1,4 +1,6 @@
 #pragma once
+
+#ifdef TG_USE_OPENCL
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 #include "kernels/utils/opencl_utils.hpp"
@@ -56,3 +58,4 @@ REGISTER_KERNEL("Dot_F32_3D_OpenCL_v0", 2, 2, matchDotF32_3D_OpenCL_v0, runDotF3
                 refFactoryDotF32, {}, MemSpace(1, HandleType::OPENCL),
                 {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}},
                 {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});
+#endif

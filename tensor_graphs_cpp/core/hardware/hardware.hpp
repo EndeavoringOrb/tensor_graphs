@@ -16,6 +16,10 @@
 #include "core/logging.hpp"
 #include "core/types.hpp"
 
+#if defined(TG_ARCH_X64) && defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
 #if defined(TG_OS_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -194,6 +198,7 @@ struct HardwareCaps
     bool has_unified_memory = false;
     bool has_cuda = false;
     bool has_neon = false;
+    bool has_avx2 = false;
     bool has_opencl = false;
     bool is_adreno = false;
     std::string hw_tag;
@@ -218,6 +223,20 @@ struct HardwareCaps
     {
 #if defined(TG_HAS_NEON)
         has_neon = true;
+#endif
+#if defined(TG_ARCH_X64) && (defined(__GNUC__) || defined(__clang__))
+        __builtin_cpu_init();
+        has_avx2 = __builtin_cpu_supports("avx2");
+#elif defined(TG_ARCH_X64) && defined(_MSC_VER)
+        int cpu_info[4] = {};
+        __cpuid(cpu_info, 1);
+        const bool has_osxsave = (cpu_info[2] & (1 << 27)) != 0;
+        const bool has_avx = (cpu_info[2] & (1 << 28)) != 0;
+        if (has_osxsave && has_avx && (_xgetbv(0) & 0x6) == 0x6)
+        {
+            __cpuidex(cpu_info, 7, 0);
+            has_avx2 = (cpu_info[1] & (1 << 5)) != 0;
+        }
 #endif
         num_threads = get_num_threads();
 

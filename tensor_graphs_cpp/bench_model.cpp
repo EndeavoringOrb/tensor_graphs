@@ -24,7 +24,7 @@
 #include "core/cost_model.hpp"
 #include "core/debug.hpp"
 #include "core/graph.hpp"
-#include "core/hardware.hpp"
+#include "core/hardware/hardware.hpp"
 #include "core/kernels.hpp"
 #include "core/logging.hpp"
 #include "core/memory.hpp"

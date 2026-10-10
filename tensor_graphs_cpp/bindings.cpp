@@ -256,7 +256,7 @@ struct InstallCrashHandler
 #endif
 
 #include "core/common/thread_pool.hpp"
-#include "core/hardware.hpp"
+#include "core/hardware/hardware.hpp"
 #include "core/plan/brancher.hpp"
 #include "core/plan/planner.hpp"
 #include "core/session.hpp"

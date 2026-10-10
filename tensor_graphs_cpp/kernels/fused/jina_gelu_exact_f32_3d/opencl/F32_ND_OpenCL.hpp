@@ -1,6 +1,8 @@
 #include "kernels/fused/jina_gelu_exact_f32_3d/ref.hpp"
 // tensor_graphs_cpp/kernels/fused/jina_gelu_exact_f32_3d/opencl/F32_ND_OpenCL.hpp
 #pragma once
+
+#ifdef TG_USE_OPENCL
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 #include "kernels/utils/opencl_utils.hpp"
@@ -37,3 +39,4 @@ REGISTER_KERNEL("JinaGeluExact_F32_3D_OpenCL", 1, 1, matchJinaGeluExact_F32_3D_O
                 refFactoryJinaGeluExact_F32_3D, {0}, MemSpace(1, HandleType::OPENCL),
                 {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32}, {{1, 1024, 3072}}, {true},
                 {{MemSpace(1, HandleType::OPENCL)}});
+#endif
