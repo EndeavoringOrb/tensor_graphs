@@ -253,5 +253,5 @@ inline void runF8E4M3TransposedGEMMv4(const KernelContext &ctx)
 
 REGISTER_KERNEL("F8_E4M3_Transposed_GEMM_NEON_v4", 2, 2, matchF8E4M3TransposedGEMMv4, runF8E4M3TransposedGEMMv4,
                 refFactoryDotTransposedBF16, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::F8_E4M3}, {{1, 4224, 6144}, {6144, 6144}}, {true, true},
+                {DType::FLOAT32, DType::F8_E4M3}, {{1, 256, 512}, {512, 512}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

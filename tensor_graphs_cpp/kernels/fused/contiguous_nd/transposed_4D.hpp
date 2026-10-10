@@ -7,6 +7,7 @@
 #include "core/types.hpp"
 
 #include "kernels/fused/contiguous_nd/ref.hpp"
+template <bool transpose_middle>
 inline bool matchContiguousTransposed4D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].getShape().size() != 4 || output.getShape().size() != 4)
@@ -19,29 +20,27 @@ inline bool matchContiguousTransposed4D(const std::vector<TensorNode> &inputs, c
     const auto &shape = inputs[0].getShape();
     const auto &strides = inputs[0].strides;
 
-    // Check for permute(0, 2, 1, 3): shape [B, H, S, D], input strides [H*S*D, D, H*D, 1]
-    uint64_t B = shape[0];
-    uint64_t H = shape[1];
-    uint64_t S = shape[2];
-    uint64_t D = shape[3];
+    if (strides.size() != 4)
+        return false;
+    const uint64_t h = shape[1];
+    const uint64_t s = shape[2];
+    const uint64_t d = shape[3];
+    if (strides[0] != h * s * d)
+        return false;
 
-    if (strides[3] == 1 && strides[1] == D && strides[2] == H * D)
-        return true;
-
-    // Check for permute(0, 1, 3, 2): shape [B, H, D, S], input strides [H*S*D, S*D, 1, D]
-    if (strides[2] == 1 && strides[3] == D && strides[1] == S * D)
-        return true;
-
-    return false;
+    if constexpr (transpose_middle)
+        return strides[3] == 1 && strides[1] == d && strides[2] == h * d;
+    else
+        return strides[2] == 1 && strides[3] == s && strides[1] == s * d;
 }
 
+template <bool transpose_middle>
 inline void runContiguousTransposed4D(const KernelContext &ctx)
 {
     const float *in = static_cast<const float *>(ctx.inputs[0]);
     float *out = static_cast<float *>(ctx.outputs[0]);
 
     const auto &shape = ctx.inViews[0].getShape();
-    const auto &strides = ctx.inViews[0].strides;
 
     uint32_t B = shape[0];
     uint32_t H = shape[1];
@@ -52,9 +51,7 @@ inline void runContiguousTransposed4D(const KernelContext &ctx)
     if (num_threads == 0)
         num_threads = 1;
 
-    bool is_0213 = (strides[3] == 1 && strides[1] == D && strides[2] == H * D);
-
-    if (is_0213)
+    if constexpr (transpose_middle)
     {
         // Out layout: [B, H, S, D] row-major
         // In layout: [B, S, H, D] row-major
@@ -124,6 +121,16 @@ inline void runContiguousTransposed4D(const KernelContext &ctx)
 
 
 
-REGISTER_KERNEL("Contiguous_Transposed_4D", 1, 1, matchContiguousTransposed4D, runContiguousTransposed4D,
+inline bool matchContiguousTransposed4DMiddle(const std::vector<TensorNode> &inputs, const TensorNode &output)
+{
+    return matchContiguousTransposed4D<true>(inputs, output);
+}
+
+inline void runContiguousTransposed4DMiddle(const KernelContext &ctx)
+{
+    runContiguousTransposed4D<true>(ctx);
+}
+
+REGISTER_KERNEL("Contiguous_Transposed_4D", 1, 1, matchContiguousTransposed4DMiddle, runContiguousTransposed4DMiddle,
                 refFactoryContiguous, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32}, {{1, 48, 4224, 128}}, {false}, {{MemSpace(1, HandleType::CPP)}});
+                {DType::FLOAT32}, {{2, 3, 35, 37}}, {false}, {{MemSpace(1, HandleType::CPP)}});

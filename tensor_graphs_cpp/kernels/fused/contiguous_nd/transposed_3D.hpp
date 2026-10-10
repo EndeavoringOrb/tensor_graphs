@@ -97,4 +97,4 @@ inline void runContiguousTransposed3D(const KernelContext &ctx)
 
 REGISTER_KERNEL("Contiguous_Transposed_3D", 1, 1, matchContiguousTransposed3D, runContiguousTransposed3D,
                 refFactoryContiguous, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32}, {{256, 2048, 1024}}, {false}, {{MemSpace(1, HandleType::CPP)}});
+                {DType::FLOAT32}, {{3, 35, 37}}, {false}, {{MemSpace(1, HandleType::CPP)}});

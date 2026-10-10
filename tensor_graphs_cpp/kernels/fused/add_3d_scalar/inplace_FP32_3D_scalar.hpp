@@ -18,11 +18,12 @@ inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs
 
 inline void runAddFP32_3D_Scalar_Inplace(const KernelContext &ctx)
 {
-    float *data3D = static_cast<float *>(ctx.outputs[0]);
-    float scalarVal = *static_cast<const float *>(ctx.inputs[1]);
-    uint64_t totalElements = countElements(ctx.outViews[0].getShape());
-    for (uint64_t i = 0; i < totalElements; ++i)
-        data3D[i] += scalarVal;
+    const float *data_3d = static_cast<const float *>(ctx.inputs[0]);
+    float *output = static_cast<float *>(ctx.outputs[0]);
+    float scalar_value = *static_cast<const float *>(ctx.inputs[1]);
+    uint64_t total_elements = countElements(ctx.outViews[0].getShape());
+    for (uint64_t i = 0; i < total_elements; ++i)
+        output[i] = data_3d[i] + scalar_value;
 }
 
 REGISTER_KERNEL("Add_3D_Scalar_inplace", 2, 2, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace,

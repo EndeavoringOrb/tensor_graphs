@@ -489,7 +489,7 @@ REGISTER_KERNEL("Batched_Transposed_GEMM_StreamingStorage_NEON", 2, 2, matchBatc
                 runBatchedTransposedGEMM_StreamingStorage, refFactoryBatchedTransposedGEMM_StreamingStorage, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, // output backend
                 {DType::FLOAT32, DType::BF16},                              // X is fp32, W is bf16
-                {{256, 8, 2048}, {256, 1024, 2048}},                        // dummy shapes for the bench harness
+                {{2, 8, 256}, {2, 1024, 256}},                        // dummy shapes for the bench harness
                 {true, true},                                               // both inputs must be contiguous
                 {{MemSpace(1, HandleType::CPP)},
                  {MemSpace(0, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE

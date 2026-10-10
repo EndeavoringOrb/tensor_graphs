@@ -431,6 +431,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             TensorView view;
             view.setShape(rec.inputShapes[i]);
             view.strides = rec.inputStrides[i];
+            view.dtype = rec.inputDTypes[i];
 
             uint64_t elements = countElements(view.getShape());
             uint64_t span_bytes = getStorageSpanBytes(view);
@@ -589,7 +590,31 @@ bool runNonReferenceKernelTests(const std::string &targetKernel = "", bool useRe
             // 1. Dummy Shapes Test
             Graph refGraph;
             TestInputs refInputs = createTestInputs(refGraph, kernel);
+            if (kernel.opName == "Contiguous_Transposed_2D" ||
+                kernel.opName == "Contiguous_Transposed_3D")
+            {
+                auto &input = refGraph.getNode(refInputs.inputIds[0]);
+                const auto &shape = input.getShape();
+                const uint64_t m = shape[shape.size() - 2];
+                const uint64_t n = shape.back();
+                input.strides = kernel.opName == "Contiguous_Transposed_2D"
+                                    ? std::vector<uint64_t>{1, m}
+                                    : std::vector<uint64_t>{m * n, 1, m};
+            }
+            if (kernel.opName == "Contiguous_Transposed_4D" ||
+                kernel.opName == "Contiguous_Transposed_4D_LastAxes")
+            {
+                auto &input = refGraph.getNode(refInputs.inputIds[0]);
+                const auto &shape = input.getShape();
+                const uint64_t h = shape[1];
+                const uint64_t s = shape[2];
+                const uint64_t d = shape[3];
+                input.strides = kernel.opName == "Contiguous_Transposed_4D"
+                                    ? std::vector<uint64_t>{h * s * d, d, h * d, 1}
+                                    : std::vector<uint64_t>{h * s * d, s * d, 1, s};
+            }
             LogicalId rootId = kernel.refFactory(refInputs.inputIds, refGraph);
+
 
             // Synchronize physical rawData with any stride changes made by refFactory
             for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
@@ -601,6 +626,7 @@ bool runNonReferenceKernelTests(const std::string &targetKernel = "", bool useRe
                     TensorView view;
                     view.setShape(node.getShape());
                     view.strides = node.strides;
+                    view.dtype = node.dtype;
                     uint64_t elements = countElements(view.getShape());
                     uint64_t span_bytes = getStorageSpanBytes(view);
                     uint64_t dtypeSize = getDTypeSize(node.dtype);
@@ -622,6 +648,11 @@ bool runNonReferenceKernelTests(const std::string &targetKernel = "", bool useRe
             ref_options.raw_input_data = &refInputs.rawInputData;
             ref_options.force_non_contiguous = false;
             std::vector<float> refOutput = executeReferenceGraph(refGraph, {rootId}, ref_store, ref_options);
+            if (kernel.opName.find("Contiguous_Transposed_") == 0 &&
+                !kernel.match({refGraph.getNode(refInputs.inputIds[0])}, refGraph.getNode(rootId)))
+            {
+                Error::throw_err("Invalid dummy input layout for " + kernel.opName);
+            }
             uint64_t elements = refOutput.size();
 
             const TensorNode &rootNode = refGraph.getNode(rootId);

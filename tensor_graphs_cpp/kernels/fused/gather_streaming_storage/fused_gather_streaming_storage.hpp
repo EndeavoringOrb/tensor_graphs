@@ -180,6 +180,6 @@ REGISTER_KERNEL("Gather_StreamingStorage_NEON", 2, 2, matchGatherStreamingStorag
                 refFactoryGatherStreamingStorage, {}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, // output backend
                 {DType::BF16, DType::INT32},  // input types: raw weight (BF16), indices (INT32)
-                {{248320, 2048}, {1, 8}},     // dummy shapes
+                {{256, 2048}, {1, 8}},     // dummy shapes
                 {true, true},                 // requires contiguous inputs
                 {{MemSpace(0, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}}); // input placement

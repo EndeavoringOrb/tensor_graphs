@@ -88,5 +88,5 @@ inline void runConv2dDot(const KernelContext &ctx)
 REGISTER_KERNEL("Conv2d_Im2Col_Dot_Add", 3, 3, matchConv2dDot, runConv2dDot, refFactoryConv2dDot, {2},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
-                {{1, 384, 128, 128}, {1, 384, 3456}, {1, 384, 128, 128}}, {true, true, true},
+                {{1, 8, 16, 16}, {1, 8, 72}, {1, 8, 16, 16}}, {true, true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
