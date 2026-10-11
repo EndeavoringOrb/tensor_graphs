@@ -28,7 +28,7 @@ echo "Draining KernelBench before deploying $target_commit"
 # SIGTERM reaches only the main process. Its startup/job children finish before exit.
 systemctl --user stop kernelbench.service
 git merge --ff-only "$target_commit"
-uv sync --locked
+uv sync --locked --extra embeddinggemma --extra ml
 systemctl --user start kernelbench.service
 for ((attempt = 0; attempt < 2700; attempt++)); do
     if ! systemctl --user is-active --quiet kernelbench.service; then

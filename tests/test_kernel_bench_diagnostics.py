@@ -140,7 +140,7 @@ def testBuildFailureArtifactsSurviveCandidateCleanup(monkeypatch, tmp_path, kind
     (tmp_path / ".baseline_linted").touch()
     diagnostic = "candidate.cu(187): error: no suitable conversion [0]" if kind == "compilation_error" else "REDUNDANT LOGIC DETECTED: manual Input Count Check\nLinter Violation"
     def run(command, cwd, timeout, env):
-        if "--lint-candidate" in command and kind == "compilation_error":
+        if command[1] == "kernel_linter.py" and kind == "compilation_error":
             return {"exit_code": 0, "output": "", "stdout": "", "stderr": "", "timed_out": False, "command": command}
         directory = Path(env["KERNEL_BENCH_DIAGNOSTICS_DIR"])
         if kind == "compilation_error":
@@ -298,7 +298,7 @@ def testLintModeNeverBuildsOrLoads(monkeypatch, tmp_path):
     commands = []
     def run(command, *args, **kwargs):
         commands.append(command)
-        assert "--lint-candidate" in command
+        assert command[1] == "kernel_linter.py"
         return {"exit_code": 0, "output": "", "stdout": "", "stderr": "", "command": command}
     monkeypatch.setattr("kernel_bench.jobs.runCmd", run)
     store = FakeStore()

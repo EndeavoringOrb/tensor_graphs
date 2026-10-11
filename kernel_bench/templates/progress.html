@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kernel progress · KernelBench</title>
+<style>
+body{font:16px system-ui;background:#111827;color:#e5e7eb;max-width:1200px;margin:32px auto;padding:0 20px}a{color:#93c5fd}select,input,button{font:inherit;background:#1f2937;color:inherit;border:1px solid #475569;padding:8px;border-radius:6px}section{background:#1f2937;padding:20px;margin:20px 0;border-radius:8px}svg{width:100%;height:auto}text{fill:#e5e7eb;font:12px system-ui}pre{white-space:pre-wrap;overflow-wrap:anywhere}.legend{display:flex;gap:20px;flex-wrap:wrap}#status{color:#cbd5e1}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #475569}
+</style>
+<h1>Kernel progress</h1>
+<p><a href="/">KernelBench</a> · <a href="/board">Message board</a> · <a href="/admin">Switch active goal</a></p>
+<label>Logical goal <select id="logical-goal"><option value="">Current goal</option></select></label>
+<label>Source snapshot <input id="goal" type="number" min="1"></label> <button id="load">Load</button>
+<p id="status" role="status">Loading…</p>
+<details><summary>Logical goal definition</summary><pre id="definition"></pre></details>
+<section><h2>Goal execution</h2><p>Weighted mean of measured bucket execution times. Each candidate is paired with its pinned source baseline; these are validation results, not merged revision measurements.</p><div id="goal-chart"></div><div class="legend"><span style="color:#93c5fd">● Baseline</span><span style="color:#34d399">● Candidate</span></div></section>
+<h2>Reference graphs</h2>
+<p>Execution time per configuration, against successive submitted kernels. Hover over a point for the kernel and timing. Best observed lines show benchmark history, independent of PR acceptance.</p>
+<label>Reference graph <select id="target"></select></label>
+<div id="kernel-charts"></div>
+<section><h2>Promotion queue and results</h2><table><thead><tr><th>Kernel</th><th>Status</th><th>Goal speedup</th><th>Selected</th><th>Evidence</th></tr></thead><tbody id="promotions"></tbody></table></section>
+<script>
+const byId=id=>document.getElementById(id), ns='http://www.w3.org/2000/svg';
+let data;
+function node(tag,attributes={},text){const el=document.createElementNS(ns,tag);for(const [key,value]of Object.entries(attributes))el.setAttribute(key,value);if(text!==undefined)el.textContent=text;return el;}
+function chart(container,series,labels){
+ container.replaceChildren();const values=series.flatMap(s=>s.values.filter(v=>v!==null));
+ if(!values.length){container.textContent='No measurements yet.';return;}
+ const width=1000,height=300,left=80,right=30,top=20,bottom=70,max=Math.max(...values)*1.1;
+ const svg=node('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':'Execution time in milliseconds by submitted kernel'});
+ const x=i=>left+i*(width-left-right)/Math.max(1,labels.length-1),y=v=>height-bottom-v*(height-top-bottom)/max;
+ for(let i=0;i<=4;i++){let value=max*i/4;svg.append(node('line',{x1:left,x2:width-right,y1:y(value),y2:y(value),stroke:'#475569'}),node('text',{x:left-8,y:y(value)+4,'text-anchor':'end'},value.toPrecision(4)));}
+ svg.append(node('text',{x:15,y:15},'ms'),node('text',{x:width/2,y:height-5,'text-anchor':'middle'},'Submitted kernels →'));
+ for(const s of series){
+  const points=s.values.map((v,i)=>v===null?null:[x(i),y(v)]).filter(Boolean);
+  svg.append(node('polyline',{points:points.map(p=>p.join(',')).join(' '),fill:'none',stroke:s.color,'stroke-width':2}));
+  s.values.forEach((v,i)=>{if(v===null)return;const point=node('circle',{cx:x(i),cy:y(v),r:5,fill:s.color,tabindex:0});point.append(node('title',{},`${labels[i]} · ${s.name}: ${v.toFixed(6)} ms`));svg.append(point);});
+ }
+ labels.forEach((label,i)=>{if(labels.length<12||i%Math.ceil(labels.length/10)===0)svg.append(node('text',{x:x(i),y:height-bottom+22,'text-anchor':'middle'},`${i+1}: ${label.slice(0,18)}`));});
+ container.append(svg);
+}
+function renderKernels(){
+ const container=byId('kernel-charts');container.replaceChildren();const target=byId('target').value;
+ const calibration_rows=data.baselines.filter(row=>row.target_id===target).flatMap(row=>(row.measurements??[]).map(measurement=>({...row,...measurement,job_id:'baseline-'+row.configuration_id,kernel_name:'Calibrated baseline',is_candidate:false})));
+ const rows=[...calibration_rows,...data.kernel_history.filter(row=>row.target_id===target)],groups=new Map();
+ for(const row of rows){const key=row.configuration_fingerprint;if(!groups.has(key))groups.set(key,new Map());const jobs=groups.get(key);if(!jobs.has(row.job_id))jobs.set(row.job_id,[]);jobs.get(row.job_id).push(row);}
+ if(!groups.size)container.textContent='No benchmarks for this reference graph yet.';
+ for(const [configuration,jobs]of groups){
+  const section=document.createElement('section'),title=document.createElement('h3'),canvas=document.createElement('div');title.textContent='Configuration '+configuration.slice(0,12)+' · '+JSON.stringify([...jobs.values()][0][0].configuration?.input_shapes??[]);section.append(title,canvas);container.append(section);
+  const labels=[],candidates=[],existing=[],best=[];let running_best=Infinity;
+  for(const measurements of jobs.values()){
+   labels.push(measurements[0].kernel_name);const candidate=measurements.find(m=>m.is_candidate),competitors=measurements.filter(m=>!m.is_candidate);
+   const baseline=competitors.length?Math.min(...competitors.map(m=>m.median_ms)):null;
+   candidates.push(candidate?.median_ms??null);existing.push(baseline);running_best=Math.min(running_best,...measurements.map(m=>m.median_ms));best.push(running_best);
+  }
+  chart(canvas,[{name:'Candidate',color:'#fbbf24',values:candidates},{name:'Fastest existing',color:'#93c5fd',values:existing},{name:'Best observed',color:'#34d399',values:best}],labels);
+  const legend=document.createElement('p');legend.className='legend';for(const [name,color]of [['Candidate','#fbbf24'],['Fastest existing','#93c5fd'],['Best observed','#34d399']]){const span=document.createElement('span');span.style.color=color;span.textContent='● '+name;legend.append(span);}section.append(legend);
+ }
+}
+async function load(){
+ try{
+  const suffix=byId('goal').value?'?goal_id='+encodeURIComponent(byId('goal').value):'',response=await fetch('/api/progress'+suffix);data=await response.json();if(!response.ok)throw Error(data.error||response.statusText);
+  byId('goal').value=data.goal.id;
+  const goals_response=await fetch('/api/goals');if(!goals_response.ok)throw Error('Could not load logical goals');const logical_goals=(await goals_response.json()).goals,goal_select=byId('logical-goal');goal_select.replaceChildren();const current=document.createElement('option');current.value='';current.textContent='Current goal';goal_select.append(current);for(const goal of logical_goals){const option=document.createElement('option');option.value=goal.id;option.dataset.snapshot=goal.snapshot_ids.at(-1);option.textContent=goal.id.slice(0,12)+' · weights '+JSON.stringify(goal.bucket_weights);goal_select.append(option);}goal_select.value=data.goal.definition_id??'';
+  byId('status').textContent=`${data.goal.name} · ${data.targets.length} reference graphs · promotion ${data.promotion_enabled?'enabled':'not configured'}`;
+  byId('definition').textContent=JSON.stringify(data.definition??'Definition is registered by the first full goal validation.',null,2);
+  const select=byId('target'),old=select.value;select.replaceChildren();for(const target of data.targets){const option=document.createElement('option');option.value=target.id;option.textContent=target.reference_expression;select.append(option);}if([...select.options].some(o=>o.value===old))select.value=old;renderKernels();
+  const measured=data.promotions.filter(p=>p.baseline||p.result.baseline);chart(byId('goal-chart'),[{name:'Baseline',color:'#93c5fd',values:measured.map(p=>(p.baseline??p.result.baseline).weighted_ms)},{name:'Candidate',color:'#34d399',values:measured.map(p=>p.candidate?.weighted_ms??null)}],measured.map(p=>p.kernel_name));
+  byId('promotions').replaceChildren();for(const promotion of data.promotions){const row=document.createElement('tr');for(const value of [promotion.kernel_name,promotion.error||promotion.result.outcome||promotion.status,promotion.speedup?promotion.speedup.toFixed(3)+'×':'—',promotion.selected_count??'—']){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}const cell=document.createElement('td'),logs=document.createElement('a');logs.href='/api/jobs/'+promotion.job_id+'/logs';logs.textContent='Logs';cell.append(logs);if(promotion.result.pr_url){const url=new URL(promotion.result.pr_url);if(url.protocol==='https:'&&url.hostname==='github.com'){const pr=document.createElement('a');pr.href=url.href;pr.textContent=' · PR';cell.append(pr);}}row.append(cell);byId('promotions').append(row);}
+ }catch(error){byId('status').textContent=error.message;}
+}
+byId('goal').value=new URLSearchParams(location.search).get('goal_id')??'';
+byId('logical-goal').onchange=()=>{byId('goal').value=byId('logical-goal').selectedOptions[0].dataset.snapshot??'';load();};
+byId('load').onclick=load;byId('target').onchange=renderKernels;load();setInterval(load,15000);
+</script>
+</html>

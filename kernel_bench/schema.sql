@@ -169,3 +169,34 @@ ALTER TABLE kernel_bench.baselines ADD COLUMN IF NOT EXISTS requested boolean NO
 ALTER TABLE kernel_bench.baselines DROP CONSTRAINT IF EXISTS baselines_status_check;
 ALTER TABLE kernel_bench.baselines ADD CONSTRAINT baselines_status_check
     CHECK(status IN ('pending', 'running', 'measured', 'failed', 'unavailable'));
+
+-- Stable workload identity is separate from source/build discovery snapshots.
+CREATE TABLE IF NOT EXISTS kernel_bench.goal_definitions (
+    id text PRIMARY KEY,
+    definition jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE kernel_bench.goals ADD COLUMN IF NOT EXISTS definition_id text REFERENCES kernel_bench.goal_definitions(id);
+ALTER TABLE kernel_bench.jobs DROP CONSTRAINT IF EXISTS jobs_mode_check;
+ALTER TABLE kernel_bench.jobs ADD CONSTRAINT jobs_mode_check CHECK (mode IN ('lint', 'compile', 'evaluate', 'promote', 'goal_setup'));
+ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS parent_job_id uuid REFERENCES kernel_bench.jobs(id);
+CREATE UNIQUE INDEX IF NOT EXISTS promotion_parent ON kernel_bench.jobs(parent_job_id) WHERE mode = 'promote';
+CREATE TABLE IF NOT EXISTS kernel_bench.goal_measurements (
+    job_id uuid PRIMARY KEY REFERENCES kernel_bench.jobs(id),
+    definition_id text NOT NULL REFERENCES kernel_bench.goal_definitions(id),
+    baseline jsonb NOT NULL,
+    candidate jsonb NOT NULL,
+    speedup double precision NOT NULL CHECK (speedup > 0),
+    selected_count integer NOT NULL CHECK (selected_count >= 0),
+    accepted boolean NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS goal_validation_once ON kernel_bench.jobs(goal_id)
+    WHERE mode = 'promote' AND parent_job_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS kernel_bench.active_goal (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    goal_id bigint NOT NULL REFERENCES kernel_bench.goals(id),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);

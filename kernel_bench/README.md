@@ -1,6 +1,6 @@
 # KernelBench
 
-KernelBench tests and benchmarks individual kernels against the reference expressions that match a specified compiled goal graph. Startup expands selected instructions into reference operations and saturates them, so targets include applicable unselected fusions across instruction boundaries. It does not run model inference, extract a new execution plan, replace the goal cache, or promote kernels.
+KernelBench tests and benchmarks individual kernels against the reference expressions that match a specified compiled goal graph. Startup expands selected instructions into reference operations and saturates them, so targets include applicable unselected fusions across instruction boundaries. Configured promotion jobs compile fresh execution plans, validate the logical goal end to end, measure weighted bucket execution, and open GitHub PRs for selected candidates that improve the goal. They never replace the discovery cache.
 
 Multiple agents can submit kernels for the same target. PostgreSQL stores goal snapshots, reference targets, configurations, submitted sources, job state, logs, measurements, and feedback. Temporary files are used only for building and running native code. GPU measurements run serially using a PostgreSQL advisory lock.
 
@@ -199,10 +199,10 @@ it does not test correctness or measure performance. Completed jobs report their
 mode, passed stages, validation ID, and source/build fingerprints. Builds are not reused
 between validation and evaluation jobs yet.
 
-Validation has a separate durable queue and isolated workspace. Lint can run during
-an evaluation. Heavy builds and measurements share a PostgreSQL advisory lock,
-so compile validation can wait for an active evaluation, but need not wait for the
-whole evaluation queue. Immutable baseline lint runs once per worker snapshot.
+All jobs share one durable FIFO queue and one worker, including lint, compile,
+evaluate, and promotion. Builds and measurements also share the PostgreSQL hardware
+lock. Immutable baseline lint runs once per worker snapshot. Local candidate lint
+is available from the starter package without waiting for the server queue.
 
 The native contract is published at `/api/kernel-contract`, including executable
 CPU/CUDA copy examples (adapt the reference factory to the requested target).
@@ -330,3 +330,78 @@ archived goals without the current interface version cannot be evaluated or
 calibrated. Interface versions are included in goal fingerprints, so startup
 creates a current goal rather than reusing an incompatible snapshot. There is
 no legacy runner fallback. `retry_failed` retries failures, not unavailable baselines.
+
+
+## Goal promotion and progress
+
+A logical goal is exactly `(logical graph, ordered buckets, bucket weights, hardware system)`.
+`goal_definitions` stores this stable identity independently of immutable source/cache
+snapshots in `goals`. Selected kernels, timing samples, and source commits do not alter
+logical goal identity. A snapshot acquires its definition after its first full validation;
+subsequent runs must reproduce that definition. Progress spans snapshots sharing a definition.
+
+Set `KERNEL_BENCH_PROMOTION_CONFIG` to an operator-owned JSON file such as
+[embeddinggemma-image-promotion.json](../deploy/embeddinggemma-image-promotion.json).
+The recipe is frozen into each discovery snapshot; changing it creates a new snapshot.
+Commands are argv arrays (no shell), with `{python}`, `{cache}`, and `{report}` placeholders.
+Agent API requests cannot supply commands or choose validation paths.
+Install the validation dependencies with `uv sync --locked --extra embeddinggemma --extra ml`.
+The model path and fixtures must exist on the server. The default sample recipe uses
+`/mnt/bigdrive/models/google/embeddinggemma-2`; edit it for a different model location.
+
+Startup enqueues one baseline validation per configured snapshot. It builds full bindings,
+runs correctness for every compiled bucket, measures synchronized execution excluding model
+loading/compilation/input preparation, and registers the logical goal definition.
+Every completed evaluation with at least one configuration exceeding `kernel_speedup`
+(default 1.02) automatically enqueues a promotion. Promotion uses an isolated Git clone,
+checks the evaluated source archive against its commit, integrates on the current deployed
+revision, and builds baseline and candidate separately. Cache paths start absent. The
+runner must report correctness, its logical graph, bucket descriptions and weights,
+selected kernel IDs, and at least eight finite positive timing samples per positive-weight bucket.
+Zero-weight buckets may return empty timing samples after correctness validation.
+The EmbeddingGemma example runner supports this through `--validation-report`,
+`--bucket-weights`, `--warmup`, and `--iterations`.
+
+Weighted goal time is `sum(weight * median(bucket samples)) / sum(weights)`.
+A PR requires candidate selection in a positive-weight bucket and goal speedup at least
+`goal_speedup` (default 1.01). Zero-weight buckets still receive correctness validation.
+Failed builds/correctness runs retain logs; successful validations retain JSON reports and
+compiled cache artifacts. Unselected or slower candidates complete with explicit rejection
+outcomes. PRs include pinned base revision and validation evidence; rebasing requires
+revalidation. These measurements are validation history, not claims about merged revisions.
+
+Set `github_repo` in the recipe to enable PR creation; omit it for validation-only operation.
+The service account needs authenticated `gh`, Git HTTPS credentials, and repository write
+access. Candidates are committed under `tensor_graphs_cpp/kernels/generated/promoted/`;
+GitHub credentials never enter the starter package. Successful validations do not auto-merge.
+
+- `GET /api/goals` and `GET /api/goals/<definition-id>`: stable logical goals and their discovery snapshots.
+- `GET /progress`: goal validation chart, a chart per reference graph/configuration,
+  and promotion queue/results with PR/log links.
+- `GET /api/progress?goal_id=N`: stable definition, benchmark history, and promotion evidence.
+- `POST /api/goals/validate`: enqueue/retrieve the snapshot's baseline validation job.
+- `POST /api/jobs/<evaluation-id>/promote`: idempotently enqueue a qualifying evaluation.
+- `POST /api/jobs/<promotion-id>/retry-promotion`: retry a failed promotion with its frozen recipe.
+
+Lint, compilation, benchmarks, promotions, and idle-only baseline calibration all execute
+on the same worker. The existing PostgreSQL hardware lock also covers native builds and
+full model validation. A draining service finishes its current job before stopping.
+
+## Portable source linter
+
+The starter ZIP includes `kernel_linter.py`, `kernel_linter_rules.py`, and their Python
+dependencies. After `uv sync`, run `.venv/bin/python kernel_linter.py candidate.cu`
+(or `candidate.hpp`) locally. No CUDA/compiler is required. `build.py` imports this same
+implementation, and server candidate checks invoke its CLI directly. Use
+`.venv/bin/python kernel_linter.py --repository` for layout/rewrite checks in a full checkout.
+Source lint does not replace compilation, registration, correctness, or performance checks.
+
+### Operator goal switching
+
+The deployed default is Gemma-3-270m at sequence length 16: 16 decode buckets weighted 1/16 each, plus a zero-weight full bucket. Use `deploy/gemma-decode-promotion.json` as `KERNEL_BENCH_PROMOTION_CONFIG`. The independent Transformers validator checks every bucket and measures the weighted ones. `deploy/embeddinggemma-image-promotion.json` is an alternative recipe, not the default.
+
+`/admin` lets operators activate an existing immutable discovery snapshot or prepare a goal from an operator-owned catalog. Set a separate `KERNEL_BENCH_ADMIN_TOKEN`; API calls require both normal bench authentication and `X-Admin-Token`. The browser holds the admin token only in its password field. Agents cannot supply executable recipes. Active selection persists in PostgreSQL across restarts. Preparing a preset queues discovery in the same FIFO as benchmarking, followed by end-to-end validation; it never starts a second GPU worker.
+
+Set `KERNEL_BENCH_GOAL_CATALOG` to a JSON file mapping preset IDs to `{ "name": "Gemma decode 16", "cache_path": "/absolute/path/to/compiled.cache", "promotion_config": "/absolute/path/to/recipe.json" }`. Add a trusted cache and recipe to that file to make another goal available without editing server code. Existing jobs retain their goal and frozen recipe when the active goal changes.
+
+The existing Gemma logical graph uses RoPE theta 10000 in every layer, whereas the upstream model configuration uses 1e6 for full attention. The independent validator explicitly matches the existing graph's theta; it validates kernel changes to this workload, not equivalence to the upstream default model. Changing that graph semantics requires a separate goal.

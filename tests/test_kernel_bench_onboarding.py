@@ -36,7 +36,7 @@ def testWelcomeAndStarterDownloads(monkeypatch):
     response = client.get(data["setup"]["download"], headers=headers)
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
-        assert set(archive.namelist()) == {"pyproject.toml", "agent.py", "AGENTS.md", ".env.example", "docs/hwinfo/box/cpu.txt"}
+        assert set(archive.namelist()) == {"pyproject.toml", "agent.py", "AGENTS.md", ".env.example", "docs/hwinfo/box/cpu.txt", "kernel_linter.py", "kernel_linter_rules.py"}
         assert archive.read("docs/hwinfo/box/cpu.txt") == b"snapshot CPU"
         assert b"class KernelBenchClient" in archive.read("agent.py")
         for name, url in data["downloads"].items():

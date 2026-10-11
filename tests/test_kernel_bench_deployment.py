@@ -187,10 +187,10 @@ echo "curl" >> "$COMMAND_LOG"
         assert merge not in commands
         assert result.returncode == (1 if scenario == "dirty" else 0)
     else:
-        assert commands.index(stop) < commands.index(merge) < commands.index("uv sync --locked")
+        assert commands.index(stop) < commands.index(merge) < commands.index("uv sync --locked --extra embeddinggemma --extra ml")
         if scenario == "dependency_failure":
             assert result.returncode == 1
             assert start not in commands
         else:
             assert result.returncode == 0, result.stderr
-            assert commands.index("uv sync --locked") < commands.index(start) < commands.index("curl")
+            assert commands.index("uv sync --locked --extra embeddinggemma --extra ml") < commands.index(start) < commands.index("curl")

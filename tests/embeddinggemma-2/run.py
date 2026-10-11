@@ -65,7 +65,16 @@ def parseArgs() -> argparse.Namespace:
         default="",
         help="Path to compiled cache file. If specified, enables compilation caching to/from this file.",
     )
-    return parser.parse_args()
+    parser.add_argument("--validation-report", type=Path)
+    parser.add_argument("--bucket-weights", type=float, nargs="+")
+    parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--iterations", type=int, default=16)
+    args = parser.parse_args()
+    if args.validation_report and (args.modality == "all" or args.config == "all" or args.saturate_only or not args.cache_file):
+        parser.error("validation-report requires one modality/configuration, a cache, and inference")
+    if not 0 <= args.warmup <= 100 or not 1 <= args.iterations <= 1000:
+        parser.error("warmup must be 0..100 and iterations 1..1000")
+    return args
 
 
 def prepareText(processor: AutoProcessor) -> dict:
@@ -209,6 +218,7 @@ def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace
         "disable_compilation_caching": args.saturate_only or not bool(args.cache_file),
         "min_compile_seconds": -1.0 if args.optimal else args.min_compile_time,
         "saturate_only": args.saturate_only,
+        "bucket_weights": args.bucket_weights,
     }
     for shape_key in ("patch_count", "patch_grid_width", "mel_frames", "video_frames"):
         if shape_key in native_input:
@@ -224,6 +234,12 @@ def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace
         media = native_input["media"].reshape(-1).tolist()
         output = session.embed_media(media, token_ids)
     compareEmbedding(output, reference, modality, config_name, args.cosine_tolerance)
+    if args.validation_report:
+        from goal_validation import writeGoalReport
+        writeGoalReport(session.session, session.root_id, args.cache_file, args.validation_report,
+                        lambda values, bucket: compareEmbedding(values, reference, modality, config_name,
+                                                                args.cosine_tolerance),
+                        args.warmup, args.iterations)
 
 
 def main() -> None:

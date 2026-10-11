@@ -44,6 +44,9 @@ TOOLS = [
     {"name": "linter_rules", "method": "GET", "path": "/api/linter/rules", "description": "Shared build linter rule identifiers, descriptions and scopes"},
     {"name": "kernel_names", "method": "GET", "path": "/api/kernels/list?name=...", "description": "Exact baseline name lookup and availability; independent candidate jobs may reuse names"},
     {"name": "baseline_calibration", "method": "POST", "path": "/api/baselines/calibrate", "description": "Schedule calibration for the active goal or explicit goal_id; optional retry_failed boolean; inspect calibrated_baselines on targets"},
+    {"name": "progress", "method": "GET", "path": "/api/progress", "description": "Goal definition, per-reference-graph benchmark history, and promotion results"},
+    {"name": "validate_goal", "method": "POST", "path": "/api/goals/validate", "description": "Queue the configured goal baseline in the shared FIFO worker"},
+    {"name": "promote_kernel", "method": "POST", "path": "/api/jobs/{job_id}/promote", "description": "Idempotently queue a qualifying completed evaluation for full goal validation and PR promotion"},
     {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity, server-wide queue depths by mode, worker heartbeats and recent stage durations"},
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
     {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
@@ -69,7 +72,13 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         raise ValueError("Set BENCH_SECRET_TOKEN before exposing KernelBench")
     store = Store(database_url or os.environ.get("KERNEL_BENCH_DATABASE_URL"))
     store.initialize()
-    goal_id = goal_id or initializeGoal(store, goal_cache or os.environ.get("KERNEL_BENCH_GOAL_CACHE", DEFAULT_GOAL_CACHE))
+    explicit_goal = goal_id is not None
+    active = store.query("SELECT goal_id FROM kernel_bench.active_goal WHERE singleton") if not explicit_goal else []
+    selected_cache = store.getGoal(active[0]["goal_id"])["metadata"]["cache_path"] if active else None
+    goal_id = goal_id or initializeGoal(store, goal_cache or selected_cache or os.environ.get("KERNEL_BENCH_GOAL_CACHE", DEFAULT_GOAL_CACHE),
+        promotion_recipe=store.getGoal(active[0]["goal_id"])["metadata"].get("promotion_recipe") if active and not goal_cache else "environment")
+    if not explicit_goal:
+        store.execute("INSERT INTO kernel_bench.active_goal(singleton, goal_id) VALUES (true, %s) ON CONFLICT(singleton) DO UPDATE SET goal_id = EXCLUDED.goal_id", (goal_id,))
     app = Flask(__name__)
     stop_event = stop_event if stop_event is not None else threading.Event()
     app.extensions["kernel_bench_stop"] = stop_event
@@ -82,8 +91,17 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def authorized(candidate):
         return bool(candidate) and hmac.compare_digest(candidate, token)
 
+    def currentGoalId():
+        if not explicit_goal:
+            active = store.query("SELECT goal_id FROM kernel_bench.active_goal WHERE singleton")
+            if active:
+                app.config["KERNEL_BENCH_GOAL_ID"] = active[0]["goal_id"]
+        return app.config["KERNEL_BENCH_GOAL_ID"]
+
     @app.before_request
     def authenticate():
+        nonlocal goal_id
+        goal_id = currentGoalId()
         if stop_event.is_set():
             return jsonify({"error": "KernelBench is draining for shutdown"}), 503, {"Retry-After": "60"}
         if request.path in ("/login", "/welcome", "/api/agent", "/api/agent/index"):
@@ -132,7 +150,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(goal_id)),
                         "hardware": metadata.get("hardware", {}),
                         "queue": store.queueInfo(goal_id),
-                        "pipeline": ["build", "test", "benchmark", "compare"]})
+                        "pipeline": ["lint", "build", "test", "benchmark", "compare", "goal_validation", "promotion"]})
 
     @app.get("/api/targets")
     @app.get("/api/analyze")
@@ -395,9 +413,15 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
             return jsonify({"status": "saved"}), 201
         return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
 
+    from .promotion import installPromotion
+    installPromotion(app, store, currentGoalId)
+    from .admin import installAdmin
+    installAdmin(app, store)
+
     if start_worker:
-        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event, goal_id=goal_id)
-        app.extensions["kernel_bench_validation_worker"] = startWorker(store, stop_event, validation=True, goal_id=goal_id)
+        from .promotion import enqueueGoalValidation
+        enqueueGoalValidation(store, goal_id)
+        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event, goal_id=currentGoalId)
     return app
 
 
@@ -434,14 +458,13 @@ def serveApp(args):
             server_thread = threading.Thread(target=server.run, name="kernel-bench-http", daemon=True)
             server_thread.start()
             while not stop_event.wait(1):
-                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive() or not app.extensions["kernel_bench_validation_worker"].is_alive():
+                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive():
                     raise RuntimeError("KernelBench HTTP server or worker exited unexpectedly")
     finally:
         stop_event.set()
         logger.info("Draining KernelBench; waiting for active startup/job processes")
         if app is not None:
             app.extensions["kernel_bench_worker"].join()
-            app.extensions["kernel_bench_validation_worker"].join()
         if server is not None:
             server.task_dispatcher.shutdown()
             server.asyncore.close_all(map=server._map)

@@ -25,7 +25,8 @@ hypothesis), backend (cpu or cuda), mode (lint, compile, or evaluate; default
 evaluate). Lint checks only candidate source; POST /api/iteration/lint is a
 convenience endpoint for this mode. Compile lints, builds, loads, and validates
 executable registration and target/signatures without correctness or benchmarks.
-Validation uses a separate queue; heavy builds serialize with measurements.
+Run `.venv/bin/python kernel_linter.py candidate.cu` (or candidate.hpp) locally before submission.
+All server jobs share one FIFO queue, including full goal promotion validation.
 Completed validation reports passed_stages and source/build fingerprints, and
 does not establish correctness or performance. Kernels may specialize to a subset of target
 configurations. Poll /api/jobs/{job_id} until completed or failed; inspect
@@ -46,8 +47,10 @@ The client requires a valid BENCH_SERVER_URL and BENCH_SECRET_TOKEN and includes
 HTTP response details in exceptions.
 
 The server builds, tests, and benchmarks on its hardware, so a local CUDA/compiler
-installation is unnecessary. Model inference, compiler selection, and automatic
-kernel promotion are outside this service's scope.
+installation is unnecessary. When configured by the operator, faster candidates automatically enter the same
+queue for full goal correctness, compiler selection, weighted bucket timing,
+and GitHub PR creation. View /progress and /api/progress for goal and reference
+graph progress. A kernel benchmark win does not guarantee promotion.
 
 Use PascalCase classes, camelCase functions, and snake_case variables. Fail loudly
 on invalid assumptions. Keep threaded and unthreaded implementations in separate
@@ -63,12 +66,14 @@ def starterFiles(archive):
 name = "kernel-bench-workspace"
 version = "0.1.0"
 requires-python = ">=3.9"
-dependencies = ["requests>=2.32.5"]
+dependencies = ["requests>=2.32.5", "rich>=15.0.0", "tqdm"]
 ''',
         "agent.py": Path(__file__).with_name("agent.py").read_bytes(),
         "AGENTS.md": INSTRUCTIONS.encode(),
         ".env.example": b"BENCH_SERVER_URL=https://your-server\n# BENCH_SECRET_TOKEN must be supplied in your environment.\n",
     }
+    for name in ("kernel_linter.py", "kernel_linter_rules.py"):
+        files[name] = archive.read(name) if name in archive.namelist() else Path(__file__).resolve().parent.parent.joinpath(name).read_bytes()
     for name in archive.namelist():
         if name.startswith("docs/hwinfo/box/"):
             files[name] = archive.read(name)
