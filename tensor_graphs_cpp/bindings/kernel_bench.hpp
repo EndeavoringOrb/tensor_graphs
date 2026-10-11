@@ -57,6 +57,22 @@ inline py::dict kernelToDict(const KernelEntry &kernel)
 
 inline void registerBindings(py::module_ &module)
 {
+    module.def("kernel_bench_capabilities", []() {
+        std::vector<std::string> capabilities;
+#ifdef TG_USE_CUDA
+        capabilities.push_back("TG_USE_CUDA");
+#endif
+#ifdef TG_USE_OPENCL
+        capabilities.push_back("TG_USE_OPENCL");
+#endif
+#ifdef TG_HAS_AVX2
+        capabilities.push_back("TG_HAS_AVX2");
+#endif
+#ifdef TG_HAS_NEON
+        capabilities.push_back("TG_HAS_NEON");
+#endif
+        return capabilities;
+    });
     module.def("kernel_bench_kernels", []() {
         py::list result;
         for (const auto &[uid, kernel] : KernelRegistry::get().getAllKernels())
@@ -82,6 +98,15 @@ inline void registerBindings(py::module_ &module)
         }
         return result;
     }, py::arg("cache_path"));
+    module.def("kernel_bench_match_diagnostics", [](uint64_t kernel_id, const py::dict &configuration) {
+        auto record = recordFromDict(configuration);
+        std::vector<std::string> reasons;
+        bool matched = bindRecord(KernelRegistry::get().getKernel(KernelId{kernel_id}), record, &reasons);
+        py::dict result;
+        result["matched"] = matched;
+        result["reasons"] = reasons;
+        return result;
+    }, py::arg("kernel_id"), py::arg("configuration"));
     module.def("kernel_bench_matches", [](uint64_t kernel_id, const py::dict &configuration) {
         auto record = recordFromDict(configuration);
         return bindRecord(KernelRegistry::get().getKernel(KernelId{kernel_id}), record);
@@ -97,6 +122,53 @@ inline void registerBindings(py::module_ &module)
         if (!testKernelWithRecord(kernel, record, true))
             Error::throw_err("KernelBench correctness test failed for " + kernel.getName());
     }, py::arg("kernel_id"), py::arg("configuration"));
+    module.def("kernel_bench_test_diagnostics", [](uint64_t kernel_id, const py::dict &configuration, uint32_t seed) {
+        const auto &kernel = KernelRegistry::get().getKernel(KernelId{kernel_id});
+        auto record = recordFromDict(configuration);
+        if (!kernel.refFactory || !bindRecord(kernel, record))
+            Error::throw_err("KernelBench requires a matching kernel with a reference factory");
+        CorrectnessDiagnostic diagnostic;
+        bool passed;
+        {
+            py::gil_scoped_release release;
+            passed = testKernelWithRecord(kernel, record, true, &diagnostic, seed);
+        }
+        py::dict result;
+        result["passed"] = passed;
+        result["kind"] = diagnostic.kind;
+        result["message"] = diagnostic.message;
+        if (diagnostic.kind == "correctness_mismatch")
+        {
+            result["index"] = diagnostic.index;
+            auto encode_value = [](float value) -> py::object {
+                if (std::isfinite(value))
+                    return py::float_(value);
+                return py::str(std::isnan(value) ? "NaN" : value > 0 ? "Infinity" : "-Infinity");
+            };
+            result["reference"] = encode_value(diagnostic.reference);
+            result["actual"] = encode_value(diagnostic.actual);
+        }
+        if (diagnostic.kind == "output_size_mismatch")
+        {
+            result["reference_size"] = diagnostic.reference_size;
+            result["actual_size"] = diagnostic.actual_size;
+        }
+        py::dict tolerance;
+        tolerance["absolute"] = diagnostic.epsilon;
+        tolerance["rule"] = "equal or both NaN or finite absolute difference <= epsilon";
+        result["tolerance"] = tolerance;
+        py::dict reproduction;
+        reproduction["seed"] = seed;
+        reproduction["generator"] = "std::mt19937; reset per configuration; inputs in index order";
+        reproduction["float_distribution"] = "std::uniform_real_distribution<float>(-1, 1); BF16 truncated from float32";
+        reproduction["int32_distribution"] = "std::uniform_int_distribution<int32_t>(1, 10); CONCAT axis input overridden from shapes";
+        reproduction["bool_distribution"] = "std::uniform_int_distribution<int>(0, 1)";
+        reproduction["byte_distribution"] = "std::uniform_int_distribution<int>(1, 127)";
+        reproduction["constants"] = "input_constants replace generated values; stride scattering follows configuration";
+        reproduction["configuration"] = configuration;
+        result["reproduction"] = reproduction;
+        return result;
+    }, py::arg("kernel_id"), py::arg("configuration"), py::arg("seed") = 42);
     module.def("kernel_bench_benchmark", [](uint64_t kernel_id, const py::dict &configuration, uint32_t iterations) {
         const auto &kernel = KernelRegistry::get().getKernel(KernelId{kernel_id});
         auto record = recordFromDict(configuration);

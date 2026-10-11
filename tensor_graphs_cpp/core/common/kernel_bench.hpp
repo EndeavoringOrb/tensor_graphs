@@ -42,7 +42,7 @@ inline std::string referenceExpression(const KernelEntry &kernel)
     return describeReference(graph, root_id, input_ids);
 }
 
-inline bool bindRecord(const KernelEntry &kernel, Record &record)
+inline bool bindRecord(const KernelEntry &kernel, Record &record, std::vector<std::string> *reasons = nullptr)
 {
     if (record.inputShapes.size() != record.inputStrides.size() ||
         record.inputShapes.size() != record.inputDTypes.size())
@@ -63,9 +63,29 @@ inline bool bindRecord(const KernelEntry &kernel, Record &record)
     output.setShape(record.outputShape);
     output.strides = record.outputStrides;
     output.dtype = record.outputDType;
-    HardwareBinding binding;
-    if (!kernel.matches(inputs, output, {}, {}, {}, true, true, true, false, nullptr, nullptr, &binding))
+    // Diagnose the same built-in checks used by KernelEntry::matches, outside execution.
+    auto reject = [&](const std::string &reason) {
+        if (reasons)
+            reasons->push_back(reason);
         return false;
+    };
+    if (inputs.size() < kernel.min_num_inputs || inputs.size() > kernel.max_num_inputs)
+        return reject("input_count");
+    for (size_t i = 0; i < inputs.size(); ++i)
+    {
+        if (!kernel.requiresContiguous.empty() &&
+            kernel.requiresContiguous[std::min(i, kernel.requiresContiguous.size() - 1)] && !isContiguous(inputs[i]))
+            return reject("contiguity");
+    }
+    HardwareBinding binding;
+    if (!TopologyMapper::resolve(kernel.output_mem_space, kernel.input_mem_spaces, kernel.engines, kernel.is_view,
+                                 inputs.size(), {}, {}, {}, true, true, true, binding))
+        return reject("memory_space_or_engine");
+    for (size_t i = 0; i < inputs.size(); ++i)
+        if (!kernel.dtypes.empty() && inputs[i].dtype != kernel.dtypes[std::min(i, kernel.dtypes.size() - 1)])
+            return reject("dtype");
+    if (kernel.match && !kernel.match(inputs, output))
+        return reject("custom_match_rejected");
     record.kernelId = kernel.uid;
     record.buildContextId = BUILD_CONTEXT_ID;
     record.hwTag = HW_TAG;

@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from kernel_bench.app import createApp
 from kernel_bench.jobs import (
     PROJECT_ROOT,
+    JobFailure,
     createJob,
     evaluateJob,
     initializeGoal,
@@ -133,10 +134,130 @@ def testInvalidCandidatesFailWithoutMeasurements(goal, wrong, zero_match, error)
     job = store.nextJob()
     try:
         evaluateJob(store, job, workspace / "build")
-    except RuntimeError as exception:
+    except JobFailure as exception:
         assert error in str(exception)
+        store.failJob(job_id, str(exception), exception.details, exception.result)
+        persisted = Store(store.database_url).getJob(job_id)
+        assert persisted["error_details"]["artifact_ids"]
+        if wrong:
+            details = persisted["error_details"]
+            assert details["kind"] == "correctness_mismatch"
+            assert details["configuration_id"]
+            assert details["reference"] != details["actual"]
+            assert details["tolerance"]["absolute"] == pytest.approx(1e-4)
+            assert details["reproduction"]["seed"] == 42
+            assert persisted["result"]["correctness_results"][-1]["passed"] is False
+        else:
+            assert persisted["error_details"]["kind"] == "no_matching_configurations"
     else:
         logs = store.query("SELECT message FROM kernel_bench.events WHERE job_id = %s AND step = 'test_bench' ORDER BY id", (job_id,))
         pytest.fail(f"Invalid candidate accepted; source changed correctly: {'A[idx] - B[idx]' in job['source']}; logs: {logs}")
     assert not store.query("SELECT * FROM kernel_bench.measurements WHERE job_id = %s", (job_id,))
     assert not (workspace / "build/tensor_graphs_cpp/kernels/generated/kernel_bench/candidate.cu").exists()
+
+
+@pytest.mark.parametrize("kind", ["lint_error", "compilation_error", "registration_error"])
+def testActionableFailuresAndDurableArtifacts(goal, kind):
+    store, goal_id, app, workspace = goal
+    source = candidateSource()
+    if kind == "lint_error":
+        source = source.replace("if (output.dtype", "if (inputs.size() != 2) return false;\n    if (output.dtype")
+    elif kind == "compilation_error":
+        source += "\n#error KernelBench diagnostic compile error\n"
+    else:
+        source = source.replace("#ifdef TG_USE_CUDA", "#if defined(TG_BENCH_DISABLED)")
+    job_id = createJob(store, goal_id, source, addTarget(store, goal_id))
+    job = store.nextJob()
+    with pytest.raises(JobFailure) as exception:
+        evaluateJob(store, job, workspace / "build")
+    failure = exception.value
+    assert failure.details["kind"] == kind
+    store.failJob(job_id, str(failure), failure.details, failure.result)
+    store.addEvent(job_id, "error", str(failure))
+    client = app.test_client()
+    headers = {"X-Bench-Token": "integration-test-token"}
+    base = f"/api/jobs/{job_id}"
+    persisted = client.get(base, headers=headers).get_json()
+    assert persisted["error_details"]["kind"] == kind
+    assert persisted["error"] == str(failure)
+    artifacts = client.get(base + "/artifacts", headers=headers).get_json()["artifacts"]
+    by_name = {row["name"]: row for row in artifacts}
+    assert set(failure.details["artifact_ids"]) == {row["artifact_id"] for row in artifacts}
+    assert client.get(by_name["submitted_source"]["url"], headers=headers).data.decode() == source
+    candidate_name = "tensor_graphs_cpp/kernels/generated/kernel_bench/candidate.cu"
+    assert client.get(by_name[candidate_name]["url"], headers=headers).data.decode() == source
+    if kind == "lint_error":
+        assert "build_diagnostics/build_metadata.json" not in by_name
+        assert persisted["error_details"]["stage"] == "lint"
+    else:
+        assert "build_diagnostics/build_metadata.json" in by_name
+    if kind == "compilation_error":
+        stderr_artifacts = [row for row in artifacts if row["name"].startswith("build_diagnostics/compiler-") and row["name"].endswith(".stderr")]
+        assert any(b"KernelBench diagnostic compile error" in client.get(row["url"], headers=headers).data for row in stderr_artifacts)
+        assert "KernelBench diagnostic compile error" in persisted["error_details"]["diagnostic"]
+    elif kind == "lint_error":
+        assert "Input Count Check" in persisted["error_details"]["diagnostic"]
+        assert "Input Count Check" in persisted["error"]
+    else:
+        assert persisted["error_details"]["observed_match_count"] == 0
+        assert "TG_USE_CUDA" in persisted["error_details"]["enabled_capabilities"]
+    latest = client.get(base + "/logs?tail=1&stage=error", headers=headers).get_json()
+    cursor = latest["next_after_id"]
+    assert len(latest["events"]) == 1
+    assert not client.get(base + f"/logs?after_id={cursor}", headers=headers).get_json()["events"]
+    store.addEvent(job_id, "error", "literal %_ diagnostic")
+    assert len(client.get(base + f"/logs?after_id={cursor}&grep=%25_", headers=headers).get_json()["events"]) == 1
+    other_id = createJob(store, goal_id, candidateSource(), addTarget(store, goal_id))
+    artifact_id = by_name["submitted_source"]["artifact_id"]
+    assert client.get(f"/api/jobs/{other_id}/artifacts/{artifact_id}", headers=headers).status_code == 404
+
+
+@pytest.mark.parametrize("mode", ["lint", "compile"])
+def testValidationModes(goal, mode):
+    store, goal_id, app, workspace = goal
+    target_id = addTarget(store, goal_id)
+    source = candidateSource("KernelBench_Validation_" + mode)
+    client = app.test_client()
+    response = client.post("/api/iteration/lint" if mode == "lint" else "/api/iteration/submit",
+                           headers={"X-Bench-Token": "integration-test-token"},
+                           json={"target_id": target_id, "source": source, "backend": "cuda", "mode": mode})
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    job = store.getJob(job_id)
+    assert job["mode"] == mode
+    evaluateJob(store, job, workspace / ("validation_" + mode))
+    completed = store.getJob(job_id)
+    assert completed["status"] == "completed"
+    assert completed["result"]["mode"] == mode
+    assert completed["result"]["measurements"] == []
+    assert "correctness" not in completed["result"]["passed_stages"]
+    assert not store.query("SELECT * FROM kernel_bench.measurements WHERE job_id = %s", (job_id,))
+
+
+def testPhaseThreeContractAndSkeletons(goal):
+    from kernel_bench.onboarding import SKELETONS
+    store, goal_id, app, workspace = goal
+    client = app.test_client()
+    headers = {'X-Bench-Token': 'integration-test-token'}
+    contract = client.get('/api/kernel-contract', headers=headers).get_json()
+    assert 'TG_USE_CUDA' in contract['enabled_capabilities']
+    assert contract['run'] == 'void run(const KernelContext &ctx)'
+    import hashlib
+    from psycopg.types.json import Jsonb
+    from kernel_bench.storage import fingerprint
+    expression = 'COPY_TO($0,)'
+    copy_target = hashlib.sha256(expression.encode()).hexdigest()
+    configuration = {'input_shapes': [[8]], 'input_strides': [[1]], 'input_dtypes': [0],
+                     'input_constants': [[]], 'output_shape': [8], 'output_strides': [1], 'output_dtype': 0}
+    with store.connection() as connection:
+        connection.execute("INSERT INTO kernel_bench.targets(id, expression) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                           (copy_target, expression))
+        connection.execute("""INSERT INTO kernel_bench.configurations
+            (goal_id, target_id, fingerprint, configuration, matching_kernels)
+            VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+            (goal_id, copy_target, fingerprint(configuration), Jsonb(configuration), Jsonb({})))
+    for backend, source in SKELETONS.items():
+        job_id = createJob(store, goal_id, source, copy_target, backend=backend, mode='compile')
+        evaluateJob(store, store.getJob(job_id), workspace / ('skeleton_' + backend))
+        result = store.getJob(job_id)['result']
+        assert 'registration' in result['passed_stages']

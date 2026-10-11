@@ -94,3 +94,5 @@ runs
 tensor_graphs_cpp/generated/
 
 OpenCL-SDK
+
+.bench_agent.json

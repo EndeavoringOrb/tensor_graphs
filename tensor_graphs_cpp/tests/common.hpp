@@ -51,7 +51,20 @@ inline void assertRegionListEquals(const std::vector<Region> &actual, const std:
     }
 }
 
-inline bool compareOutputs(const float *ref, const float *test, uint64_t elements, float eps = 1e-4f)
+struct CorrectnessDiagnostic
+{
+    std::string kind;
+    std::string message;
+    uint64_t index = 0;
+    float reference = 0;
+    float actual = 0;
+    float epsilon = 1e-4f;
+    uint64_t reference_size = 0;
+    uint64_t actual_size = 0;
+};
+
+inline bool compareOutputs(const float *ref, const float *test, uint64_t elements, float eps = 1e-4f,
+                           CorrectnessDiagnostic *diagnostic = nullptr)
 {
     for (uint64_t i = 0; i < elements; ++i)
     {
@@ -59,6 +72,14 @@ inline bool compareOutputs(const float *ref, const float *test, uint64_t element
             continue;
         if (!std::isfinite(ref[i]) || !std::isfinite(test[i]) || std::abs(ref[i] - test[i]) > eps)
         {
+            if (diagnostic)
+            {
+                diagnostic->kind = "correctness_mismatch";
+                diagnostic->index = i;
+                diagnostic->reference = ref[i];
+                diagnostic->actual = test[i];
+                diagnostic->epsilon = eps;
+            }
             std::cout << "\nMismatch at index " << i << ": (ref)" << ref[i] << " != (test)" << test[i] << std::endl;
             return false;
         }
