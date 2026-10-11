@@ -79,6 +79,7 @@ class Propagator
 #endif
     virtual ~Propagator() = default;
     virtual std::string name() const = 0;
+    virtual std::string diagnosticSummary() const { return {}; }
     virtual std::string conflictReason() const { return {}; }
     virtual uint8_t interestedVarTypes() const { return kAllVarTypesMask; }
     virtual StartSelectionGuard startSelectionGuard() const { return StartSelectionGuard::NONE; }

@@ -13,6 +13,7 @@
 #include "core/plan/propagators/consumer_start_precedence.hpp"
 #include "core/plan/propagators/start_precedence.hpp"
 #include "core/plan/propagators/start_unique.hpp"
+#include "core/plan/propagators/start_bounds.hpp"
 #include "core/plan/propagators/memory_no_overlap.hpp"
 #include "core/plan/propagators/view_select_offset.hpp"
 #include "core/plan/propagators/view_to_base_offset.hpp"
@@ -76,6 +77,7 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false, 
     engine.addPropagator(std::make_unique<ConsumerStartPrecedencePropagator>(fixed_starts_only));
     engine.addPropagator(std::make_unique<StartPrecedencePropagator>());
     engine.addPropagator(std::make_unique<StartUniquePropagator>());
+    engine.addPropagator(std::make_unique<StartBoundsPropagator>());
     engine.addPropagator(std::make_unique<MemoryNoOverlapPropagator>());
     engine.addPropagator(std::make_unique<ViewSelectOffsetPropagator>());
     engine.addPropagator(std::make_unique<ViewToBaseOffsetPropagator>());

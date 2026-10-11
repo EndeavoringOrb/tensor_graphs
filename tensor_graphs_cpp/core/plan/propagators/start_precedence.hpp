@@ -9,6 +9,8 @@ namespace plan
 // StartPrecedencePropagator: see docs/core/propagators.md.
 class StartPrecedencePropagator : public Propagator
 {
+    std::string conflict_reason_;
+
     bool propagateEClass(SearchState &state, uint32_t b, EClassId cid, std::vector<VarId> &worklist)
     {
         auto sel_it = state.selected_vars[b].find(cid);
@@ -60,7 +62,12 @@ class StartPrecedencePropagator : public Propagator
             if (st_dom.setMin(min_enode_start_min))
             {
                 if (st_dom.isEmpty())
+                {
+                    conflict_reason_ = "consumer=" + state.var_infos[st_var].name +
+                        state.domains[st_var].toString() + " selection=" + sel_dom.toString() +
+                        " required-min=" + std::to_string(min_enode_start_min);
                     return false;
+                }
                 state.setDomain(st_var, st_dom);
                 worklist.push_back(st_var);
             }
@@ -73,7 +80,9 @@ class StartPrecedencePropagator : public Propagator
     {
     }
 
-    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED) | varTypeMask(VarType::START); }
+
+    std::string conflictReason() const override { return conflict_reason_; }
 
     std::string name() const override
     {
@@ -82,13 +91,35 @@ class StartPrecedencePropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        conflict_reason_.clear();
         if (changed != kInvalidVarId)
         {
-            if (state.var_infos[changed].type != VarType::SELECTED)
+            const auto type = state.var_infos.at(changed).type;
+            if (type != VarType::START && type != VarType::SELECTED)
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
-            return propagateEClass(state, b, cid, worklist);
+            if (state.var_infos[changed].type == VarType::SELECTED)
+            {
+                // Selection changes activate both forward and backward edges.
+                state.schedulePropagation(state.start_vars[b].at(cid));
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+                    if (state.domains[changed].contains(static_cast<int32_t>(en_idx + 1)))
+                        for (EClassId child : state.bucket_egraphs[b].getENode(cls.enodes[en_idx]).getChildren())
+                        {
+                            const auto it = state.start_vars[b].find(state.bucket_egraphs[b].findConst(child));
+                            if (it != state.start_vars[b].end())
+                                state.schedulePropagation(it->second);
+                        }
+            }
+            if (!propagateEClass(state, b, cid, worklist))
+                return false;
+            state.ensurePropagationState();
+            for (const auto &consumer : state.propagation.start_precedence[b].consumers_by_cid.at(cid.value))
+                if (!propagateEClass(state, b, consumer.parent_cid, worklist))
+                    return false;
+            return true;
         }
         else
         {

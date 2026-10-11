@@ -18,6 +18,8 @@
 #include "tests/storage_output_regression.hpp"
 #include "tests/view_bufferize_regression.hpp"
 #include "tests/start_run_makespan.hpp"
+#include "tests/start_bounds.hpp"
+#include "tests/write_after_read_cache.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -30,6 +32,8 @@ int main(int argc, char *argv[])
     parser.add_flag({"--const-view"}, "Run only constant and view regression tests.");
     parser.add_flag({"--selection-reachability"}, "Run only selection reachability regression tests.");
     parser.add_flag({"--incremental-propagators"}, "Run only incremental propagator equivalence tests.");
+    parser.add_flag({"--write-after-read-cache"}, "Run write-after-read reader cache regression tests.");
+    parser.add_flag({"--start-bounds"}, "Run start bounds and precedence regression tests.");
     parser.add_flag({"--start-run-makespan"}, "Run only start-run makespan propagator tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
@@ -48,6 +52,16 @@ int main(int argc, char *argv[])
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--write-after-read-cache"))
+    {
+        runWriteAfterReadCacheTests();
+        return 0;
+    }
+    if (parser.get_flag("--start-bounds"))
+    {
+        runStartBoundsTests();
+        return 0;
+    }
     if (parser.get_flag("--planner-structure"))
     {
         runPlannerStructureTests();

@@ -746,6 +746,7 @@ class SearchState
     std::unordered_set<VarId> empty_domains;
 
     uint64_t domain_revision = 0;
+
     VarId last_domain_change_var = kInvalidVarId;
     Domain last_domain_change_before;
     Domain last_domain_change_after;
@@ -998,7 +999,11 @@ class SearchState
         const EClassId root_cid = egraph.findConst(bucket_root_ids[b]);
         bucket_root_ids[b] = root_cid;
         reachable_cids[b] = collectReachableCids(egraph, root_cid);
+        if (reachable_cids[b].empty() || reachable_cids[b].size() > static_cast<size_t>(INT32_MAX))
+            Error::throw_err("Bucket start horizon requires between 1 and INT32_MAX reachable classes");
         const uint32_t max_start = static_cast<uint32_t>(reachable_cids[b].size() - 1);
+        LOG(INFO) << "[SearchState start horizon] bucket=" << b << " initial=[0.." << max_start
+                  << "] source=structurally-reachable-classes count=" << reachable_cids[b].size();
         for (EClassId cid : reachable_cids[b])
         {
             const EClass &cls = egraph.getEClass(cid);
@@ -1081,6 +1086,11 @@ class SearchState
         return trail.size();
     }
 
+#ifdef TG_PROFILE
+    uint64_t start_lower_tightenings = 0;
+    uint64_t start_upper_tightenings = 0;
+    uint64_t selection_values_removed = 0;
+#endif
     uint64_t getDomainRevision() const
     {
         return domain_revision;
@@ -1148,6 +1158,18 @@ class SearchState
             last_domain_change_before = domains[var_id];
             last_domain_change_after = new_domain;
             domain_revision++;
+#ifdef TG_PROFILE
+            if (!domains[var_id].isEmpty() && !new_domain.isEmpty())
+            {
+                if (var_infos[var_id].type == VarType::START)
+                {
+                    start_lower_tightenings += new_domain.getMin() > domains[var_id].getMin();
+                    start_upper_tightenings += new_domain.getMax() < domains[var_id].getMax();
+                }
+                if (var_infos[var_id].type == VarType::SELECTED && new_domain.size() < domains[var_id].size())
+                    selection_values_removed += domains[var_id].size() - new_domain.size();
+            }
+#endif
             updatePropagationContribution(var_id, false);
             const bool was_empty = domains[var_id].isEmpty();
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
