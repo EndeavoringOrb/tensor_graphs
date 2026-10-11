@@ -80,7 +80,7 @@ class Store:
         rows = self.query("""
             UPDATE kernel_bench.jobs SET status = 'running', started_at = now(), error = NULL, error_details = NULL
             WHERE id = (SELECT id FROM kernel_bench.jobs WHERE status = 'queued' AND (mode <> 'evaluate') = %s
-                        ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+                        ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING *
         """, (validation,))
         return rows[0] if rows else None
@@ -110,3 +110,48 @@ class Store:
         self.execute("""UPDATE kernel_bench.jobs SET status = 'failed', error = %s,
             error_details = %s, result = %s, completed_at = now() WHERE id = %s""",
             (error, Jsonb(error_details or {}), Jsonb(result or {}), job_id))
+
+    def queueInfo(self, goal_id, job=None):
+        # Queues are server-wide, matching worker scheduling across all goals.
+        rows = self.query("""SELECT mode, count(*) FILTER (WHERE status = 'queued') AS queued,
+            count(*) FILTER (WHERE status = 'running') AS running FROM kernel_bench.jobs
+            WHERE status IN ('queued', 'running') GROUP BY mode""")
+        depths = {mode: {"queued": 0, "running": 0} for mode in ("lint", "compile", "evaluate")}
+        for row in rows:
+            depths[row["mode"]] = {key: row[key] for key in ("queued", "running")}
+        statistics = self.query("""SELECT mode, stage, count(*) AS sample_count,
+            avg(seconds) AS mean_seconds, min(seconds) AS minimum_seconds, max(seconds) AS maximum_seconds
+            FROM (SELECT * FROM kernel_bench.stage_durations ORDER BY created_at DESC LIMIT 1000) recent
+            GROUP BY mode, stage ORDER BY mode, stage""")
+        result = {"depth_by_mode": depths, "workers": self.query("""SELECT w.*, COALESCE(j.step, w.stage) AS running_stage, j.stage_started_at,
+                      w.heartbeat_at < now() - interval '30 seconds' AS stale
+                      FROM kernel_bench.workers w LEFT JOIN kernel_bench.jobs j ON j.id = w.job_id"""),
+                  "ordering": "created_at ASC, id ASC within validation (lint/compile) or evaluation lane; calibration runs when evaluation is idle",
+                  "recent_stage_durations": statistics, "estimated_completion_range_seconds": None}
+        if job is not None:
+            position = None
+            if job["status"] == "queued":
+                position = self.query("""SELECT count(*) + 1 AS position FROM kernel_bench.jobs
+                    WHERE status = 'queued' AND (mode <> 'evaluate') = %s
+                    AND (created_at, id) < (%s, %s)""", (job["mode"] != "evaluate", job["created_at"], job["id"]))[0]["position"]
+            result["position"] = position
+        if (job is None or job["status"] in ("queued", "running")) and not any(worker["stage"] == "baseline" for worker in result["workers"]):
+            history = self.query("""SELECT mode, count(*) AS count, min(seconds) AS low, max(seconds) AS high
+                FROM (SELECT mode, EXTRACT(EPOCH FROM completed_at - started_at) AS seconds
+                      FROM kernel_bench.jobs WHERE status = 'completed' AND started_at IS NOT NULL
+                      ORDER BY completed_at DESC LIMIT 100) recent GROUP BY mode""")
+            by_mode = {row["mode"]: row for row in history if row["count"] >= 5}
+            active_modes = [mode for mode, counts in depths.items() if counts["queued"] + counts["running"]]
+            if all(mode in by_mode for mode in active_modes):
+                # Historical estimate includes both lanes because heavy builds share the hardware lock.
+                upper = sum((depths[mode]["queued"] + depths[mode]["running"]) * float(by_mode[mode]["high"]) for mode in active_modes)
+                result["estimated_completion_range_seconds"] = [0, upper]
+                result["estimate_method"] = "0 to sum of active jobs times recent observed maximum duration per mode; at least 5 completed samples per active mode; not a guarantee"
+        return result
+
+    def getBaselines(self, goal_id, target_id):
+        return self.query("""SELECT c.id AS configuration_id, CASE WHEN b.status = 'running' THEN 'pending' ELSE COALESCE(b.status, 'pending') END AS status,
+            COALESCE(b.status = 'running', false) AS calibrating,
+            b.measurements, b.winner, b.identity, b.error, b.measured_at
+            FROM kernel_bench.configurations c LEFT JOIN kernel_bench.baselines b ON b.configuration_id = c.id
+            WHERE c.goal_id = %s AND c.target_id = %s ORDER BY c.id""", (goal_id, target_id))

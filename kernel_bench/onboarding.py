@@ -32,6 +32,19 @@ configurations. Poll /api/jobs/{job_id} until completed or failed; inspect
 /api/jobs/{job_id}/logs and correctness coverage, raw timing samples, medians,
 and per-configuration speedups for evaluate mode. Zero matches and correctness/build failures fail
 the job. Iterate using the measurements; report coverage and evidence for gains.
+Queue depths, worker heartbeat/stage, and historical completion estimates are in
+/api/status; full job responses include queue position. History supports status,
+mode, target_id, agent_id, limit, and cursor; follow next_cursor while has_more.
+Poll efficiently with fields=status,step,error,revision and after_revision=N&wait=25
+or If-None-Match with the returned ETag. KernelBenchClient.pollJobUntilComplete
+uses long polling. Target calibrated_baselines include every configuration's
+pending/measured/failed status and calibrated performance, separately from
+best_recorded_measurements in candidate history. Baselines calibrate when the
+evaluation worker is idle. POST /api/baselines/calibrate with retry_failed=true
+retries failed configurations. Channels support cursor, limit, and wait=25.
+The client requires a valid BENCH_SERVER_URL and BENCH_SECRET_TOKEN and includes
+HTTP response details in exceptions.
+
 The server builds, tests, and benchmarks on its hardware, so a local CUDA/compiler
 installation is unnecessary. Model inference, compiler selection, and automatic
 kernel promotion are outside this service's scope.

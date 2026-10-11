@@ -118,3 +118,49 @@ CREATE TABLE IF NOT EXISTS kernel_bench.messages (
     UNIQUE (author_key, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS messages_channel_cursor ON kernel_bench.messages(channel_id, id);
+
+-- Revisions cover every job mutation, including recovery and external updates.
+ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
+ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS stage_started_at timestamptz NOT NULL DEFAULT now();
+CREATE OR REPLACE FUNCTION kernel_bench.reviseJob() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.revision := OLD.revision + 1;
+    IF NEW.step IS DISTINCT FROM OLD.step OR NEW.status IS DISTINCT FROM OLD.status THEN
+        IF OLD.status = 'running' AND NEW.step <> 'recovered' THEN
+            INSERT INTO kernel_bench.stage_durations(job_id, mode, stage, seconds)
+            VALUES(OLD.id, OLD.mode, OLD.step, EXTRACT(EPOCH FROM now() - OLD.stage_started_at))
+            ON CONFLICT(job_id, stage) DO UPDATE SET seconds = kernel_bench.stage_durations.seconds + EXCLUDED.seconds;
+        END IF;
+        NEW.stage_started_at := now();
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS job_revision ON kernel_bench.jobs;
+CREATE TRIGGER job_revision BEFORE UPDATE ON kernel_bench.jobs
+FOR EACH ROW EXECUTE FUNCTION kernel_bench.reviseJob();
+CREATE INDEX IF NOT EXISTS jobs_polling ON kernel_bench.jobs(goal_id, created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS kernel_bench.workers (
+    lane text PRIMARY KEY,
+    heartbeat_at timestamptz NOT NULL DEFAULT now(),
+    job_id uuid,
+    stage text NOT NULL DEFAULT 'idle'
+);
+CREATE TABLE IF NOT EXISTS kernel_bench.stage_durations (
+    job_id uuid NOT NULL REFERENCES kernel_bench.jobs(id) ON DELETE CASCADE,
+    mode text NOT NULL,
+    stage text NOT NULL,
+    seconds double precision NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(job_id, stage)
+);
+CREATE TABLE IF NOT EXISTS kernel_bench.baselines (
+    configuration_id bigint PRIMARY KEY REFERENCES kernel_bench.configurations(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'measured', 'failed')),
+    measurements jsonb NOT NULL DEFAULT '[]',
+    winner jsonb,
+    identity jsonb,
+    error text,
+    measured_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS stage_durations_recent ON kernel_bench.stage_durations(created_at DESC);

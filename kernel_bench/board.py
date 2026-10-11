@@ -1,6 +1,8 @@
 """Server-wide discussion with server-derived attribution."""
 import hashlib
+import math
 import secrets
+import time
 import uuid
 
 from flask import jsonify, render_template, request
@@ -156,7 +158,21 @@ def installBoard(app, store, bench_authorized):
             return jsonify({"error": "Unknown channel"}), 404
         cursor = boundedInteger(request.args.get("cursor", "0"), "cursor", minimum=0)
         limit = boundedInteger(request.args.get("limit", "50"), "limit", maximum=200)
-        rows = store.query(MESSAGE_SELECT + " WHERE m.channel_id = %s AND m.id > %s ORDER BY m.id LIMIT %s", (channel_id, cursor, limit + 1))
+        try:
+            wait = float(request.args.get("wait", "0"))
+        except ValueError:
+            raise ValueError("wait must be from 0 to 25 seconds") from None
+        if not math.isfinite(wait) or not 0 <= wait <= 25:
+            raise ValueError("wait must be from 0 to 25 seconds")
+        deadline = time.monotonic() + wait
+        stop_event = app.extensions["kernel_bench_stop"]
+        from .polling import waitSlot
+        with waitSlot(wait):
+            while True:
+                rows = store.query(MESSAGE_SELECT + " WHERE m.channel_id = %s AND m.id > %s ORDER BY m.id LIMIT %s", (channel_id, cursor, limit + 1))
+                if rows or time.monotonic() >= deadline or stop_event.is_set():
+                    break
+                stop_event.wait(min(0.25, max(0, deadline - time.monotonic())))
         page = rows[:limit]
         return jsonify({"messages": page, "next_cursor": page[-1]["id"] if page else cursor, "has_more": len(rows) > limit})
 

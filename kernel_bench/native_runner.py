@@ -125,6 +125,42 @@ def evaluate(payload, state):
     return result
 
 
+def calibrate(payload, state):
+    """Same correctness seed, benchmark rounds and competitor policy as evaluation."""
+    row = payload["configuration"]
+    configuration = row["configuration"]
+    eligible = [kernel for kernel in native.kernel_bench_kernels()
+                if kernel["reference_expression"] == payload["reference_expression"]
+                and not kernel["is_view"] and kernel["has_reference_factory"]
+                and native.kernel_bench_matches(kernel["kernel_id"], configuration)]
+    optimized = [kernel for kernel in eligible if not kernel["is_reference"]]
+    ordered = sorted(optimized or eligible, key=lambda kernel: kernel["kernel_id"])
+    if not ordered:
+        raise NativeFailure("No eligible baseline kernels", {"kind": "no_matching_kernels", "stage": "baseline"})
+    for kernel in ordered:
+        state["error_details"] = {"stage": "test", "configuration_id": row["id"], "kernel_name": kernel["name"]}
+        checkpoint(payload, state)
+        diagnostic = native.kernel_bench_test_diagnostics(kernel["kernel_id"], configuration, 42)
+        if not diagnostic["passed"]:
+            raise NativeFailure("Baseline correctness failed", {**state["error_details"], **diagnostic})
+    samples = {kernel["kernel_id"]: [] for kernel in ordered}
+    for round_idx in range(2):
+        for kernel in ordered if round_idx == 0 else reversed(ordered):
+            state["error_details"] = {"stage": "benchmark", "configuration_id": row["id"], "kernel_name": kernel["name"]}
+            checkpoint(payload, state)
+            samples[kernel["kernel_id"]].extend(native.kernel_bench_benchmark(
+                kernel["kernel_id"], configuration, payload.get("iterations", 8)))
+    measurements = []
+    for kernel in ordered:
+        values = samples[kernel["kernel_id"]]
+        if not values or not all(math.isfinite(value) and value > 0 for value in values):
+            raise ValueError("Baseline benchmark returned invalid samples")
+        measurements.append({"kernel_id": kernel["kernel_id"], "kernel_name": kernel["name"],
+                             "samples_ms": values, "median_ms": statistics.median(values)})
+    return {"measurements": measurements, "winner": min(measurements, key=lambda value: value["median_ms"]),
+            "enabled_capabilities": native.kernel_bench_capabilities()}
+
+
 def main():
     global native
     payload = json.load(sys.stdin)
@@ -135,6 +171,8 @@ def main():
         native = native_module
         if payload["action"] == "discover":
             state["result"] = {"kernels": native.kernel_bench_kernels(), "calls": native.kernel_bench_discover(payload["cache_path"]), "enabled_capabilities": native.kernel_bench_capabilities()}
+        elif payload["action"] == "baseline":
+            state["result"] = calibrate(payload, state)
         elif payload["action"] in ("evaluate", "compile"):
             state["result"] = evaluate(payload, state)
         else:

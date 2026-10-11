@@ -38,7 +38,7 @@ def testDrainFinishesActiveJobWithoutClaimingAnother(monkeypatch):
 
         def nextJob(self, validation=False):
             self.claims += 1
-            return {"goal_id": 1}
+            return {"goal_id": 1, "id": "test-job"}
 
     def evaluateJob(*args):
         entered.set()

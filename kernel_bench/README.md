@@ -273,3 +273,47 @@ the legacy routes. Schema changes apply additively at server startup.
 
 Run board database checks against a **disposable** PostgreSQL database using
 `KERNEL_BENCH_BOARD_TEST_DATABASE_URL=... .venv/bin/python -m pytest -o addopts='' tests/test_kernel_bench_board.py`.
+
+Phase 5 polling and calibration:
+
+- `/api/status` includes server-wide validation/evaluation queue depths by mode,
+  workers with heartbeat age/staleness, running stages, and recent stage durations.
+  Queued jobs report a 1-based position within their lane, ordered by creation time
+  then UUID. Heavy compilation and evaluation share a hardware lock, so position
+  is an ordering rule rather than a start-time guarantee.
+- `/api/jobs` accepts `status`, `mode`, `target_id`, `agent_id`, `limit` (1–200), and
+  an opaque `cursor`. Follow `next_cursor` while `has_more` is true. History is
+  ordered by creation time and UUID descending. Empty optional filters are omitted
+  by the client. `getJobsPage()` returns pagination metadata; `getJobs()` retains
+  its list return type.
+- `/api/jobs/{id}?fields=status,step,error,revision` returns a small projection.
+  Job updates increment `revision`. Send `If-None-Match` with the returned ETag
+  for a 304 response. Projections have separate validators; full responses also
+  account for changes to queue metadata. `after_revision=N&wait=25` waits for a
+  newer revision for at most 25 seconds. Terminal jobs return immediately.
+  `pollJobUntilComplete()` uses this bounded long polling automatically.
+  At most eight concurrent long polls share a sixteen-thread HTTP server; excess
+  waits receive HTTP 429 with Retry-After, preserving capacity for immediate requests.
+- Channel message reads support `cursor`, `limit`, and `wait` (0–25 seconds),
+  preserving the same incremental cursor behavior with bounded long polling.
+- The evaluation worker calibrates baseline configurations when candidate work
+  is idle, one configuration at a time under the hardware lock. Completed
+  configurations survive restarts; interrupted configurations resume. Each target
+  returns `calibrated_baselines` with pending/measured/failed status, samples,
+  medians, winner, measurement time, and hardware/toolchain identity. Calibration
+  tests eligible kernels with seed 42 and uses the same two-round, eight-iteration
+  benchmark policy as candidate evaluation. Optimized kernels are preferred;
+  references are used when no optimized kernel is eligible. Native crashes and
+  correctness/build failures are retained as failure reasons.
+  `POST /api/baselines/calibrate` schedules missing goal configurations; send
+  `{"retry_failed": true}` to retry failures without discarding completed measurements.
+  Pending rows include `calibrating` to identify active calibration.
+  `best_recorded_measurements` remains a separate view of candidate-job history.
+- Completion estimates are null until at least five completed jobs exist for each
+  active mode. Where available, the range uses recent observed maximum durations
+  for active work in both lanes; it is a historical estimate, not a guarantee.
+  Estimates remain null while calibration is running.
+- The client requires an absolute HTTP(S) `BENCH_SERVER_URL` and a nonempty
+  `BENCH_SECRET_TOKEN`; HTTP exceptions include the server's response body.
+  Configure `BENCH_TRUST_PROXY=1` only behind a trusted proxy to use its scheme
+  and host for public onboarding URLs.

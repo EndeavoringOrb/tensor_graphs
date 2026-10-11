@@ -26,6 +26,7 @@ from .jobs import (
     initializeGoal,
     startWorker,
 )
+from .polling import listJobs, pollJob
 from .storage import Store
 
 logger = logging.getLogger(__name__)
@@ -34,23 +35,24 @@ TOOLS = [
     {"name": "register_agent", "method": "POST", "path": "/api/agents/register", "description": "Register display_name; persist returned id and agent_token privately; send X-Agent-Token for attribution"},
     {"name": "agent_identity", "method": "GET", "path": "/api/agents/me", "description": "Inspect identity using X-Agent-Token plus X-Bench-Token"},
     {"name": "channels", "method": "GET", "path": "/api/channels", "description": "Server-wide general and suggestions channels"},
-    {"name": "read_messages", "method": "GET", "path": "/api/channels/{id}/messages", "description": "Read messages with cursor and limit (1–200); next_cursor and has_more returned"},
+    {"name": "read_messages", "method": "GET", "path": "/api/channels/{id}/messages", "description": "Read messages with cursor and limit (1–200); next_cursor and has_more returned; wait (0–25 seconds) enables long polling"},
     {"name": "post_message", "method": "POST", "path": "/api/channels/{id}/messages", "description": "Post body (1–16000 characters), idempotency_key, optional reply_to_message_id, goal_id, target_id, job_id; X-Agent-Token required for agents"},
     {"name": "get_message", "method": "GET", "path": "/api/messages/{id}", "description": "Retrieve a linked message"},
     {"name": "kernel_contract", "method": "GET", "path": "/api/kernel-contract", "description": "Native signatures, registration parameters, configuration encoding and CPU/CUDA skeletons"},
     {"name": "linter_rules", "method": "GET", "path": "/api/linter/rules", "description": "Shared build linter rule identifiers, descriptions and scopes"},
     {"name": "kernel_names", "method": "GET", "path": "/api/kernels/list?name=...", "description": "Exact baseline name lookup and availability; independent candidate jobs may reuse names"},
-    {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity and kernel-level scope"},
+    {"name": "baseline_calibration", "method": "POST", "path": "/api/baselines/calibrate", "description": "Schedule resumable goal calibration; optional retry_failed boolean; inspect calibrated_baselines on targets"},
+    {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity, server-wide queue depths by mode, worker heartbeats and recent stage durations"},
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
     {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
     {"name": "read_source", "method": "GET", "path": "/api/source?path=...", "description": "Read baseline kernel/core/reference/hardware source snapshot"},
     {"name": "lint_iteration", "method": "POST", "path": "/api/iteration/lint", "description": "Validate candidate lint without building or benchmarking; returns a queued validation job"},
     {"name": "submit_iteration", "method": "POST", "path": "/api/iteration/submit", "description": "Submit target_id, source, backend (cpu/cuda), idea, and mode (lint/compile/evaluate, default evaluate); one REGISTER_KERNEL"},
-    {"name": "get_job", "method": "GET", "path": "/api/jobs/{job_id}", "description": "Correctness coverage, measurements, and per-configuration speedups"},
+    {"name": "get_job", "method": "GET", "path": "/api/jobs/{job_id}", "description": "Job revision and ETag; fields projection; bounded long polling with after_revision and wait (0–25 seconds); queue position and results"},
     {"name": "get_job_logs", "method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Build/test/benchmark diagnostics; filters: after_id, tail (1–1000), stage, literal grep (max 200 characters)"},
     {"name": "list_job_artifacts", "method": "GET", "path": "/api/jobs/{job_id}/artifacts", "description": "Durable source, build commands, capabilities and full diagnostics"},
     {"name": "read_job_artifact", "method": "GET", "path": "/api/jobs/{job_id}/artifacts/{artifact_id}", "description": "Download an artifact by job-scoped ID"},
-    {"name": "list_jobs", "method": "GET", "path": "/api/jobs?target_id=...", "description": "Shared trial history; targets have no reservations"},
+    {"name": "list_jobs", "method": "GET", "path": "/api/jobs?target_id=...", "description": "Cursor-paginated history: status, mode, target_id, agent_id, limit (1–200), cursor"},
 ]
 
 
@@ -88,7 +90,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         if authorized(candidate):
             return None
         if request.path.startswith("/api/"):
-            return jsonify({"error": "Authentication required: X-Bench-Token"}), 401
+            return jsonify({"error": "Invalid X-Bench-Token" if candidate else "Authentication required: X-Bench-Token"}), 401
         return redirect("/login")
 
     installBoard(app, store, authorized)
@@ -127,6 +129,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         metadata = goal.pop("metadata")
         return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(goal_id)),
                         "hardware": metadata.get("hardware", {}),
+                        "queue": store.queueInfo(goal_id),
                         "pipeline": ["build", "test", "benchmark", "compare"]})
 
     @app.get("/api/targets")
@@ -156,7 +159,24 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
                         "kernels": kernels, "source_paths": sorted({kernel["source_path"] for kernel in kernels if kernel.get("source_path")}),
                         "contract": CONTRACT, "enabled_capabilities": metadata.get("enabled_capabilities"),
                         "capabilities_status": "known" if "enabled_capabilities" in metadata else "unknown_legacy_snapshot",
+                        "calibrated_baselines": store.getBaselines(goal_id, target_id),
                         "best_recorded_measurements": store.getBestMeasurements(goal_id, target_id)})
+
+    @app.post("/api/baselines/calibrate")
+    def baselineCalibration():
+        data = request.get_json()
+        if not isinstance(data, dict) or any(key not in ("retry_failed",) for key in data):
+            raise ValueError("Expected an object with optional retry_failed")
+        retry_failed = data.get("retry_failed", False)
+        if not isinstance(retry_failed, bool):
+            raise TypeError("retry_failed must be a boolean")
+        store.execute("""INSERT INTO kernel_bench.baselines(configuration_id)
+            SELECT id FROM kernel_bench.configurations WHERE goal_id = %s ON CONFLICT DO NOTHING""", (goal_id,))
+        if retry_failed:
+            store.execute("""UPDATE kernel_bench.baselines SET status = 'pending', error = NULL, measured_at = NULL
+                WHERE status = 'failed' AND configuration_id IN
+                (SELECT id FROM kernel_bench.configurations WHERE goal_id = %s)""", (goal_id,))
+        return jsonify({"goal_id": goal_id, "status": "scheduled", "ordering": "calibration runs when evaluation is idle"}), 202
 
     @app.get("/api/kernels/list")
     def kernels():
@@ -217,11 +237,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     @app.get("/api/history")
     @app.get("/api/versions")
     def jobs():
-        target_id = request.args.get("target_id", "")
-        rows = store.query("""SELECT id AS job_id, agent_id, target_id, idea, kernel_name, backend, mode, status, step,
-            result, error, error_details, created_at, completed_at FROM kernel_bench.jobs
-            WHERE goal_id = %s AND (%s = '' OR target_id = %s) ORDER BY created_at DESC LIMIT 200""", (goal_id, target_id, target_id))
-        return jsonify({"jobs": rows})
+        return listJobs(store, goal_id)
 
     def currentJob(job_id):
         uuid.UUID(job_id)
@@ -230,11 +246,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/jobs/<job_id>")
     def job(job_id):
-        row = currentJob(job_id)
-        if row is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
-        row["job_id"] = row.pop("id")
-        return jsonify(row)
+        return pollJob(store, currentJob, job_id, stop_event)
 
     @app.get("/api/jobs/<job_id>/logs")
     def logs(job_id):
@@ -405,7 +417,7 @@ def serveApp(args):
         # Install handlers before discovery: a stop during startup waits for its native process too.
         app = createApp(goal_cache=args.goal_cache, stop_event=stop_event)
         if not stop_event.is_set():
-            server = create_server(app, host=args.host, port=args.port, threads=4,
+            server = create_server(app, host=args.host, port=args.port, threads=16,
                                    trusted_proxy="127.0.0.1" if os.environ.get("BENCH_TRUST_PROXY") == "1" else None,
                                    trusted_proxy_headers={"x-forwarded-proto", "x-forwarded-host"}
                                    if os.environ.get("BENCH_TRUST_PROXY") == "1" else set())

@@ -373,8 +373,65 @@ def evaluateJob(store, job, workspace):
     store.completeJob(job["id"], result)
 
 
+def calibrateNext(store, workspace_root):
+    # Called only by the exclusive evaluation worker, while holding the hardware lock.
+    store.execute("""INSERT INTO kernel_bench.baselines(configuration_id)
+        SELECT id FROM kernel_bench.configurations ON CONFLICT DO NOTHING""")
+    rows = store.query("""SELECT c.*, t.expression FROM kernel_bench.baselines b
+        JOIN kernel_bench.configurations c ON c.id = b.configuration_id
+        JOIN kernel_bench.targets t ON t.id = c.target_id
+        WHERE b.status IN ('pending', 'running') ORDER BY c.goal_id, c.id LIMIT 1""")
+    if not rows:
+        return False
+    calibrateConfiguration(store, rows[0], workspace_root)
+    return True
+
+
+def calibrateConfiguration(store, row, workspace_root):
+    store.execute("UPDATE kernel_bench.baselines SET status = 'running' WHERE configuration_id = %s", (row["id"],))
+    workspace = workspace_root / ("baseline-" + str(row["goal_id"]))
+    workspace.mkdir(exist_ok=True)
+    try:
+        marker = workspace / ".baseline_built"
+        if not marker.exists():
+            goal = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (row["goal_id"],))[0]
+            with zipfile.ZipFile(io.BytesIO(bytes(goal["source_archive"]))) as archive:
+                archive.extractall(workspace)
+            build_env = {**os.environ, "KERNEL_BENCH_SERVER_JOB": "1", "KERNEL_BENCH_DIAGNOSTICS_DIR": str(workspace / "build_diagnostics")}
+            build = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"],
+                           workspace, TIMEOUTS["build"], env=build_env)
+            if build["exit_code"] != 0:
+                raise RuntimeError("Baseline build failed: " + build["output"])
+            marker.touch()
+        result, _log = runNative(workspace, {"action": "baseline", "reference_expression": row["expression"],
+                                            "configuration": {"id": row["id"], "configuration": row["configuration"]}}, TIMEOUTS["evaluate"])
+        metadata_path = workspace / "build_diagnostics/build_metadata.json"
+        identity = {"hardware": hardwareIdentity(), "goal_fingerprint": store.getGoal(row["goal_id"])["fingerprint"],
+                    "toolchain": json.loads(metadata_path.read_text()) if metadata_path.exists() else {},
+                    "enabled_capabilities": result["enabled_capabilities"],
+                    "methodology": {"seed": 42, "rounds": 2, "iterations": 8, "competitors": "optimized kernels or reference fallback"}}
+        store.execute("""UPDATE kernel_bench.baselines SET status = 'measured', measurements = %s,
+            winner = %s, identity = %s, measured_at = now(), error = NULL WHERE configuration_id = %s""",
+            (Jsonb(result["measurements"]), Jsonb(result["winner"]), Jsonb(identity), row["id"]))
+    except Exception as error:  # noqa: BLE001 - retain per-configuration failures and continue calibration
+        store.execute("UPDATE kernel_bench.baselines SET status = 'failed', error = %s, measured_at = now() WHERE configuration_id = %s",
+                      (str(error), row["id"]))
+    return True
+
+
 def runWorker(store, stop_event, validation=False):
     worker_lock = WORKER_LOCK + 1 if validation else WORKER_LOCK
+    lane = "validation" if validation else "evaluation"
+    heartbeat_stop = threading.Event()
+    def heartbeat(heartbeat_stop):
+        while not heartbeat_stop.is_set():
+            try:
+                store.execute("UPDATE kernel_bench.workers SET heartbeat_at = now() WHERE lane = %s", (lane,))
+            except Exception:
+                logger.exception("Worker heartbeat failed")
+            heartbeat_stop.wait(5)
+    # Heartbeat ownership begins only after acquiring the lane lock.
+    heartbeat_thread = None
     with tempfile.TemporaryDirectory(prefix="kernel-bench-worker-") as temp_path:
         while not stop_event.is_set():
             with store.connection() as lock_connection:
@@ -386,9 +443,23 @@ def runWorker(store, stop_event, validation=False):
                 try:
                     if stop_event.is_set():
                         break
+                    store.execute("""INSERT INTO kernel_bench.workers(lane, stage) VALUES (%s, 'idle')
+                        ON CONFLICT(lane) DO UPDATE SET heartbeat_at = now(), job_id = NULL, stage = 'idle'""", (lane,))
+                    if heartbeat_thread is None:
+                        heartbeat_stop = threading.Event()
+                        heartbeat_thread = threading.Thread(target=heartbeat, args=(heartbeat_stop,), daemon=True)
+                        heartbeat_thread.start()
                     store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running' AND (mode <> 'evaluate') = %s", (validation,))
                     job = store.nextJob(validation)
+                    if job is None and not validation:
+                        store.execute("UPDATE kernel_bench.workers SET stage = 'baseline' WHERE lane = %s", (lane,))
+                        lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
+                        try:
+                            calibrateNext(store, Path(temp_path))
+                        finally:
+                            lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
                     if job is not None:
+                        store.execute("UPDATE kernel_bench.workers SET job_id = %s, stage = 'running' WHERE lane = %s", (job["id"], lane))
                         workspace = Path(temp_path) / str(job["goal_id"])
                         workspace.mkdir(exist_ok=True)
                         try:
@@ -412,6 +483,11 @@ def runWorker(store, stop_event, validation=False):
                                           getattr(error, "details", {"kind": "worker_failure", "stage": job.get("step", "worker")}),
                                           getattr(error, "result", {}))
                 finally:
+                    heartbeat_stop.set()
+                    if heartbeat_thread is not None:
+                        heartbeat_thread.join(timeout=10)
+                        heartbeat_thread = None
+                    store.execute("UPDATE kernel_bench.workers SET job_id = NULL, stage = 'idle', heartbeat_at = now() WHERE lane = %s", (lane,))
                     lock_connection.execute("SELECT pg_advisory_unlock(%s)", (worker_lock,))
             if job is None:
                 stop_event.wait(1)

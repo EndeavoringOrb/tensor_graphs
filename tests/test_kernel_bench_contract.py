@@ -37,6 +37,9 @@ def testDiscovery(monkeypatch):
         def query(self, sql, parameters):
             return [{'expression': 'COPY($0,)'}]
 
+        def getBaselines(self, goal_id, target_id):
+            return []
+
         def getBestMeasurements(self, goal_id, target_id):
             return []
 
