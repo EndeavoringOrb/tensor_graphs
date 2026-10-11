@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request, send_file
+from flask import Flask, g, jsonify, redirect, render_template, request, send_file
 from psycopg.types.json import Jsonb
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -100,8 +100,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.before_request
     def authenticate():
-        nonlocal goal_id
-        goal_id = currentGoalId()
+        g.goal_id = currentGoalId()
         if stop_event.is_set():
             return jsonify({"error": "KernelBench is draining for shutdown"}), 503, {"Retry-After": "60"}
         if request.path in ("/login", "/welcome", "/api/agent", "/api/agent/index"):
@@ -145,33 +144,33 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/status")
     def status():
-        goal = store.getGoal(goal_id)
+        goal = store.getGoal(g.goal_id)
         metadata = goal.pop("metadata")
-        return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(goal_id)),
+        return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(g.goal_id)),
                         "hardware": metadata.get("hardware", {}),
-                        "queue": store.queueInfo(goal_id),
+                        "queue": store.queueInfo(g.goal_id),
                         "pipeline": ["lint", "build", "test", "benchmark", "compare", "goal_validation", "promotion"]})
 
     @app.get("/api/targets")
     @app.get("/api/analyze")
     def targets():
-        rows = store.getTargets(goal_id)
+        rows = store.getTargets(g.goal_id)
         search = request.args.get("search", "").lower()
         if search:
             rows = [row for row in rows if search in row["reference_expression"].lower()]
-        metadata = store.getGoal(goal_id)["metadata"]
+        metadata = store.getGoal(g.goal_id)["metadata"]
         for row in rows:
             row["matching_kernels"] = {key: value for group in row["matching_kernels"] for key, value in group.items()}
             row["source_paths"] = sorted({kernel["source_path"] for kernel in targetKernels(metadata, row["reference_expression"]) if kernel.get("source_path")})
-        return jsonify({"goal_id": goal_id, "targets": rows})
+        return jsonify({"goal_id": g.goal_id, "targets": rows})
 
     @app.get("/api/targets/<target_id>")
     def target(target_id):
-        configurations = store.getConfigurations(goal_id, target_id)
+        configurations = store.getConfigurations(g.goal_id, target_id)
         if not configurations:
             return jsonify({"error": "Unknown target for this goal"}), 404
         expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (target_id,))[0]["expression"]
-        metadata = store.getGoal(goal_id)["metadata"]
+        metadata = store.getGoal(g.goal_id)["metadata"]
         kernels = targetKernels(metadata, expression)
         for row in configurations:
             row["configuration"]["decoded_input_constants"] = decodeConstants(row["configuration"])
@@ -179,15 +178,15 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
                         "kernels": kernels, "source_paths": sorted({kernel["source_path"] for kernel in kernels if kernel.get("source_path")}),
                         "contract": CONTRACT, "enabled_capabilities": metadata.get("enabled_capabilities"),
                         "capabilities_status": "known" if "enabled_capabilities" in metadata else "unknown_legacy_snapshot",
-                        "calibrated_baselines": store.getBaselines(goal_id, target_id),
-                        "best_recorded_measurements": store.getBestMeasurements(goal_id, target_id)})
+                        "calibrated_baselines": store.getBaselines(g.goal_id, target_id),
+                        "best_recorded_measurements": store.getBestMeasurements(g.goal_id, target_id)})
 
     @app.post("/api/baselines/calibrate")
     def baselineCalibration():
         data = request.get_json()
         if not isinstance(data, dict) or any(key not in ("retry_failed", "goal_id") for key in data):
             raise ValueError("Expected an object with optional retry_failed and goal_id")
-        calibration_goal_id = data.get("goal_id", goal_id)
+        calibration_goal_id = data.get("goal_id", g.goal_id)
         if isinstance(calibration_goal_id, bool) or not isinstance(calibration_goal_id, int):
             raise TypeError("goal_id must be an integer")
         try:
@@ -208,7 +207,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/kernels/list")
     def kernels():
-        rows = store.getGoal(goal_id)["metadata"]["kernels"]
+        rows = store.getGoal(g.goal_id)["metadata"]["kernels"]
         name = request.args.get("name")
         if name is not None:
             rows = [kernel for kernel in rows if kernel["name"] == name]
@@ -224,10 +223,10 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def kernelContract():
         from .onboarding import SKELETONS
         return jsonify({**CONTRACT, "skeletons": SKELETONS,
-                        "enabled_capabilities": store.getGoal(goal_id)["metadata"].get("enabled_capabilities")})
+                        "enabled_capabilities": store.getGoal(g.goal_id)["metadata"].get("enabled_capabilities")})
 
     def readArchive():
-        row = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (goal_id,))[0]
+        row = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (g.goal_id,))[0]
         return zipfile.ZipFile(io.BytesIO(bytes(row["source_archive"])))
 
     @app.get("/api/source/list")
@@ -258,28 +257,27 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
                 raise TypeError(f"{key} must be a string")
         mode = "lint" if request.path == "/api/iteration/lint" else data.get("mode", "evaluate")
         author = authorIdentity(store, authorized) if request.headers.get("X-Agent-Token") else None
-        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode, agent_id=author["id"] if author else None)
+        job_id = createJob(store, g.goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode, agent_id=author["id"] if author else None)
         return jsonify({"job_id": job_id, "validation_id": job_id, "mode": mode, "status": "queued"}), 202
 
     @app.get("/api/jobs")
     @app.get("/api/history")
     @app.get("/api/versions")
     def jobs():
-        return listJobs(store, goal_id)
+        return listJobs(store, g.goal_id)
 
-    def currentJob(job_id):
+    def storedJob(job_id):
         uuid.UUID(job_id)
-        row = store.getJob(job_id)
-        return row if row and row["goal_id"] == goal_id else None
+        return store.getJob(job_id)
 
     @app.get("/api/jobs/<job_id>")
     def job(job_id):
-        return pollJob(store, currentJob, job_id, stop_event)
+        return pollJob(store, storedJob, job_id, stop_event)
 
     @app.get("/api/jobs/<job_id>/logs")
     def logs(job_id):
-        if currentJob(job_id) is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
+        if storedJob(job_id) is None:
+            return jsonify({"error": "Unknown job"}), 404
         clauses = ["job_id = %s"]
         parameters = [job_id]
         after_id = request.args.get("after_id")
@@ -319,8 +317,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/jobs/<job_id>/artifacts")
     def artifacts(job_id):
-        if currentJob(job_id) is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
+        if storedJob(job_id) is None:
+            return jsonify({"error": "Unknown job"}), 404
         rows = store.query("""SELECT id, name, media_type, octet_length(data) AS size_bytes, created_at
             FROM kernel_bench.artifacts WHERE job_id = %s ORDER BY name""", (job_id,))
         for row in rows:
@@ -330,8 +328,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/jobs/<job_id>/artifacts/<artifact_id>")
     def artifact(job_id, artifact_id):
-        if currentJob(job_id) is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
+        if storedJob(job_id) is None:
+            return jsonify({"error": "Unknown job"}), 404
         uuid.UUID(artifact_id)
         rows = store.query("SELECT name, media_type, data FROM kernel_bench.artifacts WHERE job_id = %s AND id = %s",
                            (job_id, artifact_id))
@@ -345,7 +343,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     @app.get("/api/benchmarks/records")
     def measurements():
         rows = store.query("""SELECT m.* FROM kernel_bench.measurements m JOIN kernel_bench.jobs j ON j.id = m.job_id
-            WHERE j.goal_id = %s ORDER BY j.created_at DESC LIMIT 1000""", (goal_id,))
+            WHERE j.goal_id = %s ORDER BY j.created_at DESC LIMIT 1000""", (g.goal_id,))
         return jsonify({"records": rows})
 
     def starterFiles():
@@ -359,7 +357,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def agent():
         from .onboarding import INSTRUCTIONS
         base_url = request.url_root.rstrip("/")
-        return jsonify({"scope": "kernel", "goal_id": goal_id, "tools": TOOLS,
+        return jsonify({"scope": "kernel", "goal_id": g.goal_id, "tools": TOOLS,
                         "instructions": INSTRUCTIONS,
                         "authentication": {"header": "X-Bench-Token", "environment_variable": "BENCH_SECRET_TOKEN"},
                         "setup": {"base_url": base_url, "environment_variable": "BENCH_SERVER_URL",
@@ -414,7 +412,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
 
     from .promotion import installPromotion
-    installPromotion(app, store, currentGoalId)
+    installPromotion(app, store, lambda: g.goal_id)
     from .admin import installAdmin
     installAdmin(app, store)
 

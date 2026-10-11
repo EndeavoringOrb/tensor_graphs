@@ -293,5 +293,15 @@ def testAdminGoalSelectionAndQueuedPreparation(pollingDatabase, monkeypatch, tmp
     assert job["mode"] == "goal_setup" and job["status"] == "queued"
     assert job["result"]["cache_path"] == str(cache)
     assert job["result"]["recipe"]["kernel_speedup"] == 1.02
+    other_id = store.query("""INSERT INTO kernel_bench.goals(fingerprint, name, cache_sha256, cache_data, source_archive, metadata)
+        VALUES (%s, 'alternate goal', '', '', '', '{"kernels": []}') RETURNING id""", (str(uuid.uuid4()),))[0]["id"]
+    try:
+        assert client.post("/api/admin/goals/activate", headers=headers, json={"goal_id": other_id}).status_code == 200
+        assert client.get("/api/status", headers=headers).get_json()["goal"]["id"] == other_id
+        assert client.get("/api/jobs/" + str(job["id"]) + "/logs", headers=headers).status_code == 200
+        assert client.get("/api/jobs/" + str(job["id"]), headers=headers).status_code == 200
+    finally:
+        client.post("/api/admin/goals/activate", headers=headers, json={"goal_id": goal_id})
+        store.execute("DELETE FROM kernel_bench.goals WHERE id = %s", (other_id,))
     assert client.get("/api/jobs?mode=goal_setup", headers=headers).status_code == 200
     assert client.get("/api/status", headers=headers).get_json()["queue"]["depth_by_mode"]["goal_setup"]["queued"] >= 1
