@@ -1,6 +1,7 @@
 """Compare native TensorGraphs and Sentence Transformers EmbeddingGemma 2 outputs."""
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -66,10 +67,13 @@ def parseArgs() -> argparse.Namespace:
         help="Path to compiled cache file. If specified, enables compilation caching to/from this file.",
     )
     parser.add_argument("--validation-report", type=Path)
+    parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--bucket-weights", type=float, nargs="+")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iterations", type=int, default=16)
     args = parser.parse_args()
+    if args.plan_only and not args.validation_report:
+        parser.error("plan-only requires validation-report")
     if args.validation_report and (args.modality == "all" or args.config == "all" or args.saturate_only or not args.cache_file):
         parser.error("validation-report requires one modality/configuration, a cache, and inference")
     if not 0 <= args.warmup <= 100 or not 1 <= args.iterations <= 1000:
@@ -192,14 +196,14 @@ def encodeReference(model: SentenceTransformer, modality: str, args: argparse.Na
 
 def compareEmbedding(native_values: list[float], reference: torch.Tensor, modality: str,
                      config_name: str, cosine_tolerance: float) -> None:
-    native = torch.tensor(native_values, dtype=torch.float32).reshape(1, -1)
-    expected = reference.detach().float().cpu().reshape(1, -1)
+    native = torch.tensor(native_values, dtype=torch.float64).reshape(1, -1)
+    expected = reference.detach().double().cpu().reshape(1, -1)
     if native.shape != expected.shape:
         raise AssertionError(f"{config_name}/{modality}: shape {tuple(native.shape)} != {tuple(expected.shape)}")
     cosine = torch.nn.functional.cosine_similarity(native, expected).item()
     max_abs = (native - expected).abs().max().item()
     print(f"{modality}: cosine={cosine:.7f}, max_abs={max_abs:.7f}", flush=True)
-    if cosine < cosine_tolerance:
+    if not torch.isfinite(native).all() or not math.isfinite(cosine) or cosine < cosine_tolerance:
         raise AssertionError(
             f"{config_name}/{modality}: cosine {cosine:.7f} is below {cosine_tolerance:.7f}"
         )
@@ -227,6 +231,12 @@ def runEmbeddingGemma2(config_name: str, modality: str, args: argparse.Namespace
     if args.saturate_only:
         return
 
+    if args.plan_only:
+        from goal_validation import writeGoalReport
+        writeGoalReport(session.session, session.root_id, args.cache_file, args.validation_report,
+                        None, args.warmup, args.iterations, plan_only=True)
+        return
+
     reference = encodeReference(reference_model, modality, args, native_input)
     if modality == "text":
         output = session.embed_text(token_ids)
@@ -249,7 +259,7 @@ def main() -> None:
     selected_modalities = MODALITIES if args.modality == "all" else (args.modality,)
     config_names = list(CONFIGS) if args.config == "all" else [args.config]
     reference_model = (
-        None if args.saturate_only
+        None if args.saturate_only or args.plan_only
         else SentenceTransformer(str(args.model_path), device=args.device)
     )
     processor = AutoProcessor.from_pretrained(args.model_path)

@@ -142,6 +142,9 @@ std::vector<float> executeFusedKernel(const KernelEntry &kernel, const std::vect
         kernel.inferView(dummyInputs, dummyOutView, graph);
 
         outView.strides = dummyOutView.strides;
+        outView.offset = dummyOutView.offset;
+        if (outView.offset + getStorageSpanBytes(outView) > pk.inputBuffers[0].hostData.size())
+            Error::throw_err("Inferred reference view exceeds its input buffer");
 
         return flattenOutput(pk.inputBuffers[0].hostData.data() + outView.offset, outView.getShape(), outView.strides,
                              outView.dtype);

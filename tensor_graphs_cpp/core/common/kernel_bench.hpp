@@ -172,6 +172,29 @@ inline std::vector<Record> discoverCalls(const std::string &cache_path, Discover
             }
             if (data)
             {
+                // A logical ID may name a scalar constant underlying a larger
+                // transformed value. It is not that value's captured storage.
+                // Staging is owned contiguous logical data, not the compiled
+                // allocation at view.offset. Scalar broadcast views are the
+                // only safe expansion of a shorter staged constant.
+                auto dtype_size = getDTypeSize(view.dtype);
+                auto logical_bytes = countElements(view) * dtype_size;
+                bool scalar_broadcast = data->size() == dtype_size && getStorageSpanBytes(view) == dtype_size;
+                if (data->size() != logical_bytes && !scalar_broadcast)
+                {
+                    std::cerr << "[discovery] Runtime view boundary " << physical_id.value
+                              << " has no complete constant capture (" << data->size()
+                              << " bytes, logical size " << logical_bytes << ")" << std::endl;
+                    logical_ids[physical_id] = id;
+                    return id;
+                }
+                if (data->size() != logical_bytes)
+                {
+                    auto logical_data = std::make_shared<std::vector<uint8_t>>(logical_bytes);
+                    for (uint64_t element = 0; element < countElements(view); ++element)
+                        std::memcpy(logical_data->data() + element * dtype_size, data->data(), dtype_size);
+                    data = logical_data;
+                }
                 graph.constantStaging[id] = data;
                 graph.input_data_types[id] = InputDataType::CONSTANT;
                 SHA256 hash;

@@ -11,6 +11,7 @@ import pytest
 from kernel_bench import native_runner
 from kernel_bench.app import createApp
 from kernel_bench.jobs import JobFailure, evaluateJob, readableOutput, runCmd, runNative
+from kernel_bench.policy import NATIVE_INTERFACE_VERSION
 
 
 def testSubprocessDrainsBothStreamsAndPreservesDiagnostics(tmp_path):
@@ -101,6 +102,8 @@ def kernel_bench_kernels():
     return [{"name": "candidate", "kernel_id": 1, "reference_expression": "ADD", "has_reference_factory": True, "is_reference": False, "is_view": False}]
 def kernel_bench_matches(*args):
     return True
+def kernel_bench_benchmark(*args):
+    return [1.] * 8
 def kernel_bench_match_diagnostics(*args):
     return {"matched": True, "reasons": []}
 def kernel_bench_test_diagnostics(*args):
@@ -128,7 +131,7 @@ def testBuildFailureArtifactsSurviveCandidateCleanup(monkeypatch, tmp_path, kind
             self.artifacts = {}
             self.events = []
         def getGoal(self, *args):
-            return {"metadata": {"native_interface_version": 1}}
+            return {"metadata": {"native_interface_version": NATIVE_INTERFACE_VERSION}}
         def query(self, *args):
             return [{"source_archive": b""}]
         def addArtifact(self, job_id, name, data, media_type):
@@ -288,7 +291,7 @@ def testLintModeNeverBuildsOrLoads(monkeypatch, tmp_path):
         def query(self, *args):
             return [{"source_archive": b""}]
         def getGoal(self, *args):
-            return {"fingerprint": "snapshot", "metadata": {"native_interface_version": 1}}
+            return {"fingerprint": "snapshot", "metadata": {"native_interface_version": NATIVE_INTERFACE_VERSION}}
         def addArtifact(self, *args):
             return "artifact"
         def addEvent(self, *args):

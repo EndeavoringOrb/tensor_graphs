@@ -872,7 +872,8 @@ struct CostModel
 
             if (!doneWarning.exchange(true, std::memory_order_relaxed))
             {
-                std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
+                std::cerr << "\nWARNING: Missing compiler cost records for kernel " << kernelId.value
+                          << "; planner cost is infinity. Calibrate executable goal configurations.\n" << std::flush;
             }
             return std::numeric_limits<float>::infinity();
         }

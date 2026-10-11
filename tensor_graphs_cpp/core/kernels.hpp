@@ -749,15 +749,18 @@ class KernelRegistry
     {
         if (input_mem_spaces.size() != min_num_inputs)
         {
-            Error::throw_err("input_mem_spaces.size() != min_num_inputs");
+            Error::throw_err("Kernel " + opName + ": input_mem_spaces has " + std::to_string(input_mem_spaces.size()) +
+                             " entries; min_num_inputs is " + std::to_string(min_num_inputs));
         }
         if (dtypes.size() != min_num_inputs)
         {
-            Error::throw_err("dtypes.size() != min_num_inputs");
+            Error::throw_err("Kernel " + opName + ": dtypes has " + std::to_string(dtypes.size()) +
+                             " entries; min_num_inputs is " + std::to_string(min_num_inputs));
         }
         if (contiguous.size() != min_num_inputs)
         {
-            Error::throw_err("contiguous.size() != min_num_inputs");
+            Error::throw_err("Kernel " + opName + ": contiguous has " + std::to_string(contiguous.size()) +
+                             " entries; min_num_inputs is " + std::to_string(min_num_inputs));
         }
 
         entries.emplace(uid, KernelEntry{uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory,

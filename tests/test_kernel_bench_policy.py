@@ -2,7 +2,7 @@
 import pytest
 
 from kernel_bench import jobs
-from kernel_bench.policy import baselineEligible
+from kernel_bench.policy import NATIVE_INTERFACE_VERSION, baselineEligible
 
 
 @pytest.mark.parametrize('field', ['is_view', 'is_reference', 'has_reference_factory', None])
@@ -14,7 +14,7 @@ def testEligibility(field):
 
 
 class FakeStore:
-    def __init__(self, version=1):
+    def __init__(self, version=NATIVE_INTERFACE_VERSION):
         self.version = version
         self.calls = []
     def getGoal(self, goal_id):
@@ -45,7 +45,7 @@ def testUnavailableBaselineDoesNotBuild(monkeypatch, tmp_path):
     assert 'reference factory' in store.calls[-1][1][0]
 
 
-@pytest.mark.parametrize('version', [None, 0, 2])
+@pytest.mark.parametrize('version', [None, 0, NATIVE_INTERFACE_VERSION + 1])
 def testIncompatibleGoalRejectedBeforeBuild(monkeypatch, tmp_path, version):
     def forbidden(*args, **kwargs):
         pytest.fail('Incompatible snapshot attempted native work')

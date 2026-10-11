@@ -46,6 +46,7 @@ TOOLS = [
     {"name": "baseline_calibration", "method": "POST", "path": "/api/baselines/calibrate", "description": "Schedule calibration for the active goal or explicit goal_id; optional retry_failed boolean; inspect calibrated_baselines on targets"},
     {"name": "progress", "method": "GET", "path": "/api/progress", "description": "Goal definition, per-reference-graph benchmark history, and promotion results"},
     {"name": "validate_goal", "method": "POST", "path": "/api/goals/validate", "description": "Queue the configured goal baseline in the shared FIFO worker"},
+    {"name": "executed_workloads", "method": "GET", "path": "/api/goals/{snapshot_id}/workloads", "description": "Executed baseline shapes, strides, memory placement, engines, counts and planner cost estimates per bucket"},
     {"name": "promote_kernel", "method": "POST", "path": "/api/jobs/{job_id}/promote", "description": "Idempotently queue a qualifying completed evaluation for full goal validation and PR promotion"},
     {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity, server-wide queue depths by mode, worker heartbeats and recent stage durations"},
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
@@ -162,7 +163,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         for row in rows:
             row["matching_kernels"] = {key: value for group in row["matching_kernels"] for key, value in group.items()}
             row["source_paths"] = sorted({kernel["source_path"] for kernel in targetKernels(metadata, row["reference_expression"]) if kernel.get("source_path")})
-        return jsonify({"goal_id": g.goal_id, "targets": rows})
+        return jsonify({"goal_id": g.goal_id, "targets": rows,
+                        "invalid_configurations": metadata.get("invalid_configurations", [])})
 
     @app.get("/api/targets/<target_id>")
     def target(target_id):
@@ -174,6 +176,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         kernels = targetKernels(metadata, expression)
         for row in configurations:
             row["configuration"]["decoded_input_constants"] = decodeConstants(row["configuration"])
+            row["kernel_rejections"] = metadata.get("configuration_rejections", {}).get(expression + ":" + row.get("fingerprint", ""), {})
         return jsonify({"id": target_id, "reference_expression": expression, "configurations": configurations,
                         "kernels": kernels, "source_paths": sorted({kernel["source_path"] for kernel in kernels if kernel.get("source_path")}),
                         "contract": CONTRACT, "enabled_capabilities": metadata.get("enabled_capabilities"),

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernel_bench.onboarding import starterFiles
-from kernel_bench.promotion import enqueuePromotion, goalDefinition, promoteJob, promotionConfig, validateReport
+from kernel_bench.promotion import enqueuePromotion, goalDefinition, promoteJob, promotionConfig, promotionEligibility, validateReport
 from kernel_bench.storage import Store, fingerprint
 from kernel_linter import lintCandidate
 
@@ -78,6 +78,18 @@ def testFrozenPromotionRecipeAndGate():
         enqueuePromotion(store, parent)
 
 
+def testCoveragePromotionRequiresCorrectnessAndMeasuredCandidate():
+    parent = {"mode": "evaluate", "status": "completed", "result": {
+        "tested_configuration_ids": [5], "comparisons": [{"configuration_id": 5,
+        "candidate_ms": 0.5, "best_existing_kernel": None, "best_existing_ms": None, "speedup": None}]}}
+    config = {"kernel_speedup": 1.02}
+    assert promotionEligibility(parent, config)["reason"] == "executable_coverage_added"
+    parent["result"]["tested_configuration_ids"] = []
+    assert not promotionEligibility(parent, config)["eligible"]
+    parent["status"] = "failed"
+    assert not promotionEligibility(parent, config)["eligible"]
+
+
 def testOneQueueForEveryMode():
     queries = []
     store = Store("test")
@@ -132,8 +144,9 @@ def testPackagedLinterMatchesBuildAndServer(tmp_path):
         lintCandidate(candidate)
 
 
-@pytest.mark.parametrize("selected,candidate_ms,github,outcome", [(True, 1, False, "validated"), (False, 1, False, "unselected"), (True, 3, False, "no_goal_speedup"), (True, 1, True, "pr_created")])
-def testFullPromotionStages(monkeypatch, tmp_path, selected, candidate_ms, github, outcome):
+@pytest.mark.parametrize("planning", [False, True])
+@pytest.mark.parametrize("selected,candidate_ms,github,outcome", [(True, 1, False, "validated"), (False, 1, False, "unselected"), (True, 3, False, "no_goal_speedup"), (True, 1, True, "pr_created"), (True, 1.99, False, "no_goal_speedup")])
+def testFullPromotionStages(monkeypatch, tmp_path, selected, candidate_ms, github, outcome, planning):
     archive_bytes = io.BytesIO()
     with zipfile.ZipFile(archive_bytes, "w"):
         pass
@@ -175,6 +188,8 @@ def testFullPromotionStages(monkeypatch, tmp_path, selected, candidate_ms, githu
             (generated / "kernel_uids.json").write_text(json.dumps({"99": {"name": "candidate"}, "0x63": {"name": "candidate"}}))
         elif "runner.py" in argv:
             evidence = report()
+            if "--plan-only" in argv:
+                evidence["plan_only"] = True
             if "candidate" in argv[-2]:
                 evidence["buckets"][1]["samples_ms"] = [candidate_ms] * 8
                 evidence["buckets"][1]["kernel_ids"] = ["99" if selected else "2"]
@@ -195,17 +210,29 @@ def testFullPromotionStages(monkeypatch, tmp_path, selected, candidate_ms, githu
                                                                  "timeout_seconds": 60, "goal_speedup": 1.01}}}
     if github:
         job["result"]["recipe"]["github_repo"] = "owner/repo"
+    if planning:
+        job["result"]["recipe"]["planning_command"] = ["{python}", "runner.py", "--plan-only", "{report}", "{cache}"]
     promoteJob(store, job)
     calibration_commands = [argv for argv in commands if "kernel_bench/cost_records.py" in argv]
-    assert len(calibration_commands) == 1  # candidate costs never contaminate the baseline
+    assert len(calibration_commands) == (3 if candidate_ms == 1.99 else 1) + (1 if planning and selected else 0)
+    if planning and not selected:
+        assert len([argv for argv in commands if "runner.py" in argv]) == 1
+        assert "--plan-only" in next(argv for argv in commands if "runner.py" in argv)
+    if candidate_ms == 1.99:
+        assert len(store.result["paired_measurements"]) == 3
+        assert store.result["speedup_lower_95"] < 1.01
     if github:
         assert store.result["pr_url"] == "https://github.com/owner/repo/pull/1"
         assert any(argv[:2] == ["git", "push"] for argv in commands)
         assert all("--force" not in argv for argv in commands)
     assert store.result["outcome"] == outcome
     assert store.result["selected_count"] == int(selected)
-    assert store.result["speedup"] == 2 / candidate_ms
-    assert sum("build.py" in argv for argv in commands) == 2
+    if planning and not selected:
+        assert "speedup" not in store.result
+        assert sum("build.py" in argv for argv in commands) == 1
+    else:
+        assert store.result["speedup"] == pytest.approx(2 / candidate_ms)
+        assert sum("build.py" in argv for argv in commands) == (6 if candidate_ms == 1.99 else 2) + int(planning)
 
 
 def testQueuedGoalPreparationKeepsSharedWorkerLock(monkeypatch):

@@ -137,7 +137,8 @@ def calibrate(payload, state):
         raise NativeFailure("No eligible baseline kernels", {
             "kind": "no_matching_kernels", "stage": "baseline", "configuration_id": row["id"],
             "reference_expression": payload["reference_expression"],
-            "target_kernels": [{**kernel, "matches_configuration": native.kernel_bench_matches(
+            "target_kernels": [{**kernel, "matches_configuration": native.kernel_bench_matches(kernel["kernel_id"], configuration),
+                "match_diagnostics": native.kernel_bench_match_diagnostics(
                 kernel["kernel_id"], configuration)} for kernel in kernels
                 if kernel["reference_expression"] == payload["reference_expression"]]})
     for kernel in ordered:
@@ -145,7 +146,9 @@ def calibrate(payload, state):
         checkpoint(payload, state)
         diagnostic = native.kernel_bench_test_diagnostics(kernel["kernel_id"], configuration, 42)
         if not diagnostic["passed"]:
-            raise NativeFailure("Baseline correctness failed", {**state["error_details"], **diagnostic})
+            raise NativeFailure("Baseline correctness failed: " + (diagnostic.get("message") or
+                                diagnostic.get("kind", "correctness mismatch")),
+                                {**state["error_details"], **diagnostic})
     samples = {kernel["kernel_id"]: [] for kernel in ordered}
     for round_idx in range(2):
         for kernel in ordered if round_idx == 0 else reversed(ordered):
@@ -172,7 +175,18 @@ def main():
     try:
         import kernel_bench_native as native_module
         native = native_module
-        if payload["action"] == "discover":
+        required = ("kernel_bench_kernels", "kernel_bench_capabilities",
+                    "kernel_bench_matches", "kernel_bench_match_diagnostics",
+                    "kernel_bench_test_diagnostics", "kernel_bench_benchmark")
+        if payload["action"] in ("discover", "preflight"):
+            required += ("kernel_bench_discover",)
+        missing = [name for name in required if not callable(getattr(native, name, None))]
+        if missing:
+            raise NativeFailure("Native interface is missing exports: " + ", ".join(missing),
+                                {"kind": "incompatible_native_interface", "stage": "load", "missing_exports": missing})
+        if payload["action"] == "preflight":
+            state["result"] = {"enabled_capabilities": native.kernel_bench_capabilities()}
+        elif payload["action"] == "discover":
             state["result"] = {"kernels": native.kernel_bench_kernels(), "calls": native.kernel_bench_discover(payload["cache_path"]), "enabled_capabilities": native.kernel_bench_capabilities()}
         elif payload["action"] == "baseline":
             state["result"] = calibrate(payload, state)

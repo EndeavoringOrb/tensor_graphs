@@ -127,7 +127,9 @@ inline void registerBindings(py::module_ &module)
             data["kernel_name"] = kernel.getName();
             data["reference_expression"] = referenceExpression(kernel);
             auto bound_record = record;
-            data["kernel_matches"] = bindRecord(kernel, bound_record);
+            std::vector<std::string> match_reasons;
+            data["kernel_matches"] = bindRecord(kernel, bound_record, &match_reasons);
+            data["match_reasons"] = match_reasons;
             result.append(data);
         }
         return result;

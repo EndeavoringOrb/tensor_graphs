@@ -407,3 +407,46 @@ Set `KERNEL_BENCH_GOAL_CATALOG` to a JSON file mapping preset IDs to `{ "name": 
 The existing Gemma logical graph uses RoPE theta 10000 in every layer, whereas the upstream model configuration uses 1e6 for full attention. The independent validator explicitly matches the existing graph's theta; it validates kernel changes to this workload, not equivalence to the upstream default model. Changing that graph semantics requires a separate goal.
 
 End-to-end validation also needs the hardware's compiler cost corpus at `benchmarks/records.bin` in the deployed checkout (or an operator recipe's `compiler_records` path). Copy the existing hardware-calibrated corpus when setting up the service. Every validation freezes and archives this corpus; the winning kernel's measured microbenchmark configurations are appended through the native record serializer under its current registry UID. Without these records, the compiler assigns infinite cost to unmeasured kernels and cannot select new submissions. Baseline and candidate runs start with the same corpus, with candidate measurements added only to the candidate build.
+
+### Correctness and promotion diagnostics
+
+Native interface version 2 creates a new immutable discovery snapshot on startup.
+Older snapshots remain available for history; new evaluations and calibrations
+require the current interface. Discovery expands genuine scalar broadcast
+constants and treats incomplete transformed captures as runtime inputs. Any
+remaining malformed constant configurations are quarantined and listed in
+`GET /api/targets` under `invalid_configurations`. Each target configuration
+includes `kernel_rejections` for topology, layout, dtype and custom-match failures.
+Calibration failures retain structured `error_details`; infrastructure failures
+stop the remaining calibration batch. Retry calibration after repairing the cause.
+
+Completed evaluations include `promotion_eligibility`. A candidate that passes
+correctness and adds executable coverage can enter full goal validation without
+an existing kernel speedup. It must still be selected and pass the goal speedup
+gate. Operator recipes may provide `planning_command`, using the same `{python}`,
+`{cache}` and `{report}` substitutions as `command`. The supplied Gemma recipes
+use `--plan-only` to skip correctness and timing runs when no candidate
+instructions are selected in weighted buckets. Planning reports never count as
+correctness evidence. Update operator recipe files as well as the deployed source
+to enable this preflight, then prepare the updated preset through `/admin`.
+Restarting preserves the active snapshot's frozen recipe; editing a recipe file
+alone does not replace it.
+
+Results within 3% of the goal speedup threshold receive two additional measurement
+pairs, alternating baseline/candidate order. Reported speedup uses the geometric
+mean of the three ratios; acceptance requires its 95% Student t lower bound to
+clear the threshold. The result preserves individual pairs and dispersion.
+Clearly separated results retain a single pair and have no confidence interval.
+
+`GET /api/goals/{snapshot_id}/workloads` and the executed-workload section on
+`/progress` show selected baseline kernels, shapes, strides, memory placement,
+engines, execution counts and planner estimates by bucket. Planner estimates are
+not measured per-instruction times. Older reports require a new goal validation
+to populate this evidence. Full reports and candidate planning reports also remain
+available as job artifacts.
+
+The updater writes `deployment-status` and `last-refusal` in
+`KERNEL_BENCH_STATE_DIR` (default `~/.cache/kernelbench`). `/api/admin/queue` and
+`/admin` show the deployment state; changed paths are logged once per distinct
+refusal. Recopy `deploy/kernelbench-update.sh` to the installed updater path when
+rolling out these changes, as described in `deploy/README.md`.

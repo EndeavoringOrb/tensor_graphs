@@ -152,6 +152,6 @@ class Store:
     def getBaselines(self, goal_id, target_id):
         return self.query("""SELECT c.id AS configuration_id, CASE WHEN b.status = 'running' THEN 'pending' ELSE COALESCE(b.status, 'pending') END AS status,
             COALESCE(b.status = 'running', false) AS calibrating,
-            b.measurements, b.winner, b.identity, b.error, b.measured_at
+            b.measurements, b.winner, b.identity, b.error, b.error_details, b.measured_at
             FROM kernel_bench.configurations c LEFT JOIN kernel_bench.baselines b ON b.configuration_id = c.id
             WHERE c.goal_id = %s AND c.target_id = %s ORDER BY c.id""", (goal_id, target_id))

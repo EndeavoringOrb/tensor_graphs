@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS kernel_bench.baselines (
 CREATE INDEX IF NOT EXISTS stage_durations_recent ON kernel_bench.stage_durations(created_at DESC);
 
 ALTER TABLE kernel_bench.baselines ADD COLUMN IF NOT EXISTS requested boolean NOT NULL DEFAULT false;
+ALTER TABLE kernel_bench.baselines ADD COLUMN IF NOT EXISTS error_details jsonb;
 ALTER TABLE kernel_bench.baselines DROP CONSTRAINT IF EXISTS baselines_status_check;
 ALTER TABLE kernel_bench.baselines ADD CONSTRAINT baselines_status_check
     CHECK(status IN ('pending', 'running', 'measured', 'failed', 'unavailable'));

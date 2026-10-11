@@ -93,6 +93,12 @@ int main(int argc, char **argv)
     fragment.eclass_id = EClassId{9};
     fragment.children = {EClassId{7}, EClassId{8}};
     compiled.instructions.push_back(fragment);
+    auto scalar_bytes = std::make_shared<std::vector<uint8_t>>(sizeof(float));
+    std::memcpy(scalar_bytes->data(), constant_values.data(), sizeof(float));
+    // A transformed view cannot borrow a scalar's staging as its own values.
+    compiled.constantStaging[EClassId{7}] = scalar_bytes;
+    compiled.constantStaging[EClassId{8}] = scalar_bytes;
+    compiled.nodeViews[EClassId{8}].strides = {0};
     auto cache_path = argc > 1 ? std::filesystem::path(argv[1])
                                : std::filesystem::temp_directory_path() / "kernel-bench-regression.bin";
     {
@@ -116,7 +122,11 @@ int main(int argc, char **argv)
     for (auto record : calls)
     {
         if (record.kernelId == mul.kernel_id && record.outputShape == std::vector<uint32_t>{16})
+        {
             found_independent_fragment = true;
+            if (!record.inputConstants.at(0).empty() || record.inputConstants.at(1).size() != 16 * sizeof(float))
+                Error::throw_err("Discovery did not distinguish transformed constants from scalar broadcasts");
+        }
         if (record.kernelId == restricted_id)
             found_restricted_reference = true;
         if (record.kernelId != fma_id)
@@ -144,6 +154,38 @@ int main(int argc, char **argv)
     scalar_record.inputStrides = {{}, {}, {}};
     scalar_record.inputDTypes = {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32};
     const auto &scalar_kernel = KernelRegistry::get().getKernel(fma_id);
+    auto view_kernel = scalar_kernel;
+    view_kernel.min_num_inputs = view_kernel.max_num_inputs = 1;
+    view_kernel.is_view = true;
+    view_kernel.dtypes = {DType::FLOAT32};
+    view_kernel.input_mem_spaces = {{1, HandleType::CPP}};
+    view_kernel.requiresContiguous = {true};
+    view_kernel.run = nullptr;
+    view_kernel.inferView = [](const std::vector<TensorNode> &, TensorView &output, const Graph &) {
+        output.strides = {1};
+        output.offset = sizeof(float);
+    };
+    Graph view_graph;
+    auto view_input = view_graph.input({4}, DType::FLOAT32, {1});
+    std::vector<uint8_t> view_data(4 * sizeof(float));
+    float view_values[] = {1, 2, 3, 4};
+    std::memcpy(view_data.data(), view_values, sizeof(view_values));
+    auto view_output = executeFusedKernel(view_kernel, {view_data}, {view_input}, {2}, {1}, DType::FLOAT32, view_graph);
+    if (view_output != std::vector<float>{2, 3})
+        Error::throw_err("Reference view lost its nonzero slice offset");
+    for (const auto &[uid, kernel] : KernelRegistry::get().getAllKernels())
+        if (kernel.getName() == "Copy_Cuda_SameDevice")
+        {
+            Record copy_record;
+            copy_record.inputShapes = {{8}};
+            copy_record.inputStrides = {{1}};
+            copy_record.inputDTypes = {DType::FLOAT32};
+            copy_record.outputShape = {8};
+            copy_record.outputStrides = {1};
+            copy_record.outputDType = DType::FLOAT32;
+            if (KernelBench::bindRecord(kernel, copy_record) && !testKernelWithRecord(kernel, copy_record, true))
+                Error::throw_err("Same-device CUDA copy failed correctness");
+        }
     if (!KernelBench::bindRecord(scalar_kernel, scalar_record) ||
         !testKernelWithRecord(scalar_kernel, scalar_record, true))
         Error::throw_err("Scalar configuration failed correctness verification");

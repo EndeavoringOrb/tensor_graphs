@@ -700,6 +700,13 @@ struct FusionRule : public Rule
             const auto &mapped_engines = item.second.first;
             const auto &mapped_input_spaces = item.second.second;
 
+            // COPY_TO within one memory space is already an identity in the
+            // egraph. Reintroducing it as a fused operation creates a cycle of
+            // equivalent copies and makes saturation grow without bound.
+            if (oldENode.getOpType() == OpType::COPY_TO && mapped_input_spaces.size() == 1 &&
+                mapped_input_spaces[0] == target_mem_space)
+                continue;
+
             FusedCandidate cand;
             cand.kernel = kernel;
             cand.target_mem_space = target_mem_space;

@@ -130,6 +130,17 @@ class KernelLinter:
             paren_start = match.end() - 1
             args = extractMacroCallArgs(clean_content, paren_start)
 
+            if match.group(1) == "REGISTER_KERNEL" and len(args) == 13 and args[1].isdigit():
+                minimum = int(args[1])
+                for index, field in ((9, "dtypes"), (11, "contiguous"), (12, "input_mem_spaces")):
+                    literal = args[index].strip()
+                    if literal.startswith("{") and literal.endswith("}"):
+                        entries = extractMacroCallArgs("(" + literal[1:-1] + ")", 0)
+                        if len(entries) != minimum:
+                            line_num = content[:match.start()].count("\n") + 1
+                            console.print(f"registration_arity: {file_path}:{line_num}: {field} has {len(entries)} entries; min_num_inputs is {minimum}")
+                            sys.exit(1)
+
             if len(args) < 4:
                 continue
 

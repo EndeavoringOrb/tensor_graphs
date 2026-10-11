@@ -16,6 +16,8 @@ from kernel_bench.agent import KernelBenchClient
 from kernel_bench.app import createApp
 from kernel_bench.polling import decodeCursor, encodeCursor, pollJob
 from kernel_bench.storage import Store
+from kernel_bench.policy import NATIVE_INTERFACE_VERSION
+from kernel_bench.storage import fingerprint
 
 
 def testCursor():
@@ -125,7 +127,7 @@ def pollingDatabase():
     store.initialize()  # migrations are repeatable
     key = str(uuid.uuid4())
     goal_id = store.query("""INSERT INTO kernel_bench.goals(fingerprint, name, cache_sha256, cache_data, source_archive, metadata)
-        VALUES (%s, 'polling test', '', '', '', %s) RETURNING id""", (key, Jsonb({'kernels': [], 'native_interface_version': 1})))[0]['id']
+        VALUES (%s, 'polling test', '', '', '', %s) RETURNING id""", (key, Jsonb({'kernels': [], 'native_interface_version': NATIVE_INTERFACE_VERSION})))[0]['id']
     store.execute('INSERT INTO kernel_bench.targets(id, expression) VALUES (%s, %s)', (key, key))
     configuration_id = store.query("""INSERT INTO kernel_bench.configurations(goal_id, target_id, fingerprint, configuration, matching_kernels)
         VALUES(%s, %s, %s, '{"input_dtypes": [], "input_constants": []}', '{}') RETURNING id""", (goal_id, key, key))[0]['id']
@@ -184,7 +186,8 @@ def testCalibrationRecovery(pollingDatabase, monkeypatch, tmp_path):
     assert client.post('/api/baselines/calibrate', json={}, headers=headers).status_code == 202
     workspace = tmp_path / ('baseline-' + str(goal_id))
     workspace.mkdir()
-    (workspace / '.baseline_built').touch()
+    (workspace / '.baseline_built').write_text(fingerprint({"goal": store.getGoal(goal_id)["fingerprint"],
+                                                        "native_interface_version": NATIVE_INTERFACE_VERSION}))
     measurement = {'kernel_id': 1, 'kernel_name': 'baseline', 'samples_ms': [1, 2], 'median_ms': 1.5}
     monkeypatch.setattr(jobs, 'hardwareIdentity', lambda: {'machine': 'test'})
     monkeypatch.setattr(jobs, 'runNative', lambda *args: ({'measurements': [measurement], 'winner': measurement, 'enabled_capabilities': []}, ''))

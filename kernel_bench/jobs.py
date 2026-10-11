@@ -20,7 +20,7 @@ from pathlib import Path
 from psycopg.types.json import Jsonb
 
 from .storage import fingerprint
-from .policy import NATIVE_INTERFACE_VERSION, baselineEligible
+from .policy import NATIVE_INTERFACE_VERSION, baselineEligible, configurationErrors
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GOAL_CACHE = PROJECT_ROOT / "dirty_region_caches/embeddinggemma-2-image-current.bin.dirty-cache"
@@ -94,7 +94,9 @@ def readableOutput(output):
 
 def runCmd(command, cwd, timeout, payload=None, env=None):
     started_at = time.monotonic()
-    logger.info("Starting %s (timeout %ss)", " ".join(command), timeout)
+    job_context = (env or {}).get("KERNEL_BENCH_JOB_ID") or (payload or {}).get("job_id")
+    context = f"job={job_context} workspace={cwd}" if job_context else str(cwd)
+    logger.info("[%s] Starting %s (timeout %ss)", context, " ".join(command), timeout)
     process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, env=env,
                                start_new_session=os.name != "nt")
@@ -143,7 +145,8 @@ def runCmd(command, cwd, timeout, payload=None, env=None):
     output = readableOutput(stdout + "\n" + stderr)
     if timed_out:
         output += f"\nTimed out after {timeout}s"
-    logger.info("[%s] Finished in %.1fs (exit %s)", process.pid, time.monotonic() - started_at, process.returncode)
+    (logger.error if timed_out or process.returncode else logger.info)(
+        "[%s pid=%s] Finished in %.1fs (exit %s)", context, process.pid, time.monotonic() - started_at, process.returncode)
     return {"exit_code": process.returncode, "stdout": stdout, "stderr": stderr,
             "output": output, "timed_out": timed_out, "command": command}
 
@@ -221,14 +224,27 @@ def initializeGoal(store, cache_path, promotion_recipe="environment", already_lo
                         "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True).strip()}
             kernels_by_id = {kernel["kernel_id"]: kernel for kernel in discovered["kernels"]}
             groups = {}
+            invalid_configurations = {}
             for call in discovered["calls"]:
                 expression = call["reference_expression"]
                 configuration = {key: call[key] for key in ("input_shapes", "input_strides", "input_dtypes", "input_constants",
                                                             "output_shape", "output_strides", "output_dtype")}
                 config_hash = fingerprint(configuration)
-                group = groups.setdefault((expression, config_hash), {"configuration": configuration, "kernels": {}})
+                errors = configurationErrors(configuration)
+                if errors:
+                    invalid_configurations[config_hash] = {"reference_expression": expression,
+                        "configuration": configuration, "errors": errors}
+                    continue
+                group = groups.setdefault((expression, config_hash), {"configuration": configuration, "kernels": {}, "rejections": {}})
+                if not call["kernel_matches"]:
+                    group["rejections"][call["kernel_name"]] = call.get("match_reasons", ["not_executable_on_this_configuration"])
                 if call["kernel_matches"] and baselineEligible(kernels_by_id[call["kernel_id"]]):
                     group["kernels"][str(call["kernel_id"])] = call["kernel_name"]
+            metadata["invalid_configurations"] = list(invalid_configurations.values())
+            metadata["configuration_rejections"] = {expression + ":" + config_hash: group["rejections"]
+                for (expression, config_hash), group in groups.items() if group["rejections"]}
+            if invalid_configurations:
+                logger.error("Discovery quarantined %s invalid configurations; inspect goal metadata", len(invalid_configurations))
             with store.connection() as connection:
                 goal_id = connection.execute("""INSERT INTO kernel_bench.goals
                     (fingerprint, name, cache_sha256, cache_data, source_archive, metadata)
@@ -312,6 +328,7 @@ def evaluateJob(store, job, workspace):
     try:
         store.addEvent(job["id"], "lint", "Validating candidate source")
         build_env = {**os.environ, "KERNEL_BENCH_SERVER_JOB": "1",
+                     "KERNEL_BENCH_JOB_ID": str(job["id"]),
                      "KERNEL_BENCH_DIAGNOSTICS_DIR": str(diagnostic_dir.resolve())}
         lint_command = [getPythonExe(), "kernel_linter.py", str(candidate_path.relative_to(workspace))]
         baseline_marker = workspace / ".baseline_linted"
@@ -367,6 +384,7 @@ def evaluateJob(store, job, workspace):
         store.addEvent(job["id"], native_stage, "Validating executable registration and target" if mode == "compile" else
                        "Testing covered goal configurations, then benchmarking against existing kernels")
         result, log = runNative(workspace, {"action": "compile" if mode == "compile" else "evaluate", "kernel_name": job["kernel_name"],
+                                           "job_id": str(job["id"]),
                                            "reference_expression": expression,
                                            "configurations": [{"id": row["id"], "configuration": row["configuration"]} for row in configurations]}, TIMEOUTS["evaluate"])
         store.addEvent(job["id"], native_stage, log)
@@ -398,6 +416,10 @@ def evaluateJob(store, job, workspace):
             if native_path.is_file():
                 saveArtifact(name, native_path.read_bytes(), "application/json" if name.endswith(".json") else "text/plain")
         candidate_path.unlink(missing_ok=True)
+    if mode == "evaluate":
+        from .promotion import promotionEligibility
+        result["promotion_eligibility"] = promotionEligibility({**job, "status": "completed", "result": result},
+            store.getGoal(job["goal_id"])["metadata"].get("promotion_recipe"))
     store.completeJob(job["id"], result)
     if mode == "evaluate":
         from .promotion import enqueuePromotion
@@ -434,7 +456,9 @@ def calibrateConfiguration(store, row, workspace_root):
                           ("No matching executable kernels with a reference factory", row["id"]))
             return True
         marker = workspace / ".baseline_built"
-        if not marker.exists():
+        build_identity = fingerprint({"goal": store.getGoal(row["goal_id"])["fingerprint"],
+                                      "native_interface_version": NATIVE_INTERFACE_VERSION})
+        if not marker.exists() or marker.read_text() != build_identity:
             goal = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (row["goal_id"],))[0]
             with zipfile.ZipFile(io.BytesIO(bytes(goal["source_archive"]))) as archive:
                 archive.extractall(workspace)
@@ -443,7 +467,8 @@ def calibrateConfiguration(store, row, workspace_root):
                            workspace, TIMEOUTS["build"], env=build_env)
             if build["exit_code"] != 0:
                 raise RuntimeError("Baseline build failed: " + build["output"])
-            marker.touch()
+            runNative(workspace, {"action": "preflight"}, TIMEOUTS["evaluate"])
+            marker.write_text(build_identity)
         result, _log = runNative(workspace, {"action": "baseline", "reference_expression": row["expression"],
                                             "configuration": {"id": row["id"], "configuration": row["configuration"]}}, TIMEOUTS["evaluate"])
         metadata_path = workspace / "build_diagnostics/build_metadata.json"
@@ -452,12 +477,20 @@ def calibrateConfiguration(store, row, workspace_root):
                     "enabled_capabilities": result["enabled_capabilities"],
                     "methodology": {"seed": 42, "rounds": 2, "iterations": 8, "competitors": "matching non-reference kernels with reference factories"}}
         store.execute("""UPDATE kernel_bench.baselines SET status = 'measured', measurements = %s,
-            winner = %s, identity = %s, measured_at = now(), error = NULL WHERE configuration_id = %s""",
+            winner = %s, identity = %s, measured_at = now(), error = NULL, error_details = NULL WHERE configuration_id = %s""",
             (Jsonb(result["measurements"]), Jsonb(result["winner"]), Jsonb(identity), row["id"]))
     except Exception as error:  # noqa: BLE001 - retain per-configuration failures and continue calibration
         status = "unavailable" if isinstance(error, JobFailure) and error.details.get("kind") == "no_matching_kernels" else "failed"
-        store.execute("UPDATE kernel_bench.baselines SET status = %s, error = %s, measured_at = now() WHERE configuration_id = %s",
-                      (status, str(error), row["id"]))
+        details = getattr(error, "details", {"kind": "calibration_infrastructure_failure"})
+        details = {**details, "configuration_id": row["id"], "configuration": row["configuration"]}
+        logger.error("Baseline goal=%s configuration=%s failed: %s", row["goal_id"], row["id"], error)
+        store.execute("UPDATE kernel_bench.baselines SET status = %s, error = %s, error_details = %s, measured_at = now() WHERE configuration_id = %s",
+                      (status, str(error), Jsonb(details), row["id"]))
+        if details.get("kind") in ("incompatible_native_interface", "calibration_infrastructure_failure", "native_crash"):
+            store.execute("""UPDATE kernel_bench.baselines b SET status = 'failed', error = %s,
+                error_details = %s, measured_at = now() FROM kernel_bench.configurations c
+                WHERE c.id = b.configuration_id AND c.goal_id = %s AND b.status IN ('pending', 'running')""",
+                          ("Calibration batch stopped: " + str(error), Jsonb(details), row["goal_id"]))
     return True
 
 

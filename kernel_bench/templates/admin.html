@@ -273,6 +273,9 @@
       try {
         const data = await api('/api/admin/queue');
         authStatus.textContent = `Connected · Active Goal: ${data.active_goal_id}`;
+        const deployment = data.deployment || {status: 'unknown'};
+        authStatus.textContent += ` · Deployment: ${deployment.status}${deployment.phase ? ' (' + deployment.phase + ')' : ''}`;
+        authStatus.title = deployment.details || '';
         authStatus.style.color = 'var(--success)';
 
         // 1. Worker status

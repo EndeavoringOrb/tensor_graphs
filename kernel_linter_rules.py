@@ -28,6 +28,7 @@ REDUNDANCY_PATTERNS = {
 
 
 STRUCTURAL_RULES = {
+    "registration_arity": "Literal registration input metadata lists must match min_num_inputs.",
     "kernel_registration_detection_error": "Kernel implementation files must contain a registration macro.",
     "nested_reference_factory_header": "Keep ref.hpp at the fused folder root.",
     "reference_factory_header_missing": "Each fused kernel folder must contain ref.hpp.",

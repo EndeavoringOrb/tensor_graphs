@@ -1,7 +1,39 @@
 {
-  "command": ["{python}", "tests/gemma-3-270m/run.py", "--model-path", "/mnt/bigdrive/models/google/gemma-3-270m", "--cache", "{cache}", "--validation-report", "{report}", "--warmup", "1", "--iterations", "8", "--min-compile-time", "1"],
+  "command": [
+    "{python}",
+    "tests/gemma-3-270m/run.py",
+    "--model-path",
+    "/mnt/bigdrive/models/google/gemma-3-270m",
+    "--cache",
+    "{cache}",
+    "--validation-report",
+    "{report}",
+    "--warmup",
+    "1",
+    "--iterations",
+    "8",
+    "--min-compile-time",
+    "1"
+  ],
   "kernel_speedup": 1.02,
   "goal_speedup": 1.01,
   "timeout_seconds": 7200,
-  "github_repo": "EndeavoringOrb/tensor_graphs"
+  "github_repo": "EndeavoringOrb/tensor_graphs",
+  "planning_command": [
+    "{python}",
+    "tests/gemma-3-270m/run.py",
+    "--model-path",
+    "/mnt/bigdrive/models/google/gemma-3-270m",
+    "--cache",
+    "{cache}",
+    "--validation-report",
+    "{report}",
+    "--warmup",
+    "1",
+    "--iterations",
+    "8",
+    "--min-compile-time",
+    "1",
+    "--plan-only"
+  ]
 }

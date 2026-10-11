@@ -82,8 +82,20 @@ def installAdmin(app, store):
         baselines = store.query("""SELECT b.status, count(*) AS count
             FROM kernel_bench.baselines b JOIN kernel_bench.configurations c ON c.id = b.configuration_id
             WHERE c.goal_id = %s GROUP BY b.status""", (app.config["KERNEL_BENCH_GOAL_ID"],))
+        state_directory = Path(os.environ.get("KERNEL_BENCH_STATE_DIR", str(Path.home() / ".cache/kernelbench")))
+        state_path = state_directory / "deployment-status"
+        deployment = {"status": "unknown"}
+        if state_path.is_file():
+            values = state_path.read_text().splitlines()
+            if len(values) != 3:
+                raise ValueError("Malformed deployment status file")
+            deployment = dict(zip(("status", "phase", "updated_at"), values))
+            refusal = state_directory / "last-refusal"
+            if deployment["status"] == "failed" and refusal.is_file():
+                deployment["details"] = refusal.read_text()
         return jsonify({
             "queue_summary": queue_summary,
+            "deployment": deployment,
             "active_jobs": active_jobs,
             "recent_jobs": recent_jobs,
             "baseline_calibration": {row["status"]: row["count"] for row in baselines},
