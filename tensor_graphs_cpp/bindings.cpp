@@ -1,126 +1,337 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+// clang-format off
+#include <cstdio>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <windows.h>
+#include <dbghelp.h>
+// clang-format on
+
+#pragma comment(lib, "dbghelp.lib")
+
+inline const char *get_exception_code_name(DWORD code)
+{
+    switch (code)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:
+        return "EXCEPTION_ACCESS_VIOLATION (0xc0000005)";
+    case EXCEPTION_IN_PAGE_ERROR:
+        return "EXCEPTION_IN_PAGE_ERROR (0xc0000006)";
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+        return "EXCEPTION_ILLEGAL_INSTRUCTION (0xc000001d)";
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED (0xc000008c)";
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+        return "EXCEPTION_DATATYPE_MISALIGNMENT (0xc0000002)";
+    case EXCEPTION_STACK_OVERFLOW:
+        return "EXCEPTION_STACK_OVERFLOW (0xc00000fd)";
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        return "EXCEPTION_INT_DIVIDE_BY_ZERO (0xc0000094)";
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        return "EXCEPTION_FLT_DIVIDE_BY_ZERO (0xc000008e)";
+    case EXCEPTION_FLT_UNDERFLOW:
+        return "EXCEPTION_FLT_UNDERFLOW (0xc0000091)";
+    default:
+        return "UNKNOWN_FATAL_EXCEPTION";
+    }
+}
+
+inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
+{
+    // 1. Resolve module name and relative base offset
+    char mod_name[MAX_PATH] = "<unknown>";
+    DWORD64 mod_base = SymGetModuleBase64(process, addr);
+    if (!mod_base)
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+        {
+            mod_base = reinterpret_cast<DWORD64>(mbi.AllocationBase);
+        }
+    }
+    if (mod_base)
+    {
+        char full_path[MAX_PATH] = {0};
+        if (GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), full_path, sizeof(full_path)))
+        {
+            const char *slash = strrchr(full_path, '\\');
+            const char *fslash = strrchr(full_path, '/');
+            const char *base_name = slash ? slash + 1 : (fslash ? fslash + 1 : full_path);
+            strncpy_s(mod_name, sizeof(mod_name), base_name, _TRUNCATE);
+        }
+    }
+
+    DWORD64 offset_in_mod = mod_base ? (addr - mod_base) : 0;
+
+    // 2. Resolve symbol using stack-allocated memory (no heap allocations)
+    alignas(SYMBOL_INFO) char symbol_buffer[sizeof(SYMBOL_INFO) + 256] = {0};
+    SYMBOL_INFO *symbol = reinterpret_cast<SYMBOL_INFO *>(symbol_buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 255;
+    DWORD64 sym_disp = 0;
+    bool has_sym = SymFromAddr(process, addr, &sym_disp, symbol) && (symbol->NameLen > 0);
+
+    // 3. Resolve source file & line number if PDB is present
+    IMAGEHLP_LINE64 line = {0};
+    line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+    DWORD line_disp = 0;
+    bool has_line = SymGetLineFromAddr64(process, addr, &line_disp, &line);
+
+    if (frame_idx >= 0)
+    {
+        std::cerr << "  [" << std::setw(2) << frame_idx << "] ";
+    }
+    else
+    {
+        std::cerr << "  ";
+    }
+
+    std::cerr << "0x" << std::hex << std::setw(16) << std::setfill('0') << addr << std::dec << std::setfill(' ') << " "
+              << mod_name;
+
+    if (mod_base)
+    {
+        std::cerr << " + 0x" << std::hex << offset_in_mod << std::dec;
+    }
+    if (has_sym)
+    {
+        std::cerr << " : " << symbol->Name;
+    }
+    if (has_line)
+    {
+        std::cerr << " (" << line.FileName << ":" << line.LineNumber << ")";
+    }
+    std::cerr << "\n";
+}
+
+inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // Filter strictly for fatal hardware/memory errors
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_FLT_UNDERFLOW)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
+    static volatile LONG g_in_handler = 0;
+    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE process = GetCurrentProcess();
+    HANDLE thread = GetCurrentThread();
+
+    // Ensure DbgHelp symbol engine is initialized
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+    SymInitialize(process, NULL, TRUE);
+
+    DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
+
+    std::cerr << "\n========================================================\n"
+              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
+              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
+
+    // Diagnostic information for Access Violations
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+    {
+        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
+        const char *op = (access_type == 0)   ? "read from"
+                         : (access_type == 1) ? "write to"
+                         : (access_type == 8) ? "execute at"
+                                              : "access";
+        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
+        if (fault_target < 0x1000)
+        {
+            std::cerr << " (Null / near-null pointer dereference)";
+        }
+        std::cerr << "\n";
+    }
+
+    std::cerr << "========================================================\n"
+              << "Call Stack (Crash Site):\n";
+
+    // Copy the context record because StackWalk64 mutates it during unwinding
+    CONTEXT ctx = *ep->ContextRecord;
+    ctx.ContextFlags = CONTEXT_FULL;
+
+    STACKFRAME64 frame;
+    memset(&frame, 0, sizeof(frame));
+    DWORD machineType = IMAGE_FILE_MACHINE_UNKNOWN;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+    machineType = IMAGE_FILE_MACHINE_ARM64;
+    frame.AddrPC.Offset = ctx.Pc;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Fp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Sp;
+    frame.AddrStack.Mode = AddrModeFlat;
+#elif defined(_M_X64) || defined(__x86_64__)
+    machineType = IMAGE_FILE_MACHINE_AMD64;
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+#elif defined(_M_IX86) || defined(__i386__)
+    machineType = IMAGE_FILE_MACHINE_I386;
+    frame.AddrPC.Offset = ctx.Eip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Ebp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Esp;
+    frame.AddrStack.Mode = AddrModeFlat;
+#endif
+
+    int frame_idx = 0;
+    DWORD64 prev_pc = 0;
+
+    while (frame_idx < 64)
+    {
+        if (!StackWalk64(machineType, process, thread, &frame, &ctx, NULL, SymFunctionTableAccess64, SymGetModuleBase64,
+                         NULL))
+        {
+            break;
+        }
+
+        DWORD64 pc = frame.AddrPC.Offset;
+        if (pc == 0 || pc == prev_pc)
+        {
+            break;
+        }
+        prev_pc = pc;
+
+        print_frame_info(process, pc, frame_idx);
+        frame_idx++;
+    }
+
+    // If StackWalk64 was unable to unwind even frame 0, print the fault PC directly
+    if (frame_idx == 0)
+    {
+        print_frame_info(process, fault_pc, 0);
+    }
+
+    std::cerr << "========================================================\n" << std::flush;
+    fflush(stderr);
+    fflush(stdout);
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+struct InstallCrashHandler
+{
+    InstallCrashHandler()
+    {
+        HANDLE process = GetCurrentProcess();
+        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+        SymInitialize(process, NULL, TRUE);
+        AddVectoredExceptionHandler(1, TG_CrashHandler);
+    }
+} static _install_crash_handler;
+#endif
+
 #include "core/common/thread_pool.hpp"
-#include "core/hardware.hpp"
-#include "core/plan/cached_plan.hpp"
+#include "core/hardware/hardware.hpp"
+#include "core/plan/brancher.hpp"
 #include "core/plan/planner.hpp"
-#include "core/plan/search_delegate.hpp"
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
+#include "bindings/kernel_bench.hpp"
 #include "models/deepseek-v4-flash.hpp"
+#include "models/krea-2-turbo.hpp"
+#include "models/qwen-image-vae.hpp"
+#include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
 
 namespace py = pybind11;
 
-// Pybind11 Trampoline Class for C++ SearchDelegate virtual method overrides
-class PySearchDelegate : public SearchDelegate
+static std::string pythonCallsite()
+{
+    py::object caller = py::module_::import("sys").attr("_getframe")(0);
+    py::object code = caller.attr("f_code");
+    return code.attr("co_filename").cast<std::string>() + ":" +
+           py::str(caller.attr("f_lineno")).cast<std::string>() + " (" +
+           code.attr("co_name").cast<std::string>() + ")";
+}
+
+class PyBrancher : public plan::Brancher
 {
   public:
-    using SearchDelegate::SearchDelegate;
+    using plan::Brancher::Brancher;
 
-    void push_state() override
+    bool chooseBranch(const plan::SearchState &state, plan::BranchDecision &out_decision) override
     {
-        PYBIND11_OVERRIDE(void, SearchDelegate, push_state);
-    }
-    void pop_state() override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, pop_state);
-    }
-    void on_leaf_evaluated(float cost) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, on_leaf_evaluated, cost);
-    }
-
-    void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                          const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_cache_graph, node_features, edge_src, edge_dst);
-    }
-
-    void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                     const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_egraph, node_features, edge_src, edge_dst);
-    }
-
-    void init_dispatch_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                             const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_dispatch_graph, node_features, edge_src, edge_dst);
-    }
-
-    void init_bufferize_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                              const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_bufferize_graph, node_features, edge_src, edge_dst);
-    }
-
-    void init_malloc_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                           const std::vector<uint32_t> &edge_dst) override
-    {
-        PYBIND11_OVERRIDE(void, SearchDelegate, init_malloc_graph, node_features, edge_src, edge_dst);
-    }
-
-    std::vector<uint32_t> order_cache(const std::vector<ActionFeatureCache> &choices) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_cache, choices);
-    }
-
-    std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_enodes, enodes);
-    }
-
-    std::vector<uint32_t> order_dispatch(const std::vector<ActionFeatureExtractDispatch> &ready_nodes) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_dispatch, ready_nodes);
-    }
-
-    std::vector<uint32_t> order_bufferize(const std::vector<ActionFeatureBufferize> &choices) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_bufferize, choices);
-    }
-
-    std::vector<uint32_t> order_malloc(const std::vector<ActionFeatureMalloc> &avail_buffers) override
-    {
-        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_malloc, avail_buffers);
+        PYBIND11_OVERRIDE_PURE(bool, plan::Brancher, chooseBranch, state, out_decision);
     }
 };
 
-// C++ API for LLM Generation accessible to Python
 class LLMSession
 {
     std::unique_ptr<MemoryManager> mem;
     std::unique_ptr<Graph> g;
-    std::unique_ptr<Repo> repo;
+    std::unique_ptr<TGStore> repo;
     std::unique_ptr<Session> session;
     LogicalId inputIdsId;
     LogicalId logitsId;
     uint32_t vocab_size = 0;
     uint32_t max_seq_len = 128;
     std::vector<uint32_t> prev_tokens;
+    Debug::ReferenceVerifier referenceVerifier;
+    std::string referenceFile;
+    std::string compareReferenceFile;
+    bool runFullGraph = false;
+    bool compileNoWeightsBucket = false;
+    bool has_run = false;
 
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
-               std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
+               std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
                bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
-               uint32_t threads = 0)
+               uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
+                uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
+               double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
+               const std::string &write_refs = "", const std::string &compare_refs = "",
+                bool disable_compilation_caching = false, bool ref_only = false,
+               bool compile_no_weights_bucket = false, bool saturate_only = false)
     {
+        compileNoWeightsBucket = compile_no_weights_bucket;
+        referenceFile = write_refs;
+        compareReferenceFile = compare_refs;
+        runFullGraph = !referenceFile.empty() || !compareReferenceFile.empty();
+        max_seq_len = std::max(1u, max_sequence_length);
         if (threads > 0)
         {
             set_num_threads(threads);
         }
 
-        std::unordered_map<MemSpace, uint64_t> bufferSizes = {
-            {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
+        auto act_brancher = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
-        if (HardwareCaps::get().has_opencl)
-        {
-            bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
-        }
-
-        mem = std::make_unique<MemoryManager>(bufferSizes);
+        mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
         if (model_name == "gemma-3-270m")
@@ -153,17 +364,43 @@ class LLMSession
         }
 
         std::string gHash = computeGraphHash(*g, {logitsId});
-        repo = std::make_unique<Repo>("benchmarks/repo_" + model_name, gHash, true);
+        repo = std::make_unique<TGStore>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
+                                      gHash, true);
 
         std::string actual_cache = cache_file;
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            actual_cache = "dirty_region_caches/" + model_name + "-cpp.bin";
+            std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : ""));
+            actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
+        if (compile_no_weights_bucket)
+            actual_cache += ".no-weights-persistent-cache-v2";
+        if (!referenceFile.empty())
+            actual_cache += disable_fusion ? ".no-fusion-reference-write" : ".reference-write";
+        else if (disable_fusion)
+            actual_cache += ".no-fusion-all";
+        else if (!compareReferenceFile.empty())
+            actual_cache += ".reference-compare";
+        actual_cache += disable_caching ? ".no-dirty-cache" : ".dirty-cache";
 
-        session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
-                                            min_compile_time, delegate);
+        session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(),
+                                            disable_caching,
+                                            min_compile_time, act_brancher, log_cost_calls,
+                                            "benchmarks/records.bin", disable_compilation_caching);
+        session->settings.use_ortools = use_ortools;
+        session->settings.use_ortools_full = use_ortools_full;
+        session->settings.use_ortools_lns = use_ortools_lns;
+        session->settings.max_time_seconds = max_time_seconds;
+        session->settings.disable_fusion = disable_fusion;
+        session->settings.saturate_only = saturate_only;
+        KernelRegistry::get().setReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
+
+        if ((!referenceFile.empty() || !compareReferenceFile.empty()) &&
+            !referenceVerifier.init(referenceFile, compareReferenceFile))
+        {
+            throw std::runtime_error("Failed to initialize reference tensor verifier");
+        }
 
         if (compile_decode_buckets)
         {
@@ -180,7 +417,30 @@ class LLMSession
             }
         }
 
-        session->compile(true);
+        if (compile_no_weights_bucket)
+        {
+            ShapePropagator prop;
+            prop.inferShapeRecursive(logitsId, *g);
+
+            Bucket bucket;
+            bucket.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            bucket.outputNeededRegion = makeFull(g->getNode(logitsId).getShape());
+            session->addBucket(bucket.inputDirtyRegions, bucket.outputNeededRegion);
+        }
+
+        if (!bucket_weights.empty())
+        {
+            session->ensureFullBucket();
+            session->setBucketWeights(bucket_weights);
+        }
+
+        if (saturate_only)
+        {
+            session->plan(true);
+            return;
+        }
+
+        session->compile();
     }
 
     int32_t generate_step(const std::vector<uint32_t> &tokens)
@@ -233,7 +493,16 @@ class LLMSession
         b.inputDirtyRegions = {{inputIdsId, dirty_regions}};
         b.outputNeededRegion = {outR};
 
-        const float *device_output = static_cast<const float *>(session->run(b));
+        auto debugCallback = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx,
+                                 const void *data) {
+            referenceVerifier.verify(logicalId, kernel_name, ctx, data, g.get());
+        };
+        const bool verifyTensors = !referenceFile.empty() || !compareReferenceFile.empty();
+        const bool use_full_bucket = runFullGraph || (compileNoWeightsBucket && !has_run);
+        const float *device_output = static_cast<const float *>(session->run(
+            use_full_bucket ? Bucket{} : b, verifyTensors ? Debug::Callback(debugCallback) : Debug::Callback{},
+            !use_full_bucket));
+        has_run = true;
 
         std::vector<float> host_output;
 #ifdef TG_USE_CUDA
@@ -261,14 +530,215 @@ class LLMSession
             }
         }
 
+        std::cout << "[DEBUG_LOGITS] max_val=" << max_val << " argmax_idx=" << argmax_idx
+                  << " host_output[0]=" << host_output[0] << " host_output[1]=" << host_output[1]
+                  << " host_output[563]=" << (563 < host_output.size() ? host_output[563] : -999.0f)
+                  << " tokIdx=" << tokIdx << std::endl;
         prev_tokens = tokens;
         return argmax_idx;
+    }
+};
+
+class Krea2Session
+{
+    std::unique_ptr<MemoryManager> mem;
+    std::unique_ptr<Graph> g;
+    std::unique_ptr<TGStore> repo;
+    std::unique_ptr<Session> session;
+    LogicalId inputIdsId;
+    LogicalId attentionMaskId;
+    LogicalId latentInputId;
+    LogicalId imageOutputId;
+    std::vector<int32_t> previous_token_ids;
+    std::vector<float> previous_latent_data;
+    bool has_previous_inputs = false;
+
+    Krea2TurboConfig cfg;
+    Krea2TurboVAEConfig vae_cfg;
+    Qwen3VLConfig te_cfg;
+    uint32_t num_steps;
+    float mu_val;
+
+  public:
+    Krea2Session(const std::string &model_path, const std::string &text_encoder_path = "",
+                 const std::string &vae_path = "", uint32_t height = 1024, uint32_t width = 1024,
+                 uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
+                 std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
+                  const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
+                 bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0,
+                  bool use_ortools_lns = false, bool disable_compilation_caching = false)
+        : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
+    {
+        if (threads > 0)
+        {
+            set_num_threads(threads);
+        }
+
+        auto act_brancher = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
+
+        std::string actual_dit_path = model_path;
+        if (std::filesystem::is_directory(model_path))
+        {
+            if (std::filesystem::exists(model_path + "/krea.safetensors"))
+                actual_dit_path = model_path + "/krea.safetensors";
+            else if (std::filesystem::exists(model_path + "/turbo.safetensors"))
+                actual_dit_path = model_path + "/turbo.safetensors";
+            else if (std::filesystem::exists(model_path + "/krea2_turbo_fp8_scaled.safetensors"))
+                actual_dit_path = model_path + "/krea2_turbo_fp8_scaled.safetensors";
+            else if (std::filesystem::exists(model_path + "/transformer"))
+                actual_dit_path = model_path + "/transformer";
+        }
+
+        std::string actual_te_path = text_encoder_path;
+        if (actual_te_path.empty())
+        {
+            if (std::filesystem::exists(model_path + "/text_encoder"))
+                actual_te_path = model_path + "/text_encoder";
+            else if (std::filesystem::exists(model_path + "/text_encoders"))
+                actual_te_path = model_path + "/text_encoders";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_bf16.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b_bf16.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b.safetensors";
+            else if (std::filesystem::exists(model_path + "/qwen3vl_4b_fp8_scaled.safetensors"))
+                actual_te_path = model_path + "/qwen3vl_4b_fp8_scaled.safetensors";
+            else
+                actual_te_path = model_path;
+        }
+
+        std::string actual_vae_path = vae_path;
+        if (actual_vae_path.empty())
+        {
+            if (std::filesystem::exists(model_path + "/vae"))
+                actual_vae_path = model_path + "/vae";
+            else if (std::filesystem::exists(model_path + "/qwen_image_vae.safetensors"))
+                actual_vae_path = model_path + "/qwen_image_vae.safetensors";
+            else
+                actual_vae_path = model_path;
+        }
+
+        mem = std::make_unique<MemoryManager>();
+        g = std::make_unique<Graph>();
+
+        auto roots = build_krea2_pipeline_graph(*g, *mem, actual_dit_path, actual_te_path, actual_vae_path, height,
+                                                width, text_seq_len, steps, mu);
+        imageOutputId = roots.roots[0];
+        inputIdsId = roots.inputs[0];
+        attentionMaskId = roots.inputs[1];
+        latentInputId = roots.inputs[2];
+
+        std::string gHash = computeGraphHash(*g, {imageOutputId});
+        repo = std::make_unique<TGStore>("benchmarks/repo_krea-2-turbo-pipeline", gHash, true);
+
+        std::string actual_cache = cache_file;
+        if (actual_cache.empty())
+        {
+            std::filesystem::create_directories("dirty_region_caches");
+            std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : "");
+            actual_cache = "dirty_region_caches/" + prefix + "krea-2-turbo-pipeline-" + std::to_string(width) + "x" +
+                           std::to_string(height) + "-s" + std::to_string(steps) + ".bin";
+        }
+
+        session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
+                                            min_compile_time, act_brancher, log_cost_calls,
+                                            "benchmarks/records.bin", disable_compilation_caching);
+        session->settings.use_ortools_full = use_ortools_full;
+        session->settings.use_ortools_lns = use_ortools_lns;
+        session->settings.max_time_seconds = max_time_seconds;
+
+        // These buckets cover the input combinations used when regenerating
+        // an image.  The prompt and latent tensors are fixed-size, so changing
+        // their contents only needs a new execution plan for the dirty input
+        // region, not a graph recompilation.
+        if (!disable_caching)
+        {
+            const std::vector<Region> output_regions = makeFull(g->getNode(imageOutputId).getShape());
+            const std::vector<Region> token_regions = makeFull(g->getNode(inputIdsId).getShape());
+            const std::vector<Region> latent_regions = makeFull(g->getNode(latentInputId).getShape());
+
+            session->addBucket({{inputIdsId, token_regions}}, output_regions);
+            session->addBucket({{latentInputId, latent_regions}}, output_regions);
+            session->addBucket({{inputIdsId, token_regions}, {latentInputId, latent_regions}}, output_regions);
+        }
+        session->compile(true);
+    }
+
+    std::vector<float> generate_image(const std::vector<int32_t> &token_ids, const std::vector<float> &attention_mask,
+                                      const std::vector<float> &latent_data)
+    {
+        std::vector<int32_t> padded_tokens = token_ids;
+        const uint32_t encoder_seq_len = cfg.text_seq_len + KREA_QWEN_PREFIX_TOKEN_COUNT;
+        if (padded_tokens.size() < encoder_seq_len)
+        {
+            padded_tokens.resize(encoder_seq_len, 151643);
+        }
+        else if (padded_tokens.size() > encoder_seq_len)
+        {
+            padded_tokens.resize(encoder_seq_len);
+        }
+
+        if (num_steps > 0)
+        {
+            session->writeInput(inputIdsId, padded_tokens.data(), encoder_seq_len * sizeof(int32_t));
+            session->writeInput(attentionMaskId, attention_mask.data(), cfg.text_seq_len * sizeof(float));
+        }
+        session->writeInput(latentInputId, latent_data.data(), latent_data.size() * sizeof(float));
+
+        Bucket b;
+        const bool token_changed = !has_previous_inputs || previous_token_ids != padded_tokens;
+        const bool latent_changed = !has_previous_inputs || previous_latent_data != latent_data;
+        b.outputNeededRegion = makeFull(g->getNode(imageOutputId).getShape());
+
+        if (token_changed && latent_changed)
+        {
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+        else if (token_changed)
+        {
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+        }
+        else if (latent_changed)
+        {
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+        else
+        {
+            // There is no no-op bucket.  Treat an unchanged request as a full
+            // refresh so it remains correct when caching is disabled or when
+            // the caller repeats the same inputs.
+            b.inputDirtyRegions[inputIdsId] = makeFull(g->getNode(inputIdsId).getShape());
+            b.inputDirtyRegions[latentInputId] = makeFull(g->getNode(latentInputId).getShape());
+        }
+
+        previous_token_ids = padded_tokens;
+        previous_latent_data = latent_data;
+        has_previous_inputs = true;
+        const float *device_output = static_cast<const float *>(session->run(b));
+
+        uint64_t num_pixels = 1ULL * vae_cfg.in_channels * cfg.height * cfg.width;
+        std::vector<float> host_output(num_pixels);
+
+#ifdef TG_USE_CUDA
+        cudaPointerAttributes attrs;
+        if (cudaPointerGetAttributes(&attrs, device_output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+        {
+            cudaMemcpy(host_output.data(), device_output, num_pixels * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+        else
+#endif
+        {
+            std::memcpy(host_output.data(), device_output, num_pixels * sizeof(float));
+        }
+
+        return host_output;
     }
 };
 
 PYBIND11_MODULE(tensor_graphs, m)
 {
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
+    KernelBench::registerBindings(m);
 
     m.def("set_num_threads", &set_num_threads, py::arg("num_threads"),
           "Set the number of threads used by TensorGraph thread pools and parallel execution.");
@@ -351,7 +821,8 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<Bucket>(m, "Bucket")
         .def(py::init<>())
         .def_readwrite("inputDirtyRegions", &Bucket::inputDirtyRegions)
-        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion);
+        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion)
+        .def_readwrite("weight", &Bucket::weight);
 
     py::class_<MemSpace>(m, "MemSpace")
         .def(py::init<>())
@@ -366,11 +837,266 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("__eq__", [](const LogicalId &self, const LogicalId &other) { return self == other; })
         .def("__repr__", [](const LogicalId &self) { return "LogicalId(" + std::to_string(self.value) + ")"; });
 
+    py::class_<BufferId>(m, "BufferId")
+        .def(py::init<>())
+        .def(py::init<uint32_t>())
+        .def_readwrite("value", &BufferId::value)
+        .def("__hash__", [](const BufferId &self) { return std::hash<BufferId>()(self); })
+        .def("__eq__", [](const BufferId &self, const BufferId &other) { return self == other; })
+        .def("__repr__", [](const BufferId &self) { return "BufferId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<EClassId>(m, "EClassId")
+        .def(py::init<>())
+        .def(py::init<uint32_t>())
+        .def_readwrite("value", &EClassId::value)
+        .def("__hash__", [](const EClassId &self) { return std::hash<EClassId>()(self); })
+        .def("__eq__", [](const EClassId &self, const EClassId &other) { return self == other; })
+        .def("__repr__", [](const EClassId &self) { return "EClassId(" + std::to_string(self.value) + ")"; });
+
+    py::class_<ParallelBuffer>(m, "ParallelBuffer")
+        .def(py::init<>())
+        .def(py::init<BufferId, MemSpace, uint64_t, uint32_t, uint32_t, int64_t>(),
+             py::arg("id"), py::arg("mem_space"), py::arg("size"), py::arg("start"), py::arg("end"),
+             py::arg("offset") = -1)
+        .def_readwrite("id", &ParallelBuffer::id)
+        .def_readwrite("mem_space", &ParallelBuffer::mem_space)
+        .def_readwrite("size", &ParallelBuffer::size)
+        .def_readwrite("start", &ParallelBuffer::start)
+        .def_readwrite("end", &ParallelBuffer::end)
+        .def_readwrite("offset", &ParallelBuffer::offset)
+        .def("__repr__", [](const ParallelBuffer &b) {
+            return "ParallelBuffer(id=" + std::to_string(b.id.value) + ", size=" + std::to_string(b.size) +
+                   ", start=" + std::to_string(b.start) + ", end=" + std::to_string(b.end) +
+                   ", offset=" + std::to_string(b.offset) + ")";
+        });
+
+    py::class_<ExtractionResult>(m, "ExtractionResult")
+        .def(py::init<>())
+        .def_readwrite("selection_map", &ExtractionResult::selection_map)
+        .def_readwrite("order", &ExtractionResult::order)
+        .def_readwrite("buffers", &ExtractionResult::buffers)
+        .def_readwrite("eclass_to_buf", &ExtractionResult::eclass_to_buf)
+        .def_readwrite("cost", &ExtractionResult::cost)
+        .def_readwrite("eclass_to_cost", &ExtractionResult::eclass_to_cost);
+
+    py::class_<CompiledGraph>(m, "CompiledGraph")
+        .def(py::init<>())
+        .def_readwrite("bucket", &CompiledGraph::bucket)
+        .def_readwrite("nodeCosts", &CompiledGraph::nodeCosts)
+        .def_readwrite("eclass_to_logical", &CompiledGraph::eclass_to_logical)
+        .def_readwrite("logical_to_eclass", &CompiledGraph::logical_to_eclass)
+        .def("cost", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("get_cost", &CompiledGraph::get_cost, py::arg("print_utilization") = false)
+        .def("getCost", &CompiledGraph::getCost, py::arg("print_utilization") = false)
+        .def("evaluate_makespan", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("evaluateMakespan", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("calculate_makespan", &CompiledGraph::cost, py::arg("print_utilization") = false)
+        .def("calculateMakespan", &CompiledGraph::cost, py::arg("print_utilization") = false);
+
+    auto pyCalculateMakespan = [](py::handle insts_obj, py::dict node_costs, bool print_utilization) -> float {
+        if (py::isinstance<CompiledGraph>(insts_obj)) {
+            return insts_obj.cast<const CompiledGraph &>().cost(print_utilization);
+        }
+        py::sequence instructions = insts_obj.cast<py::sequence>();
+        if (instructions.empty()) {
+            float sum = 0.0f;
+            for (auto item : node_costs) {
+                sum += item.second.cast<float>();
+            }
+            return sum;
+        }
+
+        MakespanSimulator sim;
+        for (auto inst_handle : instructions) {
+            py::dict inst = inst_handle.cast<py::dict>();
+
+            EClassId cid{0};
+            if (inst.contains("eclassId"))
+                cid = EClassId{inst["eclassId"].cast<uint32_t>()};
+            else if (inst.contains("eclass_id"))
+                cid = EClassId{inst["eclass_id"].cast<uint32_t>()};
+            else if (inst.contains("id"))
+                cid = EClassId{inst["id"].cast<uint32_t>()};
+
+            float inst_cost = 0.0f;
+            if (node_costs.contains(py::int_(cid.value))) {
+                inst_cost = node_costs[py::int_(cid.value)].cast<float>();
+            } else if (node_costs.contains(py::str(std::to_string(cid.value)))) {
+                inst_cost = node_costs[py::str(std::to_string(cid.value))].cast<float>();
+            }
+
+            std::vector<EClassId> children;
+            if (inst.contains("children")) {
+                for (auto c : inst["children"].cast<py::sequence>()) {
+                    children.push_back(EClassId{c.cast<uint32_t>()});
+                }
+            }
+
+            std::vector<uint32_t> in_bufs;
+            if (inst.contains("inBuffers")) {
+                for (auto b : inst["inBuffers"].cast<py::sequence>()) {
+                    if (py::isinstance<py::dict>(b)) {
+                        py::dict bdict = b.cast<py::dict>();
+                        in_bufs.push_back(bdict.contains("id") ? bdict["id"].cast<uint32_t>() : UINT32_MAX);
+                    } else if (py::isinstance<py::int_>(b)) {
+                        in_bufs.push_back(b.cast<uint32_t>());
+                    }
+                }
+            } else if (inst.contains("in_buffers")) {
+                for (auto b : inst["in_buffers"].cast<py::sequence>()) {
+                    if (py::isinstance<py::dict>(b)) {
+                        py::dict bdict = b.cast<py::dict>();
+                        in_bufs.push_back(bdict.contains("id") ? bdict["id"].cast<uint32_t>() : UINT32_MAX);
+                    } else if (py::isinstance<py::int_>(b)) {
+                        in_bufs.push_back(b.cast<uint32_t>());
+                    }
+                }
+            }
+
+            uint32_t out_buf = UINT32_MAX;
+            if (inst.contains("outBuffer")) {
+                auto ob = inst["outBuffer"];
+                if (py::isinstance<py::dict>(ob)) {
+                    py::dict obdict = ob.cast<py::dict>();
+                    if (obdict.contains("id"))
+                        out_buf = obdict["id"].cast<uint32_t>();
+                } else if (py::isinstance<py::int_>(ob)) {
+                    out_buf = ob.cast<uint32_t>();
+                }
+            } else if (inst.contains("out_buffer")) {
+                auto ob = inst["out_buffer"];
+                if (py::isinstance<py::dict>(ob)) {
+                    py::dict obdict = ob.cast<py::dict>();
+                    if (obdict.contains("id"))
+                        out_buf = obdict["id"].cast<uint32_t>();
+                } else if (py::isinstance<py::int_>(ob)) {
+                    out_buf = ob.cast<uint32_t>();
+                }
+            }
+
+            std::vector<Engine> engines;
+            if (inst.contains("engines")) {
+                for (auto e : inst["engines"].cast<py::sequence>()) {
+                    if (py::isinstance<py::dict>(e)) {
+                        py::dict edict = e.cast<py::dict>();
+                        uint32_t idx = edict.contains("idx") ? edict["idx"].cast<uint32_t>() : 0;
+                        EngineType type = EngineType::CPU;
+                        if (edict.contains("type")) {
+                            type = static_cast<EngineType>(edict["type"].cast<uint32_t>());
+                        }
+                        engines.push_back(Engine{idx, type});
+                    } else if (py::isinstance<Engine>(e)) {
+                        engines.push_back(e.cast<Engine>());
+                    }
+                }
+            }
+
+            bool is_view = false;
+            if (inst.contains("is_view"))
+                is_view = inst["is_view"].cast<bool>();
+            else if (inst.contains("isView"))
+                is_view = inst["isView"].cast<bool>();
+
+            sim.addOperation(cid, children, in_bufs, out_buf, engines, inst_cost, is_view);
+        }
+
+        float total_cost = sim.getMakespan();
+        if (print_utilization && total_cost > 0.0f) {
+            std::cout << "Total Execution Cost: " << total_cost << " ms\n";
+            for (const auto &kv : sim.engine_active_time) {
+                Engine eng = kv.first;
+                float active_duration = kv.second;
+                float percentage = (active_duration / total_cost) * 100.0f;
+                std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): " << std::fixed
+                          << std::setprecision(2) << percentage << "% "
+                          << "(" << active_duration << " ms active)\n";
+            }
+        }
+        return total_cost;
+    };
+
+    m.def("calculate_makespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("calculateMakespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("evaluate_makespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("evaluateMakespan", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("get_cost", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+    m.def("getCost", pyCalculateMakespan, py::arg("instructions"), py::arg("node_costs") = py::dict(), py::arg("print_utilization") = false);
+
+    py::class_<Settings>(m, "Settings")
+        .def(py::init<>(&Settings::get_default))
+        .def_readwrite("use_ortools", &Settings::use_ortools)
+        .def_readwrite("use_ortools_full", &Settings::use_ortools_full)
+        .def_readwrite("use_ortools_lns", &Settings::use_ortools_lns)
+        .def_readwrite("cpu_only", &Settings::cpu_only)
+        .def_readwrite("disable_node_caching", &Settings::disable_caching)
+        .def_readwrite("disable_compilation_caching", &Settings::disable_compilation_caching)
+        .def_readwrite("only_plan", &Settings::only_plan)
+        .def_readwrite("saturate_only", &Settings::saturate_only)
+        .def_readwrite("min_compile_seconds", &Settings::min_compile_seconds)
+        .def_readwrite("num_threads", &Settings::num_threads)
+        .def_readwrite("bucket_weights", &Settings::bucket_weights);
+
+    py::class_<MemoryManager>(m, "MemoryManager").def(py::init<>());
+
+    py::class_<Session>(m, "Session")
+        .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
+                          bool disable_node_caching, bool use_ortools, bool use_ortools_full, bool use_ortools_lns,
+                          bool disable_compilation_caching, float min_compile_seconds) {
+            Settings settings = Settings::get_default();
+            settings.use_ortools = use_ortools;
+            settings.use_ortools_full = use_ortools_full;
+            settings.use_ortools_lns = use_ortools_lns;
+            settings.disable_caching = disable_node_caching;
+            settings.disable_compilation_caching = disable_compilation_caching;
+            settings.min_compile_seconds = min_compile_seconds;
+            if (!cache_file.empty())
+                settings.cache_file = cache_file;
+            return std::make_unique<Session>(g, mem, root_id, settings);
+        }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
+            py::arg("disable_node_caching") = false, py::arg("use_ortools") = false,
+            py::arg("use_ortools_full") = false, py::arg("use_ortools_lns") = false,
+            py::arg("disable_compilation_caching") = false, py::arg("min_compile_seconds") = 0.0f)
+        .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
+                              const std::vector<Region> &outNeeded, float weight) {
+            s.addBucket(inDirty, outNeeded, weight);
+        }, py::arg("input_dirty_regions"), py::arg("output_needed_region"), py::arg("weight") = 1.0f)
+        .def("plan", &Session::plan, py::arg("do_saturate") = true)
+        .def("compile", &Session::compile, py::arg("do_saturate") = true)
+        .def("ensure_full_bucket", &Session::ensureFullBucket)
+        .def("export_ortools_problem", &Session::exportOrtoolsProblem, py::arg("do_saturate") = true)
+        .def("ensure_cache_coverage_ortools", &Session::ensureCacheCoverageOrtools, py::arg("do_saturate") = true)
+        .def("get_compiled_graphs", &Session::getCachedGraphs)
+        .def("set_compiled_graphs", &Session::setCachedGraphs)
+        .def("write_input_int32", [](Session &s, LogicalId id, const std::vector<int32_t> &values) {
+            s.writeInput(id, values.data(), values.size() * sizeof(int32_t));
+        })
+        .def("write_input_float32", [](Session &s, LogicalId id, const std::vector<float> &values) {
+            s.writeInput(id, values.data(), values.size() * sizeof(float));
+        })
+        .def("run_float32", [](Session &s, LogicalId root_id) {
+            const float *output = static_cast<const float *>(s.run());
+            const uint64_t count = countElements(s.graph.getNode(root_id).getShape());
+            std::vector<float> result(count);
+#ifdef TG_USE_CUDA
+            cudaPointerAttributes attrs;
+            if (cudaPointerGetAttributes(&attrs, output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+            {
+                cudaMemcpy(result.data(), output, count * sizeof(float), cudaMemcpyDeviceToHost);
+                return result;
+            }
+#endif
+            std::copy(output, output + count, result.begin());
+            return result;
+        })
+        .def_readwrite("settings", &Session::settings);
+
     py::class_<TensorNode>(m, "TensorNode")
         .def_readonly("id", &TensorNode::id)
         .def_readonly("op_type", &TensorNode::opType)
         .def_readonly("dtype", &TensorNode::dtype)
         .def_readonly("child_ids", &TensorNode::child_ids)
+        .def_readonly("debug_origin", &TensorNode::debugOrigin)
+        .def_readonly("debugOrigin", &TensorNode::debugOrigin)
         .def_property_readonly("shape", &TensorNode::getShape);
 
     py::class_<Graph>(m, "Graph")
@@ -378,27 +1104,83 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readonly("nodes", &Graph::nodes)
         .def("hasNode", &Graph::hasNode)
         .def("getNode", [](const Graph &self, LogicalId id) { return self.getNode(id); })
+        .def("set_debug_origin", [](Graph &self, LogicalId id, const std::string &origin) {
+            self.getNode(id).debugOrigin = origin;
+        }, py::arg("node_id"), py::arg("origin"))
+        .def("setDebugOrigin", [](Graph &self, LogicalId id, const std::string &origin) {
+            self.getNode(id).debugOrigin = origin;
+        }, py::arg("node_id"), py::arg("origin"))
         .def(
             "input",
             [](Graph &self, const std::vector<uint32_t> &shape, DType dtype) { return self.input(shape, dtype); },
             py::arg("shape"), py::arg("dtype") = DType::FLOAT32)
-        .def("add", [](Graph &self, LogicalId a, LogicalId b) { return self.add(a, b); })
+        .def("weight", [](Graph &self, const std::string &path, const std::string &name) {
+            return self.weight(path, name);
+        })
+        .def("constant_float32", [](Graph &self, const std::vector<uint32_t> &shape,
+                                     const std::vector<float> &values) {
+            if (countElements(shape) != values.size())
+                throw std::runtime_error("constant_float32 value count does not match shape");
+            return self.constant(shape, values.data(), DType::FLOAT32);
+        })
+        .def("constant_int32", [](Graph &self, const std::vector<uint32_t> &shape,
+                                   const std::vector<int32_t> &values) {
+            if (countElements(shape) != values.size())
+                throw std::runtime_error("constant_int32 value count does not match shape");
+            return self.constant(shape, values.data(), DType::INT32);
+        })
+        .def("add", [](Graph &self, LogicalId a, LogicalId b) {
+            LogicalId id = self.add(a, b);
+            self.getNode(id).debugOrigin = pythonCallsite();
+            return id;
+        })
         .def("mul", [](Graph &self, LogicalId a, LogicalId b) { return self.mul(a, b); })
         .def("div", [](Graph &self, LogicalId a, LogicalId b) { return self.div(a, b); })
-        .def("dot", [](Graph &self, LogicalId a, LogicalId b) { return self.dot(a, b); })
+        .def("dot", [](Graph &self, LogicalId a, LogicalId b, const std::string &debugOrigin) {
+            LogicalId id = self.dot(a, b);
+            if (!debugOrigin.empty())
+            {
+                self.getNode(id).debugOrigin = debugOrigin;
+            }
+            else
+            {
+                self.getNode(id).debugOrigin = pythonCallsite();
+            }
+            return id;
+        }, py::arg("a"), py::arg("b"), py::arg("debug_origin") = "")
         .def("sin", [](Graph &self, LogicalId a) { return self.sin(a); })
         .def("cos", [](Graph &self, LogicalId a) { return self.cos(a); })
         .def("neg", [](Graph &self, LogicalId a) { return self.neg(a); })
         .def("pow", [](Graph &self, LogicalId a, LogicalId b) { return self.pow(a, b); })
         .def("sum", [](Graph &self, LogicalId a, LogicalId b) { return self.sum(a, b); })
+        .def("sum_axis", [](Graph &self, LogicalId a, int32_t axis) {
+            return self.sum(a, self.constant({1}, &axis, DType::INT32));
+        })
+        .def("max_axis", [](Graph &self, LogicalId a, int32_t axis) {
+            return self.max(a, self.constant({1}, &axis, DType::INT32));
+        })
         .def("max", [](Graph &self, LogicalId a, LogicalId b) { return self.max(a, b); })
+        .def("contiguous", [](Graph &self, LogicalId a) { return self.contiguous(a); })
         .def("reshape",
              [](Graph &self, LogicalId a, const std::vector<int32_t> &shape) { return self.reshape(a, shape); })
         .def("permute", [](Graph &self, LogicalId a, LogicalId dims) { return self.permute(a, dims); })
+        .def("permute_axes", [](Graph &self, LogicalId a, const std::vector<int32_t> &axes) {
+            return self.permute(a, axes);
+        })
         .def("slice", [](Graph &self, LogicalId a, LogicalId st, LogicalId en,
                          LogicalId step) { return self.slice(a, st, en, step); })
-        .def("scatter", [](Graph &self, LogicalId t, LogicalId u, LogicalId st, LogicalId en,
-                           LogicalId step) { return self.scatter(t, u, st, en, step); })
+        .def("slice_dims", [](Graph &self, LogicalId a, const std::vector<int32_t> &st,
+                               const std::vector<int32_t> &en, const std::vector<int32_t> &step) {
+            if (st.size() != en.size() || st.size() != step.size())
+                throw std::runtime_error("slice_dims bounds must have equal rank");
+            const std::vector<uint32_t> shape{static_cast<uint32_t>(st.size())};
+            LogicalId start = self.constant(shape, st.data(), DType::INT32);
+            LogicalId end = self.constant(shape, en.data(), DType::INT32);
+            LogicalId stride = self.constant(shape, step.data(), DType::INT32);
+            return self.slice(a, start, end, stride);
+        })
+        .def("scatter", [](Graph &self, LogicalId u, LogicalId st, LogicalId en, LogicalId step,
+                           LogicalId shape) { return self.scatter(u, st, en, step, shape); })
         .def("concat",
              [](Graph &self, const std::vector<LogicalId> &ids, uint32_t axis) { return self.concat(ids, axis); })
         .def("cast", [](Graph &self, LogicalId a, DType dtype) { return self.cast(a, dtype); })
@@ -410,8 +1192,14 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("gather", [](Graph &self, LogicalId a, LogicalId idx) { return self.gather(a, idx); })
         .def("fill",
              [](Graph &self, float value, const std::vector<uint32_t> &shape) { return self.fill(value, shape); })
+        .def("fill_from", [](Graph &self, LogicalId value, const std::vector<uint32_t> &shape) {
+            return self.fill(value, shape);
+        })
         .def("constant", [](Graph &self, const std::vector<int32_t> &vals) { return self.constant(vals); })
         .def("relu", [](Graph &self, LogicalId a, const std::vector<uint32_t> &shape) { return self.relu(a, shape); })
+        .def("im2col", [](Graph &self, LogicalId a, uint32_t kernel, uint32_t stride, uint32_t padding) {
+            return self.im2col(a, kernel, stride, padding);
+        })
         .def("log", [](Graph &self, LogicalId a) { return self.log(a); })
         .def("argmax", [](Graph &self, LogicalId a, LogicalId dim, LogicalId k) { return self.argmax(a, dim, k); })
         .def("lt", [](Graph &self, LogicalId a, LogicalId b) { return self.lt(a, b); })
@@ -420,71 +1208,54 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("logical_or", [](Graph &self, LogicalId a, LogicalId b) { return self.logical_or(a, b); })
         .def("logical_not", [](Graph &self, LogicalId a) { return self.logical_not(a); });
 
-    // Action Feature Structs
-    py::class_<ActionFeatureCache>(m, "ActionFeatureCache")
-        .def_readwrite("is_cached", &ActionFeatureCache::is_cached)
-        .def_readwrite("size", &ActionFeatureCache::size)
-        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
-        .def_readwrite("op_type", &ActionFeatureCache::op_type)
-        .def_readwrite("num_users", &ActionFeatureCache::num_users)
-        .def_readwrite("logical_id", &ActionFeatureCache::logical_id);
 
-    py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
-        .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
-        .def_readwrite("size", &ActionFeatureExtractDispatch::size)
-        .def_readwrite("mem_space", &ActionFeatureExtractDispatch::mem_space)
-        .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
-        .def_readwrite("graph", &ActionFeatureExtractDispatch::graph);
 
-    py::class_<ActionFeatureBufferize>(m, "ActionFeatureBufferize")
-        .def_readwrite("is_new_buffer", &ActionFeatureBufferize::is_new_buffer)
-        .def_readwrite("size", &ActionFeatureBufferize::size)
-        .def_readwrite("parent_size", &ActionFeatureBufferize::parent_size)
-        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time);
-
-    py::class_<ActionFeatureMalloc>(m, "ActionFeatureMalloc")
-        .def_readwrite("size", &ActionFeatureMalloc::size)
-        .def_readwrite("start", &ActionFeatureMalloc::start)
-        .def_readwrite("end", &ActionFeatureMalloc::end);
-
-    // Search Delegate
-    py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")
+    // Brancher
+    py::class_<plan::BranchDecision>(m, "BranchDecision")
         .def(py::init<>())
-        .def("push_state", &SearchDelegate::push_state)
-        .def("pop_state", &SearchDelegate::pop_state)
-        .def("on_leaf_evaluated", &SearchDelegate::on_leaf_evaluated)
-        .def("init_cache_graph", &SearchDelegate::init_cache_graph)
-        .def("init_egraph", &SearchDelegate::init_egraph)
-        .def("init_dispatch_graph", &SearchDelegate::init_dispatch_graph)
-        .def("init_bufferize_graph", &SearchDelegate::init_bufferize_graph)
-        .def("init_malloc_graph", &SearchDelegate::init_malloc_graph)
-        .def("order_cache", &SearchDelegate::order_cache)
-        .def("order_enodes", &SearchDelegate::order_enodes)
-        .def("order_dispatch", &SearchDelegate::order_dispatch)
-        .def("order_bufferize", &SearchDelegate::order_bufferize)
-        .def("order_malloc", &SearchDelegate::order_malloc);
+        .def_readwrite("left_delta", &plan::BranchDecision::left_delta)
+        .def_readwrite("right_delta", &plan::BranchDecision::right_delta);
 
-    // Saturated E-Graph Context & Simulations
-    py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")
-        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); });
-
-    m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
-          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
-
-    m.def("build_and_saturate_egraph_from_graph", &build_and_saturate_egraph_from_graph, py::arg("graph"),
-          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false);
-
-    m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
-          py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false);
-
-    m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
-          py::arg("log_cost_calls") = false);
+    py::class_<plan::Brancher, PyBrancher, std::shared_ptr<plan::Brancher>>(m, "Brancher")
+        .def(py::init<>());
+    py::class_<plan::HeuristicBrancher, plan::Brancher, std::shared_ptr<plan::HeuristicBrancher>>(
+        m, "HeuristicBrancher")
+        .def(py::init<>());
+    m.attr("SearchDelegate") = m.attr("Brancher");
+    m.attr("HeuristicSearchDelegate") = m.attr("HeuristicBrancher");
+    m.attr("HeuristicDelegate") = m.attr("HeuristicBrancher");
+    m.def("make_full_regions", [](const std::vector<uint32_t> &shape) { return makeFull(shape); });
 
     py::class_<LLMSession>(m, "LLMSession")
-        .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool, uint32_t>(),
-             py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
+        .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
+                      bool, const std::string &, const std::string &, bool, bool, bool, bool>(),
+             py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false, py::arg("threads") = 0)
+             py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
+             py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
+             py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
+             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
+             py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
+             py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false,
+             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false)
         .def("generate_step", &LLMSession::generate_step);
+
+    py::class_<Krea2Session>(m, "Krea2Session")
+        .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
+                      uint32_t, float, std::shared_ptr<plan::Brancher>, float, const std::string &, bool, uint32_t,
+                      bool, bool, double, bool, bool>(),
+             py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
+             py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
+             py::arg("mu") = 1.15f, py::arg("brancher") = nullptr, py::arg("min_compile_time") = 0.0f,
+             py::arg("cache_file") = "", py::arg("disable_node_caching") = false, py::arg("threads") = 0,
+             py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
+             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
+             py::arg("disable_compilation_caching") = false)
+        .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
+             py::arg("latent_data"))
+        .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
+             py::arg("latent_data"));
+
+    m.attr("EmbeddingGemma2") = py::module_::import("embeddinggemma2").attr("EmbeddingGemma2");
 }

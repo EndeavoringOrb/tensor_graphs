@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KernelBench</title>
+<style>
+body {font:16px system-ui; max-width:1100px; margin:40px auto; padding:0 20px; background:#111827; color:#e5e7eb}
+select,textarea,input,button {box-sizing:border-box; padding:10px; border:1px solid #475569; background:#1f2937; color:inherit; border-radius:6px}
+select,textarea,input {width:100%; margin:8px 0 16px} textarea {font:13px monospace; height:300px}
+button {cursor:pointer} pre {white-space:pre-wrap; overflow-wrap:anywhere; background:#1f2937; padding:16px}
+a {color:#93c5fd} .job {padding:12px 0; border-bottom:1px solid #475569}
+</style>
+<h1>KernelBench</h1>
+<p>Optimize reference graphs matching your goal. Every submission gets correctness tests and per-configuration comparisons.</p>
+<p id="status">Loading goal…</p>
+<label>Reference graph<select id="target"></select></label>
+<button id="inspect">Inspect target</button>
+<pre id="details"></pre>
+<form id="submission">
+<label>Idea<input id="idea" required></label>
+<label>Backend<select id="backend"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>
+<label>New kernel source<textarea id="source" required spellcheck="false"></textarea></label>
+<button>Build, test, and benchmark</button>
+</form>
+<p id="message" role="status"></p>
+<h2>Experiments</h2>
+<div id="jobs"></div>
+<script>
+async function api(path, options={}) {
+  const response=await fetch(path, options), data=await response.json();
+  if(!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+async function refreshJobs() {
+  const data=await api('/api/jobs'), container=document.getElementById('jobs');
+  container.replaceChildren();
+  for(const job of data.jobs) {
+    const element=document.createElement('details'); element.className='job';
+    const title=document.createElement('summary'); title.textContent=`${job.kernel_name}: ${job.status} (${job.step})`;
+    const details=document.createElement('pre'); details.textContent=JSON.stringify(job.error || job.result,null,2);
+    const link=document.createElement('a'); link.href=`/api/jobs/${job.job_id}/logs`; link.textContent='Logs';
+    element.append(title,details,link); container.append(element);
+  }
+}
+document.getElementById('inspect').onclick=async()=>{
+  try {document.getElementById('details').textContent=JSON.stringify(await api('/api/targets/'+document.getElementById('target').value),null,2);}
+  catch(error) {document.getElementById('message').textContent=error.message;}
+};
+document.getElementById('submission').onsubmit=async(event)=>{
+  event.preventDefault();
+  try {
+    const data=await api('/api/iteration/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      target_id:document.getElementById('target').value,idea:document.getElementById('idea').value,
+      backend:document.getElementById('backend').value,source:document.getElementById('source').value})});
+    document.getElementById('message').textContent=`Queued ${data.job_id}`; await refreshJobs();
+  } catch(error) {document.getElementById('message').textContent=error.message;}
+};
+(async()=>{
+  try {
+    const status=await api('/api/status'); document.getElementById('status').textContent=`Goal: ${status.goal.name} · ${status.target_count} reference graphs`;
+    const data=await api('/api/targets'), select=document.getElementById('target');
+    for(const target of data.targets) {const option=document.createElement('option');option.value=target.id;option.textContent=`${target.reference_expression} (${target.configuration_count} configurations)`;select.append(option);}
+    await refreshJobs();setInterval(()=>refreshJobs().catch(error=>document.getElementById('message').textContent=error.message),5000);
+  } catch(error) {document.getElementById('message').textContent=error.message;}
+})();
+</script>
+</html>

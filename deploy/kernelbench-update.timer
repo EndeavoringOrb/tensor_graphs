@@ -1,0 +1,10 @@
+[Unit]
+Description=Check tensor_graphs main every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+Unit=kernelbench-update.service
+
+[Install]
+WantedBy=timers.target

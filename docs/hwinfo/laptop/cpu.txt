@@ -1,0 +1,130 @@
+﻿================================================================================
+CPU HARDWARE PROFILE - LENOVO THINKPAD T14s GEN 6 (SNAPDRAGON)
+System SKU: 21N10000US
+Processor: Qualcomm Snapdragon X Elite X1E-78-100 / Oryon
+Observed on this laptop; vendor specifications are cited below.
+================================================================================
+
+IDENTIFICATION
+--------------------------------------------------------------------------------
+- Architecture: ARM64 (Windows reports ARMv8, Qualcomm Family 8 Model 1 Rev 201)
+- Cores / logical processors: 12 / 12 (no SMT exposed)
+- Maximum reported clock: about 3.4 GHz; Qualcomm lists 3.4 GHz multi-core for
+  the X1E-78-100. This is a platform maximum, not a guaranteed sustained clock.
+- Qualcomm lists 42 MB total cache for this SKU. Windows WMI/SMBIOS reports
+  2,304 KiB L1 instruction cache (8-way), 1,152 KiB L1 data cache (8-way),
+  and 36,864 KiB L2 cache (reported associativity 7). The WMI values are
+  system totals; per-core mapping, cache latency, and line size were not
+  obtained.
+- Process: Qualcomm lists a 4 nm SoC process.
+- Installed system memory: 32 GB LPDDR5X-8448, on-board.
+
+ISA AND FEATURE ENUMERATION
+--------------------------------------------------------------------------------
+- This is an ARM64 target. The architectural SIMD family is Advanced SIMD
+  (NEON), with 128-bit vector registers. `arm_neon.h` intrinsics correspond to
+  AArch64 instructions. The Arm intrinsics database maps intrinsics to the
+  instruction names and required architectural features.
+- Windows API feature query (`IsProcessorFeaturePresent`) on this machine,
+  Windows build 26200, returned true for: ARMv8 base instructions; ARMv8 crypto
+  (AES, SHA-1, SHA-2); ARMv8 CRC32; ARMv8.1 atomics; ARMv8.2 dot product
+  (SDOT/UDOT); ARMv8.3 JSCVT; ARMv8.3 LRCPC; SHA-3; SHA-512; NEON I8MM;
+  NEON FP16; and NEON BF16.
+- The same Windows API returned false for: SVE, SVE2 and the queried SVE
+  subfeatures; LSE2; NEON EBF16; SME and the queried SME subfeatures. Windows
+  documents that a false result can also mean that its HAL does not expose
+  detection for that feature. The queried feature IDs on this Windows build are
+  documented by Microsoft; the Arm ISA reference remains the instruction-level
+  authority.
+- To enumerate the architectural instructions individually, use Arm's A-profile
+  A64 ISA reference or machine-readable specification. Search by instruction
+  mnemonic or extension/FEAT name. The Arm intrinsics database provides the
+  corresponding C/C++ intrinsic, instruction, type, and architecture requirement.
+- Windows `IsProcessorFeaturePresent` is a feature-group query, not a complete
+  instruction-by-instruction CPU dump. It reports OS/HAL-exposed feature flags.
+  Windows build 26200 on this system exposes the feature flags listed above.
+- Practical low-level surfaces: AArch64 assembly and compiler output; Advanced
+  SIMD/NEON intrinsics; the Arm instruction reference; Windows feature flags;
+  and compiler target-feature controls.
+- The feature query was run on 2026-10-10. Microsoft documents that a false
+  result can mean either unsupported hardware or a feature the Windows HAL does
+  not expose for detection; the API is not a raw dump of architectural ID regs.
+
+DATA TYPES AND OPERATION FAMILIES
+--------------------------------------------------------------------------------
+- Scalar AArch64 operations include 8-, 16-, 32-, and 64-bit integer values
+  and FP16, FP32, and FP64 floating-point values. NEON has 128-bit vectors
+  with integer lanes, FP32/FP64 lanes, and the reported FP16 and BF16
+  extensions. The queried flags do not report FP8 or SVE/SME vector types.
+- NEON operation families include integer and floating-point arithmetic,
+  comparisons, bitwise and shift operations, lane rearrangement, loads/stores,
+  widening/narrowing, and saturating arithmetic. Reported extensions add
+  AES/SHA cryptographic operations, CRC32, atomic read-modify-write
+  operations, signed/unsigned 8-bit dot products (SDOT/UDOT), and 8-bit
+  integer matrix multiply (I8MM). FP16 and BF16 flags enable their respective
+  arithmetic/conversion instruction families.
+- The byte/word types are ISA register formats, not a statement that every
+  compiler language provides arithmetic operators for each type. Arm's ISA
+  reference lists individual opcodes; ACLE and the intrinsics database list
+  compiler-visible types, intrinsic overloads, instruction mappings, and
+  feature requirements.
+
+MEASURED EXECUTION RATES
+--------------------------------------------------------------------------------
+- Measured 2026-10-10 on this laptop with Clang 19, `-O3`, and target
+  `armv8.6-a+crypto+dotprod+i8mm+fp16+bf16`. These are observed single-run
+  throughputs for the specific instruction loops in
+  `cpu_microbench.cpp`, not vendor peak ratings.
+- Single-thread vector arithmetic: FP32 FMA 29.5 GFLOP/s; FP16 FMA
+  162.0 GFLOP/s; BF16 dot product with FP32 accumulation 161.7 GFLOP/s;
+  signed INT8 SDOT 435.9 GOP/s; signed INT8 I8MM 432.9 GOP/s. Each multiply-
+  accumulate is counted as two operations. These kernels use independent
+  accumulators to supply instruction-level parallel work.
+- Streaming arrays of 512 MiB per array: one-thread read 67.5 GB/s, copy
+  51.4 GB/s, triad 52.9 GB/s; 12-thread read 96.4 GB/s, copy 60.4 GB/s,
+  triad 70.2 GB/s. These single-pass rates include worker creation/join time.
+  GB/s counts bytes read and written by each operation. The 12-thread run
+  creates 12 workers; it does not pin them to individual cores.
+- `llvm-objdump` of the compiled benchmark shows native AArch64 `fmla` for
+  FP32/FP16, `bfdot` for BF16 dot, `sdot` for signed INT8 dot, and `smmla` for
+  INT8 matrix multiply.
+- The scalar CPU's sustained frequency, temperature, power state, and competing
+  SoC traffic were not instrumented during this run.
+
+OBSERVED DEVICE
+--------------------------------------------------------------------------------
+- Windows processor name: Snapdragon(R) X Elite - X1E78100 - Qualcomm(R) Oryon(TM) CPU
+- Win32 reports 12 cores, 12 logical processors, 3417 MHz maximum clock.
+- System model: Lenovo ThinkPad T14s Gen 6, machine type 21N1; product SKU
+  21N10000US.
+
+SOURCES
+--------------------------------------------------------------------------------
+- Qualcomm Snapdragon X Elite specifications:
+  https://www.qualcomm.com/laptops/products/snapdragon-x-elite
+- Lenovo ThinkPad T14s Gen 6 (Snapdragon) PSREF:
+  https://psref.lenovo.com/Product/ThinkPad/ThinkPad_T14s_Gen_6_Snapdragon?tab=model
+- Qualcomm Snapdragon X Elite product brief:
+  https://docs.qualcomm.com/bundle/publicresource/87-71417-1_REV_F_Snapdragon_X_Elite_Product_Brief.pdf
+- Arm A-profile A64 Instruction Set Architecture (instruction-by-instruction):
+  https://developer.arm.com/documentation/ddi0602/latest/
+- Arm Architecture Machine Readable Specification (features, instructions,
+  system registers; browsable JSON mirror):
+  https://kernel.googlesource.com/pub/scm/linux/kernel/git/maz/AARCHMRS/
+- Arm intrinsics search database:
+  https://developer.arm.com/architectures/instruction-sets/simd-isas/neon/intrinsics
+- Arm C Language Extensions (ACLE), Advanced SIMD/NEON intrinsics:
+  https://developer.arm.com/documentation/101028/latest/
+- Arm ACLE current specification (NEON, FP16, BF16, and other extension types):
+  https://arm-software.github.io/acle/main/acle.html
+- Microsoft `IsProcessorFeaturePresent` ARM feature names, numeric IDs, and
+  detection caveats:
+  https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-isprocessorfeaturepresent
+- Microsoft `Win32_CacheMemory` WMI fields (cache size and properties):
+  https://learn.microsoft.com/windows/win32/cimwin32prov/win32-cachememory
+- Reproducible ARM64 instruction and memory microbenchmarks:
+  `cpu_microbench.cpp`. Build in an ARM64 Visual Studio developer prompt
+  with `clang++ --target=aarch64-pc-windows-msvc -O3
+  -march=armv8.6-a+crypto+dotprod+i8mm+fp16+bf16 cpu_microbench.cpp -o
+  cpu_microbench.exe`. Run `cpu_microbench.exe 100000000 134217728 50000000`
+  for the measured iteration and 512 MiB array settings.

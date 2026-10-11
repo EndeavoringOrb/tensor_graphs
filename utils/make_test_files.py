@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from binary import DTYPE_MAP, OP_TYPES, BinaryWriter
 from safetensors.torch import save_file
 
-TEST_DIR = "tensor_graphs_cpp/tests"
+TEST_DIR = "tensor_graphs_cpp/tests/data"
 
 
 tests = []

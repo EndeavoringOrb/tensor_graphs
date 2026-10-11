@@ -1,0 +1,32 @@
+﻿================================================================================
+STORAGE PROFILE - LENOVO THINKPAD T14s GEN 6 (SNAPDRAGON)
+Installed internal drive as observed on this laptop; relevant to datasets,
+checkpoint I/O, and out-of-core workloads.
+================================================================================
+
+OBSERVED DRIVE
+--------------------------------------------------------------------------------
+- Model: Western Digital PC SN740 SDDQMQD-1T00-1201.
+- Device type / bus: NVMe SSD. Windows Get-PhysicalDisk reports BusType NVMe;
+  Win32_DiskDrive exposes the device through a SCSI interface abstraction.
+- Capacity: 1,024,209,543,168 bytes reported by Get-PhysicalDisk, approximately
+  1.02 TB decimal / 954 GiB before partitions and filesystem overhead.
+- Health status at query time: Healthy.
+- Interface: the T14s Gen 6 Snapdragon platform specification provides an
+  M.2 2280 PCIe 4.0 x4 SSD slot. The installed drive's exact negotiated PCIe
+  link speed was not queried.
+
+INTERFACE FACTS
+--------------------------------------------------------------------------------
+- Lenovo specifies one M.2 2280 PCIe 4.0 x4 SSD slot for this platform.
+- Windows reports the installed drive as NVMe through Get-PhysicalDisk and as
+  SCSI through the Win32_DiskDrive interface field.
+- The negotiated PCIe link rate, sequential transfer rates, random IOPS, and
+  access latency were not queried on this system.
+
+SOURCES
+--------------------------------------------------------------------------------
+- Lenovo ThinkPad T14s Gen 6 (Snapdragon) PSREF:
+  https://psref.lenovo.com/Product/ThinkPad/ThinkPad_T14s_Gen_6_Snapdragon?tab=model
+- Windows device inventory: Win32_DiskDrive and Get-PhysicalDisk, queried on
+  this laptop on 2026-10-10.

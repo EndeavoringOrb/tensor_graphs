@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +22,155 @@ console = Console()
 ROOT_DIR = Path("tensor_graphs_cpp")
 GENERATED_DIR = ROOT_DIR / "generated"
 KERNELS_DIR = ROOT_DIR / "kernels"
+CACHE_FILE = GENERATED_DIR / ".build_cache.json"
+CACHE_SCHEMA_VERSION = 2
+
+
+def writeIfChanged(filepath: Path, content: str) -> bool:
+    """Writes content to filepath only if the file does not exist or its content differs."""
+    if filepath.exists():
+        try:
+            if filepath.read_text(encoding="utf-8") == content:
+                return False
+        except Exception:
+            pass
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text(content, encoding="utf-8")
+    return True
+
+
+def parseDepFile(dep_path: Path) -> list[Path]:
+    """Parses Makefile-style dependency .d file into list of existing local paths."""
+    if not dep_path.exists():
+        return []
+    try:
+        text = dep_path.read_text(encoding="utf-8", errors="ignore")
+        parts = text.replace("\\\n", " ").replace("\n", " ").split()
+        if not parts:
+            return []
+        deps = []
+        for p in parts[1:]:
+            p_clean = p.strip()
+            if (
+                not p_clean
+                or p_clean.endswith(":")
+                or p_clean.startswith("/usr/")
+                or p_clean.startswith("/opt/")
+            ):
+                continue
+            dep_file = Path(p_clean)
+            if dep_file.exists():
+                deps.append(dep_file)
+        return deps
+    except Exception:
+        return []
+
+
+def isObjectUpToDate(
+    obj_path: Path,
+    src_path: Path,
+    dep_path: Path | None,
+    cmd_key: str,
+    cache: dict,
+    force: bool = False,
+    require_dep: bool = False,
+) -> bool:
+    """Checks if a compiled object file is up to date relative to its source and dependencies."""
+    if force or not obj_path.exists():
+        return False
+    cached_entry = cache.get(str(obj_path.resolve()))
+    if not cached_entry or cached_entry.get("cmd_key") != cmd_key:
+        return False
+
+    if require_dep and (dep_path is None or not dep_path.exists()):
+        return False
+
+    obj_mtime = obj_path.stat().st_mtime
+    if src_path.exists() and src_path.stat().st_mtime > obj_mtime:
+        return False
+
+    if dep_path is not None:
+        deps = parseDepFile(dep_path)
+        for d in deps:
+            if d.exists() and d.stat().st_mtime > obj_mtime:
+                return False
+
+    return True
+
+
+def isBinaryUpToDate(
+    bin_path: Path,
+    obj_paths: list[Path],
+    link_key: str,
+    cache: dict,
+    force: bool = False,
+) -> bool:
+    """Checks if a linked binary is up to date relative to its constituent object files."""
+    if force or not bin_path.exists():
+        return False
+    cached_entry = cache.get(str(bin_path.resolve()))
+    if not cached_entry or cached_entry.get("link_key") != link_key:
+        return False
+
+    bin_mtime = bin_path.stat().st_mtime
+    for obj in obj_paths:
+        if not obj.exists() or obj.stat().st_mtime > bin_mtime:
+            return False
+
+    return True
+
+
+def makeLinkKey(linker: str, ld_flags: list[str], obj_paths: list[Path], object_cmd_keys: dict[str, str]) -> str:
+    """Build a link cache key that also captures how every object was compiled."""
+    objects = []
+    for obj_path in obj_paths:
+        resolved_path = str(obj_path.resolve())
+        objects.append(
+            {
+                "path": resolved_path,
+                "compile_key": object_cmd_keys.get(resolved_path, "<unknown>"),
+            }
+        )
+
+    return json.dumps(
+        {
+            "linker": linker,
+            "ld_flags": ld_flags,
+            "objects": objects,
+        },
+        sort_keys=True,
+    )
+
+
+def loadBuildCache() -> dict:
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            if cache.get("__schema_version__") != CACHE_SCHEMA_VERSION:
+                console.print("[yellow]Ignoring outdated build cache schema.[/yellow]")
+                return {}
+            return cache
+        except Exception:
+            console.print("[yellow]Ignoring unreadable build cache.[/yellow]")
+    return {}
+
+
+def saveBuildCache(cache: dict) -> None:
+    """Atomically persist cache metadata so interrupted builds cannot corrupt it."""
+    cache_to_save = dict(cache)
+    cache_to_save["__schema_version__"] = CACHE_SCHEMA_VERSION
+    temp_file = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(cache_to_save, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, CACHE_FILE)
+    except Exception:
+        temp_file.unlink(missing_ok=True)
+
 
 CORE_DEPENDENCIES = [
     ROOT_DIR / "core" / "types.hpp",
@@ -28,11 +179,11 @@ CORE_DEPENDENCIES = [
 
 ALL_TARGETS = [
     "bench.cpp",
-    "chat.cpp",
+    "bench_model.cpp",
     "embed.cpp",
     "main.cpp",
     "test.cpp",
-    "write_ref_tensors.cpp",
+    "test_inst.cpp",
     "bindings.cpp",
 ]
 
@@ -178,7 +329,6 @@ class PlatformInfo:
     os_name: str
     machine: str
     is_arm64: bool
-    is_python_arm64: bool
     is_windows: bool
     vcvars_path: str
     cuda_path: str
@@ -196,10 +346,12 @@ class PlatformInfo:
         os_name = os.name
         machine = platform.machine().lower()
         is_windows = os_name == "nt"
-        is_arm64 = machine in ("aarch64", "arm64")
-
-        python_plat = sysconfig.get_platform().lower()
-        is_python_arm64 = "arm64" in python_plat or "aarch64" in python_plat
+        native_machine = (
+            os.environ.get("PROCESSOR_ARCHITEW6432")
+            or os.environ.get("PROCESSOR_ARCHITECTURE")
+            or machine
+        ).lower()
+        is_arm64 = native_machine in ("aarch64", "arm64")
 
         vcvars_path = find_vcvarsall()
         compiler = CompilerInfo.detect()
@@ -313,7 +465,6 @@ class PlatformInfo:
             os_name=os_name,
             machine=machine,
             is_arm64=is_arm64,
-            is_python_arm64=is_python_arm64,
             is_windows=is_windows,
             vcvars_path=vcvars_path,
             cuda_path=cuda_path,
@@ -407,6 +558,8 @@ class BuildConfig:
     debug: bool = False
     profile: bool = False
     no_lint: bool = False
+    force: bool = False
+    clean: bool = False
     log_level_str: str = "INFO"
     log_level_val: int = 1
     targets: list[str] = field(default_factory=lambda: list(ALL_TARGETS))
@@ -438,6 +591,19 @@ class BuildConfig:
 
 
 class KernelLinter:
+    REF_FACTORY_DEFINITION_PATTERN = re.compile(
+        r"\bLogicalId\s+([a-zA-Z_]\w*)\s*\(\s*"
+        r"const\s+std::vector\s*<\s*LogicalId\s*>\s*&\s*[a-zA-Z_]\w*\s*,\s*"
+        r"Graph\s*&\s*[a-zA-Z_]\w*\s*\)\s*\{",
+        re.MULTILINE,
+    )
+    REF_FACTORY_PATTERN = re.compile(
+        r"\bLogicalId\s+[a-zA-Z_]\w*\s*\(\s*"
+        r"const\s+std::vector\s*<\s*LogicalId\s*>\s*&\s*[a-zA-Z_]\w*\s*,\s*"
+        r"Graph\s*&\s*[a-zA-Z_]\w*\s*\)\s*\{",
+        re.MULTILINE,
+    )
+
     REDUNDANCY_PATTERNS = {
         r"inputs\.size\(\)": (
             "Input Count Check",
@@ -480,7 +646,11 @@ class KernelLinter:
     ]
 
     def _validate_kernel_file(self, file_path: Path):
-        if not file_path.is_file() or file_path.suffix not in [".hpp", ".cu"]:
+        if (
+            not file_path.is_file()
+            or file_path.suffix not in [".hpp", ".cu"]
+            or file_path.name == "ref.hpp"
+        ):
             return
         content = file_path.read_text(encoding="utf-8")
         rel_path = file_path.relative_to(ROOT_DIR)
@@ -505,6 +675,7 @@ class KernelLinter:
                 + r"\s*\(([\s\S]*?)\)\s*(?:const\s*)?(?:noexcept\s*)?\{",
                 re.MULTILINE,
             )
+
             func_def_match = func_def_pattern.search(clean_content)
 
             n_matches += 1
@@ -546,6 +717,119 @@ class KernelLinter:
                     border_style="red",
                 )
             )
+
+    def _validate_fused_ref_layout(self):
+        fused_dir = ROOT_DIR / "kernels" / "fused"
+        if not fused_dir.is_dir():
+            return
+
+        kernel_files = [
+            path
+            for path in fused_dir.rglob("*")
+            if path.is_file()
+            and path.suffix in {".hpp", ".cu", ".cl"}
+            and path.name != "ref.hpp"
+        ]
+        nested_ref_paths = [
+            path
+            for path in fused_dir.rglob("ref.hpp")
+            if len(path.relative_to(fused_dir).parts) > 2
+        ]
+        if nested_ref_paths:
+            nested_ref = sorted(nested_ref_paths)[0]
+            console.print(
+                Panel(
+                    f"[bold red]NESTED REFERENCE FACTORY HEADER:[/bold red] [cyan]{nested_ref}[/cyan]\n\n"
+                    "Keep ref.hpp at the fused kernel folder root and have nested kernel implementations include it.",
+                    title="Linter Violation",
+                    border_style="red",
+                )
+            )
+            sys.exit(1)
+
+        factory_dirs = {
+            fused_dir / path.relative_to(fused_dir).parts[0] for path in kernel_files
+        }
+
+        for folder in sorted(factory_dirs):
+            ref_path = folder / "ref.hpp"
+            if not ref_path.is_file():
+                console.print(
+                    Panel(
+                        f"[bold red]REFERENCE FACTORY HEADER MISSING:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
+                        "Every fused kernel folder must contain a ref.hpp.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+            content = ref_path.read_text(encoding="utf-8")
+            clean_content = strip_cpp_comments_and_strings(content)
+            factories = list(
+                self.REF_FACTORY_DEFINITION_PATTERN.finditer(clean_content)
+            )
+            if len(factories) != 1:
+                console.print(
+                    Panel(
+                        f"[bold red]INVALID REFERENCE FACTORY COUNT:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
+                        f"Expected exactly one ref factory definition, found {len(factories)}.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+
+        for file_path in kernel_files:
+            rel_path = file_path.relative_to(fused_dir)
+            is_opencl_kernel = file_path.suffix == ".cl"
+            clean_content = ""
+            if file_path.suffix in {".hpp", ".cu"}:
+                content = file_path.read_text(encoding="utf-8")
+                clean_content = strip_cpp_comments_and_strings(content)
+                is_opencl_kernel = bool(
+                    re.search(
+                        r"\b(?:OpenCL::getKernel|clEnqueueNDRangeKernel)\s*\(",
+                        clean_content,
+                    )
+                )
+
+            if is_opencl_kernel and len(rel_path.parts) < 3:
+                console.print(
+                    Panel(
+                        f"[bold red]OPENCL KERNEL MUST BE NESTED:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
+                        "Place each OpenCL source and wrapper in a subfolder beneath its fused kernel folder.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
+
+            if is_opencl_kernel and file_path.suffix in {".hpp", ".cu"}:
+                source_match = re.search(
+                    r'\bOpenCL::getKernel\s*\(\s*"([^"]+\.cl)"', content
+                )
+                if source_match and (ROOT_DIR / source_match.group(1)).parent != file_path.parent:
+                    console.print(
+                        Panel(
+                            f"[bold red]OPENCL SOURCE AND WRAPPER MUST BE TOGETHER:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
+                            f"The referenced source {source_match.group(1)} must be in the wrapper's subfolder.",
+                            title="Linter Violation",
+                            border_style="red",
+                        )
+                    )
+                    sys.exit(1)
+
+            if self.REF_FACTORY_PATTERN.search(clean_content):
+                rel_path = file_path.relative_to(ROOT_DIR)
+                console.print(
+                    Panel(
+                        f"[bold red]REFERENCE FACTORY IN KERNEL FILE:[/bold red] [cyan]{ROOT_DIR / rel_path}[/cyan]\n\n"
+                        "Move the LogicalId ref factory definition into the folder's ref.hpp.",
+                        title="Linter Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
 
     def _validate_rewrite_file(self, file_path: Path):
         if not file_path.is_file() or file_path.suffix not in [
@@ -666,6 +950,8 @@ class KernelLinter:
         if config.no_lint:
             return
 
+        self._validate_fused_ref_layout()
+
         validators = [
             (ROOT_DIR / "kernels", self._validate_kernel_file),
             (ROOT_DIR / "core", self._validate_rewrite_file),
@@ -685,8 +971,9 @@ class KernelLinter:
 
 
 class CodeGenerator:
-    def __init__(self, config: BuildConfig):
+    def __init__(self, config: BuildConfig, platform_info: PlatformInfo):
         self.config = config
+        self.platform = platform_info
 
     @staticmethod
     def get_file_hash(filepath: Path) -> str:
@@ -709,21 +996,19 @@ class CodeGenerator:
         cl_files = sorted(list(KERNELS_DIR.rglob("*.cl")))
         out_file = GENERATED_DIR / "opencl_kernels.gen.hpp"
 
-        with open(out_file, "w", encoding="utf-8") as f:
-            f.write("#pragma once\n")
-            f.write("#include <unordered_map>\n")
-            f.write("#include <string>\n\n")
-            f.write(
-                "inline const std::unordered_map<std::string, const char*> OPENCL_SOURCE_MAP = {\n"
-            )
-            for cl_path in cl_files:
-                rel_path = cl_path.relative_to(ROOT_DIR).as_posix()
-                content = cl_path.read_text(encoding="utf-8")
-                f.write(
-                    f'    {{"{rel_path}", R"TG_OPENCL(\n{content}\n)TG_OPENCL"}},\n'
-                )
-            f.write("};\n")
+        lines = [
+            "#pragma once\n",
+            "#include <unordered_map>\n",
+            "#include <string>\n\n",
+            "inline const std::unordered_map<std::string, const char*> OPENCL_SOURCE_MAP = {\n",
+        ]
+        for cl_path in cl_files:
+            rel_path = cl_path.relative_to(ROOT_DIR).as_posix()
+            content = cl_path.read_text(encoding="utf-8")
+            lines.append(f'    {{"{rel_path}", R"TG_OPENCL(\n{content}\n)TG_OPENCL"}},\n')
+        lines.append("};\n")
 
+        writeIfChanged(out_file, "".join(lines))
         console.print(f"[dim]Generated {len(cl_files)} OpenCL kernel strings.[/dim]")
 
     def generate_kernel_includes(self, core_seed: str) -> None:
@@ -731,12 +1016,16 @@ class CodeGenerator:
 
         cpu_includes_hpp = GENERATED_DIR / "cpu_kernels.gen.hpp"
         cuda_includes_cu = GENERATED_DIR / "cuda_kernels.gen.cu"
+        cuda_stable_cu = GENERATED_DIR / "cuda_stable.gen.cu"
+        cuda_gen_cu = GENERATED_DIR / "cuda_generated.gen.cu"
         kernels_all_hpp = GENERATED_DIR / "kernels_all.gen.hpp"
         kernel_uids_json = GENERATED_DIR / "kernel_uids.json"
         kernel_uids_hpp = GENERATED_DIR / "kernel_uids.gen.hpp"
 
         kernel_entries_cpu: list[tuple[str, str]] = []
         kernel_entries_cuda: list[tuple[str, str]] = []
+        kernel_entries_cuda_stable: list[tuple[str, str]] = []
+        kernel_entries_cuda_gen: list[tuple[str, str]] = []
         uid_info_map: dict[str, dict[str, str]] = {}
         hpp_lines = ["#pragma once\n", "#include <cstdint>\n\n"]
 
@@ -744,17 +1033,26 @@ class CodeGenerator:
             [
                 p
                 for p in KERNELS_DIR.rglob("*")
-                if p.is_file() and p.suffix in (".hpp", ".cu")
+                if p.is_file()
+                and p.suffix in (".hpp", ".cu")
+                and p.name != "ref.hpp"
             ]
         )
 
         for path in kernel_files:
             rel_path = path.relative_to(ROOT_DIR)
             inc_path = rel_path.as_posix()
+            path_parts = {part.lower() for part in rel_path.parts}
 
-            if not self.config.use_opencl and ("kernels/opencl" in inc_path.lower()):
+            if not self.config.use_opencl and any(
+                "opencl" in part for part in path_parts
+            ):
                 continue
-            if not self.config.use_cuda and ("kernels/cuda" in inc_path.lower()):
+            if not self.config.use_cuda and (
+                path.suffix.lower() == ".cu"
+                or "cuda" in path_parts
+                or "cublas" in path_parts
+            ):
                 continue
 
             file_hash = self.get_file_hash(path)
@@ -768,6 +1066,10 @@ class CodeGenerator:
                 kernel_entries_cpu.append((inc_path, uid_val))
             else:
                 kernel_entries_cuda.append((inc_path, uid_val))
+                if "kernels/generated" in inc_path.lower():
+                    kernel_entries_cuda_gen.append((inc_path, uid_val))
+                else:
+                    kernel_entries_cuda_stable.append((inc_path, uid_val))
 
             op_name = path.stem
             try:
@@ -798,68 +1100,74 @@ class CodeGenerator:
 
         self._write_includes_file(cpu_includes_hpp, kernel_entries_cpu, is_cu=False)
         self._write_includes_file(cuda_includes_cu, kernel_entries_cuda, is_cu=True)
+        self._write_includes_file(cuda_stable_cu, kernel_entries_cuda_stable, is_cu=True)
+        if kernel_entries_cuda_gen:
+            self._write_includes_file(cuda_gen_cu, kernel_entries_cuda_gen, is_cu=True)
+        else:
+            if cuda_gen_cu.exists():
+                cuda_gen_cu.unlink(missing_ok=True)
 
-        with open(kernels_all_hpp, "w", encoding="utf-8") as f:
-            f.write("#pragma once\n")
-            f.write('#include "cpu_kernels.gen.hpp"\n')
-
-        with open(kernel_uids_json, "w", encoding="utf-8") as f:
-            json.dump(uid_info_map, f, indent=2)
-
-        with open(kernel_uids_hpp, "w", encoding="utf-8") as f:
-            f.writelines(hpp_lines)
+        writeIfChanged(kernels_all_hpp, '#pragma once\n#include "cpu_kernels.gen.hpp"\n')
+        writeIfChanged(kernel_uids_json, json.dumps(uid_info_map, indent=2))
+        writeIfChanged(kernel_uids_hpp, "".join(hpp_lines))
 
         console.print(
-            f"[dim]Generated {len(kernel_entries_cpu)} CPU and {len(kernel_entries_cuda)} CUDA Kernel Includes.[/dim]"
+            f"[dim]Generated {len(kernel_entries_cpu)} CPU and {len(kernel_entries_cuda)} CUDA Kernel Includes ({len(kernel_entries_cuda_stable)} stable, {len(kernel_entries_cuda_gen)} generated).[/dim]"
         )
         console.print("[dim]Saved UID metadata mapping to kernel_uids.json.[/dim]")
 
     def generate_build_context(self) -> None:
         GENERATED_DIR.mkdir(parents=True, exist_ok=True)
         ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
-        cmd_str = f"{platform.machine()}"
+        if self.platform.is_windows:
+            cmd_str = "ARM64" if self.platform.is_arm64 else "AMD64"
+        else:
+            cmd_str = "aarch64" if self.platform.is_arm64 else platform.machine()
         ctx_hash = hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()
 
-        with open(ctx_hpp, "w", encoding="utf-8") as f:
-            f.write("#pragma once\n")
-            f.write("#include <cstdint>\n\n")
-            f.write(
-                "// Generated by build.py - Represents compile flags relevant to kernel benchmarks\n"
-            )
-            f.write(f"constexpr uint64_t BUILD_CONTEXT_ID = 0x{ctx_hash[:16]}ULL;\n")
-
+        content = (
+            "#pragma once\n"
+            "#include <cstdint>\n\n"
+            "// Generated by build.py - Represents compile flags relevant to kernel benchmarks\n"
+            f"constexpr uint64_t BUILD_CONTEXT_ID = 0x{ctx_hash[:16]}ULL;\n"
+        )
+        writeIfChanged(ctx_hpp, content)
         console.print(f"[dim]Build Context ID: 0x{ctx_hash[:16]}[/dim]")
 
     def _write_includes_file(
         self, filepath: Path, entries: list[tuple[str, str]], is_cu: bool
     ) -> None:
-        with open(filepath, "w", encoding="utf-8") as f:
-            if not is_cu:
-                f.write("#pragma once\n")
-            f.write('#include "core/kernels.hpp"\n\n')
-            f.write("// Generated by build.py - Injects UIDs and includes kernels\n\n")
+        lines = []
+        if not is_cu:
+            lines.append("#pragma once\n")
+        lines.append('#include "core/kernels.hpp"\n\n')
+        lines.append("// Generated by build.py - Injects UIDs and includes kernels\n\n")
 
-            for inc_path, uid in sorted(entries):
-                f.write(f"// --- {inc_path} ---\n")
-                f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
+        for inc_path, uid in sorted(entries):
+            lines.append(f"// --- {inc_path} ---\n")
+            for macro in REGISTER_MACROS:
+                lines.append(f"#undef {macro}\n")
 
-                uid_str = f"KernelId{{{uid}}}"
-                f.write(
-                    f"#define REGISTER_REF_KERNEL(op, n_min, n_max, match, run, ...) REGISTER_REF_KERNEL_INTERNAL({uid_str}, op, n_min, n_max, match, run, __VA_ARGS__)\n"
-                )
-                f.write(
-                    f"#define REGISTER_REF_KERNEL_VIEW(op, n_min, n_max, match, inferView, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid_str}, op, n_min, n_max, match, inferView, __VA_ARGS__)\n"
-                )
-                f.write(
-                    f"#define REGISTER_KERNEL(name, n_min, n_max, match, run, ref, ...) REGISTER_KERNEL_INTERNAL({uid_str}, name, n_min, n_max, match, run, ref, __VA_ARGS__)\n"
-                )
-                f.write(
-                    f"#define REGISTER_KERNEL_VIEW(name, n_min, n_max, match, ref, inferView, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid_str}, name, n_min, n_max, match, ref, inferView, __VA_ARGS__)\n"
-                )
-                f.write(f'#include "{inc_path}"\n\n')
+            uid_str = f"KernelId{{{uid}}}"
+            lines.append(
+                f"#define REGISTER_REF_KERNEL(op, n_min, n_max, match, run, ...) REGISTER_REF_KERNEL_INTERNAL({uid_str}, op, n_min, n_max, match, run, __VA_ARGS__)\n"
+            )
+            lines.append(
+                f"#define REGISTER_REF_KERNEL_VIEW(op, n_min, n_max, match, inferView, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid_str}, op, n_min, n_max, match, inferView, __VA_ARGS__)\n"
+            )
+            lines.append(
+                f"#define REGISTER_KERNEL(name, n_min, n_max, match, run, ref, ...) REGISTER_KERNEL_INTERNAL({uid_str}, name, n_min, n_max, match, run, ref, __VA_ARGS__)\n"
+            )
+            lines.append(
+                f"#define REGISTER_KERNEL_VIEW(name, n_min, n_max, match, ref, inferView, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid_str}, name, n_min, n_max, match, ref, inferView, __VA_ARGS__)\n"
+            )
+            lines.append(f'#include "{inc_path}"\n\n')
 
-            f.write("// --- Clean up macros ---\n")
-            f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
+        lines.append("// --- Clean up macros ---\n")
+        for macro in REGISTER_MACROS:
+            lines.append(f"#undef {macro}\n")
+
+        writeIfChanged(filepath, "".join(lines))
 
 
 class Toolchain:
@@ -880,10 +1188,10 @@ class Toolchain:
     def get_nvcc_binary(self) -> str:
         return "nvcc"
 
-    def get_cxx_flags(self, is_python_ext: bool = False) -> list[str]:
+    def get_cxx_flags(self) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
-            "-std=c++20",
+            "-std=c++17",
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",
         ]
         if self.platform.is_windows:
@@ -895,15 +1203,19 @@ class Toolchain:
             if self.platform.opencl_inc_dir:
                 flags.append(f"-I{self.platform.opencl_inc_dir}")
 
-        target_arm64 = (
-            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
-        )
+        target_arm64 = self.platform.is_arm64
+
+        if self.config.profile:
+            flags.append("-DTG_PROFILE")
 
         if self.platform.is_windows:
             if target_arm64 and not self.config.use_cuda:
                 flags.extend(
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
                 )
+            elif not target_arm64:
+                # Build x86 binaries for this machine's instruction set.
+                flags.extend(["-target", "x86_64-pc-windows-msvc", "-march=native"])
 
             if self.config.debug:
                 flags.extend(["-g", "-O0", "-DTG_DEBUG"])
@@ -914,6 +1226,9 @@ class Toolchain:
         else:
             if target_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
+            else:
+                # Build x86 binaries for this machine's instruction set.
+                flags.append("-march=native")
 
             if self.config.debug:
                 flags.extend(["-g", "-O0", "-DTG_DEBUG", "-fno-omit-frame-pointer"])
@@ -952,6 +1267,8 @@ class Toolchain:
         link_flags = ["-shared"]
 
         if self.platform.is_windows:
+            if not self.platform.is_arm64:
+                link_flags.extend(["-target", "x86_64-pc-windows-msvc"])
             py_lib_dir_base = Path(sys.base_prefix) / "libs"
             py_lib_dir_prefix = Path(sys.prefix) / "libs"
             link_flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
@@ -962,7 +1279,7 @@ class Toolchain:
 
         return [f for f in inc_flags if f], [f for f in link_flags if f], ext_suffix
 
-    def get_ld_flags(self, is_python_ext: bool = False) -> list[str]:
+    def get_ld_flags(self) -> list[str]:
         flags = []
         if self.config.use_cuda:
             if self.platform.cuda_lib_dir:
@@ -970,25 +1287,30 @@ class Toolchain:
                 if not self.platform.is_windows:
                     flags.append(f"-Wl,-rpath,{self.platform.cuda_lib_dir}")
             flags.append("-lcudart")
+            flags.append("-lcublas")
 
         if self.config.use_opencl:
             if self.platform.opencl_lib_dir:
-                flags.append(f"-L{self.platform.opencl_lib_dir}")
-                if not self.platform.is_windows:
-                    flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
+                lib_dir = self.platform.opencl_lib_dir
+                flags.append(f"-L{lib_dir}")
+            if not self.platform.is_windows:
+                flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
             flags.append("-lOpenCL")
 
             if self.platform.is_windows and self.config.profile:
                 flags.append("-Wl,-debug")
 
-        if not is_python_ext and not self.config.use_cuda:
+        if self.platform.is_windows:
+            flags.append("-ldbghelp")
+
+        if not self.config.use_cuda:
             flags.extend(["-static"])
         return flags
 
-    def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
+    def get_nvcc_flags(self) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
-            "-std=c++20",
+            "-std=c++17",
             "-x",
             "cu",
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",
@@ -999,14 +1321,15 @@ class Toolchain:
         else:
             flags.append("-DNOMINMAX")
 
+        if self.config.profile:
+            flags.append("-DTG_PROFILE")
+
         if self.config.debug:
             flags.extend(["-g", "-G", "-O0", "-DTG_DEBUG"])
         else:
             flags.append("-O3")
 
-        target_arm64 = (
-            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
-        )
+        target_arm64 = self.platform.is_arm64
 
         if self.config.use_cuda:
             flags.append("-DTG_USE_CUDA")
@@ -1018,9 +1341,7 @@ class Toolchain:
 
         return flags
 
-    def run_cmd(
-        self, cmd: list[str], is_python_ext: bool = False
-    ) -> subprocess.CompletedProcess:
+    def run_cmd(self, cmd: list[str], label: str) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
 
         if (
@@ -1029,11 +1350,7 @@ class Toolchain:
             and self.platform.vcvars_path
             and Path(self.platform.vcvars_path).exists()
         ):
-            target_arm64 = (
-                self.platform.is_python_arm64
-                if is_python_ext
-                else self.platform.is_arm64
-            )
+            target_arm64 = self.platform.is_arm64
             arch = "arm64" if (target_arm64 and not self.config.use_cuda) else "amd64"
             full_command = f'"{self.platform.vcvars_path}" {arch} && {cmd_str}'
         else:
@@ -1048,7 +1365,7 @@ class Toolchain:
             console.print(
                 Panel(
                     f"{result.stdout}\n\n[red]{result.stderr}[/red]",
-                    title="[bold red]COMPILER ERROR[/bold red]",
+                    title=f"[bold red]COMPILER ERROR — {label}[/bold red]",
                     border_style="red",
                 )
             )
@@ -1057,7 +1374,7 @@ class Toolchain:
             console.print(
                 Panel(
                     f"{result.stdout}[yellow]{result.stderr}[/yellow]",
-                    title="[bold yellow]BUILD WARNINGS[/bold yellow]",
+                    title=f"[bold yellow]BUILD WARNINGS — {label}[/bold yellow]",
                     border_style="yellow",
                 )
             )
@@ -1072,9 +1389,34 @@ class BuildOrchestrator:
         self.config = config
         self.toolchain = Toolchain(config, self.platform)
         self.linter = KernelLinter()
-        self.code_gen = CodeGenerator(config)
+        self.code_gen = CodeGenerator(config, self.platform)
+
+    def clean(self) -> None:
+        console.print("[bold yellow]Cleaning build artifacts and cache...[/bold yellow]")
+        if CACHE_FILE.exists():
+            CACHE_FILE.unlink(missing_ok=True)
+        if GENERATED_DIR.exists():
+            for p in GENERATED_DIR.glob("*"):
+                if p.suffix in (".o", ".obj", ".d", ".cu", ".hpp", ".json"):
+                    p.unlink(missing_ok=True)
+        for target_file in ALL_TARGETS:
+            target_stem = target_file.split(".")[0]
+            bin_path = ROOT_DIR / target_stem
+            if bin_path.exists():
+                bin_path.unlink(missing_ok=True)
+            bin_exe = ROOT_DIR / f"{target_stem}.exe"
+            if bin_exe.exists():
+                bin_exe.unlink(missing_ok=True)
+        for p in Path(".").glob("tensor_graphs.*"):
+            if p.is_file() and p.suffix in (".so", ".pyd", ".dylib"):
+                p.unlink(missing_ok=True)
+        self._render_success_panel("Clean completed successfully.", "clean")
 
     def run(self) -> None:
+        if self.config.clean:
+            self.clean()
+            return
+
         ensure_toolchain(self.platform)
 
         console.print(
@@ -1095,83 +1437,253 @@ class BuildOrchestrator:
         obj_ext = ".obj" if self.platform.is_windows else ".o"
         out_ext = ".exe" if self.platform.is_windows else ""
 
-        cuda_obj = str(GENERATED_DIR / f"cuda_kernels{obj_ext}")
+        build_cache = loadBuildCache()
+        if self.config.force:
+            build_cache.clear()
+
+        cuda_objs: list[str] = []
+        cuda_object_cmd_keys: dict[str, str] = {}
+        cuda_objs_recompiled = False
 
         if self.config.use_cuda:
-            console.print("\n[bold blue]Compiling CUDA Kernels...[/bold blue]")
-            cuda_src = str(GENERATED_DIR / "cuda_kernels.gen.cu")
-            cmd = (
-                [self.toolchain.get_nvcc_binary()]
-                + self.toolchain.get_nvcc_flags()
-                + ["-c", cuda_src, "-o", cuda_obj]
-            )
-            res = self.toolchain.run_cmd(cmd)
-            self._render_success_panel(res.stdout)
+            nvcc_bin = self.toolchain.get_nvcc_binary()
+            nvcc_flags = self.toolchain.get_nvcc_flags()
+
+            cuda_stable_src = GENERATED_DIR / "cuda_stable.gen.cu"
+            cuda_stable_obj = GENERATED_DIR / f"cuda_stable{obj_ext}"
+            cuda_stable_dep = GENERATED_DIR / "cuda_stable.d"
+            if not cuda_stable_src.exists() and (GENERATED_DIR / "cuda_kernels.gen.cu").exists():
+                cuda_stable_src = GENERATED_DIR / "cuda_kernels.gen.cu"
+
+            cmd_key_stable = f"{nvcc_bin} {' '.join(nvcc_flags)} {cuda_stable_src}"
+            if isObjectUpToDate(cuda_stable_obj, cuda_stable_src, cuda_stable_dep, cmd_key_stable, build_cache, self.config.force):
+                console.print(f"[dim]Using cached CUDA kernels: {cuda_stable_obj.name}[/dim]")
+            else:
+                console.print(f"\n[bold blue]Compiling CUDA Kernels ({cuda_stable_src.name})...[/bold blue]")
+                dep_flag = ["-MMD", "-MF", str(cuda_stable_dep)] if not self.platform.is_windows else []
+                cmd = (
+                    [nvcc_bin]
+                    + nvcc_flags
+                    + dep_flag
+                    + ["-c", str(cuda_stable_src), "-o", str(cuda_stable_obj)]
+                )
+                res = self.toolchain.run_cmd(cmd, f"compile {cuda_stable_src.name}")
+                self._render_success_panel(res.stdout, f"compile {cuda_stable_src.name}")
+                cuda_objs_recompiled = True
+                build_cache[str(cuda_stable_obj.resolve())] = {
+                    "cmd_key": cmd_key_stable,
+                    "built_at": time.time(),
+                }
+
+            cuda_object_cmd_keys[str(cuda_stable_obj.resolve())] = cmd_key_stable
+            cuda_objs.append(str(cuda_stable_obj))
+
+            cuda_gen_src = GENERATED_DIR / "cuda_generated.gen.cu"
+            cuda_gen_obj = GENERATED_DIR / f"cuda_generated{obj_ext}"
+            cuda_gen_dep = GENERATED_DIR / "cuda_generated.d"
+
+            if cuda_gen_src.exists() and cuda_gen_src.stat().st_size > 0:
+                cmd_key_gen = f"{nvcc_bin} {' '.join(nvcc_flags)} {cuda_gen_src}"
+                if isObjectUpToDate(cuda_gen_obj, cuda_gen_src, cuda_gen_dep, cmd_key_gen, build_cache, self.config.force):
+                    console.print(f"[dim]Using cached CUDA generated kernels: {cuda_gen_obj.name}[/dim]")
+                else:
+                    console.print(f"\n[bold blue]Compiling CUDA Generated Kernels ({cuda_gen_src.name})...[/bold blue]")
+                    dep_flag = ["-MMD", "-MF", str(cuda_gen_dep)] if not self.platform.is_windows else []
+                    cmd = (
+                        [nvcc_bin]
+                        + nvcc_flags
+                        + dep_flag
+                        + ["-c", str(cuda_gen_src), "-o", str(cuda_gen_obj)]
+                    )
+                    res = self.toolchain.run_cmd(cmd, f"compile {cuda_gen_src.name}")
+                    self._render_success_panel(res.stdout, f"compile {cuda_gen_src.name}")
+                    cuda_objs_recompiled = True
+                    build_cache[str(cuda_gen_obj.resolve())] = {
+                        "cmd_key": cmd_key_gen,
+                        "built_at": time.time(),
+                    }
+                cuda_object_cmd_keys[str(cuda_gen_obj.resolve())] = cmd_key_gen
+                cuda_objs.append(str(cuda_gen_obj))
+            else:
+                if cuda_gen_obj.exists():
+                    cuda_gen_obj.unlink(missing_ok=True)
+                if cuda_gen_dep.exists():
+                    cuda_gen_dep.unlink(missing_ok=True)
+
+            cuda_combined_obj = GENERATED_DIR / f"cuda_kernels{obj_ext}"
+            if len(cuda_objs) == 1:
+                if not cuda_combined_obj.exists() or cuda_objs_recompiled:
+                    shutil.copy2(cuda_objs[0], cuda_combined_obj)
+            elif len(cuda_objs) > 1:
+                if not self.platform.is_windows:
+                    if not cuda_combined_obj.exists() or cuda_objs_recompiled:
+                        combine_cmd = ["ld", "-r"] + cuda_objs + ["-o", str(cuda_combined_obj)]
+                        subprocess.run(combine_cmd, check=True)
+                else:
+                    if not cuda_combined_obj.exists() or cuda_objs_recompiled:
+                        shutil.copy2(cuda_objs[0], cuda_combined_obj)
+
+        targets_to_compile = []
+        target_info = {}
 
         for main_file in self.config.targets:
-            console.print(f"\n[bold blue]Compiling {main_file}...[/bold blue]")
-            main_src = str(ROOT_DIR / main_file)
+            main_src = ROOT_DIR / main_file
             target_stem = main_file.split(".")[0]
+            is_py = main_file in ("bindings.cpp", "kernel_bench_bindings.cpp")
 
-            if main_file == "bindings.cpp":
-                py_inc_flags, py_link_flags, ext_suffix = (
-                    self.toolchain.get_pybind11_flags()
-                )
-                out_name = f"tensor_graphs{ext_suffix}"
-                extra_objs = [cuda_obj] if self.config.use_cuda else []
-                cmd = (
-                    [self.toolchain.get_cxx_binary()]
-                    + self.toolchain.get_cxx_flags(is_python_ext=True)
-                    + py_inc_flags
-                    + [main_src]
-                    + extra_objs
-                    + ["-o", out_name]
-                    + py_link_flags
-                    + self.toolchain.get_ld_flags(is_python_ext=True)
-                )
-                res = self.toolchain.run_cmd(cmd, is_python_ext=True)
-                self._render_success_panel(res.stdout)
+            main_obj = GENERATED_DIR / f"{target_stem}{obj_ext}"
+            dep_file = GENERATED_DIR / f"{target_stem}.d"
+            cxx_bin = self.toolchain.get_cxx_binary()
+            cxx_flags = self.toolchain.get_cxx_flags()
+            py_inc = self.toolchain.get_pybind11_flags()[0] if is_py else []
+            cmd_key = f"{cxx_bin} {' '.join(cxx_flags)} {' '.join(py_inc)} {main_src}"
+
+            supports_deps = self.platform.compiler.kind in ("clang", "gcc")
+            up_to_date = isObjectUpToDate(
+                main_obj,
+                main_src,
+                dep_file,
+                cmd_key,
+                build_cache,
+                self.config.force,
+                require_dep=supports_deps,
+            )
+            target_info[main_file] = {
+                "main_src": main_src,
+                "target_stem": target_stem,
+                "is_py": is_py,
+                "main_obj": main_obj,
+                "dep_file": dep_file,
+                "cxx_bin": cxx_bin,
+                "cxx_flags": cxx_flags,
+                "py_inc": py_inc,
+                "cmd_key": cmd_key,
+                "recompiled": not up_to_date,
+            }
+
+            if not up_to_date:
+                targets_to_compile.append(main_file)
+            else:
+                console.print(f"[dim]Using cached object: {main_obj.name}[/dim]")
+
+        def compileTargetObj(target_file: str) -> tuple[str, bool, str]:
+            info = target_info[target_file]
+            console.print(f"\n[bold blue]Compiling {target_file}...[/bold blue]")
+            dep_flag = (
+                ["-MMD", "-MF", str(info["dep_file"])]
+                if self.platform.compiler.kind in ("clang", "gcc")
+                else []
+            )
+            cmd = (
+                [info["cxx_bin"]]
+                + info["cxx_flags"]
+                + info["py_inc"]
+                + dep_flag
+                + ["-c", str(info["main_src"]), "-o", str(info["main_obj"])]
+            )
+            res = self.toolchain.run_cmd(cmd, f"compile {target_file}")
+            return target_file, True, res.stdout
+
+        if targets_to_compile:
+            num_workers = min(len(targets_to_compile), os.cpu_count() or 4)
+            if num_workers > 1:
+                console.print(f"[cyan]Compiling {len(targets_to_compile)} targets in parallel ({num_workers} workers)...[/cyan]")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    futures = [executor.submit(compileTargetObj, tf) for tf in targets_to_compile]
+                    for fut in concurrent.futures.as_completed(futures):
+                        tf, ok, out = fut.result()
+                        build_cache[str(target_info[tf]["main_obj"].resolve())] = {
+                            "cmd_key": target_info[tf]["cmd_key"],
+                            "built_at": time.time(),
+                        }
+                        self._render_success_panel(out, f"compile {tf}")
+            else:
+                for tf in targets_to_compile:
+                    tf, ok, out = compileTargetObj(tf)
+                    build_cache[str(target_info[tf]["main_obj"].resolve())] = {
+                        "cmd_key": target_info[tf]["cmd_key"],
+                        "built_at": time.time(),
+                    }
+                    self._render_success_panel(out, f"compile {tf}")
+
+        object_cmd_keys = dict(cuda_object_cmd_keys)
+        for info in target_info.values():
+            object_cmd_keys[str(info["main_obj"].resolve())] = info["cmd_key"]
+
+        for main_file in self.config.targets:
+            info = target_info[main_file]
+            target_stem = info["target_stem"]
+            is_py = info["is_py"]
+            main_obj = info["main_obj"]
+
+            if is_py:
+                _, py_link_flags, ext_suffix = self.toolchain.get_pybind11_flags()
+                module_name = "tensor_graphs" if main_file == "bindings.cpp" else "kernel_bench_native"
+                out_path = Path(f"{module_name}{ext_suffix}")
+                dep_objs = [main_obj] + [Path(co) for co in cuda_objs]
+                # Python extensions must remain position independent. The
+                # no-CUDA static-link option is intended for native executables
+                # and selects non-PIC startup objects that cannot be used in a
+                # shared extension module.
+                ld_flags = py_link_flags + [flag for flag in self.toolchain.get_ld_flags() if flag != "-static"]
+                link_key = makeLinkKey(info["cxx_bin"], ld_flags, dep_objs, object_cmd_keys)
+
+                bin_up_to_date = isBinaryUpToDate(out_path, dep_objs, link_key, build_cache, self.config.force)
+                if bin_up_to_date and not info["recompiled"] and not cuda_objs_recompiled:
+                    console.print(f"[dim]Target up-to-date: {out_path.name}[/dim]")
+                else:
+                    console.print(f"\n[bold blue]Linking {out_path.name}...[/bold blue]")
+                    cmd = (
+                        [info["cxx_bin"]]
+                        + [str(main_obj)]
+                        + [str(co) for co in cuda_objs]
+                        + ["-o", str(out_path)]
+                        + ld_flags
+                    )
+                    res = self.toolchain.run_cmd(cmd, f"link {out_path.name}")
+                    self._render_success_panel(res.stdout, f"link {out_path.name}")
+                    build_cache[str(out_path.resolve())] = {
+                        "link_key": link_key,
+                        "built_at": time.time(),
+                    }
                 continue
 
-            out_name = f"tensor_graphs_cpp/{target_stem}{out_ext}"
+            out_path = Path(f"tensor_graphs_cpp/{target_stem}{out_ext}")
+            dep_objs = [main_obj] + ([Path(co) for co in cuda_objs] if self.config.use_cuda else [])
+            ld_flags = self.toolchain.get_cxx_flags() + self.toolchain.get_ld_flags()
+            link_key = makeLinkKey(info["cxx_bin"], ld_flags, dep_objs, object_cmd_keys)
 
-            if self.config.use_cuda:
-                main_obj = str(GENERATED_DIR / f"{target_stem}{obj_ext}")
-                cmd = (
-                    [self.toolchain.get_cxx_binary()]
-                    + self.toolchain.get_cxx_flags()
-                    + ["-c", main_src, "-o", main_obj]
-                )
-                self.toolchain.run_cmd(cmd)
-
-                cmd = (
-                    [self.toolchain.get_cxx_binary()]
-                    + [main_obj, cuda_obj, "-o", out_name]
-                    + self.toolchain.get_cxx_flags()
-                    + self.toolchain.get_ld_flags()
+            bin_up_to_date = isBinaryUpToDate(out_path, dep_objs, link_key, build_cache, self.config.force)
+            if bin_up_to_date and not info["recompiled"] and not cuda_objs_recompiled:
+                console.print(f"[dim]Target up-to-date: {out_path.name}[/dim]")
+            else:
+                console.print(f"\n[bold blue]Linking {out_path.name}...[/bold blue]")
+                link_cmd = (
+                    [info["cxx_bin"]]
+                    + [str(main_obj)]
+                    + ([str(co) for co in cuda_objs] if self.config.use_cuda else [])
+                    + ["-o", str(out_path)]
+                    + ld_flags
                 )
                 if self.platform.is_windows and self.config.debug:
-                    cmd.append("-g")
+                    link_cmd.append("-g")
 
-                res = self.toolchain.run_cmd(cmd)
-            else:
-                cmd = (
-                    [self.toolchain.get_cxx_binary()]
-                    + self.toolchain.get_cxx_flags()
-                    + [main_src, "-o", out_name]
-                    + self.toolchain.get_ld_flags()
-                )
-                res = self.toolchain.run_cmd(cmd)
+                res = self.toolchain.run_cmd(link_cmd, f"link {out_path.name}")
+                self._render_success_panel(res.stdout, f"link {out_path.name}")
+                build_cache[str(out_path.resolve())] = {
+                    "link_key": link_key,
+                    "built_at": time.time(),
+                }
 
-            self._render_success_panel(res.stdout)
+        saveBuildCache(build_cache)
 
     @staticmethod
-    def _render_success_panel(stdout: str) -> None:
+    def _render_success_panel(stdout: str, label: str) -> None:
         content = stdout.strip() if stdout.strip() else "No output"
         console.print(
             Panel(
                 f"[green]{content}[/green]",
-                title="[bold green]BUILD SUCCESS[/bold green]",
+                title=f"[bold green]BUILD SUCCESS — {label}[/bold green]",
                 border_style="green",
             )
         )
@@ -1207,9 +1719,22 @@ def main() -> None:
         "--no-lint", action="store_true", help="Skip kernel validation checks"
     )
     parser.add_argument(
+        "--lint", action="store_true", help="Run kernel validation checks and exit"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rebuild of all targets ignoring cache",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clean generated build artifacts and cache",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
+        default="DEBUG",
         choices=[
             "DEBUG",
             "INFO",
@@ -1233,12 +1758,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.lint:
+        KernelLinter().lint(BuildConfig())
+        return
+
     config = BuildConfig(
         cuda_override=args.cuda,
         opencl_override=args.opencl,
         debug=args.debug,
         profile=args.profile,
         no_lint=args.no_lint,
+        force=args.force,
+        clean=args.clean,
         log_level_str=args.log_level,
         targets=args.targets,
     )

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,7 @@ struct BenchBuffer
     MemSpace mem_space = {1, HandleType::CPP};
     uint64_t bytes = 0;
     std::vector<uint8_t> hostData;
+    std::unique_ptr<CppBuffer> cppBuffer;
     void *devicePtr = nullptr;
     cl_mem clMem = nullptr;
 
@@ -63,6 +65,7 @@ struct BenchBuffer
             mem_space = o.mem_space;
             bytes = o.bytes;
             hostData = std::move(o.hostData);
+            cppBuffer = std::move(o.cppBuffer);
             devicePtr = o.devicePtr;
             clMem = o.clMem;
             o.devicePtr = nullptr;
@@ -83,10 +86,17 @@ struct BenchBuffer
         if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
+            cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
+            if (set_device_err != cudaSuccess)
+            {
+                Error::throw_err("cudaSetDevice failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(set_device_err)));
+            }
             cudaError_t err = cudaMalloc(&devicePtr, bytes);
             if (err != cudaSuccess)
             {
-                Error::throw_err("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+                Error::throw_err("cudaMalloc failed on device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(err)));
             }
 #else
             Error::throw_err("CUDA backend requested but TG_USE_CUDA is not defined.");
@@ -113,6 +123,15 @@ struct BenchBuffer
             Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
         }
+        else if (mem_space.type == HandleType::CPP)
+        {
+            // Use the same page-rounded, 4096-byte-aligned arena as executor runs.
+            // Some CPU kernels use aligned non-temporal stores and cannot safely
+            // run against std::vector<uint8_t>'s weaker alignment guarantee.
+            cppBuffer = std::make_unique<CppBuffer>(mem_space, bytes);
+            cppBuffer->init();
+            devicePtr = cppBuffer->getBasePtr();
+        }
         else
         {
             devicePtr = hostData.data();
@@ -121,13 +140,26 @@ struct BenchBuffer
 
     void upload()
     {
-        if (mem_space.type == HandleType::CUDA)
+        if (mem_space.type == HandleType::CPP)
+        {
+            if (!cppBuffer)
+                Error::throw_err("CPU benchmark buffer was not initialized.");
+            cppBuffer->write(0, hostData.data(), bytes);
+        }
+        else if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
+            cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
+            if (set_device_err != cudaSuccess)
+            {
+                Error::throw_err("cudaSetDevice failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(set_device_err)));
+            }
             cudaError_t err = cudaMemcpy(devicePtr, hostData.data(), bytes, cudaMemcpyHostToDevice);
             if (err != cudaSuccess)
             {
-                Error::throw_err("cudaMemcpy HostToDevice failed: " + std::string(cudaGetErrorString(err)));
+                Error::throw_err("cudaMemcpy HostToDevice failed on device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(err)));
             }
 #endif
         }
@@ -152,13 +184,26 @@ struct BenchBuffer
 
     void download()
     {
-        if (mem_space.type == HandleType::CUDA)
+        if (mem_space.type == HandleType::CPP)
+        {
+            if (!cppBuffer || !devicePtr)
+                Error::throw_err("CPU benchmark buffer was not initialized.");
+            std::memcpy(hostData.data(), devicePtr, bytes);
+        }
+        else if (mem_space.type == HandleType::CUDA)
         {
 #ifdef TG_USE_CUDA
+            cudaError_t set_device_err = cudaSetDevice(mem_space.idx);
+            if (set_device_err != cudaSuccess)
+            {
+                Error::throw_err("cudaSetDevice failed for device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(set_device_err)));
+            }
             cudaError_t err = cudaMemcpy(hostData.data(), devicePtr, bytes, cudaMemcpyDeviceToHost);
             if (err != cudaSuccess)
             {
-                Error::throw_err("cudaMemcpy DeviceToHost failed: " + std::string(cudaGetErrorString(err)));
+                Error::throw_err("cudaMemcpy DeviceToHost failed on device " + std::to_string(mem_space.idx) + ": " +
+                                 std::string(cudaGetErrorString(err)));
             }
 #endif
         }
@@ -183,11 +228,13 @@ struct BenchBuffer
 
     void free()
     {
+        cppBuffer.reset();
         if (devicePtr)
         {
             if (mem_space.type == HandleType::CUDA)
             {
 #ifdef TG_USE_CUDA
+                cudaSetDevice(mem_space.idx);
                 cudaFree(devicePtr);
 #endif
             }
@@ -299,8 +346,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out.is_open())
             {
-                std::cerr << "Failed to create dummy storage file: " << path << std::endl;
-                continue;
+                Error::throw_err("Failed to create dummy storage file: " + path);
             }
 
             // Write prepared host-side data if available; otherwise, write fallback
@@ -321,6 +367,8 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
             }
             out.close();
             sf.paths.push_back(path);
+            if (!out)
+                Error::throw_err("Failed to write dummy storage file: " + path);
 
             int fd = -1;
 #ifdef TG_OS_WINDOWS
@@ -330,7 +378,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
 #endif
             if (fd < 0)
             {
-                std::cerr << "Failed to open dummy storage file for reading: " << path << std::endl;
+                Error::throw_err("Failed to open dummy storage file for reading: " + path);
             }
             sf.fds.push_back(fd);
         }
@@ -396,6 +444,16 @@ struct PreparedKernel
     void prepare(const KernelEntry &kernel, const Record &r,
                  const std::vector<std::vector<uint8_t>> *explicitInputData = nullptr)
     {
+        HardwareBinding binding;
+        if (!TopologyMapper::resolve(kernel.output_mem_space, kernel.input_mem_spaces, kernel.engines,
+                                     kernel.is_view, r.inputShapes.size(), r.output_mem_space,
+                                     r.input_mem_spaces, r.engines, false, false, false, binding) &&
+            !TopologyMapper::resolve(kernel.output_mem_space, kernel.input_mem_spaces, kernel.engines,
+                                     kernel.is_view, r.inputShapes.size(), {}, {}, {}, true, true, true, binding))
+        {
+            Error::throw_err("Unable to resolve physical hardware for " + kernel.getName());
+        }
+
         inputBuffers.resize(r.inputShapes.size());
         inPtrs.assign(r.inputShapes.size(), nullptr);
         inViews.resize(r.inputShapes.size());
@@ -420,18 +478,20 @@ struct PreparedKernel
                 elements = 1;
             uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
 
-            MemSpace b = {1, HandleType::CPP};
-            if (!r.input_mem_spaces.empty() && idx < r.input_mem_spaces.size())
-                b = r.input_mem_spaces[idx];
+            inputBuffers[idx].allocate(binding.input_mem_spaces[idx], bytes);
 
-            inputBuffers[idx].allocate(b, bytes);
-
-            if (explicitInputData && idx < explicitInputData->size() && !(*explicitInputData)[idx].empty())
+            // Benchmark records may contain control bytes captured from a
+            // different scatter slice.  Always synthesize SCATTER controls so
+            // the benchmark cannot turn stale starts/steps into an invalid
+            // write, even when inputConstants is populated.
+            bool synthesize_scatter_control = kernel.opType == OpType::SCATTER && idx >= 1 && idx <= 4;
+            if (!synthesize_scatter_control && explicitInputData && idx < explicitInputData->size() &&
+                !(*explicitInputData)[idx].empty())
             {
                 std::memcpy(inputBuffers[idx].hostData.data(), (*explicitInputData)[idx].data(),
                             std::min(bytes, (uint64_t)(*explicitInputData)[idx].size()));
             }
-            else if (idx < r.inputConstants.size() && !r.inputConstants[idx].empty() &&
+            else if (!synthesize_scatter_control && idx < r.inputConstants.size() && !r.inputConstants[idx].empty() &&
                      r.inputConstants[idx].size() == bytes)
             {
                 std::memcpy(inputBuffers[idx].hostData.data(), r.inputConstants[idx].data(), bytes);
@@ -447,7 +507,24 @@ struct PreparedKernel
                 else if (r.inputDTypes[idx] == DType::INT32)
                 {
                     int32_t *iptr = reinterpret_cast<int32_t *>(inputBuffers[idx].hostData.data());
-                    if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
+                    if (kernel.opType == OpType::SCATTER)
+                    {
+                        // SCATTER's control tensors are starts, ends, steps,
+                        // and output shape.  The generic INT32 fallback below
+                        // fills them with one, which makes a full-size update
+                        // start at coordinate 1 and write one row/column past
+                        // the output.  Use a valid identity slice instead.
+                        for (uint64_t k = 0; k < elements; ++k)
+                        {
+                            int32_t value = 1;
+                            if (idx == 1) // starts
+                                value = 0;
+                            else if (idx == 2 || idx == 4) // ends / output shape
+                                value = (k < r.outputShape.size()) ? static_cast<int32_t>(r.outputShape[k]) : 1;
+                            iptr[k] = value;
+                        }
+                    }
+                    else if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                     {
                         if (idx == 1 && r.inputShapes.size() > 0 && r.inputShapes[0].size() == r.outputShape.size() &&
                             elements == r.inputShapes[0].size())
@@ -476,14 +553,14 @@ struct PreparedKernel
                     }
                     else if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
                     {
-                        if (idx == r.inputShapes.size() - 1)
+                        if (idx == 0)
                         {
                             int32_t concat_axis = -1;
-                            if (!r.inputShapes.empty() && !r.outputShape.empty())
+                            if (!r.inputShapes.empty() && !r.outputShape.empty() && r.inputShapes.size() > 1)
                             {
                                 for (uint64_t d = 0; d < r.outputShape.size(); ++d)
                                 {
-                                    if (r.outputShape[d] != r.inputShapes[0][d])
+                                    if (r.outputShape[d] != r.inputShapes[1][d])
                                     {
                                         concat_axis = (int32_t)d;
                                         break;
@@ -499,6 +576,32 @@ struct PreparedKernel
                         {
                             for (uint64_t k = 0; k < elements; ++k)
                                 iptr[k] = 1;
+                        }
+                    }
+                    else if (kernel.opType == OpType::SUM || kernel.opName.find("Sum") != std::string::npos)
+                    {
+                        if (idx == 1)
+                        {
+                            int32_t reduction_axis = 0;
+                            if (!r.inputShapes.empty() && r.inputShapes[0].size() == r.outputShape.size())
+                            {
+                                for (uint64_t d = 0; d < r.inputShapes[0].size(); ++d)
+                                {
+                                    if (r.inputShapes[0][d] != r.outputShape[d] && r.outputShape[d] == 1)
+                                    {
+                                        reduction_axis = static_cast<int32_t>(d);
+                                        break;
+                                    }
+                                }
+                            }
+                            iptr[0] = reduction_axis;
+                            for (uint64_t k = 1; k < elements; ++k)
+                                iptr[k] = reduction_axis;
+                        }
+                        else
+                        {
+                            for (uint64_t k = 0; k < elements; ++k)
+                                iptr[k] = 0;
                         }
                     }
                     else
@@ -543,8 +646,7 @@ struct PreparedKernel
                 elements = 1;
             uint64_t bytes = elements * getDTypeSize(r.outputDType);
 
-            MemSpace outBackend = r.output_mem_space;
-            outputBuffers[0].allocate(outBackend, bytes);
+            outputBuffers[0].allocate(binding.output_mem_space, bytes);
 
             outPtrs[0] = outputBuffers[0].getWritePtr();
 
@@ -570,41 +672,46 @@ struct PreparedKernel
         }
 
 #ifdef TG_USE_CUDA
-        // Benchmarking/testing environments bypass the Executor, so provide a valid CUDA
-        // stream here to ensure ctx.cuda_stream() does not throw an out-of-bounds error
-        // when CUDA kernels are run directly through PreparedKernel.
+        int primary_cuda_device = -1;
+        for (const auto &engine : binding.engines)
         {
-            uint32_t cudaDevIdx = 0;
-            bool hasCuda = (r.output_mem_space.type == HandleType::CUDA);
-            if (hasCuda)
-                cudaDevIdx = r.output_mem_space.idx;
-            if (!hasCuda)
+            if (engine.type == EngineType::CUDA_GPU || engine.type == EngineType::CUDA_DMA)
             {
-                for (const auto &ms : r.input_mem_spaces)
+                primary_cuda_device = static_cast<int>(engine.idx);
+                break;
+            }
+        }
+        if (primary_cuda_device == -1 && binding.output_mem_space.type == HandleType::CUDA)
+            primary_cuda_device = static_cast<int>(binding.output_mem_space.idx);
+        if (primary_cuda_device == -1)
+        {
+            for (const auto &mem_space : binding.input_mem_spaces)
+            {
+                if (mem_space.type == HandleType::CUDA)
                 {
-                    if (ms.type == HandleType::CUDA)
-                    {
-                        hasCuda = true;
-                        cudaDevIdx = ms.idx;
-                        break;
-                    }
+                    primary_cuda_device = static_cast<int>(mem_space.idx);
+                    break;
                 }
             }
-
-            if (hasCuda)
+        }
+        if (primary_cuda_device != -1)
+        {
+            cudaError_t err = cudaSetDevice(primary_cuda_device);
+            if (err != cudaSuccess)
             {
-                cudaSetDevice(cudaDevIdx);
-                if (!benchStream)
-                {
-                    cudaError_t err = cudaStreamCreateWithFlags(&benchStream, cudaStreamNonBlocking);
-                    if (err != cudaSuccess)
-                    {
-                        Error::throw_err("cudaStreamCreateWithFlags failed in PreparedKernel::prepare: " +
-                                         std::string(cudaGetErrorString(err)));
-                    }
-                }
-                ctx.cuda_streams.push_back(reinterpret_cast<void *>(benchStream));
+                Error::throw_err("cudaSetDevice failed in PreparedKernel::prepare: " +
+                                 std::string(cudaGetErrorString(err)));
             }
+            if (!benchStream)
+            {
+                err = cudaStreamCreateWithFlags(&benchStream, cudaStreamNonBlocking);
+                if (err != cudaSuccess)
+                {
+                    Error::throw_err("cudaStreamCreateWithFlags failed in PreparedKernel::prepare: " +
+                                     std::string(cudaGetErrorString(err)));
+                }
+            }
+            ctx.cuda_streams.push_back(reinterpret_cast<void *>(benchStream));
         }
 #endif
     }
@@ -621,10 +728,9 @@ struct PreparedKernel
 
             if (b.type == HandleType::STORAGE)
             {
-                if (storageInIdx < sf.fds.size())
-                {
-                    ctx.fd[idx] = sf.fds[storageInIdx++];
-                }
+                if (storageInIdx >= sf.fds.size())
+                    Error::throw_err("PreparedKernel::updateStorageContext: missing storage file descriptor");
+                setStorageInput(ctx, idx, inViews[idx], sf.fds[storageInIdx++], 0);
             }
         }
     }
@@ -679,94 +785,109 @@ struct CacheFile
 {
     uint32_t version = 0;
     LogicalId rootId;
-    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::unordered_set<BaseEClassId> selectedCachedNodes;
+    std::vector<float> bucketWeights;
     std::vector<CompiledGraph> compiledGraphs;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constants;
     bool isValid = true;
     std::string invalidReason;
 };
 
-inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernels = false)
+inline CacheFile loadCacheFile(const std::string &cache_path, bool validateKernels = false)
 {
     CacheFile cache;
-    if (cachePath.empty())
+    if (cache_path.empty())
     {
         cache.isValid = false;
         cache.invalidReason = "Cache path is empty";
         return cache;
     }
 
-    std::ifstream file(cachePath, std::ios::binary);
+    if (!fs::exists(cache_path)) {
+        cache.invalidReason = "No cache file at " + cache_path;
+    }
+
+    std::ifstream file(cache_path, std::ios::binary);
     if (!file.is_open())
     {
         cache.isValid = false;
-        cache.invalidReason = "Could not open cache file: " + cachePath;
+        cache.invalidReason = "Could not open cache file: " + cache_path;
         return cache;
     }
 
-    BinaryReader br(file);
-    while (file.peek() != EOF)
+    try
     {
-        uint8_t type = 0;
-        br.read(type);
-
-        if (type == 0) // Metadata
+        BinaryReader br(file);
+        while (file.peek() != EOF)
         {
-            br.read(cache.version);
-            br.read(cache.rootId);
-            br.read(cache.selectedCachedNodes);
-        }
-        else if (type == 1) // Compiled Bucket
-        {
-            CompiledGraph cg;
-            br.read(cg);
+            uint8_t type = 0;
+            br.read(type);
 
-            if (validateKernels)
+            if (type == 0) // Metadata
             {
-                for (const auto &inst : cg.instructions)
+                br.read(cache.version);
+                br.read(cache.rootId);
+                br.read(cache.selectedCachedNodes);
+                if (cache.version >= 4)
+                    br.read(cache.bucketWeights);
+            }
+            else if (type == 1) // Compiled Bucket
+            {
+                CompiledGraph cg;
+                br.read(cg);
+
+                if (validateKernels)
                 {
-                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                    for (const auto &inst : cg.instructions)
                     {
-                        cache.isValid = false;
-                        cache.invalidReason = "Invalid Kernel ID: " + toString(inst.kernel_id);
-                        break;
+                        if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                        {
+                            cache.isValid = false;
+                            cache.invalidReason = "Invalid Kernel ID: " + toString(inst.kernel_id);
+                            break;
+                        }
                     }
+                    if (!cache.isValid)
+                        break;
                 }
-                if (!cache.isValid)
-                    break;
+                cache.compiledGraphs.push_back(std::move(cg));
             }
-            cache.compiledGraphs.push_back(std::move(cg));
-        }
-        else if (type == 2) // Constants
-        {
-            uint32_t count = 0;
-            br.read(count);
-            for (uint32_t i = 0; i < count; ++i)
+            else if (type == 2) // Constants
             {
-                LogicalId nodeId;
-                std::vector<uint8_t> data;
-                br.read(nodeId);
-                br.read(data);
-                cache.constants[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                uint32_t count = 0;
+                br.read(count);
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    LogicalId nodeId;
+                    std::vector<uint8_t> data;
+                    br.read(nodeId);
+                    br.read(data);
+                    cache.constants[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                }
+            }
+            else
+            {
+                cache.isValid = false;
+                cache.invalidReason = "Unknown block type";
+                break;
             }
         }
-        else
-        {
-            cache.isValid = false;
-            cache.invalidReason = "Unknown block type";
-            break;
-        }
+    }
+    catch (const std::exception &e)
+    {
+        cache.isValid = false;
+        cache.invalidReason = std::string("Corrupted cache file: ") + e.what();
     }
 
     return cache;
 }
 
-inline std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+inline std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cache_path)
 {
     std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
     std::unordered_set<std::string> seen;
 
-    CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/false);
+    CacheFile cache = loadCacheFile(cache_path, /*validateKernels=*/false);
     if (!cache.isValid)
     {
         std::cerr << "Warning: " << cache.invalidReason << std::endl;

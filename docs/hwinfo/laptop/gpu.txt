@@ -1,0 +1,82 @@
+﻿================================================================================
+GPU HARDWARE PROFILE - QUALCOMM ADRENO X1-85
+Host: Lenovo ThinkPad T14s Gen 6, Snapdragon X Elite X1E-78-100
+Observed device details and vendor-published specifications.
+================================================================================
+
+IDENTIFICATION AND PEAKS
+--------------------------------------------------------------------------------
+- Device: Qualcomm Adreno X1-85 integrated GPU.
+- Qualcomm's X1E-78-100 SKU specification lists up to 1.25 GHz and up to
+  3.8 TFLOPs GPU throughput.
+- GPU and CPU share the platform's LPDDR5X system memory: 32 GB installed,
+  running at 8448 MT/s. Qualcomm lists 135 GB/s platform memory bandwidth.
+- Qualcomm lists DirectX 12 support. Windows exposes this GPU through the
+  Qualcomm Adreno graphics driver; the current driver version observed here is
+  31.0.160.0.
+
+HARDWARE EXECUTION AND LOW-LEVEL INSPECTION
+--------------------------------------------------------------------------------
+- The installed Qualcomm GPU driver reports 6 compute units and 32,768 bytes
+  of local storage per work-group.
+- Device floating-point configuration query: FP32 `0x16`, FP16 `0x16`, FP64
+  `0x00`. The driver also advertises Qualcomm BF16 product and integer dot
+  product operations.
+- The hardware operation classes visible in Qualcomm's GPU analysis tools
+  include ALU, half-precision ALU, EFU, global/local memory operations, and
+  private-memory spill traffic. Reports include instruction counts, registers,
+  and maximum active waves. Qualcomm's Adreno guide describes wave/subgroup
+  execution and vector memory operations; it gives wave sizes seen across
+  Adreno generations, not an X1-85-specific fixed wave size.
+- Qualcomm documents `cl_qcom_dot_product8` as packed signed or unsigned
+  four-byte dot products with signed-saturating 32-bit accumulation. The
+  installed X1-85 device executed this operation in the benchmark below.
+- Directly measured operation types include FP32 FMA, FP16 FMA, and packed
+  signed INT8 dot products with INT32 accumulation. The device property query
+  reported no FP64 configuration. See the measurements below.
+- Qualcomm provides no public X1-85 shader ISA manual comparable to its CPU
+  and Hexagon instruction manuals. Adreno Offline Compiler and Snapdragon
+  Profiler expose compiled instruction/resource reports and runtime metrics.
+
+OBSERVED DEVICE
+--------------------------------------------------------------------------------
+- Windows device name: Qualcomm(R) Adreno(TM) X1-85 GPU.
+- Device node: ACPI\VEN_QCOM&DEV_0C36 (Qualcomm subsystem).
+- The GPU is detected by Windows and reports device status OK.
+
+MEASURED GPU OPERATIONS
+--------------------------------------------------------------------------------
+- Measured on this laptop on 2026-10-10 using 16,777,216 work items, device-event timings,
+  and the Qualcomm OpenCL driver. The test source is
+  `gpu_microbench.py`; the measurements are throughput for these
+  particular kernels, not peak ratings.
+- Streaming 64 MiB arrays: copy 95.8 GB/s (64 MiB read and 64 MiB written) and
+  triad 101.6 GB/s (128 MiB read and 64 MiB written).
+- Arithmetic instruction loops: FP32 FMA 0.020 TFLOP/s; FP16 FMA 0.023
+  TFLOP/s; packed INT8 dot8 8.98 TOP/s. Each multiply and each addition counts
+  as one operation. FMA and dot8 kernels use 8 independent accumulators per
+  work item; each kernel runs 32 dependent rounds per accumulator. The tested
+  INT8 dot instruction consumes four packed byte pairs and accumulates into
+  INT32.
+- Kernel execution time was read from OpenCL device events, using the median
+  of four runs. GPU clock, temperature, power, and concurrent SoC memory traffic
+  were not recorded.
+
+SOURCES
+--------------------------------------------------------------------------------
+- Qualcomm Snapdragon X Elite specifications:
+  https://www.qualcomm.com/laptops/products/snapdragon-x-elite
+- Qualcomm Snapdragon X Elite product brief (GPU SKU, memory, and platform):
+  https://docs.qualcomm.com/bundle/publicresource/87-71417-1_REV_F_Snapdragon_X_Elite_Product_Brief.pdf
+- Qualcomm Windows on Snapdragon software and graphics drivers:
+  https://www.qualcomm.com/developer/windows-on-snapdragon/software
+- Qualcomm Snapdragon Mobile Platform OpenCL General Programming and
+  Optimization Guide:
+  https://docs.qualcomm.com/bundle/publicresource/80-NB295-11_REV_C_Qualcomm_Snapdragon_Mobile_Platform_Opencl_General_Programming_and_Optimization.pdf
+- Qualcomm Adreno Offline Compiler and Snapdragon Profiler overview:
+  https://www.qualcomm.com/developer/blog/2025/08/optimize-performance-and-graphics-for-adreno-gpu-low-power-gaming
+- Qualcomm Profiler User Guide (Windows ARM64 support and capture modes):
+  https://docs.qualcomm.com/doc/80-54323-2
+- Reproducible GPU operation microbenchmarks:
+  `gpu_microbench.py`; run with `.venv/Scripts/python.exe
+  docs/hwinfo/laptop/gpu_microbench.py`.

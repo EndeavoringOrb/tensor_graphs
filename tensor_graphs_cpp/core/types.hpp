@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/hardware/detection.hpp"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -18,7 +20,9 @@ typedef uint32_t cl_uint;
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -28,13 +32,13 @@ typedef uint32_t cl_uint;
 #include <list>
 #include <map>
 #include <memory>
-#include <source_location>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "core/common/constants.hpp"
 #include "core/serialization.hpp"
 
 #ifdef min
@@ -48,40 +52,43 @@ using json = nlohmann::json;
 
 // TODO: split up into types/tensor_node.hpp, types/...
 
-// TODO: os & architecture detection should be in hardware.hpp and types should
-// include hardware.hpp
-// --- OS Detection ---
-#if defined(_WIN32) || defined(_WIN64)
-#define TG_OS_WINDOWS
-#elif defined(__APPLE__)
-#define TG_OS_MACOS
-#elif defined(__linux__)
-#define TG_OS_LINUX
-#endif
+struct SourceLocation
+{
+    const char *file_;
+    uint32_t line_;
 
-// --- Architecture Detection ---
-#if defined(__aarch64__) || defined(_M_ARM64)
-#define TG_ARCH_ARM64
-#if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
-#define TG_HAS_NEON
-#endif
-#elif defined(__x86_64__) || defined(_M_X64)
-#define TG_ARCH_X64
-#endif
+    constexpr SourceLocation(const char *file = __builtin_FILE(), uint32_t line = __builtin_LINE())
+        : file_(file), line_(line)
+    {
+    }
 
-inline std::string toString(std::source_location loc)
+    static constexpr SourceLocation current(const char *file = __builtin_FILE(), uint32_t line = __builtin_LINE())
+    {
+        return SourceLocation(file, line);
+    }
+
+    constexpr const char *file_name() const noexcept
+    {
+        return file_;
+    }
+    constexpr uint32_t line() const noexcept
+    {
+        return line_;
+    }
+};
+
+inline std::string toString(SourceLocation loc)
 {
     return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
 }
 
 namespace Error
 {
-template <typename T = std::runtime_error, typename... Args>
-[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args,
-                                   std::source_location loc = std::source_location::current())
+template <typename T = std::runtime_error>
+[[noreturn]] inline void throw_err(const std::string &msg, SourceLocation loc = SourceLocation::current())
 {
     std::cerr << "\n[TensorGraph Error] (" << toString(loc) << ") " << msg << std::endl << std::flush;
-    throw T(msg, std::forward<Args>(args)...);
+    throw T(msg);
 }
 } // namespace Error
 
@@ -148,7 +155,35 @@ struct BufferId
 {
     uint32_t value = UINT32_MAX;
 
-    auto operator<=>(const BufferId &) const = default;
+    constexpr BufferId() = default;
+    constexpr explicit BufferId(uint32_t val) : value(val)
+    {
+    }
+
+    bool operator==(const BufferId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const BufferId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const BufferId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const BufferId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const BufferId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const BufferId &o) const
+    {
+        return value >= o.value;
+    }
 
     BufferId operator++(int)
     {
@@ -162,7 +197,35 @@ struct LogicalId
 {
     uint32_t value = UINT32_MAX;
 
-    auto operator<=>(const LogicalId &) const = default;
+    constexpr LogicalId() = default;
+    constexpr explicit LogicalId(uint32_t val) : value(val)
+    {
+    }
+
+    bool operator==(const LogicalId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const LogicalId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const LogicalId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const LogicalId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const LogicalId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const LogicalId &o) const
+    {
+        return value >= o.value;
+    }
 
     LogicalId operator++(int)
     {
@@ -197,28 +260,153 @@ class LogicalIdAllocator
 
     LogicalId _allocate()
     {
-        return nextId++;
+        // Logical IDs are used as keys in each temporary graph constructed by
+        // parallel bucket planning.  The allocator is global, so uniqueness
+        // must hold across worker threads as well.
+        return LogicalId{nextId.fetch_add(1, std::memory_order_relaxed)};
     }
 
-    LogicalId nextId{0};
+    std::atomic<uint32_t> nextId{0};
 };
 
 struct EClassId
 {
     uint32_t value = UINT32_MAX;
-    auto operator<=>(const EClassId &) const = default;
+
+    constexpr EClassId() = default;
+    constexpr explicit EClassId(uint32_t val) : value(val)
+    {
+    }
+
+    bool operator==(const EClassId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const EClassId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const EClassId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const EClassId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const EClassId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const EClassId &o) const
+    {
+        return value >= o.value;
+    }
+};
+
+struct BaseEClassId
+{
+    uint32_t value = UINT32_MAX;
+
+    constexpr BaseEClassId() = default;
+    constexpr explicit BaseEClassId(uint32_t val) : value(val)
+    {
+    }
+
+    bool operator==(const BaseEClassId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const BaseEClassId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const BaseEClassId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const BaseEClassId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const BaseEClassId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const BaseEClassId &o) const
+    {
+        return value >= o.value;
+    }
 };
 
 struct ENodeId
 {
     uint32_t value = UINT32_MAX;
-    auto operator<=>(const ENodeId &) const = default;
+
+    constexpr ENodeId() = default;
+    constexpr explicit ENodeId(uint32_t val) : value(val)
+    {
+    }
+
+    bool operator==(const ENodeId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const ENodeId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const ENodeId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const ENodeId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const ENodeId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const ENodeId &o) const
+    {
+        return value >= o.value;
+    }
 };
 
 struct KernelId
 {
     uint64_t value = UINT32_MAX;
-    auto operator<=>(const KernelId &) const = default;
+
+    constexpr KernelId() = default;
+    constexpr explicit KernelId(uint64_t val) : value(val)
+    {
+    }
+
+    bool operator==(const KernelId &o) const
+    {
+        return value == o.value;
+    }
+    bool operator!=(const KernelId &o) const
+    {
+        return value != o.value;
+    }
+    bool operator<(const KernelId &o) const
+    {
+        return value < o.value;
+    }
+    bool operator<=(const KernelId &o) const
+    {
+        return value <= o.value;
+    }
+    bool operator>(const KernelId &o) const
+    {
+        return value > o.value;
+    }
+    bool operator>=(const KernelId &o) const
+    {
+        return value >= o.value;
+    }
 };
 
 enum class HandleType : uint32_t
@@ -252,6 +440,16 @@ struct MemSpace
     bool operator==(const MemSpace &other) const
     {
         return idx == other.idx && type == other.type;
+    }
+    bool operator!=(const MemSpace &other) const
+    {
+        return !(*this == other);
+    }
+    bool operator<(const MemSpace &other) const
+    {
+        if (type != other.type)
+            return type < other.type;
+        return idx < other.idx;
     }
 };
 
@@ -333,6 +531,14 @@ template <> struct hash<EClassId>
     }
 };
 
+template <> struct hash<BaseEClassId>
+{
+    std::uint64_t operator()(const BaseEClassId &id) const noexcept
+    {
+        return std::hash<uint32_t>()(id.value);
+    }
+};
+
 template <> struct hash<ENodeId>
 {
     std::uint64_t operator()(const ENodeId &id) const noexcept
@@ -384,6 +590,16 @@ struct Engine
     bool operator==(const Engine &other) const
     {
         return idx == other.idx && type == other.type;
+    }
+    bool operator!=(const Engine &other) const
+    {
+        return !(*this == other);
+    }
+    bool operator<(const Engine &other) const
+    {
+        if (type != other.type)
+            return type < other.type;
+        return idx < other.idx;
     }
 };
 
@@ -449,6 +665,15 @@ struct Dim
 {
     uint32_t start;
     uint32_t stop;
+
+    bool operator==(const Dim &other) const
+    {
+        return start == other.start && stop == other.stop;
+    }
+    bool operator!=(const Dim &other) const
+    {
+        return !(*this == other);
+    }
 };
 
 struct Region
@@ -535,7 +760,7 @@ struct TensorNode
         strides = calcContiguousStrides(_shape);
     }
 
-    uint64_t getSizeBytes() const
+    uint64_t getLogicalSizeBytes() const
     {
         return countElements(getShape()) * getDTypeSize(dtype);
     }
@@ -628,6 +853,11 @@ struct GraphPatternCacheKey
             return false;
         return true;
     }
+
+    bool operator!=(const GraphPatternCacheKey &o) const
+    {
+        return !(*this == o);
+    }
 };
 
 namespace std
@@ -713,6 +943,14 @@ inline void tg_serialize(BinaryWriter &bw, const EClassId &val)
     bw.write(val.value);
 }
 inline void tg_deserialize(BinaryReader &br, EClassId &val)
+{
+    br.read(val.value);
+}
+inline void tg_serialize(BinaryWriter &bw, const BaseEClassId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, BaseEClassId &val)
 {
     br.read(val.value);
 }
@@ -870,6 +1108,11 @@ inline bool operator==(const Region &a, const Region &b)
     return true;
 }
 
+inline bool operator!=(const Region &a, const Region &b)
+{
+    return !(a == b);
+}
+
 inline bool operator<=(const Region &a, const Region &b)
 {
     // Does b completely cover a?
@@ -974,10 +1217,40 @@ inline bool isContiguous(const TensorView &view)
     return isContiguous(view.strides, view.getShape());
 }
 
-inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape,
-                             DType dtype) // TODO: redundant with TensorNode::getSizeBytes?
+inline uint64_t getLogicalSizeBytes(const std::vector<uint32_t> &shape,
+                                    DType dtype)
 {
     return countElements(shape) * getDTypeSize(dtype);
+}
+
+// Logical bytes describe a packed tensor; storage span includes stride gaps.
+inline uint64_t getStorageSpanBytes(const std::vector<uint32_t> &shape,
+                                   const std::vector<uint64_t> &strides, DType dtype)
+{
+    if (shape.size() != strides.size())
+        Error::throw_err("Storage span: shape and strides have different ranks");
+    for (uint32_t extent : shape)
+        if (extent == 0)
+            return 0;
+
+    uint64_t span_elements = 1;
+    const uint64_t max_value = std::numeric_limits<uint64_t>::max();
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        const uint64_t extent = shape[i] - 1;
+        if (extent != 0 && strides[i] > (max_value - span_elements) / extent)
+            Error::throw_err("Storage span: strided element span overflow");
+        span_elements += extent * strides[i];
+    }
+    const uint64_t element_bytes = getDTypeSize(dtype);
+    if (element_bytes != 0 && span_elements > max_value / element_bytes)
+        Error::throw_err("Storage span: byte span overflow");
+    return span_elements * element_bytes;
+}
+
+inline uint64_t getStorageSpanBytes(const TensorView &view)
+{
+    return getStorageSpanBytes(view.getShape(), view.strides, view.dtype);
 }
 
 template <typename T> inline std::string toString(const std::vector<T> &vec)
@@ -991,6 +1264,9 @@ template <typename T> inline std::string toString(const std::vector<T> &vec)
     ss << "]";
     return ss.str();
 }
+
+std::string toString(OpType op);
+std::ostream &operator<<(std::ostream &os, OpType op);
 
 inline std::string toString(DType dtype)
 {
@@ -1097,6 +1373,11 @@ inline std::string toString(EClassId id)
     return "EClassId(" + std::to_string(id.value) + ")";
 }
 
+inline std::string toString(BaseEClassId id)
+{
+    return "BaseEClassId(" + std::to_string(id.value) + ")";
+}
+
 inline std::string toString(ENodeId id)
 {
     return "ENodeId(" + std::to_string(id.value) + ")";
@@ -1116,6 +1397,10 @@ inline std::ostream &operator<<(std::ostream &os, KernelId id)
     return os << toString(id);
 }
 inline std::ostream &operator<<(std::ostream &os, EClassId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, BaseEClassId id)
 {
     return os << toString(id);
 }
@@ -1331,7 +1616,56 @@ struct Bucket
 {
     std::unordered_map<LogicalId, std::vector<Region>> inputDirtyRegions;
     std::vector<Region> outputNeededRegion;
+    // Relative expected frequency of this bucket. Planner entry points normalize
+    // all bucket weights before using them in the shared-cache objective.
+    float weight = 1.0f;
 };
+
+inline std::vector<float> normalizedBucketWeights(const std::vector<float> &weights)
+{
+    if (weights.empty())
+    {
+        Error::throw_err("[normalizedBucketWeights] at least one bucket is required");
+    }
+
+    double total = 0.0;
+    for (float weight : weights)
+    {
+        if (!std::isfinite(weight) || weight < 0.0f)
+        {
+            Error::throw_err("[normalizedBucketWeights] bucket weights must be "
+                             "finite and non-negative");
+        }
+        total += static_cast<double>(weight);
+    }
+    if (!(total > 0.0) || !std::isfinite(total))
+    {
+        Error::throw_err("[normalizedBucketWeights] bucket weights must have a "
+                         "positive finite sum");
+    }
+
+    std::vector<float> normalized;
+    normalized.reserve(weights.size());
+    for (float weight : weights)
+    {
+        normalized.push_back(static_cast<float>(static_cast<double>(weight) / total));
+    }
+    return normalized;
+}
+
+inline std::vector<float> normalizedBucketWeights(const std::vector<Bucket> &buckets)
+{
+    std::vector<float> weights;
+    weights.reserve(buckets.size());
+    for (const Bucket &bucket : buckets)
+        weights.push_back(bucket.weight);
+
+    // Preserve a legacy zero-weight full-only bucket instead of rejecting it.
+    if (weights.size() == 1 && weights[0] == 0.0f)
+        return weights;
+
+    return normalizedBucketWeights(weights);
+}
 
 inline void tg_serialize(BinaryWriter &bw, const Bucket &val)
 {
@@ -1390,7 +1724,6 @@ inline void tg_deserialize(BinaryReader &br, Bucket &val)
 
 inline bool operator==(const Bucket &a, const Bucket &b)
 {
-    bool equal = true;
     if (a.inputDirtyRegions.size() != b.inputDirtyRegions.size())
     {
         return false;
@@ -1427,6 +1760,204 @@ inline bool operator==(const Bucket &a, const Bucket &b)
     return true;
 }
 
+inline bool operator!=(const Bucket &a, const Bucket &b)
+{
+    return !(a == b);
+}
+
+inline std::string toString(const Bucket &bucket)
+{
+    std::stringstream ss;
+    ss << "Bucket(inputs={";
+    bool first_input = true;
+    for (const auto &pair : bucket.inputDirtyRegions)
+    {
+        if (!first_input)
+            ss << ", ";
+        first_input = false;
+        ss << pair.first << ": [";
+        for (size_t i = 0; i < pair.second.size(); ++i)
+        {
+            if (i > 0)
+                ss << ", ";
+            ss << encodeRegion(pair.second[i]);
+        }
+        ss << "]";
+    }
+    ss << "}, output=[";
+    for (size_t i = 0; i < bucket.outputNeededRegion.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << encodeRegion(bucket.outputNeededRegion[i]);
+    }
+    ss << "], weight=" << bucket.weight << ")";
+    return ss.str();
+}
+
+inline std::ostream &operator<<(std::ostream &os, const Bucket &bucket)
+{
+    return os << toString(bucket);
+}
+ 
+struct MakespanSimulator
+{
+    std::unordered_map<EClassId, float> eclass_finish;
+    std::unordered_map<uint32_t, float> buffer_finish;
+    std::unordered_map<Engine, float> engine_finish;
+    std::unordered_map<Engine, float> engine_active_time;
+
+    void addOperation(EClassId cid,
+                      const std::vector<EClassId> &children,
+                      const std::vector<uint32_t> &in_buffers,
+                      uint32_t out_buffer,
+                      const std::vector<Engine> &engines,
+                      float cost,
+                      bool is_view)
+    {
+        if (cost == TGConstants::INF || std::isinf(cost))
+            cost = 1.0f;
+
+        const float duration = is_view ? 0.0f : cost;
+
+        float children_finish = 0.0f;
+        for (size_t j = 0; j < children.size(); ++j)
+        {
+            EClassId child = children[j];
+            auto finish_it = eclass_finish.find(child);
+            if (finish_it != eclass_finish.end())
+            {
+                children_finish = std::max(children_finish, finish_it->second);
+            }
+            else if (j < in_buffers.size())
+            {
+                uint32_t buf_id = in_buffers[j];
+                if (buf_id != UINT32_MAX)
+                {
+                    auto b_it = buffer_finish.find(buf_id);
+                    if (b_it != buffer_finish.end())
+                    {
+                        children_finish = std::max(children_finish, b_it->second);
+                    }
+                }
+            }
+        }
+
+        float engine_free = 0.0f;
+        if (!is_view && engines.empty())
+        {
+            auto finish_it = engine_finish.find(Engine{0, EngineType::CPU});
+            if (finish_it != engine_finish.end())
+                engine_free = std::max(engine_free, finish_it->second);
+        }
+        else if (!is_view)
+        {
+            for (const Engine &eng : engines)
+            {
+                auto finish_it = engine_finish.find(eng);
+                if (finish_it != engine_finish.end())
+                    engine_free = std::max(engine_free, finish_it->second);
+            }
+        }
+
+        const float start_time = std::max(children_finish, engine_free);
+        const float finish_time = start_time + duration;
+        eclass_finish[cid] = finish_time;
+
+        if (out_buffer != UINT32_MAX)
+        {
+            buffer_finish[out_buffer] = finish_time;
+        }
+
+        if (!is_view)
+        {
+            if (engines.empty())
+            {
+                Engine cpu{0, EngineType::CPU};
+                engine_finish[cpu] = finish_time;
+                engine_active_time[cpu] += duration;
+            }
+            else
+            {
+                for (const Engine &eng : engines)
+                {
+                    engine_finish[eng] = finish_time;
+                    engine_active_time[eng] += duration;
+                }
+            }
+        }
+    }
+
+    float getMakespan() const
+    {
+        float max_finish = 0.0f;
+        for (const auto &pair : engine_finish)
+            max_finish = std::max(max_finish, pair.second);
+        return max_finish;
+    }
+};
+
+inline float evaluateMakespan(const std::vector<OpInstruction> &instructions,
+                              const std::unordered_map<EClassId, float> &nodeCosts,
+                              bool print_utilization = false,
+                              std::unordered_map<Engine, float> *out_engine_active_time = nullptr)
+{
+    if (instructions.empty())
+    {
+        float sum = 0.0f;
+        for (const auto &pair : nodeCosts)
+        {
+            sum += pair.second;
+        }
+        return sum;
+    }
+
+    MakespanSimulator sim;
+    for (const OpInstruction &inst : instructions)
+    {
+        float inst_cost = 0.0f;
+        auto cost_it = nodeCosts.find(inst.eclass_id);
+        if (cost_it != nodeCosts.end())
+        {
+            inst_cost = cost_it->second;
+        }
+
+        std::vector<uint32_t> in_bufs;
+        in_bufs.reserve(inst.inBuffers.size());
+        for (const auto &buf : inst.inBuffers)
+        {
+            in_bufs.push_back(buf.id.value);
+        }
+
+        uint32_t out_buf = inst.outBuffer.id.value;
+        sim.addOperation(inst.eclass_id, inst.children, in_bufs, out_buf, inst.engines, inst_cost, false);
+    }
+
+    float total_cost = sim.getMakespan();
+
+    if (out_engine_active_time)
+    {
+        *out_engine_active_time = sim.engine_active_time;
+    }
+
+    if (print_utilization && total_cost > 0.0f)
+    {
+        std::cout << "Total Execution Cost: " << total_cost << " ms\n";
+        for (const auto &kv : sim.engine_active_time)
+        {
+            Engine eng = kv.first;
+            float active_duration = kv.second;
+            float percentage = (active_duration / total_cost) * 100.0f;
+
+            std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): " << std::fixed
+                      << std::setprecision(2) << percentage << "% "
+                      << "(" << active_duration << " ms active)\n";
+        }
+    }
+
+    return total_cost;
+}
+
 struct CompiledGraph
 {
     Bucket bucket;
@@ -1436,16 +1967,22 @@ struct CompiledGraph
     // Canonical direction:
     // compiled physical node id -> original logical node id.
     std::unordered_map<EClassId, LogicalId> eclass_to_logical;
+    std::unordered_map<LogicalId, EClassId> logical_to_eclass;
     std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
-    float cost() const
+    float cost(bool print_utilization = false) const
     {
-        float sum = 0.0f;
-        for (const auto &pair : nodeCosts)
-        {
-            sum += pair.second;
-        }
-        return sum;
+        return evaluateMakespan(instructions, nodeCosts, print_utilization);
+    }
+
+    float get_cost(bool print_utilization = false) const
+    {
+        return cost(print_utilization);
+    }
+
+    float getCost(bool print_utilization = false) const
+    {
+        return cost(print_utilization);
     }
 
     bool has_logical_id(EClassId eclass_id) const
@@ -1538,6 +2075,7 @@ inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
     bw.write(val.instructions);
     bw.write(val.nodeCosts);
     bw.write(val.eclass_to_logical);
+    bw.write(val.logical_to_eclass);
     uint32_t const_size = 0;
     for (const auto &pair : val.constantStaging)
     {
@@ -1562,6 +2100,7 @@ inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
     br.read(val.instructions);
     br.read(val.nodeCosts);
     br.read(val.eclass_to_logical);
+    br.read(val.logical_to_eclass);
     uint32_t const_size;
     br.read(const_size);
     val.constantStaging.clear();

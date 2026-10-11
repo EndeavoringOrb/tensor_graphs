@@ -1,0 +1,73 @@
+#pragma once
+#include <algorithm>
+#include <vector>
+
+#include "core/common/thread_pool.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
+
+#include "kernels/fused/neg_f32_nd/ref.hpp"
+// =============================================================================
+// FUSED KERNEL: Negate F32 ND (NEON + Multi-threaded)
+//
+// Replaces the reference NEGATE kernel which uses getStridedIndex per element.
+// For contiguous tensors (the common case), this uses NEON vnegq_f32 and
+// multi-threading for near-linear scaling across all 12 cores.
+//
+// Expected savings: ~580ms remaining after softmax fusion (RoPE neg patterns)
+// But also critical for enabling correct fusion of other subgraphs containing
+// neg.
+// =============================================================================
+
+#if defined(TG_HAS_NEON)
+#include <arm_neon.h>
+
+inline bool matchNegF32_ND_NEON_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
+{
+    if (inputs[0].getShape() != output.getShape())
+        return false;
+    // Only handle contiguous for NEON path
+    return isContiguous(output);
+}
+
+inline void runNegF32_ND_NEON_Threaded(const KernelContext &ctx)
+{
+    const float *x = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+
+    const uint64_t n = countElements(ctx.inViews[0].getShape());
+    if (n == 0)
+        return;
+
+    uint32_t num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0)
+        num_threads = 1;
+
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        const uint64_t chunk = (n + num_threads - 1) / num_threads;
+        const uint64_t start = t * chunk;
+        const uint64_t end = std::min(start + chunk, n);
+        uint64_t i = start;
+
+        // NEON path: negate 4 floats at a time
+        for (; i + 4 <= end; i += 4)
+        {
+            float32x4_t vx = vld1q_f32(x + i);
+            vst1q_f32(out + i, vnegq_f32(vx));
+        }
+        // Scalar tail
+        for (; i < end; ++i)
+        {
+            out[i] = -x[i];
+        }
+    });
+}
+
+// Reference factory: same as the reference negate - just graph.neg(x)
+
+
+REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded,
+                refFactoryNegF32_ND_CUDA, {0, 1}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+
+#endif // TG_HAS_NEON

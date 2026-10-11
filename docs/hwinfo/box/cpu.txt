@@ -1,0 +1,250 @@
+================================================================================
+CPU HARDWARE & ARCHITECTURE SPECIFICATION
+Target: Intel(R) Xeon(R) CPU E5-1680 v3 @ 3.20GHz
+System: Linux x86_64 (6.1.0-44-amd64)
+Recorded for low-level kernel optimization & SIMD code generation
+================================================================================
+
+1. GENERAL IDENTIFICATION & TOPOLOGY
+--------------------------------------------------------------------------------
+- Processor Model:        Intel(R) Xeon(R) CPU E5-1680 v3
+- Microarchitecture:      Haswell-EP (Haswell-E / Grantley platform)
+- Process Node:           22 nm Tri-Gate (FinFET)
+- Family / Model / Step:  Family 6, Model 63 (0x3F), Stepping 2
+- Sockets:                1
+- Physical Cores:         8
+- Hardware Threads:       16 (Hyper-Threading / SMT enabled, 2 threads/core)
+- Core/Thread Mapping:    Each physical core hosts 2 hardware threads:
+                          Core 0: CPUs 0, 8
+                          Core 1: CPUs 1, 9
+                          Core 2: CPUs 2, 10
+                          Core 3: CPUs 3, 11
+                          Core 4: CPUs 4, 12
+                          Core 5: CPUs 5, 13
+                          Core 6: CPUs 6, 14
+                          Core 7: CPUs 7, 15
+- Base Clock:             3.20 GHz
+- Max Turbo Frequency:    3.80 GHz (single-core max; all-core turbo typically 3.5 GHz)
+- Min Frequency:          1.20 GHz
+- Address Width:          46 bits physical, 48 bits virtual
+- Endianness:             Little-endian
+
+2. CACHE HIERARCHY & MEMORY TOPOLOGY
+--------------------------------------------------------------------------------
+- Line Size (all levels): 64 bytes (cache line alignment: 64-byte boundary)
+- L1 Data (L1d):          32 KiB per core (8 instances = 256 KiB total)
+                          - 8-way set associative, 64 sets
+                          - Shared between SMT sibling threads on the core
+                          - Load latency: 4 cycles (simple), 5 cycles (complex addressing)
+                          - Bandwidth: 2x 256-bit (32B) loads + 1x 256-bit (32B) store per cycle
+                            (Up to 64 bytes read + 32 bytes write per core per cycle)
+- L1 Instruction (L1i):   32 KiB per core (8 instances = 256 KiB total)
+                          - 8-way set associative, 64 sets
+- L2 Unified:             256 KiB per core (8 instances = 2 MiB total)
+                          - 8-way set associative, 512 sets, non-inclusive / inclusive victim
+                          - Latency: ~12-14 cycles
+                          - Bandwidth: 64 bytes/cycle read from L2 to L1
+- L3 Unified (LLC):       20 MiB shared across all 8 cores
+                          - 20-way set associative, 16384 sets
+                          - Inclusive cache, divided into slices connected via bidirectional ring bus
+                          - Latency: ~34-40 cycles depending on ring distance
+- NUMA Configuration:     Single NUMA Node (Node 0 contains CPUs 0-15)
+- Physical Memory (RAM):  32 GiB Total (2x 16 GB DDR4-2133 MT/s Registered ECC RDIMMs)
+                          - Populated Slots: CPU0-DIMM1, CPU0-DIMM8
+                          - Unpopulated Slots: CPU0-DIMM3, CPU0-DIMM6
+                          - Configured Speed: 2133 MT/s (DDR4-2133)
+                          - Memory Mode: Dual-Channel configured (CPU supports up to Quad-Channel)
+                          - Theoretical Peak RAM Bandwidth (Configured Dual-Channel):
+                            2 channels * 8 bytes * 2.133 GT/s = 34.13 GB/s
+                          - Theoretical Max RAM Bandwidth (Max Quad-Channel):
+                            4 channels * 8 bytes * 2.133 GT/s = 68.26 GB/s
+                          - Practical Memory Bandwidth: ~28-30 GB/s achievable (read) in dual-channel
+
+3. FREQUENCY, POWER & TURBO MULTIPLIERS
+--------------------------------------------------------------------------------
+- TDP:                    140 W
+- Base Frequency:         3.20 GHz (Multiplier 32x, BCLK 100 MHz)
+- Turbo Bins (Factory Default):
+    * 1 to 2 active cores: 3.80 GHz (38x)
+    * 3 active cores:      3.60 GHz (36x)
+    * 4 to 8 active cores: 3.50 GHz (35x all-core turbo)
+- Frequency Scaling / AVX Offset:
+    * Unlike Broadwell/Skylake with severe AVX downclock offsets, Haswell has
+      mild frequency reduction under heavy AVX2 load if hitting TDP/current limit (140W).
+    * Sustained 8-core AVX2 all-core turbo typically holds around 3.3 - 3.5 GHz.
+- Note: E5-1680 v3 has an unlocked multiplier (rare for Xeons).
+
+4. EMPIRICALLY MEASURED PERFORMANCE & PIPELINE METRICS
+--------------------------------------------------------------------------------
+(Measured via microbenchmarks on this machine)
+- Single-Core FP32 FMA Peak:  97 - 110 GFLOP/s (at ~3.04 - 3.45 GHz burst)
+- 8-Core (Physical) FMA Peak: 715.57 GFLOP/s sustained (at ~2.80 GHz all-core under
+                              100% AVX2 FMA load; throttled by 140W TDP limit)
+- Theoretical Peak (3.5 GHz): 8 cores * 32 FLOPs/cycle * 3.5 GHz = 896 GFLOP/s (FP32)
+                              8 cores * 16 FLOPs/cycle * 3.5 GHz = 448 GFLOP/s (FP64)
+- FMA Latency (vfmadd231ps):   4.87 cycles (nominally 5 cycles)
+- FMA Throughput:             0.55 cycles/instruction (1.82 - 2.00 FMAs/cycle across Ports 0 & 1)
+- L1 Data Load Bandwidth:     ~50 bytes/cycle measured (theoretical peak: 64 bytes/cycle)
+- Empirical Memory Bandwidth (Multi-threaded STREAM Triad on 8 cores / 16 threads):
+    * Standard Cached Stores:     21.86 GB/s (20.36 GiB/s)
+    * Non-Temporal Stores (NT):   28.96 GB/s (26.97 GiB/s) -> 85% of dual-channel peak!
+    * Optimization takeaway: Non-temporal stores (_mm256_stream_ps) yield a ~32%
+      bandwidth increase by avoiding write-allocate (RFO) memory traffic.
+
+5. MICROARCHITECTURE & EXECUTION PORT TOPOLOGY (HASWELL)
+--------------------------------------------------------------------------------
+The Haswell out-of-order execution engine features 8 dispatch ports (Ports 0-7):
+- Port 0:  INT ALU, Shift, FP MUL, FP FMA (256-bit), Branch
+- Port 1:  INT ALU, Shift, FP ADD, FP FMA (256-bit), Slow INT MUL, LEA
+- Port 2:  Load AGU & Read Data (256-bit, 32 bytes/cycle from L1d)
+- Port 3:  Load AGU & Read Data (256-bit, 32 bytes/cycle from L1d)
+- Port 4:  Store Data (256-bit, 32 bytes/cycle write to L1d)
+- Port 5:  INT ALU, Shift, 256-bit Vector Shuffle & Permute,
+           256-bit Vector Boolean Logic (vandps, vorps, vxorps),
+           FP Conversions (F16C vcvtph2ps)
+- Port 6:  INT ALU, Shift, Branch
+- Port 7:  Store AGU (Address Generation for Port 4 store)
+
+Key Pipeline Parameters:
+- Decode Width:               4 instructions/cycle (4-1-1-1 macro-op decoder)
+- Decoded Stream Buffer (DSB): 1.5K uop cache; dispatches up to 8 uops/cycle
+- Micro-op Queue (IDQ):       56 uops
+- Reorder Buffer (ROB):       192 uops
+- Reservation Station (RS):   60 uops
+- Architectural Registers:    16 YMM registers (ymm0 to ymm15, 256 bits each)
+                              Aliased to 16 XMM registers (xmm0 to xmm15)
+
+6. SUPPORTED INSTRUCTION SET EXTENSIONS & INTRINSICS
+--------------------------------------------------------------------------------
+[x] AVX2 (Advanced Vector Extensions 2)
+    - Full 256-bit integer SIMD and floating-point vector execution.
+[x] FMA3 (Fused Multiply-Add with 3 operands)
+    - Single instruction a*b + c with 1 rounding step, 5-cycle latency, 2 per cycle.
+    - Instructions: vfmadd132ps/pd, vfmadd213ps/pd, vfmadd231ps/pd
+    - Negated / Sub variants: vfmsub..., vfnmadd..., vfnmsub..., vfmaddsub...
+[x] F16C (Half-Precision Floating Point Conversion)
+    - Hardware conversion between IEEE 754-2008 FP16 and FP32.
+    - vcvtph2ps: converts 8 x FP16 in xmm/mem to 8 x FP32 in ymm (Port 5, 4 cycles).
+    - vcvtps2ph: converts 8 x FP32 in ymm to 8 x FP16 in xmm/mem (Port 1/5, 4-5 cycles).
+[x] BMI1 & BMI2 (Bit Manipulation Instructions 1 & 2)
+    - andn, bextr, blsi, blsmsk, blsr, bzhi, mulx, pdep, pext, rorx, sarx, shlx, shrx.
+    - Fast hardware PDEP and PEXT (1 cycle, 1 uop).
+    - Shifts without clobbering EFLAGS (shlx, shrx, sarx, rorx).
+[x] ABM / LZCNT & POPCNT
+    - lzcnt (leading zero count), popcnt (population count) - 3 cycles latency.
+[x] SSE4.2 / SSE4.1 / SSSE3 / SSE3 / SSE2 / SSE
+[x] AES-NI & PCLMULQDQ
+[x] MOVBE (Big-endian to little-endian direct swap on load/store)
+[x] ERMS (Enhanced REP MOVSB / STOSB)
+    - Hardware-accelerated block memory copy/set using internal 256-bit/512-bit buses.
+[x] FSGSBASE (Fast userspace access to FS/GS segment registers)
+[x] RDTSCP & RDRAND
+
+NOT SUPPORTED (Critical Constraints - Do NOT emit these instructions):
+[-] NO AVX-512 (No AVX512F, DQ, BW, VL, CD, VNNI, BF16, FP16)
+    - No 512-bit ZMM registers (only 256-bit YMM registers ymm0-ymm15 exist).
+    - No opmask registers (k0-k7) or AVX-512 predicated masking.
+    - No embedded memory broadcast specifiers (e.g., {1to8} or {1to16}).
+[-] NO AVX-VNNI (No 256-bit vpdpbusd for direct int8 dot products).
+[-] NO AMX (No matrix tiles or systolic execution).
+[-] NO Bfloat16 (No hardware bf16 dot products or conversion instructions).
+[-] NO Native FP16 Math (FP16 computation must be converted to FP32 first via F16C).
+
+7. DETAILED KERNEL OPTIMIZATION GUIDELINES
+--------------------------------------------------------------------------------
+
+A. FLOATING POINT (FP32 & FP16) TENSOR COMPUTATION:
+- Single-Precision (FP32) GEMM / Convolutions:
+  * Haswell has 2 FMA units (Port 0 and Port 1). Peak throughput is 2 FMAs/cycle.
+  * FMA latency is 5 cycles.
+  * To hide the 5-cycle pipeline latency on 2 ports, a minimum of 10 independent
+    accumulator registers must be active simultaneously (2 ports * 5 cycles = 10).
+  * Given 16 YMM registers total, the optimal micro-kernel register tile is:
+      - 6x2 Tile (12 accumulators: ymm0-ymm11):
+          * 12 accumulators (ymm0..ymm11) hold a 16x6 or 6x16 output sub-block.
+          * 2 registers (ymm12, ymm13) hold 2 vectors of matrix A (16 floats).
+          * 1 register (ymm14) holds broadcast elements of matrix B (vbroadcastss).
+          * 1 scratch/prefetch register (ymm15).
+          * Loop arithmetic intensity: 12 FMAs per 3 loads (4 FMAs/load).
+          * Ports 0 & 1 execute the 12 FMAs in 6 cycles.
+          * Ports 2 & 3 execute the 3 loads in 1.5 cycles.
+          * This achieves ~92-96% of theoretical peak compute on Haswell!
+      - Alternative 4x3 Tile (12 accumulators):
+          * 12 accumulators (ymm0..ymm11).
+          * 3 registers for matrix B (ymm12..ymm14).
+          * 1 register for matrix A broadcast (ymm15).
+          * 12 FMAs per 4 loads (3 FMAs/load).
+
+- Half-Precision (FP16) Strategy:
+  * Store weights and activations as FP16 (half) in memory:
+    - Halves memory footprint and doubles effective DRAM/cache bandwidth.
+  * Stream loads using vmovdqu / vmovaps (128-bit loads contain 8 half floats).
+  * Expand to FP32 in registers using vcvtph2ps:
+    - Dispatches to Port 5 (1 uop, 4 cycles latency, 1 instruction/cycle throughput).
+  * Compute dot products / FMAs using vfmadd231ps on Ports 0 and 1.
+  * Notice the architectural balance: Ports 0 & 1 do FMA compute while Port 5
+    concurrently unpacks FP16 to FP32 without bottlenecking the FMA pipes!
+  * Downconvert output back to FP16 with vcvtps2ph (Port 1 or Port 5) before store.
+
+B. QUANTIZED INT8 KERNELS (VNNI EMULATION):
+- Since AVX-VNNI (vpdpbusd) is absent, int8 dot products must be constructed using:
+  1. Load unsigned int8 activations (A) and signed int8 weights (B).
+  2. vpmaddubsw (ymm_accum16, ymm_a_u8, ymm_b_s8):
+     - Multiplies unsigned byte by signed byte and adds adjacent pairs into 16-bit words.
+     - Throughput: 1 instruction/cycle on Port 0.
+  3. vpmaddwd (ymm_accum32, ymm_accum16, ymm_ones_16):
+     - Multiplies 16-bit words by constant vector of 1s and accumulates to 32-bit ints.
+     - Throughput: 1 instruction/cycle on Port 0.
+  4. vpaddd into 32-bit accumulator registers (Ports 1 or 5).
+
+C. FAST TRANSCENDENTALS & NORMALIZATION (GELU, SILU, SOFTMAX, RMSNORM):
+- Fast Reciprocal Square Root:
+  * Hardware vrsqrtps computes 1/sqrt(x) with 11-12 bits of precision (Port 0, 1 uop).
+  * Apply one Newton-Raphson refinement step:
+      y1 = 0.5f * y0 * (3.0f - x * y0 * y0)
+      - Implemented using vmulps and vfmsub213ps / vfnmadd213ps.
+  * Reaches full 24-bit IEEE single-precision floating point in ~8 cycles,
+    compared to hardware vsqrtps + vdivps which take ~28 cycles and serialize Port 0!
+- Vector Min / Max for Softmax:
+  * vmaxps / vminps: 1 cycle latency on Port 0 or Port 1.
+  * Fast horizontal reduction within 256-bit register:
+      1. vextractf128 xmm1, ymm0, 1      ; extract upper 128 bits
+      2. vmaxps xmm0, xmm0, xmm1          ; max across 128-bit halves
+      3. vshufps xmm1, xmm0, xmm0, 0xEE   ; shuffle elements
+      4. vmaxps xmm0, xmm0, xmm1
+      5. vshufps xmm1, xmm0, xmm0, 0x55
+      6. vmaxps xmm0, xmm0, xmm1          ; scalar result in xmm0[0]
+
+D. MEMORY SUBSYSTEM & CACHE MANAGEMENT:
+- Cache Line Alignment:
+  * Cache lines are 64 bytes.
+  * Always align memory allocations to 64 bytes (posix_memalign / aligned_alloc(64, ...)).
+  * Unaligned loads (vmovups) that stay within a single 64-byte line have 0 cycle penalty.
+  * A load crossing a 64-byte boundary incurs a ~12-cycle split load penalty.
+- Cache Tiling Budgets for Haswell:
+  * L1d Cache: 32 KiB -> Inner micro-kernel panels (A and B buffers) should fit in <= 24 KiB.
+  * L2 Cache: 256 KiB -> Macro-kernel blocking Kc x Nc should fit in <= 192 KiB.
+  * L3 Cache: 20 MiB shared -> Total working footprint <= 16 MiB across all cores.
+- Non-Temporal Stores:
+  * For tensors exceeding L3 capacity (> 20 MiB), use vmovntps (_mm256_stream_ps).
+  * Bypasses the cache and achieves 28.96 GB/s memory write bandwidth (vs 21.86 GB/s).
+  * Must write entire 64-byte lines and finish with _mm_sfence().
+- Avoid AVX2 Gather (vgatherdps / vgatherdpd):
+  * On Haswell, vgather instructions are microcoded into scalar serial loads.
+  * Latency is high (~18-24 cycles) and throughput is poor.
+  * For sparse or lookup patterns, scalar loads + vpinsrd / vpunpckldq is often faster.
+
+E. ABI, VZEROUPPER & MIXED CODE:
+- Issue `vzeroupper` (_mm256_zeroupper()) at the boundary of any function using AVX
+  before returning to scalar/SSE code or calling external non-VEX libraries.
+  Failure to do so causes a 70+ cycle penalty on subsequent SSE instructions due
+  to dirty upper-register state.
+
+8. COMPILER FLAGS & LOW-LEVEL BUILD INSTRUCTIONS
+--------------------------------------------------------------------------------
+- Recommended GCC / Clang flags:
+  `-march=haswell -mtune=haswell -O3 -mavx2 -mfma -mf16c -mbmi2 -fno-math-errno`
+- Useful inline assembly / intrinsic headers:
+  `#include <immintrin.h>`   // AVX, AVX2, FMA, F16C, BMI, BMI2
+  `#include <x86intrin.h>`    // RDTSC, low-level builtins
+================================================================================

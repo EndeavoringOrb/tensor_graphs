@@ -17,6 +17,23 @@ class Synchronizer
     std::unordered_map<uint32_t, std::vector<Engine>> buffer_last_writers;
     std::unordered_set<Engine> busy_engines;
 
+    struct PendingAccess
+    {
+        ParallelBuffer buffer;
+        bool writes;
+    };
+    std::unordered_map<Engine, std::vector<PendingAccess>> pending_accesses;
+
+    static bool overlapsMemory(const ParallelBuffer &a, const ParallelBuffer &b)
+    {
+        if (a.mem_space != b.mem_space || a.size == 0 || b.size == 0)
+            return false;
+        if (a.offset < 0 || b.offset < 0)
+            return a.id == b.id;
+        return a.offset <= b.offset ? static_cast<uint64_t>(b.offset - a.offset) < a.size
+                                    : static_cast<uint64_t>(a.offset - b.offset) < b.size;
+    }
+
 #ifdef TG_USE_CUDA
     std::unordered_map<Engine, cudaStream_t> cuda_streams;
     std::unordered_map<uint32_t, cudaEvent_t> buffer_events; // buffer_id -> event
@@ -82,6 +99,32 @@ class Synchronizer
 
         const Engine &primary_engine = inst_engines[0];
 
+        // Allocation lifetimes follow dispatch order, but device work can still
+        // be using an arena range when a different buffer reuses it. Buffer IDs
+        // alone cannot describe these read/write and write/write dependencies.
+        std::vector<Engine> conflicting_engines;
+        for (const auto &entry : pending_accesses)
+        {
+            if (entry.first == primary_engine)
+                continue;
+            bool conflict = false;
+            for (const PendingAccess &access : entry.second)
+            {
+                conflict = overlapsMemory(access.buffer, inst.outBuffer);
+                if (!conflict && access.writes)
+                {
+                    for (const ParallelBuffer &input : inst.inBuffers)
+                        conflict = conflict || overlapsMemory(access.buffer, input);
+                }
+                if (conflict)
+                    break;
+            }
+            if (conflict)
+                conflicting_engines.push_back(entry.first);
+        }
+        for (const Engine &engine : conflicting_engines)
+            syncEngine(engine);
+
         for (const ParallelBuffer &inBuf : inst.inBuffers)
         {
             auto it = buffer_last_writers.find(inBuf.id.value);
@@ -146,11 +189,27 @@ class Synchronizer
 
         if (issued_work)
         {
+#ifdef TG_USE_CUDA
+            // CPU-dispatched uploads use the default stream. A pageable H2D
+            // copy can return after staging, before its device write finishes;
+            // our nonblocking consumer streams do not implicitly wait for it.
+            if (primary_engine.type == EngineType::CPU && inst.outBuffer.mem_space.type == HandleType::CUDA)
+            {
+                cudaSetDevice(inst.outBuffer.mem_space.idx);
+                const cudaError_t result = cudaStreamSynchronize(nullptr);
+                if (result != cudaSuccess)
+                    Error::throw_err(cudaGetErrorString(result));
+            }
+#endif
             for (const Engine &eng : inst_engines)
             {
                 if (eng.type != EngineType::CPU)
                 {
                     busy_engines.insert(eng);
+                    auto &accesses = pending_accesses[eng];
+                    for (const ParallelBuffer &input : inst.inBuffers)
+                        accesses.push_back({input, false});
+                    accesses.push_back({inst.outBuffer, true});
                 }
             }
 
@@ -210,6 +269,7 @@ class Synchronizer
         }
 #endif
         busy_engines.erase(engine);
+        pending_accesses.erase(engine);
     }
 
     void syncEngines(const std::vector<Engine> &engines)

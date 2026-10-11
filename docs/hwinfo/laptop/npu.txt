@@ -1,0 +1,209 @@
+﻿================================================================================
+NPU HARDWARE PROFILE - QUALCOMM HEXAGON
+Host: Lenovo ThinkPad T14s Gen 6, Snapdragon X Elite X1E-78-100
+Observed device details and public hardware/ISA references.
+================================================================================
+
+IDENTIFICATION AND CAPABILITY
+--------------------------------------------------------------------------------
+- Device: Qualcomm Hexagon NPU integrated in the Snapdragon X Elite SoC.
+- Terminology: Hexagon is Qualcomm's DSP/NPU architecture family; this SoC uses
+  Hexagon v73. HVX is its vector instruction extension, while HMX is its matrix
+  accelerator. HTP (Hexagon Tensor Processor) is Qualcomm's name for the NPU
+  processor/backend built around Hexagon. QNN (Qualcomm AI Engine Direct) is
+  the graph API/runtime used to target processors including HTP. QAIRT
+  (Qualcomm AI Runtime) is the SDK distribution that includes QNN libraries,
+  tools, converters, and profiling utilities.
+- Qualcomm advertises up to 45 TOPS for the X Elite NPU; the product
+  specification does not state a per-format instruction rate.
+- The NPU shares the SoC memory subsystem with CPU and GPU. The laptop has 32 GB
+  LPDDR5X-8448; Qualcomm's platform peak memory bandwidth is 135 GB/s.
+- Windows enumerates the device as a Qualcomm Hexagon NPU ComputeAccelerator and
+  reports status OK.
+
+ISA AND INSTRUCTION INSPECTION
+--------------------------------------------------------------------------------
+- Qualcomm's AI Engine Direct device table maps Snapdragon X Elite/Plus SoC
+  SC8380 to Hexagon architecture v73 and HTP SoC model 60. The X1E-78-100 is in
+  this Snapdragon X Elite platform family.
+- Hexagon v73 has a public Qualcomm Programmer's Reference Manual covering the
+  scalar instruction set, encodings, instruction classes, packet scheduling,
+  memory operations, vector operations, and performance-monitor events. The
+  separate Hexagon V73 HVX Programmer's Reference Manual covers the HVX vector
+  instruction set, vector types, intrinsics, and programming model. These
+  references provide instruction-by-instruction opcode tables and encodings.
+- HVX v73 uses 1024-bit (128-byte) vector registers with 32-bit, 16-bit, or
+  8-bit lanes; the manual documents 32 vector data registers, four predicate
+  registers, vector memory operations, and vector resource classes. It documents
+  that multiple SIMD instructions can execute in parallel and that the number
+  of vector contexts is implementation-defined.
+- An HVX hardware thread is a Hexagon scalar hardware thread attached to an HVX
+  vector context; the attachment allows it to issue HVX instructions. Multiple
+  threads can execute simultaneously when they have separate vector contexts.
+  The v73 manual says the number of contexts is implementation-defined, so the
+  public architecture manual does not establish the exact context count enabled
+  in this laptop's SoC.
+- The scalar ISA uses statically scheduled VLIW packets and compound
+  instructions. The v73 manual is the instruction-level reference for the
+  documented scalar/HVX architecture; HMX matrix operations are described in
+  the Hexagon Kernel Library materials.
+- Qualcomm's Hexagon-MLIR preview compiles Triton kernels and PyTorch models to
+  executable code for tested v73 Hexagon NPUs and can expose generated Hexagon
+  assembly during lowering. Hexagon compiler output can be disassembled and
+  checked against the v73 scalar/HVX instruction manuals.
+
+HARDWARE DATA TYPES AND OPERATION FAMILIES
+--------------------------------------------------------------------------------
+- The Hexagon v73 scalar core uses 32-bit general registers and 64-bit register
+  pairs. Its scalar instruction set includes signed/unsigned integer and
+  predicate operations, fixed-point operations, FP32 arithmetic/conversion,
+  and packed complex arithmetic. Qualcomm's scalar PRM enumerates opcodes,
+  operands, instruction packets, and execution resources.
+- HVX v73 has 1024-bit vector registers and supports signed/unsigned 8-, 16-,
+  and 32-bit lanes, QFloat16/QFloat32, IEEE FP16, and IEEE FP32 forms. Its
+  instruction families include arithmetic, min/max/compare, shifts, bitwise
+  logic, permutations, gather/scatter and vector loads/stores, widening,
+  saturation, multiply/accumulate, and floating-point math. The HVX PRM is the
+  instruction-by-instruction reference, including vector resource and latency
+  tables.
+- Hexagon Matrix eXtensions (HMX) provide matrix multiply acceleration on this
+  Hexagon generation. Qualcomm's Hexagon Kernel Library exposes HMX matrix
+  operations and lists v73 among its targets. Its documented interfaces cover
+  FP16 matrix multiply, unsigned 8-bit activations with signed 8-bit or 4-bit
+  weights and INT32 accumulation, and mixed FP32/FP16 entry points. These are
+  matrix-operation input/accumulator formats, distinct from scalar/HVX lane
+  formats.
+- The hardware operation families include scalar DSP work, general SIMD via
+  HVX, and matrix multiply/convolution workloads via HMX. Qualcomm's v73 scalar
+  and HVX manuals contain the instruction encodings and scheduling details.
+  HMX low-level programming details are in the Hexagon Kernel Library's
+  micro-API documentation; the v73 scalar/HVX PRMs do not enumerate HMX opcodes.
+
+MEASUREMENTS
+--------------------------------------------------------------------------------
+- The MatMul and RMSNorm source graphs were generated as float32 ONNX models by
+  `tools/npu/benchmarks/create_op_graphs.py`. QAIRT converted them into QNN model
+  source and ARM64 model DLLs. The physical runs used the native ARM64
+  `qnn-net-run.exe`, `QnnHtp.dll`, raw input tensors, synchronous execution, and
+  the built-in QNN HTP operators. They did not register a custom OpPackage.
+- Physical measurements used QAIRT 2.51.40.260930, native Windows ARM64,
+  `QnnHtp.dll`, HTP architecture V73, burst performance profile, and an
+  `hvx_threads` setting of 4. This is the graph's QNN HVX worker-thread setting,
+  not the Windows CPU logical-processor count. It records the setting used by
+  these runs; it does not establish the SoC's physical maximum or show that four
+  is faster than other settings. Inputs and outputs were float32 QNN tensors.
+  The profiles include
+  QNN graph and RPC costs; “Accelerator (execute excluding wait)” is the
+  profile's accelerator execution field.
+- The bundled float32 `convReluModel` graph used input shape `[1,299,299,3]` and
+  output shape `[1,149,149,32]`. Its latest two-input run averaged 3.093 ms per
+  graph execution, with 0.595 ms minimum and 5.591 ms maximum. The profile
+  averaged 0.522 ms in QNN accelerator execute time and 0.137 ms in accelerator
+  execute time excluding wait.
+- Float32 matrix multiplication used two dynamic `[128,128]` inputs and one
+  `[128,128]` output (2,097,152 multiply-accumulates). In a five-second
+  profiling run, graph execution averaged 298 us, with 180 us minimum and
+  3,406 us maximum. The profile averaged 46 us QNN accelerator execute time,
+  29 us accelerator execute time, and 14 us accelerator execute time excluding
+  wait. Detailed profiling reported 23,782 average accelerator cycles for the
+  MatMul node (`matmul`, OpId 16).
+- Float32 RMSNorm used input and output shape `[32,4096]`, normalized over the
+  last dimension, with epsilon `1e-5`. The ONNX graph was `Mul`, `ReduceMean`,
+  `Add`, `Sqrt`, and `Div`; QAIRT fused it into one HTP node named
+  `rms_norm_Y`. In a five-second profiling run, graph execution averaged
+  445 us, with 323 us minimum and 5,490 us maximum. The profile averaged 115 us
+  QNN accelerator execute time, 99 us accelerator execute time, and 79 us
+  accelerator execute time excluding wait. Detailed profiling reported
+  174,668 average accelerator cycles for `rms_norm_Y`.
+- Float32 reference comparison for the first output from each run: MatMul
+  maximum absolute error 0.02298 and mean absolute error 0.003165; RMSNorm
+  maximum absolute error 0.002821 and mean absolute error 0.0001883.
+- These are timings for QAIRT-generated QNN graphs on the physical HTP. The
+  MatMul and fused RMSNorm nodes are not custom Hexagon OpPackage microkernels.
+  QAIRT's profiler reports aggregate accelerator fields and per-node cycles;
+  they do not expose an isolated HVX/HMX instruction sequence or standalone
+  custom-kernel launch measurement.
+- The basic five-second runs report average `RPC (execute)` times of 250 us for
+  MatMul and 337 us for RMSNorm, versus 14 us and 79 us for accelerator execute
+  excluding wait. The 23,782 and 174,668 node-cycle counts came from separate
+  two-second detailed-profile runs. Those detailed runs report 372 us and
+  553 us average NetRun times, respectively, so their end-to-end averages must
+  not be mixed with the basic-profile averages above.
+- Detailed profiling reported zero HTP graph yields in both runs. Its average
+  resource events reported 88 us initial VTCM acquisition and 52 us HVX/HMX
+  power-up/acquisition for MatMul; RMSNorm reported 101 us and 212 us. These
+  are separate profiler events from accelerator execute excluding wait.
+- A physical graph-config sweep requested `hvx_threads` values 1 through 8.
+  The per-graph profile reported 1, 2, 3, 4, 4, 4, 4, and 4 threads. Thus four
+  is the largest thread count this QAIRT 2.51.40 Windows HTP path reports for
+  this device; requests above four were capped at four. This is a runtime graph
+  setting result, not a direct readout of the silicon's vector-context fuse
+  configuration. The sweep used device id 0, HTP architecture v73, SoC model
+  60, graph `vtcm_mb=8`, and graph optimization setting `O=3`. Eight MB is the
+  requested graph VTCM allocation, not a measurement of the device's total
+  VTCM. The sweep did not query the total VTCM size or the number of HTP cores.
+- The installed Windows NPU driver is 30.0.219.1000, dated 2025-11-09. A custom
+  OpPackage registration attempt on this driver returned
+  `Custom oppackage is not supported by the user driver` (error 1000). Standard
+  QNN graph execution continued to work.
+- Qualcomm's platform validator reported Hexagon Architecture V73 and passed
+  its DSP calculator test with QAIRT's `lib/hexagon-v73/unsigned` directory in
+  `ADSP_LIBRARY_PATH`.
+- The Hexagon SDK 6.6.0.0, Windows ARM64 Hexagon Tools 19.0.02, and HexKL
+  1.0.0-beta1 `6.4.0.0` package are extracted under `tools/npu/sdk/`.
+- The supplied HexKL FP16 HMX micro example compiled and linked for v73, then
+  passed in Qualcomm's Hexagon simulator. This validates toolchain and API
+  linkage; simulator execution is not a physical NPU throughput measurement.
+- The SDK metadata names Hexagon Tools 19.0.07 as its default dependency. The
+  installed 19.0.02 toolchain passed the v73 example; the SDK-matched 19.0.07
+  package may be needed for other SDK features.
+- The installed Hexagon compiler and HexKL run the FP16 HMX micro example in
+  the v73 simulator, but that is simulator execution and does not provide a
+  physical NPU timing. No isolated HVX instruction throughput or physical
+  custom-kernel timing is recorded here.
+- Qualcomm advertises up to 45 TOPS for the X Elite NPU. The public product
+  specification does not expose an instruction-level per-format rate or
+  measured laptop result.
+
+OBSERVED DEVICE
+--------------------------------------------------------------------------------
+- Windows device name: Snapdragon(R) X Elite - X1E78100 - Qualcomm(R) Hexagon(TM) NPU.
+- Device class: ComputeAccelerator; device status OK.
+
+SOURCES
+--------------------------------------------------------------------------------
+- Qualcomm QAIRT HTP profiling API (HVX-thread count, accelerator wait/resource
+  acquisition, VTCM, power-up, and yield events):
+  https://docs.qualcomm.com/nav/home/api-rst_file_include_QNN_HTP_QnnHtpProfile_h.html?product=924033590759186372
+- Qualcomm Windows Hexagon NPU Driver 1.0.0.12 announcement (IPC task-queue
+  latency and throughput changes):
+  https://www.qualcomm.com/developer/blog/2025/12/hexagon-npu-driver-update-snapdragon-pcs
+- Qualcomm Hexagon NPU architecture overview (scalar, vector, tensor engines;
+  shared memory; processor roles):
+  https://www.qualcomm.com/processors/hexagon
+- QAIRT HTP graph optimization configuration (`hvx_threads` example):
+  https://docs.qualcomm.com/nav/home/htp_auto_optimization.html?product=924033590759186372
+- Qualcomm Snapdragon X Elite specifications (Hexagon up to 45 TOPS):
+  https://www.qualcomm.com/laptops/products/snapdragon-x-elite
+- Qualcomm Hexagon NPU SDK:
+  https://www.qualcomm.com/developer/software/hexagon-npu-sdk
+- Qualcomm AI Engine Direct / QAIRT SDK device architecture table:
+  https://docs.qualcomm.com/nav/home/QNN_general_overview.html?product=924033590759186372
+- Qualcomm AI Hub Apps device mapping and Windows SDK setup (X Elite uses
+  `hexagon-v73`):
+  https://github.com/qualcomm/ai-hub-apps/blob/release/tutorials/llm_on_genie/README.md
+- Qualcomm Hexagon V73 Programmer's Reference Manual (scalar ISA and PMU):
+  https://docs.qualcomm.com/bundle/publicresource/80-N2040-53_REV_AB_Qualcomm_Hexagon_V73_Programmers_Reference_Manual.pdf
+- Qualcomm Hexagon V73 HVX Programmer's Reference Manual:
+  https://docs.qualcomm.com/doc/80-N2040-54/80-N2040-54_REV_AB_Qualcomm_Hexagon_V73_HVX_Programmers_Reference_Manual.pdf
+- Qualcomm announcement and operator/type details for Hexagon acceleration in
+  XNNPACK (HVX data types and implemented operator families):
+  https://www.qualcomm.com/developer/blog/2026/03/bringing-xnnpack-hexagon-npu
+- Qualcomm Hexagon-MLIR open-source compiler (Triton/PyTorch lowering and
+  assembly inspection; v73 is among its tested targets):
+  https://github.com/qualcomm/hexagon-mlir
+- Qualcomm Hexagon-MLIR user guide:
+  https://github.com/qualcomm/hexagon-mlir/blob/main/docs/user-guide.md
+- Qualcomm Hexagon Kernel Library (HMX APIs, supported Hexagon versions, and
+  operand precisions; SDK distribution):
+  https://softwarecenter.qualcomm.com/catalog/catalog-suite/Qualcomm%C2%AE%20AI%20Stack

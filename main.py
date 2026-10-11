@@ -1,11 +1,8 @@
+# main.py
 import argparse
 from pathlib import Path
 
 import tensor_graphs
-from safetensors.torch import load_file
-
-from train_models import AlphaZeroTransformer
-from train_shared import ActorDelegate, TrainConfig
 from utils.decode import load_tokenizer
 
 
@@ -57,7 +54,7 @@ def main():
         "--run-dir",
         type=str,
         default=None,
-        help="Path to runs/N to load the agent from",
+        help="Path to run directory (e.g. runs/0) to load the cost predictor model from",
     )
     parser.add_argument(
         "--tokens",
@@ -66,10 +63,21 @@ def main():
         help="Max tokens to generate per response turn",
     )
     parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=128,
+        help="Maximum model sequence length (also determines the decode buckets)",
+    )
+    parser.add_argument(
         "--min-compile-time",
         type=float,
         default=0.0,
-        help="Minimum required compile time per bucket in seconds",
+        help="Search time budget in seconds (0 stops at the first feasible plan)",
+    )
+    parser.add_argument(
+        "--optimal",
+        action="store_true",
+        help="Search until the planner exhausts its search space",
     )
     parser.add_argument(
         "--compile-decode-buckets",
@@ -77,9 +85,76 @@ def main():
         help="Compile decode buckets in addition to the single full bucket",
     )
     parser.add_argument(
-        "--disable-caching",
+        "--compile-no-weights-bucket",
+        action="store_true",
+        help="Compile a full-output bucket with no dirty inputs, and run with fully dirty inputs/output",
+    )
+    parser.add_argument(
+        "--disable-node-caching",
         action="store_true",
         help="Disable dirty region session caching",
+    )
+    parser.add_argument(
+        "--disable-compilation-caching",
+        action="store_true",
+        help="Disable compiled-session cache file reads and writes",
+    )
+    parser.add_argument(
+        "--disable-fusion",
+        action="store_true",
+        help="Disable multi-operation fusion patterns",
+    )
+    parser.add_argument(
+        "--write-refs",
+        type=str,
+        default="",
+        help="Write intermediate tensors to this reference file",
+    )
+    parser.add_argument(
+        "--compare-refs",
+        type=str,
+        default="",
+        help="Compare intermediate tensors with this reference file",
+    )
+    parser.add_argument(
+        "--use-ortools",
+        action="store_true",
+        help="Use the OR-Tools global cache/extraction planner",
+    )
+    parser.add_argument(
+        "--use-ortools-full",
+        action="store_true",
+        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
+    )
+    parser.add_argument(
+        "--use-ortools-lns",
+        action="store_true",
+        help="Use iterative subgraph LNS solver with OR-Tools",
+    )
+    parser.add_argument("--max-time-seconds", type=float, default=None,
+                        help="Maximum time in seconds for the OR-Tools solver")
+    parser.add_argument(
+        "--cache-file",
+        type=str,
+        default="",
+        help="Optional compiled-session cache path (use a new path to force a fresh plan)",
+    )
+    parser.add_argument(
+        "--log-cost-calls",
+        action="store_true",
+        default=True,
+        help="Log cost model calls to benchmarks/calls.bin (default: True)",
+    )
+    parser.add_argument(
+        "--no-log-cost-calls",
+        dest="log_cost_calls",
+        action="store_false",
+        help="Disable logging cost model calls to benchmarks/calls.bin",
+    )
+    parser.add_argument(
+        "--saturate-only",
+        action="store_true",
+        help="Run saturation/planning only to log cost model calls without running the model",
     )
     parser.add_argument(
         "--threads",
@@ -92,42 +167,70 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    cfg = TrainConfig()
-
     run_dir_path = Path(args.run_dir) if args.run_dir else None
     if run_dir_path:
+        from safetensors.torch import load_file
+        from train import CostPredictorDelegate, CostPredictorRNN, TrainConfig
+
+        cfg = TrainConfig()
         config_file = run_dir_path / "config.json"
-        try:
-            cfg = TrainConfig.load(config_file)
-        except FileNotFoundError as e:
-            print(f"Warning: Failed to load config from {config_file}: {e}")
+        if config_file.exists():
+            try:
+                cfg = TrainConfig.load(config_file)
+                print(f"[Main] Loaded config from {config_file}")
+            except Exception as e:
+                print(f"[Main] Warning: Failed to load config from {config_file}: {e}")
 
-    agent = AlphaZeroTransformer(
-        d_model=cfg.d_model,
-        nhead=cfg.nhead,
-        num_layers=cfg.num_layers,
-        max_feat_dim=cfg.max_feat_dim,
-    )
-
-    if run_dir_path:
         model_file = run_dir_path / "model.safetensors"
         if model_file.exists():
-            agent.load_state_dict(load_file(model_file))
-            print(f"Loaded trained delegate agent from {model_file}")
+            state_dict = load_file(model_file)
+            model = CostPredictorRNN(hidden_dim=cfg.hidden_dim)
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            delegate = CostPredictorDelegate(
+                model=model,
+                epsilon=0.0,
+                is_training=False,
+            )
+            print(f"[Main] Loaded trained CostPredictorRNN agent from {model_file}")
+        else:
+            delegate = None
+    else:
+        delegate = None
 
-    agent.eval()
-    delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
+    if args.use_ortools_lns:
+        os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
 
+    disable_compilation_caching = (
+        args.disable_compilation_caching or args.saturate_only
+    )
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(
         args.model,
         args.model_path,
         delegate,
-        min_compile_time=args.min_compile_time,
+        min_compile_time=-1.0 if args.optimal else args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
-        disable_caching=args.disable_caching,
+        compile_no_weights_bucket=args.compile_no_weights_bucket,
+        cache_file=args.cache_file,
+        disable_node_caching=args.disable_node_caching,
+        disable_compilation_caching=disable_compilation_caching,
         threads=args.threads,
+        log_cost_calls=args.log_cost_calls,
+        max_sequence_length=args.seq_len,
+        use_ortools=args.use_ortools,
+        use_ortools_full=args.use_ortools_full,
+        max_time_seconds=args.max_time_seconds or 0.0,
+        use_ortools_lns=args.use_ortools_lns,
+        disable_fusion=args.disable_fusion,
+        write_refs=args.write_refs,
+        compare_refs=args.compare_refs,
+        saturate_only=args.saturate_only,
     )
+
+    if args.saturate_only:
+        print("[Main] Saturate-only complete. Cost model calls logged.")
+        return
 
     print(f"Loading tokenizer for {args.model}...")
     tokenizer = load_tokenizer([args.model_path, args.model])

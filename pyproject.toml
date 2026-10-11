@@ -15,7 +15,6 @@ dependencies = [
     "tqdm",
     "tokenizers",
     "huggingface-hub",
-    "torch",
     "safetensors",
     "hf_xet",
     "transformers>=4.57.6",
@@ -26,7 +25,49 @@ dependencies = [
     "pybind11>=3.0.4",
     "psutil>=7.2.2",
     "matplotlib>=3.9.4",
+    "httpx>=0.28.1",
+    "requests>=2.32.5",
+    "pytest>=8.4.2",
+    "python-dotenv>=1.2.1",
+    "psycopg[binary]>=3.2,<4",
+    "waitress>=3.0,<4",
 ]
+
+[project.optional-dependencies]
+ortools = [
+    "ortools>=9.15.6755",
+]
+ml = [
+    "torch==2.7.1+cu118 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision==0.22.1+cu118 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.10.0+cpu ; sys_platform == 'win32' and platform_machine == 'ARM64' and python_full_version >= '3.11'",
+    "torchvision==0.25.0+8ac84ee ; sys_platform == 'win32' and platform_machine == 'ARM64' and python_full_version >= '3.11'",
+]
+embeddinggemma = [
+    "av>=17.1.0 ; python_full_version >= '3.10'",
+    "librosa>=0.11.0 ; python_full_version >= '3.10'",
+    "sentence-transformers>=6.1.0 ; python_full_version >= '3.10'",
+    "soundfile>=0.14.0 ; python_full_version >= '3.10'",
+    "transformers>=5.18.0 ; python_full_version >= '3.10'",
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
+name = "torch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "torch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.setuptools]
+py-modules = ["embeddinggemma2"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -39,3 +80,14 @@ addopts = "--cov=tensor_graphs"
 
 [tool.ruff.lint]
 ignore = ["E402", "F403", "E741"]
+
+[tool.uv.sources]
+markupsafe = { index = "pypi" }
+torch = [
+    { index = "torch-cu118", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "torch-cpu", marker = "sys_platform == 'win32' and platform_machine == 'ARM64'" },
+]
+torchvision = [
+    { index = "torch-cu118", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "torch-cpu", marker = "sys_platform == 'win32' and platform_machine == 'ARM64'" },
+]

@@ -1,342 +1,313 @@
-# File: kernel_bench/app.py
-import re
-import struct
-from collections import defaultdict
-from datetime import datetime, timezone
+"""Authenticated kernel-level API. Start with python -m kernel_bench.app."""
+import argparse
+import hmac
+import io
+import logging
+import os
+import signal
+import threading
+import uuid
+import zipfile
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from dotenv import load_dotenv
+from flask import Flask, jsonify, redirect, render_template, request, send_file
+from psycopg.types.json import Jsonb
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .jobs import (
-    KERNELS_DIR,
+    DEFAULT_GOAL_CACHE,
     PROJECT_ROOT,
-    BinaryReader,
-    create_job,
-    get_hw_info,
-    jobs,
-    load_cache_file,
-    load_job_history,
-    load_reports,
-    save_report,
-    start_worker,
+    createJob,
+    initializeGoal,
+    startWorker,
 )
+from .storage import Store
 
-app = Flask(__name__)
-start_worker()
+logger = logging.getLogger(__name__)
 
-
-def format_constants(raw_bytes, dtype):
-    if not raw_bytes:
-        return ""
-    dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
-    dt_str = (
-        dtypes[dtype] if isinstance(dtype, int) and dtype < len(dtypes) else str(dtype)
-    )
-    if dt_str == "FLOAT32":
-        count = len(raw_bytes) // 4
-        return list(struct.unpack(f"<{count}f", raw_bytes))
-    elif dt_str == "INT32":
-        count = len(raw_bytes) // 4
-        return list(struct.unpack(f"<{count}i", raw_bytes))
-    return list(raw_bytes)
+TOOLS = [
+    {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity and kernel-level scope"},
+    {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
+    {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
+    {"name": "read_source", "method": "GET", "path": "/api/source?path=...", "description": "Read baseline kernel/core/reference/hardware source snapshot"},
+    {"name": "submit_iteration", "method": "POST", "path": "/api/iteration/submit", "description": "Submit target_id, source, backend (cpu/cuda), and idea; one REGISTER_KERNEL"},
+    {"name": "get_job", "method": "GET", "path": "/api/jobs/{job_id}", "description": "Correctness coverage, measurements, and per-configuration speedups"},
+    {"name": "get_job_logs", "method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Build/test/benchmark diagnostics from PostgreSQL"},
+    {"name": "list_jobs", "method": "GET", "path": "/api/jobs?target_id=...", "description": "Shared trial history; targets have no reservations"},
+]
 
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+def createApp(database_url=None, goal_cache=None, token=None, start_worker=True, goal_id=None, stop_event=None):
+    load_dotenv(PROJECT_ROOT / ".env")
+    token = token or os.environ.get("BENCH_SECRET_TOKEN", "").strip()
+    if not token:
+        token_file = PROJECT_ROOT / ".bench_token"
+        if token_file.is_file():
+            token = token_file.read_text().strip()
+    if not token:
+        raise ValueError("Set BENCH_SECRET_TOKEN before exposing KernelBench")
+    store = Store(database_url or os.environ.get("KERNEL_BENCH_DATABASE_URL"))
+    store.initialize()
+    goal_id = goal_id or initializeGoal(store, goal_cache or os.environ.get("KERNEL_BENCH_GOAL_CACHE", DEFAULT_GOAL_CACHE))
+    app = Flask(__name__)
+    stop_event = stop_event if stop_event is not None else threading.Event()
+    app.extensions["kernel_bench_stop"] = stop_event
+    if os.environ.get("BENCH_TRUST_PROXY") == "1":
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+    app.extensions["kernel_bench_store"] = store
+    app.config["KERNEL_BENCH_GOAL_ID"] = goal_id
+
+    def authorized(candidate):
+        return bool(candidate) and hmac.compare_digest(candidate, token)
+
+    @app.before_request
+    def authenticate():
+        if stop_event.is_set():
+            return jsonify({"error": "KernelBench is draining for shutdown"}), 503, {"Retry-After": "60"}
+        if request.path in ("/login", "/welcome", "/api/agent", "/api/agent/index"):
+            return None
+        candidate = request.headers.get("X-Bench-Token", "") or request.cookies.get("bench_token", "")
+        if authorized(candidate):
+            return None
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Authentication required: X-Bench-Token"}), 401
+        return redirect("/login")
+
+    @app.errorhandler(ValueError)
+    @app.errorhandler(TypeError)
+    def invalidRequest(error):
+        return jsonify({"error": str(error)}), 400
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if request.method == "POST":
+            if authorized(request.form.get("token", "").strip()):
+                response = redirect("/")
+                response.set_cookie("bench_token", token, httponly=True, samesite="Strict", secure=request.is_secure)
+                return response
+            return render_template("login.html", error="Invalid token", next_param="/"), 401
+        return render_template("login.html", error=None, next_param="/")
+
+    @app.get("/")
+    def index():
+        return render_template("kernel.html")
+
+    @app.get("/logout")
+    def logout():
+        response = redirect("/login")
+        response.delete_cookie("bench_token")
+        return response
+
+    @app.get("/api/status")
+    def status():
+        goal = store.getGoal(goal_id)
+        metadata = goal.pop("metadata")
+        return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(goal_id)),
+                        "hardware": metadata.get("hardware", {}),
+                        "pipeline": ["build", "test", "benchmark", "compare"]})
+
+    @app.get("/api/targets")
+    @app.get("/api/analyze")
+    def targets():
+        rows = store.getTargets(goal_id)
+        search = request.args.get("search", "").lower()
+        if search:
+            rows = [row for row in rows if search in row["reference_expression"].lower()]
+        return jsonify({"goal_id": goal_id, "targets": rows})
+
+    @app.get("/api/targets/<target_id>")
+    def target(target_id):
+        configurations = store.getConfigurations(goal_id, target_id)
+        if not configurations:
+            return jsonify({"error": "Unknown target for this goal"}), 404
+        expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (target_id,))[0]["expression"]
+        kernels = [kernel for kernel in store.getGoal(goal_id)["metadata"]["kernels"] if kernel["reference_expression"] == expression]
+        return jsonify({"id": target_id, "reference_expression": expression, "configurations": configurations,
+                        "kernels": kernels, "best_recorded_measurements": store.getBestMeasurements(goal_id, target_id)})
+
+    @app.get("/api/kernels/list")
+    def kernels():
+        return jsonify({"kernels": store.getGoal(goal_id)["metadata"]["kernels"]})
+
+    def readArchive():
+        row = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (goal_id,))[0]
+        return zipfile.ZipFile(io.BytesIO(bytes(row["source_archive"])))
+
+    @app.get("/api/source/list")
+    @app.get("/api/core/list")
+    def sources():
+        with readArchive() as archive:
+            return jsonify({"files": archive.namelist()})
+
+    @app.get("/api/source")
+    @app.get("/api/kernels/read_source")
+    @app.get("/api/core/read_source")
+    def source():
+        path = request.args.get("path", "")
+        with readArchive() as archive:
+            if path not in archive.namelist():
+                return jsonify({"error": "Unknown baseline source path"}), 404
+            return jsonify({"path": path, "content": archive.read(path).decode()})
+
+    @app.post("/api/iteration/submit")
+    @app.post("/api/kernels/test")
+    def submit():
+        data = request.get_json()
+        if not isinstance(data, dict):
+            raise TypeError("Expected a JSON object")
+        for key in ("source", "target_id", "idea", "backend"):
+            if key in data and not isinstance(data[key], str):
+                raise TypeError(f"{key} must be a string")
+        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"))
+        return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+    @app.get("/api/jobs")
+    @app.get("/api/history")
+    @app.get("/api/versions")
+    def jobs():
+        target_id = request.args.get("target_id", "")
+        rows = store.query("""SELECT id AS job_id, target_id, idea, kernel_name, backend, status, step,
+            result, error, created_at, completed_at FROM kernel_bench.jobs
+            WHERE goal_id = %s AND (%s = '' OR target_id = %s) ORDER BY created_at DESC LIMIT 200""", (goal_id, target_id, target_id))
+        return jsonify({"jobs": rows})
+
+    def currentJob(job_id):
+        uuid.UUID(job_id)
+        row = store.getJob(job_id)
+        return row if row and row["goal_id"] == goal_id else None
+
+    @app.get("/api/jobs/<job_id>")
+    def job(job_id):
+        row = currentJob(job_id)
+        if row is None:
+            return jsonify({"error": "Unknown job for this goal"}), 404
+        row["job_id"] = row.pop("id")
+        return jsonify(row)
+
+    @app.get("/api/jobs/<job_id>/logs")
+    def logs(job_id):
+        if currentJob(job_id) is None:
+            return jsonify({"error": "Unknown job for this goal"}), 404
+        return jsonify({"events": store.query("SELECT id, step, message, created_at FROM kernel_bench.events WHERE job_id = %s ORDER BY id", (job_id,))})
+
+    @app.get("/api/benchmarks/records")
+    def measurements():
+        rows = store.query("""SELECT m.* FROM kernel_bench.measurements m JOIN kernel_bench.jobs j ON j.id = m.job_id
+            WHERE j.goal_id = %s ORDER BY j.created_at DESC LIMIT 1000""", (goal_id,))
+        return jsonify({"records": rows})
+
+    def starterFiles():
+        from .onboarding import starterFiles as makeStarterFiles
+        with readArchive() as archive:
+            return makeStarterFiles(archive)
+
+    @app.get("/welcome")
+    @app.get("/api/agent")
+    @app.get("/api/agent/index")
+    def agent():
+        from .onboarding import INSTRUCTIONS
+        base_url = request.url_root.rstrip("/")
+        return jsonify({"scope": "kernel", "goal_id": goal_id, "tools": TOOLS,
+                        "instructions": INSTRUCTIONS,
+                        "authentication": {"header": "X-Bench-Token", "environment_variable": "BENCH_SECRET_TOKEN"},
+                        "setup": {"base_url": base_url, "environment_variable": "BENCH_SERVER_URL",
+                                  "download": base_url + "/api/starter.zip",
+                                  "install": "uv sync",
+                                  "client": "from agent import KernelBenchClient; client = KernelBenchClient()"},
+                        "downloads": {name: base_url + "/api/starter/" + name
+                                      for name in ("pyproject.toml", "agent.py", "AGENTS.md", ".env.example")},
+                        "hardware": {"status": "/api/status", "files": "/api/source/list",
+                                     "source_prefix": "docs/hwinfo/box/"}})
+
+    @app.get("/api/starter.zip")
+    def starterArchive():
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, content in starterFiles().items():
+                archive.writestr(name, content)
+        output.seek(0)
+        return send_file(output, mimetype="application/zip", as_attachment=True, download_name="kernel-bench-starter.zip")
+
+    @app.get("/api/starter/<path:name>")
+    def starterFile(name):
+        files = starterFiles()
+        if name not in files:
+            return jsonify({"error": "Unknown starter file"}), 404
+        return send_file(io.BytesIO(files[name]), mimetype="text/plain", as_attachment=True,
+                         download_name=Path(name).name)
+
+    @app.get("/api/tools")
+    def tools():
+        return jsonify({"tools": TOOLS})
+
+    @app.route("/api/<kind>", methods=["GET", "POST"])
+    def feedback(kind):
+        if kind not in ("reports", "suggestions"):
+            return jsonify({"error": "Unknown endpoint"}), 404
+        singular = "report" if kind == "reports" else "suggestion"
+        if request.method == "POST":
+            data = request.get_json()
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object")
+            store.execute("INSERT INTO kernel_bench.feedback(kind, data) VALUES (%s, %s)", (singular, Jsonb(data)))
+            return jsonify({"status": "saved"}), 201
+        return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
+
+    if start_worker:
+        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event)
+    return app
 
 
-@app.post("/api/kernels/test")
-def submit_kernel():
-    data = request.get_json(force=True, silent=True)
-    if not data or not data.get("source") or not data.get("opname"):
-        return jsonify({"error": "Missing 'source' or 'opname'"}), 400
-
-    backend = data.get("backend", "cpu")
-    target_model = data.get("target_model", "gemma-3-270m")
-
-    job_id = create_job(data["source"], data["opname"], backend, target_model)
-    return jsonify({"job_id": job_id, "status": "queued"}), 202
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    parser = argparse.ArgumentParser(description="KernelBench kernel-level server")
+    parser.add_argument("--goal-cache", type=Path)
+    parser.add_argument("--host", default=os.environ.get("BENCH_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("BENCH_PORT", "8080")))
+    args = parser.parse_args()
+    serveApp(args)
 
 
-@app.get("/api/kernels/file/<job_id>")
-def read_kernel_file(job_id):
-    history = load_job_history()
-    job = next((j for j in history if j["job_id"] == job_id), None)
-    if not job and job_id in jobs:
-        job = jobs[job_id]
+def serveApp(args):
+    from waitress import create_server
 
-    if not job or not job.get("kernel_file"):
-        return jsonify({"error": "File not found"}), 404
+    stop_event = threading.Event()
 
-    content = Path(job["kernel_file"]).read_text()
-    return jsonify({"content": content})
+    def requestStop(signum, frame):
+        stop_event.set()
 
-
-@app.get("/api/jobs/<job_id>")
-def get_job(job_id):
-    job = jobs.get(job_id)
-    if not job:
-        history = load_job_history()
-        job = next((j for j in history if j["job_id"] == job_id), None)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
-
-
-@app.get("/api/history")
-def get_history():
-    history = load_job_history()
-    return jsonify(
-        {"history": history, "message": f"{len(history)} item(s) in history"}
-    )
-
-
-@app.get("/api/hwinfo")
-def get_hardware_info():
-    return jsonify({"hwinfo": get_hw_info()})
-
-
-# In kernel_bench/app.py
-
-
-@app.get("/api/read_benchmarks")
-def get_read_benchmarks():
-    op_filter = request.args.get("op", "")
-    shape_filter = request.args.get("shape", "")
-    target_model = request.args.get("target_model", "gemma-3-270m")
-
-    records_path = PROJECT_ROOT / "benchmarks" / "records.bin"
-    cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"
-    header_path = (
-        PROJECT_ROOT / "tensor_graphs_cpp" / "generated" / "kernel_uids.gen.hpp"
-    )
-
-    if not records_path.exists():
-        return jsonify({"records": []})
-
-    uid_map = {}
-    if cache_path.exists():
-        cache_entries = load_cache_file(cache_path)
-        for entry in cache_entries:
-            if entry.get("type") == "compiled_bucket":
-                graph = entry["graph"]
-                for inst in graph["instructions"]:
-                    uid = str(inst["kernelId"])
-                    # Map UID
-                    uid_map[uid] = f"Kernel_{hex(inst['kernelId'])}"
-
-    if header_path.exists():
-        pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
-        with open(header_path, "r") as f:
-            for name, hex_val in pattern.findall(f.read()):
-                val_int = int(hex_val, 16)
-                uid_map[str(val_int)] = name
-                uid_map[hex_val.lower()] = name
-
-    records = []
-    with open(records_path, "rb") as f:
-        br = BinaryReader(f)
-        while True:
-            r = br.read_record()
-            if r is None:
-                break
-
-            uid = str(r.get("kernelId", ""))
-            opname = uid_map.get(
-                uid, uid_map.get(hex(r.get("kernelId", 0)), r.get("opName", "UNKNOWN"))
-            )
-            r["opName"] = opname
-            r["kernelId"] = hex(r["kernelId"])
-
-            shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
-            if op_filter:
-                if not re.search(op_filter, opname, re.IGNORECASE) and not re.search(
-                    op_filter, uid, re.IGNORECASE
-                ):
-                    continue
-            if shape_filter:
-                if not re.search(shape_filter, shapes):
-                    continue
-
-            in_consts = r.get("inputConstants", [])
-            in_dtypes = r.get("inputDTypes", [])
-            if in_consts and in_dtypes:
-                formatted_consts = []
-                for idx, data in enumerate(in_consts):
-                    dt = in_dtypes[idx] if idx < len(in_dtypes) else -1
-                    formatted_consts.append(format_constants(data, dt))
-                r["inputConstants"] = formatted_consts
-            records.append(r)
-
-    return jsonify({"records": records})
-
-
-@app.get("/api/analyze")
-def get_analyze():
-    target_model = request.args.get("target_model", "gemma-3-270m")
-    if target_model == "gemma-3-270m":
-        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"]
-    elif target_model == "flux-klein-4b":
-        cache_paths = [
-            PROJECT_ROOT / "dirty_region_caches" / "flux-text.bin",
-            PROJECT_ROOT / "dirty_region_caches" / "flux-trans.bin",
-            PROJECT_ROOT / "dirty_region_caches" / "flux-vae.bin",
-        ]
-    else:
-        return jsonify({"error": f'Unrecognized target model "{target_model}"'}), 404
-
-    if any(not cache_path.exists() for cache_path in cache_paths):
-        return jsonify({"error": "No cache data available yet."}), 404
-
-    total_estimated_time = 0.0
-    extracted_uids = set()
-    chain_stats = defaultdict(lambda: {"time": 0.0, "count": 0})
-    op_type_stats = defaultdict(float)
-
-    for cache_path in cache_paths:
-        cache_entries = load_cache_file(cache_path)
-        for entry in cache_entries:
-            if entry.get("type") == "compiled_bucket":
-                graph = entry["graph"]
-                node_views = graph.get("nodeViews", {})
-                node_costs = graph.get("nodeCosts", {})
-                for inst in graph["instructions"]:
-                    eclass_id = inst["eclassId"]
-                    uid = inst["kernelId"]
-                    extracted_uids.add(uid)
-                    op_name = f"Kernel_{hex(uid)}"
-
-                    runtime = node_costs.get(eclass_id, 0.0)
-                    if runtime == float("inf"):
-                        runtime = 0.0
-
-                    total_estimated_time += runtime
-                    op_type_stats[op_name] += runtime
-
-                    input_shapes = [
-                        node_views[cid]["shape"]
-                        for cid in inst.get("children", [])
-                        if cid in node_views
-                    ]
-                    out_shape = (
-                        node_views[eclass_id]["shape"]
-                        if eclass_id in node_views
-                        else []
-                    )
-
-                    debug_origin = inst.get("debugOrigin", "UNKNOWN")
-                    identity = (
-                        f"{op_name}({input_shapes}->{list(out_shape)}) [{debug_origin}]"
-                    )
-
-                    chain_stats[identity]["time"] += runtime
-                    chain_stats[identity]["count"] += 1
-
-    top_chains = sorted(
-        [
-            {"chain": k, "time": v["time"], "count": v["count"]}
-            for k, v in chain_stats.items()
-        ],
-        key=lambda x: x["time"],
-        reverse=True,
-    )[:20]
-    top_ops = sorted(
-        [{"op": k, "time": v} for k, v in op_type_stats.items()],
-        key=lambda x: x["time"],
-        reverse=True,
-    )
-
-    return jsonify(
-        {
-            "total_estimated_time_ms": total_estimated_time,
-            "extracted_uids": [hex(u) for u in extracted_uids],
-            "top_chains": top_chains,
-            "top_ops": top_ops,
-        }
-    )
-
-
-@app.get("/api/kernels/list")
-def list_kernel_files():
-    """Recursively lists all kernel files in the kernels directory."""
+    previous_handlers = {signum: signal.signal(signum, requestStop) for signum in (signal.SIGTERM, signal.SIGINT)}
+    app = None
+    server = None
+    server_thread = None
     try:
-        files = []
-        for path in KERNELS_DIR.rglob("*"):
-            if path.is_file():
-                files.append(str(path.relative_to(KERNELS_DIR)))
-        return jsonify({"files": sorted(files)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.get("/api/kernels/read_model")
-def read_model_source():
-    target_model = request.args.get("target_model", "gemma-3-270m")
-    model_files = {
-        "gemma-3-270m": ["gemma-3-270m.hpp"],
-        "flux-klein-4b": [
-            "flux-klein-4b.hpp",
-            "flux-klein-4b-text_encoder.hpp",
-            "flux-klein-4b-transformer.hpp",
-            "flux-klein-4b-vae.hpp",
-        ],
-    }
-
-    files_to_read = model_files.get(target_model, [])
-    if not files_to_read:
-        return jsonify({"error": f"No source files mapped for {target_model}"}), 404
-
-    content = ""
-    for fname in files_to_read:
-        path = PROJECT_ROOT / "tensor_graphs_cpp" / "models" / fname
-        if path.exists():
-            content += f"// --- {fname} ---\n{path.read_text()}\n\n"
-        else:
-            content += f"// --- {fname} (NOT FOUND) ---\n\n"
-
-    return jsonify({"content": content, "target_model": target_model})
-
-
-@app.get("/api/kernels/read_source")
-def read_kernel_source():
-    """Reads the content of a specific kernel file."""
-    rel_path = request.args.get("path")
-    if not rel_path:
-        return jsonify({"error": "Missing 'path' parameter"}), 400
-
-    try:
-        safe_path = (KERNELS_DIR / rel_path).resolve()
-        if not str(safe_path).startswith(str(KERNELS_DIR.resolve())):
-            return (
-                jsonify({"error": "Access denied: Path outside kernels directory"}),
-                403,
-            )
-
-        if not safe_path.exists():
-            return jsonify({"error": "File not found"}), 404
-
-        content = safe_path.read_text()
-        return jsonify({"content": content, "path": rel_path})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.post("/api/reports")
-def add_report():
-    data = request.get_json(force=True, silent=True)
-    if not data or not data.get("issue_description"):
-        return jsonify({"error": "Missing 'issue_description'"}), 400
-
-    data["timestamp"] = datetime.now(timezone.utc).isoformat()
-    save_report(data)
-    return jsonify({"status": "success", "message": "Issue recorded"})
-
-
-@app.get("/api/reports")
-def get_reports_api():
-    return jsonify({"reports": load_reports()})
+        # Install handlers before discovery: a stop during startup waits for its native process too.
+        app = createApp(goal_cache=args.goal_cache, stop_event=stop_event)
+        if not stop_event.is_set():
+            server = create_server(app, host=args.host, port=args.port, threads=4,
+                                   trusted_proxy="127.0.0.1" if os.environ.get("BENCH_TRUST_PROXY") == "1" else None,
+                                   trusted_proxy_headers={"x-forwarded-proto", "x-forwarded-host"}
+                                   if os.environ.get("BENCH_TRUST_PROXY") == "1" else set())
+            server_thread = threading.Thread(target=server.run, name="kernel-bench-http", daemon=True)
+            server_thread.start()
+            while not stop_event.wait(1):
+                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive():
+                    raise RuntimeError("KernelBench HTTP server or worker exited unexpectedly")
+    finally:
+        stop_event.set()
+        logger.info("Draining KernelBench; waiting for active startup/job processes")
+        if app is not None:
+            app.extensions["kernel_bench_worker"].join()
+        if server is not None:
+            server.task_dispatcher.shutdown()
+            server.asyncore.close_all(map=server._map)
+        if server_thread is not None:
+            server_thread.join()
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    main()

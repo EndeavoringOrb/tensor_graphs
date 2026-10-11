@@ -146,6 +146,21 @@ inline std::string toString(const Region &reg)
         const Dim &dim = reg.region[i];
         ss << "(" << dim.start << ", " << dim.stop << ")";
     }
+    ss << "]";
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<Region> &regions)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < regions.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << toString(regions[i]);
+    }
+    ss << "]";
     return ss.str();
 }
 
@@ -441,21 +456,6 @@ inline TensorView makeView(const TensorNode &node)
     else
         view.strides = calcContiguousStrides(node.getShape());
     return view;
-}
-
-inline uint64_t getRequiredBufferSize(const TensorView &view)
-{
-    if (view.getShape().empty())
-        return 1;
-    uint64_t maxOffset = 0;
-    for (uint64_t i = 0; i < view.getShape().size(); ++i)
-    {
-        if (view.getShape()[i] > 0)
-        {
-            maxOffset += (view.getShape()[i] - 1) * view.strides[i];
-        }
-    }
-    return maxOffset + 1;
 }
 
 inline std::vector<float> flattenOutput(const void *ptr, const std::vector<uint32_t> &shape,

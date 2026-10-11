@@ -21,7 +21,7 @@ struct DotOp
             ss << "[ShapePropagator.inferShape] nodeId=" + toString(nodeId) + " DOT requires equal ranks. Got " << r0
                << " (" + toString(s0) + ") and " << r1
                << " (" + toString(s1) +
-                      "). Implicit broadcasting is not supported; use explicit reshape to align ranks. debugOrigin=" +
+                      "). Implicit broadcasting is not supported; use explicit repeat/reshape/fill to align ranks. debugOrigin=" +
                       graph.getNode(nodeId).debugOrigin;
             Error::throw_err(ss.str());
         }
@@ -29,22 +29,25 @@ struct DotOp
         if (r0 == 2)
         {
             if (s0[1] != s1[0])
-                Error::throw_err("DOT: K-dim mismatch [M,K] @ [K,N]");
+                Error::throw_err("DOT: K-dim mismatch [M,K] @ [K,N], " + std::to_string(s0[1]) + " != " +
+                                 std::to_string(s1[0]) + "; lhs=" + toString(s0) + ", rhs=" + toString(s1) +
+                                 "; debugOrigin=" + graph.getNode(nodeId).debugOrigin);
             graph.getNode(nodeId).setShape({s0[0], s1[1]});
         }
         else if (r0 == 3)
         {
             if (s0[2] != s1[1])
                 Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) +
-                                 " != " + std::to_string(s1[1]));
+                                 " != " + std::to_string(s1[1]) + "; lhs=" + toString(s0) + ", rhs=" + toString(s1) +
+                                 "; debugOrigin=" + graph.getNode(nodeId).debugOrigin);
             graph.getNode(nodeId).setShape({s0[0], s0[1], s1[2]});
         }
         else if (r0 == 4)
         {
             if (s0[0] != s1[0] || s0[1] != s1[1] || s0[3] != s1[2])
             {
-                Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[2]) +
-                                 " != " + std::to_string(s1[1]));
+                Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], lhs=" + toString(s0) +
+                                 ", rhs=" + toString(s1) + "; debugOrigin=" + graph.getNode(nodeId).debugOrigin);
             }
             graph.getNode(nodeId).setShape({s0[0], s0[1], s0[2], s1[3]});
         }
@@ -96,7 +99,14 @@ struct DotOp
         for (const auto &box : rB)
         {
             Region outBox;
-            if (sB.size() == 3)
+            if (sB.size() == 4)
+            {
+                outBox.region.push_back(box.region[0]);    // B
+                outBox.region.push_back(box.region[1]);    // H
+                outBox.region.push_back({0, outShape[2]}); // M
+                outBox.region.push_back(box.region[3]);    // N
+            }
+            else if (sB.size() == 3)
             {
                 outBox.region.push_back(box.region[0]);    // B
                 outBox.region.push_back({0, outShape[1]}); // M

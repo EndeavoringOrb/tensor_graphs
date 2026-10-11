@@ -1,21 +1,26 @@
 #pragma once
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <string>
 #include <unordered_map>
 
 #include "core/common/bench_utils.hpp"
+#include "core/common/execute_ref_graph.hpp"
 #include "core/common/thread_pool.hpp"
 #include "core/cost_model.hpp"
 #include "core/executor.hpp"
 #include "core/graph.hpp"
+#include "core/loaders/resolver.hpp"
+#include "core/loaders/tg_store.hpp"
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
-#include "core/repo.hpp"
+#include "core/plan/ortools_export.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
@@ -51,7 +56,7 @@ static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector
 
 struct Session
 {
-    static constexpr uint32_t kCacheFileVersion = 3;
+    static constexpr uint32_t kCacheFileVersion = 7;
 
     Graph &graph;
     MemoryManager &memManager;
@@ -65,18 +70,83 @@ struct Session
 
     std::string cachePath;
     std::vector<CompiledGraph> cachedGraphs;
-    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::unordered_set<BaseEClassId> selectedCachedNodes;
+    std::vector<float> cachedBucketWeights;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
     std::string recordsPath = "benchmarks/records.bin";
 
-    uint32_t fullBucketIdx;
-    Repo *repo;
+    uint32_t fullBucketIdx = UINT32_MAX;
+    TGStore *repo;
+    std::unique_ptr<TGStore> owned_repo;
     bool disableCaching = false;
+    bool disableCompilationCaching = false;
     float minCompileSeconds = 0.0f;
-    std::shared_ptr<SearchDelegate> delegate = nullptr;
+    std::shared_ptr<plan::Brancher> brancher = nullptr;
     bool logCostCalls = false;
+
+    Settings settings;
+
+    void initRepo(TGStore *_repo)
+    {
+        if (_repo)
+        {
+            repo = _repo;
+            repo->enableWriting();
+        }
+        else
+        {
+            std::string g_hash = computeGraphHash(graph, {rootId});
+            std::string repo_path = settings.repo_path.empty() ? ("benchmarks/repo_" + g_hash) : settings.repo_path;
+            owned_repo = std::make_unique<TGStore>(repo_path, g_hash, false);
+            repo = owned_repo.get();
+        }
+        if (repo)
+        {
+            TensorResolver::get().registerStore(repo->getBasePath(),
+                                                std::shared_ptr<ITensorStore>(repo, [](ITensorStore *) {}));
+        }
+    }
+
+    void foldCleanTensors()
+    {
+        if (!repo)
+            return;
+
+        repo->enableWriting();
+
+        std::vector<LogicalId> dynamic_inputs;
+        for (const auto &pair : graph.nodes)
+        {
+            if (pair.second.opType == OpType::INPUT &&
+                graph.getInputDataType(pair.first) == InputDataType::RUNTIME)
+            {
+                dynamic_inputs.push_back(pair.first);
+            }
+        }
+        for (const auto &bucket : manualBuckets)
+        {
+            // Zero-weight buckets (especially the automatically-added full
+            // bucket) are planning witnesses, not expected runtime traffic.
+            // Letting their dirty regions into this set prevents inputs that
+            // stay clean in every weighted bucket from being folded into the
+            // repository for those buckets.
+            if (bucket.weight <= 0.0f)
+                continue;
+            for (const auto &pair : bucket.inputDirtyRegions)
+            {
+                dynamic_inputs.push_back(pair.first);
+            }
+        }
+
+        RefGraphOptions ref_options;
+        ref_options.only_clean_nodes = true;
+        ref_options.fold_weights = settings.fold_weights;
+        ref_options.dynamic_inputs = &dynamic_inputs;
+
+        executeReferenceGraph(graph, {rootId}, *repo, ref_options);
+    }
 
     void ensureOutputDirectories() const
     {
@@ -112,7 +182,7 @@ struct Session
 
     void persistCache() const
     {
-        if (cachePath.empty())
+        if (disableCompilationCaching || cachePath.empty())
             return;
         ensureOutputDirectories();
         std::ofstream file(cachePath, std::ios::trunc | std::ios::binary);
@@ -125,6 +195,7 @@ struct Session
         bw.write<uint32_t>(kCacheFileVersion);
         bw.write<LogicalId>(rootId);
         bw.write(selectedCachedNodes);
+        bw.write(normalizedBucketWeights(manualBuckets));
 
         for (const CompiledGraph &g : cachedGraphs)
         {
@@ -151,25 +222,79 @@ struct Session
     }
 
     void addBucket(const std::unordered_map<LogicalId, std::vector<Region>> &inputDirtyRegions,
-                   const std::vector<Region> &outputNeededRegion)
+                   const std::vector<Region> &outputNeededRegion, float weight = 1.0f)
     {
-        manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
+        Bucket bucket{inputDirtyRegions, outputNeededRegion};
+        bucket.weight = weight;
+        manualBuckets.push_back(std::move(bucket));
+    }
+
+    void updateFullBucketWeight()
+    {
+        if (fullBucketIdx < manualBuckets.size())
+            manualBuckets[fullBucketIdx].weight = manualBuckets.size() == 1 ? 1.0f : 0.0f;
+    }
+
+    void setBucketWeights(const std::vector<float> &weights)
+    {
+        if (weights.size() != manualBuckets.size())
+        {
+            Error::throw_err("[Session.setBucketWeights] expected " + std::to_string(manualBuckets.size()) +
+                             " weights, got " + std::to_string(weights.size()));
+        }
+        const bool full_only_zero = manualBuckets.size() == 1 && fullBucketIdx == 0 && weights.size() == 1 &&
+                                    weights[0] == 0.0f;
+        if (!full_only_zero)
+            (void)normalizedBucketWeights(weights);
+        for (size_t i = 0; i < weights.size(); ++i)
+            manualBuckets[i].weight = weights[i];
+
+        updateFullBucketWeight();
+    }
+
+    Session(Graph &g, MemoryManager &mem, LogicalId root, const Settings &_settings, TGStore *_repo = nullptr,
+            std::shared_ptr<plan::Brancher> _brancher = nullptr)
+        : graph(g), memManager(mem), rootId(root), settings(_settings), isPlanned(false), isCompiled(false),
+          cachePath(_settings.cache_file), nBucketSizes(0), repo(_repo), disableCaching(_settings.disable_caching),
+          disableCompilationCaching(_settings.disable_compilation_caching),
+          minCompileSeconds(_settings.min_compile_seconds),
+          brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()),
+          logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
+    {
+        initRepo(_repo);
+        ensureOutputDirectories();
+        loadCache();
     }
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
-            Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
-            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true)
+            TGStore *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
+            std::shared_ptr<plan::Brancher> _brancher = nullptr, bool _logCostCalls = true,
+            const std::string &_recordsPath = "benchmarks/records.bin", bool _disableCompilationCaching = false)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
-          minCompileSeconds(_minCompileSeconds), delegate(_delegate), logCostCalls(_logCostCalls),
-          costModel(_logCostCalls)
+          disableCompilationCaching(_disableCompilationCaching),
+          minCompileSeconds(_minCompileSeconds),
+          brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()), logCostCalls(_logCostCalls),
+          costModel(_logCostCalls, _recordsPath)
     {
+        settings = Settings::get_default();
+        settings.cache_file = cacheFile;
+        settings.disable_caching = _disableCaching;
+        settings.disable_compilation_caching = _disableCompilationCaching;
+        settings.min_compile_seconds = _minCompileSeconds;
+        settings.log_cost_calls = _logCostCalls;
+        if (!_recordsPath.empty())
+            settings.records_path = _recordsPath;
+        initRepo(_repo);
         ensureOutputDirectories();
         loadCache();
     }
 
     void ensureFullBucket()
     {
+        ShapePropagator prop;
+        prop.inferShapeRecursive(rootId, graph);
+        
         Bucket bucket;
         bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
         std::vector<LogicalId> inputNodeIds = collectInputNodeIds();
@@ -195,6 +320,10 @@ struct Session
             fullBucketIdx = manualBuckets.size();
             manualBuckets.push_back(bucket);
         }
+
+        // Include the full bucket in the objective only when it is the sole
+        // bucket, so search has a nonzero cost to optimize in that case.
+        updateFullBucketWeight();
     }
 
     void plan(bool doSaturate = true)
@@ -203,10 +332,27 @@ struct Session
         costModel.setLogging(logCostCalls);
         costModel.load(recordsPath);
 
-        ShapePropagator prop;
-        prop.inferShapeRecursive(rootId, graph);
-
         ensureFullBucket();
+        if (!settings.bucket_weights.empty())
+            setBucketWeights(settings.bucket_weights);
+        updateFullBucketWeight();
+
+        const std::vector<float> requestedWeights = normalizedBucketWeights(manualBuckets);
+        bool cacheMatchesBuckets =
+            cachedGraphs.size() == manualBuckets.size() && cachedBucketWeights.size() == requestedWeights.size();
+        for (size_t i = 0; cacheMatchesBuckets && i < manualBuckets.size(); ++i)
+        {
+            cacheMatchesBuckets = cachedGraphs[i].bucket == manualBuckets[i] &&
+                                  std::abs(cachedBucketWeights[i] - requestedWeights[i]) <= 1e-6f;
+        }
+        if (isPlanned && !cacheMatchesBuckets)
+        {
+            std::cout << "[Session.compile] Cached buckets or weights changed; replanning." << std::endl;
+            cachedGraphs.clear();
+            selectedCachedNodes.clear();
+            cachedBucketWeights.clear();
+            isPlanned = false;
+        }
 
         if (isPlanned)
         {
@@ -215,7 +361,12 @@ struct Session
         else
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
+            foldCleanTensors();
             ensureCacheCoverage(doSaturate);
+            if (settings.saturate_only)
+            {
+                return;
+            }
             persistCache();
             isPlanned = true;
         }
@@ -225,35 +376,85 @@ struct Session
     {
         plan(doSaturate);
 
-        std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
-        memManager.init();
-
-        std::unordered_set<LogicalId> written;
+        // Compute exact peak allocation size required per MemSpace across all compiled graphs
+        std::unordered_map<MemSpace, uint64_t> peakSizes;
+        LOG(INFO) << "Bucket execution times:";
         for (const CompiledGraph &g : cachedGraphs)
         {
+            LOG(INFO) << g.bucket << ": ";
+            g.cost(true);
             for (const auto &inst : g.instructions)
             {
-                for (uint32_t i = 0; i < inst.children.size(); i++)
+                if (inst.outBuffer.mem_space.type != HandleType::STORAGE && inst.outBuffer.offset >= 0)
                 {
-                    EClassId child = inst.children[i];
-                    if (!g.has_logical_id(child))
-                        continue;
-                    LogicalId logical_id = g.get_logical_id(child);
-                    if (graph.constantStaging.count(logical_id))
+                    uint64_t extent = static_cast<uint64_t>(inst.outBuffer.offset) + inst.outBuffer.size;
+                    peakSizes[inst.outBuffer.mem_space] = std::max(peakSizes[inst.outBuffer.mem_space], extent);
+                }
+                for (const auto &inBuf : inst.inBuffers)
+                {
+                    if (inBuf.mem_space.type != HandleType::STORAGE && inBuf.offset >= 0)
+                    {
+                        uint64_t extent = static_cast<uint64_t>(inBuf.offset) + inBuf.size;
+                        peakSizes[inBuf.mem_space] = std::max(peakSizes[inBuf.mem_space], extent);
+                    }
+                }
+            }
+            for (const auto &pair : g.nodeViews)
+            {
+                uint64_t extent =
+                    pair.second.offset + countElements(pair.second.getShape()) * getDTypeSize(pair.second.dtype);
+                peakSizes[MemSpace{1, HandleType::CPP}] = std::max(peakSizes[MemSpace{1, HandleType::CPP}], extent);
+            }
+        }
+
+        std::cout << "[Session.compile] Materializing exact peak memory arenas..." << std::endl;
+        for (const auto &pair : peakSizes)
+        {
+            std::cout << "  - " << pair.first << ": " << pair.second << " bytes (" << (pair.second / (1024.0 * 1024.0))
+                      << " MB)" << std::endl;
+        }
+
+        memManager.init(peakSizes);
+
+        // Write all constants directly to their allocated offsets in memory
+        // TODO: currently redundant with constant writing in Executor::run? we should try only write constants here
+        size_t total_written = 0;
+        for (const CompiledGraph &g : cachedGraphs)
+        {
+            std::unordered_set<LogicalId> written;
+            for (const auto &pair : g.eclass_to_logical)
+            {
+                EClassId eclass_id = pair.first;
+                LogicalId logical_id = pair.second;
+                if (graph.constantStaging.count(logical_id))
+                {
+                    if (g.nodeViews.count(eclass_id))
                     {
                         if (written.insert(logical_id).second)
                         {
                             const TensorNode &node = graph.getNode(logical_id);
-                            const ParallelBuffer &buf = inst.inBuffers[i];
-                            memManager.write(buf.mem_space, buf.offset, graph.constantStaging.at(logical_id)->data(),
-                                             node.getSizeBytes());
+                            const TensorView &view = g.nodeViews.at(eclass_id);
+                            memManager.write(MemSpace{1, HandleType::CPP}, view.offset,
+                                             graph.constantStaging.at(logical_id)->data(), node.getLogicalSizeBytes());
                         }
                     }
                 }
             }
+
+            for (const auto &pair : g.constantStaging)
+            {
+                EClassId eclass_id = pair.first;
+                if (g.nodeViews.count(eclass_id))
+                {
+                    const TensorView &view = g.nodeViews.at(eclass_id);
+                    memManager.write(MemSpace{1, HandleType::CPP}, view.offset, pair.second->data(),
+                                     pair.second->size());
+                }
+            }
+            total_written += written.size();
         }
-        std::cout << "Wrote " << written.size() << " constants to memory. Graph has " << graph.constantStaging.size()
-                  << " constants." << std::endl;
+        std::cout << "Wrote " << total_written << " constants to memory across " << cachedGraphs.size()
+                  << " graph(s). Graph has " << graph.constantStaging.size() << " constants." << std::endl;
 
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
@@ -263,12 +464,42 @@ struct Session
     {
         for (const CompiledGraph &g : cachedGraphs)
         {
+            // 1. Direct O(1) lookup via logical_to_eclass
+            auto it = g.logical_to_eclass.find(logicalId);
+            if (it != g.logical_to_eclass.end())
+            {
+                EClassId eclass_id = it->second;
+                if (g.nodeViews.count(eclass_id))
+                {
+                    const TensorView &view = g.nodeViews.at(eclass_id);
+                    memManager.write(MemSpace{1, HandleType::CPP}, view.offset, data, size);
+                    return;
+                }
+            }
+
+            // 2. Scan eclass_to_logical fallback
+            for (const auto &pair : g.eclass_to_logical)
+            {
+                if (pair.second == logicalId)
+                {
+                    EClassId eclass_id = pair.first;
+                    if (g.nodeViews.count(eclass_id))
+                    {
+                        const TensorView &view = g.nodeViews.at(eclass_id);
+                        memManager.write(MemSpace{1, HandleType::CPP}, view.offset, data, size);
+                        return;
+                    }
+                }
+            }
+
+            // 3. Search instruction input buffers
             for (const auto &inst : g.instructions)
             {
                 for (uint32_t i = 0; i < inst.children.size(); i++)
                 {
                     EClassId child = inst.children[i];
-                    if (g.has_logical_id(child) && g.get_logical_id(child) == logicalId)
+                    auto it_l = g.eclass_to_logical.find(child);
+                    if (it_l != g.eclass_to_logical.end() && it_l->second == logicalId)
                     {
                         memManager.write(inst.inBuffers[i].mem_space, inst.inBuffers[i].offset, data, size);
                         return;
@@ -277,7 +508,7 @@ struct Session
             }
         }
         Error::throw_err("Logical Node ID " + toString(logicalId) +
-                         " not found in compiled instructions during Session::writeInput");
+                         " not found in compiled graph during Session::writeInput");
     }
 
     const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr, bool doSaturate = true)
@@ -304,52 +535,443 @@ struct Session
         }
 
         const uint32_t graphIdx = getBestGraphIdx(bucket);
-        executor->run(cachedGraphs[graphIdx], debugCallback);
+        const CompiledGraph &cg = cachedGraphs[graphIdx];
+        executor->run(cg, debugCallback);
 
-        const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions.back();
-        DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
-        return buf->getBasePtr() + lastInst.outBuffer.offset;
+        // Find the root node in CPU RAM or GPU RAM
+        for (const auto &pair : cg.eclass_to_logical)
+        {
+            if (pair.second == rootId)
+            {
+                EClassId eclass_id = pair.first;
+                for (const auto &inst : cg.instructions)
+                {
+                    if (inst.eclass_id == eclass_id || inst.logical_id == rootId)
+                    {
+                        DeviceBuffer *buf = memManager.getBuffer(inst.outBuffer.mem_space);
+                        if (buf && buf->getBasePtr())
+                        {
+                            std::cout << "[DEBUG_RUN] found root in instruction eclass=" << eclass_id.value
+                                      << " mem_space=" << inst.outBuffer.mem_space.idx
+                                      << " type=" << static_cast<int>(inst.outBuffer.mem_space.type)
+                                      << " offset=" << inst.outBuffer.offset << std::endl;
+                            return buf->getBasePtr() + inst.outBuffer.offset;
+                        }
+                    }
+                }
+                if (cg.nodeViews.count(eclass_id))
+                {
+                    const TensorView &rootView = cg.nodeViews.at(eclass_id);
+                    DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+                    if (buf && buf->getBasePtr())
+                    {
+                        std::cout << "[DEBUG_RUN] fallback to nodeView MemSpace{1, CPP} offset=" << rootView.offset << std::endl;
+                        return buf->getBasePtr() + rootView.offset;
+                    }
+                }
+            }
+        }
+
+        if (!cg.instructions.empty())
+        {
+            const OpInstruction &lastInst = cg.instructions.back();
+            DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
+            if (buf && buf->getBasePtr())
+            {
+                std::cout << "[DEBUG_RUN] fallback to lastInst mem_space=" << lastInst.outBuffer.mem_space.idx
+                          << " type=" << static_cast<int>(lastInst.outBuffer.mem_space.type)
+                          << " offset=" << lastInst.outBuffer.offset << std::endl;
+                return buf->getBasePtr() + lastInst.outBuffer.offset;
+            }
+        }
+
+        Error::throw_err("Failed to retrieve valid host output pointer for root node during Session::run");
+    }
+
+    struct OrtoolsPreparedState
+    {
+        Planner planner;
+        std::vector<Bucket> buckets;
+        EGraph full_state;
+        std::vector<EGraph> bucket_states;
+        std::vector<EGraph> bucket_egraphs;
+        std::vector<EClassId> bucket_root_eclass_ids;
+        std::vector<std::vector<ENodeInfo>> bucket_enode_infos;
+        std::vector<ExtractionResult> cpu_hint_extractions;
+        std::vector<CacheCandidate> candidates;
+        std::vector<std::vector<uint32_t>> candidate_clean_buckets;
+        std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
+
+        OrtoolsPreparedState(CostModel &costModel, const Settings &settings)
+            : planner(costModel, settings)
+        {
+        }
+    };
+
+    std::unique_ptr<OrtoolsPreparedState> prepareOrtoolsState(bool doSaturate)
+    {
+        auto state = std::make_unique<OrtoolsPreparedState>(costModel, settings);
+        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
+        state->buckets = manualBuckets;
+
+        Planner &planner = state->planner;
+        Graph temp_graph = graph;
+        planner.initBaseEGraph(rootId, temp_graph, topo, repo, false);
+        state->full_state = planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], doSaturate, repo);
+
+        state->bucket_states.resize(manualBuckets.size());
+        state->bucket_states[fullBucketIdx] = state->full_state;
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
+            if (bucket_idx == fullBucketIdx)
+                return;
+            Planner bucket_planner(costModel, settings);
+            state->bucket_states[bucket_idx] = bucket_planner.saturateBucket(
+                rootId, graph, manualBuckets[bucket_idx], false, repo, &state->full_state);
+        });
+
+        // Candidate cleanliness is derived from the same eclass DP used by the
+        // normal cache search.
+        if (!disableCaching)
+        {
+            for (const EClass &cls : state->full_state.getClasses())
+            {
+                if (state->full_state.findConst(cls.id) != cls.id || cls.base_eclass_id == BaseEClassId{} ||
+                    cls.mem_space.type == HandleType::STORAGE || getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) == 0)
+                    continue;
+
+                if (cls.logical_id != LogicalId{} && graph.hasNode(cls.logical_id) &&
+                    graph.getNode(cls.logical_id).opType == OpType::INPUT)
+                    continue;
+
+                bool is_input_class = false;
+                for (ENodeId eid : cls.enodes)
+                {
+                    if (state->full_state.getENode(eid).getOpType() == OpType::INPUT)
+                    {
+                        is_input_class = true;
+                        break;
+                    }
+                }
+                if (is_input_class)
+                    continue;
+
+                const bool clean_in_any_bucket = std::any_of(
+                    state->bucket_states.begin(), state->bucket_states.end(), [&](const EGraph &bucket_state) {
+                        const EClassId eclass_id = bucket_state.findEClassByBaseId(cls.base_eclass_id);
+                        return eclass_id != EClassId{} && bucket_state.getEClass(eclass_id).is_clean;
+                    });
+                if (!clean_in_any_bucket)
+                    continue;
+
+                state->candidates.push_back({cls.base_eclass_id, getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.dtype,
+                                             cls.mem_space, 0});
+                std::vector<uint32_t> clean_buckets;
+                for (uint32_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
+                {
+                    auto eclass_it = state->bucket_states[bucket_idx].findEClassByBaseId(cls.base_eclass_id);
+                    if (eclass_it != EClassId{} &&
+                        state->bucket_states[bucket_idx].getEClass(eclass_it).is_clean)
+                        clean_buckets.push_back(bucket_idx);
+                }
+                state->candidate_clean_buckets.push_back(std::move(clean_buckets));
+            }
+        }
+
+        // The solver needs input reservations before it chooses a cache set.
+        // Resolve those through eclass ids, matching the normal path.
+        planner.preallocate(graph, state->full_state,
+                            state->preallocated_buffers);
+
+        Engine cpu = Engine{0, EngineType::CPU};
+        state->bucket_egraphs.reserve(state->bucket_states.size());
+        state->bucket_root_eclass_ids.reserve(state->bucket_states.size());
+        state->bucket_enode_infos.reserve(state->bucket_states.size());
+        for (size_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
+        {
+            EGraph bucket_state = std::move(state->bucket_states[bucket_idx]);
+            for (const CacheCandidate &candidate : state->candidates)
+            {
+                EClassId eclass_id = bucket_state.findEClassByBaseId(candidate.base_eclass_id);
+                if (eclass_id == EClassId{} || !bucket_state.getEClass(eclass_id).is_clean)
+                    continue;
+
+                const EClass &cls = bucket_state.getEClass(eclass_id);
+                bool has_cache = false;
+                for (ENodeId enode_id : cls.enodes)
+                {
+                    const ENode &enode = bucket_state.getENode(enode_id);
+                    if (enode.getOpType() == OpType::CACHE)
+                    {
+                        has_cache = true;
+                        break;
+                    }
+                }
+                if (!has_cache)
+                    bucket_state.addENode(
+                        eclass_id, ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
+                                          cls.mem_space, {cpu}, std::to_string(candidate.base_eclass_id.value)));
+            }
+
+            bucket_state.rebuild(true);
+
+            auto enode_infos = planner.computeENodeInfos(bucket_state);
+            planner.pruneEGraph(bucket_state, enode_infos);
+            state->bucket_root_eclass_ids.push_back(bucket_state.findEClassByLogicalId(rootId));
+            state->bucket_egraphs.push_back(std::move(bucket_state));
+            state->bucket_enode_infos.push_back(std::move(enode_infos));
+        }
+
+        if (!settings.use_ortools_full && !settings.use_ortools_lns)
+            return state;
+
+        // Build one native witness per bucket.  The full solver receives the
+        // complete native extraction, dispatch, and allocation as its initial
+        // assignment, while remaining free to search for an improvement.
+        // Reusing the already saturated e-graphs avoids a second saturation.
+        Settings hint_settings = settings;
+        hint_settings.cpu_only = true;
+        Planner native_planner(costModel, hint_settings);
+        std::unordered_set<EClassId> no_cached_eclasses;
+        state->cpu_hint_extractions.reserve(state->bucket_egraphs.size());
+        for (size_t bucket_idx = 0; bucket_idx < state->bucket_egraphs.size(); ++bucket_idx)
+        {
+            // Keep the CP problem's complete hardware e-graph intact.  The
+            // native witness can use a CPU-pruned copy, which avoids walking
+            // OpenCL alternatives during dispatch and bufferization search.
+            EGraph hint_egraph = state->bucket_egraphs[bucket_idx];
+            auto native_infos = native_planner.computeENodeInfos(
+                hint_egraph);
+            native_planner.pruneEGraph(hint_egraph, native_infos);
+            ExtractionResult hint = native_planner.extractBest(
+                rootId, graph, hint_egraph,
+                hint_settings.min_compile_seconds == 0.0f, false, hint_settings.min_compile_seconds, brancher,
+                native_infos, &no_cached_eclasses);
+
+            // Pruning changes each eclass's local enode index.  CP-SAT uses
+            // the indices from the original, unpruned problem, so restore
+            // those indices by matching stable ENodeIds.
+            const EGraph &full_egraph = state->bucket_egraphs[bucket_idx];
+            for (auto &[eclass_id, enode_idx] : hint.selection_map)
+            {
+                const EClass &hint_class = hint_egraph.getEClass(eclass_id);
+                const ENodeId selected_enode = hint_class.enodes.at(enode_idx);
+                const EClass &full_class = full_egraph.getEClass(eclass_id);
+                auto full_index = std::find(full_class.enodes.begin(), full_class.enodes.end(), selected_enode);
+                if (full_index == full_class.enodes.end())
+                    Error::throw_err("[Session.prepareOrtoolsState] CPU hint enode missing from CP e-graph.");
+                enode_idx = static_cast<uint32_t>(std::distance(full_class.enodes.begin(), full_index));
+            }
+            state->cpu_hint_extractions.push_back(std::move(hint));
+        }
+
+        return state;
+    }
+
+    std::string exportOrtoolsProblem(bool doSaturate = true)
+    {
+        auto state = prepareOrtoolsState(doSaturate);
+        nlohmann::json prob = ortools_export::serializeProblem(
+            state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
+            state->bucket_enode_infos, state->candidates,
+            state->candidate_clean_buckets, graph, state->preallocated_buffers, settings);
+        prob["full_bucket_idx"] = fullBucketIdx;
+        prob["cpu_hints"] = nlohmann::json::array();
+        for (const auto &extraction : state->cpu_hint_extractions)
+            prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
+        return prob.dump();
+    }
+
+    void applyOrtoolsSolution(const std::string &solution_json_str, OrtoolsPreparedState &state)
+    {
+        nlohmann::json sol = nlohmann::json::parse(solution_json_str);
+        std::unordered_set<BaseEClassId> selected_cached;
+        std::vector<ExtractionResult> extractions;
+        if (!ortools_export::deserializeSolution(sol, selected_cached, extractions))
+        {
+            Error::throw_err("[Session.applyOrtoolsSolution] Failed to deserialize solution JSON.");
+        }
+
+        if (extractions.size() != manualBuckets.size())
+        {
+            Error::throw_err("[Session.applyOrtoolsSolution] Solution has " + std::to_string(extractions.size()) +
+                             " buckets, expected " + std::to_string(manualBuckets.size()));
+        }
+
+        if (settings.use_ortools_full || settings.use_ortools_lns)
+        {
+            if (sol.value("solver", "") != "ortools_full")
+                Error::throw_err("[Session.applyOrtoolsSolution] Expected a full joint OR-Tools solution.");
+            // The joint solver owns extraction, dispatch, aliases and offsets.
+            // Do not prune or re-extract here: enode indices refer to the export.
+            std::vector<CompiledGraph> compiled_graphs;
+            for (size_t b = 0; b < manualBuckets.size(); ++b)
+            {
+                const auto &extraction = extractions[b];
+                if (extraction.order.size() != extraction.selection_map.size() ||
+                    !extraction.selection_map.count(state.bucket_root_eclass_ids[b]))
+                    Error::throw_err("[Session.applyOrtoolsSolution] Incomplete joint extraction.");
+                std::unordered_set<EClassId> visited;
+                std::unordered_map<BufferId, ParallelBuffer> buffers;
+                for (const auto &buf : extraction.buffers)
+                {
+                    if (!buffers.emplace(buf.id, buf).second || buf.offset < 0)
+                        Error::throw_err("[Session.applyOrtoolsSolution] Invalid joint buffer.");
+                    auto cap = settings.mem_caps.find(buf.mem_space);
+                    if (buf.mem_space.type != HandleType::STORAGE && cap != settings.mem_caps.end() &&
+                        (buf.size > cap->second || static_cast<uint64_t>(buf.offset) > cap->second - buf.size))
+                        Error::throw_err("[Session.applyOrtoolsSolution] Joint allocation exceeds memory cap.");
+                }
+                for (EClassId cid : extraction.order)
+                {
+                    const auto &cls = state.bucket_egraphs[b].getEClass(cid);
+                    auto selected = extraction.selection_map.find(cid);
+                    auto buffer = extraction.eclass_to_buf.find(cid);
+                    if (selected == extraction.selection_map.end() || selected->second >= cls.enodes.size() ||
+                        buffer == extraction.eclass_to_buf.end() || !buffers.count(buffer->second) || visited.count(cid))
+                        Error::throw_err("[Session.applyOrtoolsSolution] Invalid joint selection or buffer mapping.");
+                    const auto &enode = state.bucket_egraphs[b].getENode(cls.enodes[selected->second]);
+                    for (EClassId child : enode.getChildren())
+                        if (!visited.count(state.bucket_egraphs[b].findConst(child)))
+                            Error::throw_err("[Session.applyOrtoolsSolution] Joint dispatch is not topological.");
+                    visited.insert(cid);
+                }
+                CompiledGraph cg = state.planner.buildCompiledGraph(
+                    rootId, graph, state.bucket_egraphs[b],
+                    extraction, state.bucket_enode_infos[b]);
+                cg.bucket = manualBuckets[b];
+                compiled_graphs.push_back(std::move(cg));
+            }
+            cachedGraphs = std::move(compiled_graphs);
+            selectedCachedNodes = std::move(selected_cached);
+            cachedBucketWeights = normalizedBucketWeights(manualBuckets);
+            persistCache();
+            return;
+        }
+
+        // OR-Tools selects the global cache set and supplies a feasible
+        // extraction witness.  Rebuild the executable graphs through the
+        // native planner so cache buffers, view aliases, and lifetimes use
+        // the same implementation as the normal path.  In particular,
+        // intermediate cached nodes must receive persistent buffers; using
+        // the solver's local bufferization here would make a cache look valid
+        // while allowing its storage to overlap a later intermediate.
+        cachedGraphs.clear();
+        for (size_t b = 0; b < manualBuckets.size(); ++b)
+        {
+            Planner thread_planner(costModel, settings);
+            thread_planner.baseState = state.planner.baseState;
+            thread_planner.baseStateInitialized = true;
+
+            auto &bucket_egraph = state.bucket_egraphs[b];
+
+            auto enode_infos = thread_planner.computeENodeInfos(
+                bucket_egraph);
+            thread_planner.pruneEGraph(bucket_egraph, enode_infos);
+
+            std::unordered_set<EClassId> cached_eclasses;
+            for (const EClass &cls : bucket_egraph.getClasses())
+            {
+                if (bucket_egraph.findConst(cls.id) == cls.id && selected_cached.count(cls.base_eclass_id))
+                    cached_eclasses.insert(cls.id);
+            }
+
+            ExtractionResult extraction = thread_planner.extractBest(
+                rootId, graph, bucket_egraph,
+                minCompileSeconds == 0.0f, false, minCompileSeconds,
+                nullptr, enode_infos, &cached_eclasses);
+            CompiledGraph cg = thread_planner.buildCompiledGraph(
+                rootId, graph, bucket_egraph, extraction, enode_infos);
+            cg.bucket = manualBuckets[b];
+            cachedGraphs.push_back(std::move(cg));
+        }
+
+        selectedCachedNodes = std::move(selected_cached);
+        cachedBucketWeights = normalizedBucketWeights(manualBuckets);
+        persistCache();
+    }
+
+    void ensureCacheCoverageOrtools(bool doSaturate)
+    {
+        std::cout << "[Session.ensureCacheCoverageOrtools] Saturating E-Graph and preparing OR-Tools CP-SAT problem..."
+                  << std::endl;
+        auto state = prepareOrtoolsState(doSaturate);
+        nlohmann::json prob = ortools_export::serializeProblem(
+            state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
+            state->bucket_enode_infos, state->candidates,
+            state->candidate_clean_buckets, graph, state->preallocated_buffers, settings);
+        prob["full_bucket_idx"] = fullBucketIdx;
+        prob["cpu_hints"] = nlohmann::json::array();
+        for (const auto &extraction : state->cpu_hint_extractions)
+            prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
+
+        std::filesystem::create_directories("benchmarks");
+        std::string prefix = settings.use_ortools_lns ? "benchmarks/ortools_lns_" : (settings.use_ortools_full ? "benchmarks/ortools_full_" : "benchmarks/ortools_");
+        std::string prob_path = prefix + "problem.json";
+        std::string sol_path = prefix + "solution.json";
+
+        {
+            std::ofstream f(prob_path);
+            f << prob.dump(2);
+        }
+        if (std::filesystem::exists(sol_path))
+        {
+            std::filesystem::remove(sol_path);
+        }
+
+        bool ok = ortools_export::runOrtoolsSolverProcess(prob_path, sol_path);
+        if (!ok)
+        {
+            Error::throw_err("[Session.ensureCacheCoverageOrtools] Solver process failed to produce solution.");
+        }
+
+        std::string sol_str;
+        {
+            std::ifstream f(sol_path);
+            std::stringstream ss;
+            ss << f.rdbuf();
+            sol_str = ss.str();
+        }
+
+        applyOrtoolsSolution(sol_str, *state);
+        std::cout << "[Session.ensureCacheCoverageOrtools] Successfully applied OR-Tools solution." << std::endl;
+    }
+
+    const std::vector<CompiledGraph> &getCachedGraphs() const { return cachedGraphs; }
+    const std::unordered_set<BaseEClassId> &getSelectedCachedNodes() const { return selectedCachedNodes; }
+    void setCachedGraphs(const std::vector<CompiledGraph> &graphs,
+                         const std::unordered_set<BaseEClassId> &cached)
+    {
+        cachedGraphs = graphs;
+        selectedCachedNodes = cached;
+        cachedBucketWeights = normalizedBucketWeights(manualBuckets);
+        persistCache();
     }
 
     void ensureCacheCoverage(bool doSaturate)
     {
+        if (settings.use_ortools || settings.use_ortools_full || settings.use_ortools_lns)
+        {
+            ensureCacheCoverageOrtools(doSaturate);
+            return;
+        }
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        std::cout << "[Session.ensureCacheCoverage] Selecting cache nodes via SearchDelegate..." << std::endl;
-        Planner planner(costModel, memManager.getMemCaps());
+        ensureFullBucket();
+        std::vector<float> bucket_weights = normalizedBucketWeights(manualBuckets);
 
-        std::unordered_map<LogicalId, MemSpace> bestCachedNodes;
-        if (!disableCaching)
+        Planner planner(costModel, settings);
+        auto [graphs, cached_nodes] = planner.planAll(
+            rootId, graph, manualBuckets, bucket_weights, doSaturate, repo, minCompileSeconds, brancher);
+
+        cachedGraphs = std::move(graphs);
+        selectedCachedNodes = std::move(cached_nodes);
+        cachedBucketWeights = std::move(bucket_weights);
+
+        if (settings.saturate_only)
         {
-            bestCachedNodes = planner.searchBestCacheNodes(rootId, graph, manualBuckets, delegate, minCompileSeconds);
+            return;
         }
-
-        std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
-        planner.preallocateLogicalBuffers(graph, bestCachedNodes, preallocatedBuffers);
-
-        std::cout << "[Session.ensureCacheCoverage] Planning buckets with " << bestCachedNodes.size()
-                  << " cached nodes across physical cores..." << std::endl;
-
-        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-        Graph tempGraph = graph;
-        planner.initBaseEGraph(rootId, tempGraph, topo, repo);
-
-        cachedGraphs.resize(manualBuckets.size());
-
-        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t i) {
-            Planner threadPlanner(costModel, memManager.getMemCaps());
-            threadPlanner.baseState = planner.baseState;
-            threadPlanner.baseStateInitialized = true;
-
-            const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, bestCachedNodes, doSaturate, true, repo,
-                                                    preallocatedBuffers, minCompileSeconds, delegate);
-            plan.bucket = bucket;
-            cachedGraphs[i] = std::move(plan);
-        });
-
-        selectedCachedNodes = std::move(bestCachedNodes);
 
         if (cachedGraphs.size() != manualBuckets.size())
         {
@@ -418,7 +1040,7 @@ struct Session
 
     void loadCache()
     {
-        if (cachePath.empty())
+        if (disableCompilationCaching || cachePath.empty())
             return;
 
         CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/true);
@@ -447,6 +1069,7 @@ struct Session
         {
             cachedGraphs = std::move(cache.compiledGraphs);
             selectedCachedNodes = std::move(cache.selectedCachedNodes);
+            cachedBucketWeights = std::move(cache.bucketWeights);
             isPlanned = true;
         }
     }

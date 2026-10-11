@@ -1,436 +1,279 @@
-# kernel_bench/jobs.py
+"""Kernel-only experiments with a durable queue and an exclusive GPU worker."""
+import hashlib
+import io
 import json
+import logging
 import os
+import platform
 import re
+import shutil
+import signal
 import subprocess
-import sys
+import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+import zipfile
 from pathlib import Path
 
+from psycopg.types.json import Jsonb
+
+from .storage import fingerprint
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-KERNELS_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "kernels"
-BENCHMARKS_DIR = PROJECT_ROOT / "benchmarks"
-CACHE_DIR = PROJECT_ROOT / "dirty_region_caches"
-HISTORY_FILE = PROJECT_ROOT / "kernel_bench" / "jobs_history.jsonl"
-REPORTS_FILE = PROJECT_ROOT / "kernel_bench" / "reports.jsonl"
-GENERATED_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "generated"
-
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-from utils.binary import (
-    BinaryReader,
-    load_cache_file,
-)
-
-TIMEOUTS = {
-    "build": 600,
-    "test": 600,
-    "infer": 1200,
-    "bench": 1800,
-}
-
-jobs: dict = {}
-worker_lock = threading.Lock()
-report_lock = threading.Lock()
+DEFAULT_GOAL_CACHE = PROJECT_ROOT / "dirty_region_caches/embeddinggemma-2-image-current.bin.dirty-cache"
+WORKER_LOCK = 724189002
+TIMEOUTS = {"build": 600, "discovery": 1800, "evaluate": 900}
+logger = logging.getLogger(__name__)
 
 
-def save_report(report_data):
-    with report_lock, open(REPORTS_FILE, "a") as f:
-        f.write(json.dumps(report_data) + "\n")
+def getPythonExe():
+    path = PROJECT_ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not path.is_file():
+        raise RuntimeError(f"Project Python environment is missing: {path}")
+    return str(path)
 
 
-def load_reports():
-    reports = []
-    if REPORTS_FILE.exists():
-        with report_lock, open(REPORTS_FILE, "r") as f:
-            for line in f:
-                if line.strip():
-                    reports.append(json.loads(line))
-    return list(reversed(reports))
+def stripComments(source):
+    return re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
 
 
-def get_hw_info():
-    info = "not available"
-    hwinfo_path = PROJECT_ROOT / "hwinfo.txt"
-    if hwinfo_path.exists():
-        info = hwinfo_path.read_text()
-    return info
+def extractRegisteredKernelNames(source_text):
+    return re.findall(r'\bREGISTER_KERNEL\s*\(\s*"([^"\n]+)"', stripComments(source_text))
 
 
-def save_job_history(job):
-    print(f"[INFO] Saving job {job['job_id']} history to {HISTORY_FILE}")
-    with open(HISTORY_FILE, "a") as f:
-        f.write(json.dumps(job) + "\n")
+def sourceArchive():
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        paths = [PROJECT_ROOT / "build.py"]
+        for directory in ("tensor_graphs_cpp", "docs/hwinfo/box"):
+            paths.extend(sorted((PROJECT_ROOT / directory).rglob("*")))
+        for path in paths:
+            relative = path.relative_to(PROJECT_ROOT)
+            if (path.is_file() and not relative.as_posix().startswith("tensor_graphs_cpp/generated/")
+                    and not relative.as_posix().startswith("tensor_graphs_cpp/kernels/generated/kernel_bench/")
+                    and path.suffix in (".py", ".cpp", ".hpp", ".h", ".cu", ".cl", ".txt")):
+                info = zipfile.ZipInfo(relative.as_posix())
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, path.read_bytes())
+    return output.getvalue()
 
 
-def load_job_history():
-    history = []
-    if HISTORY_FILE.exists():
-        with open(HISTORY_FILE, "r") as f:
-            for line in f:
-                if line.strip():
-                    history.append(json.loads(line))
-    return history
+def hardwareIdentity():
+    identity = {"machine": platform.machine(), "processor": platform.processor(),
+                "python": platform.python_version(), "system": platform.system()}
+    if shutil.which("nvidia-smi"):
+        result = runCmd(["nvidia-smi", "--query-gpu=name,uuid,driver_version", "--format=csv,noheader"], PROJECT_ROOT, 30)
+        if result["exit_code"] != 0:
+            raise RuntimeError("GPU identity query failed: " + result["output"])
+        identity["gpus"] = result["output"].strip()
+    return identity
 
 
-def find_next_slot(backend: str) -> str:
-    base = KERNELS_DIR / backend / "general" / "generated"
-    os.makedirs(base, exist_ok=True)
-    ext = ".cu" if backend == "cuda" else ".hpp"
-    n = 0
-    while True:
-        path = base / f"{n:05d}{ext}"
-        failed_path = base / f"{n:05d}{ext}.failed"
-        if not path.exists() and not failed_path.exists():
-            return str(path)
-        n += 1
+def runCmd(command, cwd, timeout, payload=None):
+    started_at = time.monotonic()
+    logger.info("Starting %s (timeout %ss)", Path(command[0]).name + " " + " ".join(command[1:]), timeout)
+    process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, start_new_session=os.name != "nt")
+    output_lines = []
 
+    def readOutput():
+        completed_progress = set()
+        for line in process.stdout:
+            output_lines.append(line)
+            progress = re.match(r"\s*(linting \[\d+/\d+\]):\s*(\d+)%", line)
+            if progress:
+                stage, percent = progress.groups()
+                if percent == "100" and stage not in completed_progress:
+                    completed_progress.add(stage)
+                    logger.info("[%s] %s complete", process.pid, stage)
+                continue
+            logger.info("[%s] %s", process.pid, line.rstrip())
 
-def run_cmd(cmd: list[str], timeout: int) -> dict:
-    start = time.time()
-    cmd_str = " ".join(cmd)
-    print(f"[EXEC] Running: {cmd_str} (Timeout: {timeout}s)")
+    reader = threading.Thread(target=readOutput, daemon=True)
+    reader.start()
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=PROJECT_ROOT
-        )
-        duration = (time.time() - start) * 1000
-        print(f"[EXEC] Finished in {duration:.2f}ms with exit code {result.returncode}")
-        if result.returncode != 0:
-            print(f"[WARN] Command stderr: {result.stderr.strip()[:200]}...")
-
-        return {
-            "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "duration_ms": duration,
-        }
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] Command TIMED OUT after {timeout}s: {cmd_str}")
-        return {
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": "TIMED OUT",
-            "duration_ms": timeout * 1000,
-        }
-
-
-def get_uid_for_file(rel_path: str):
-    json_path = GENERATED_DIR / "kernel_uids.json"
-    if json_path.exists():
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                target_rel = rel_path.replace("\\", "/")
-                for key, info in data.items():
-                    if isinstance(info, dict) and info.get("path") == target_rel:
-                        return info.get("hex_uid")
-        except Exception:
-            pass
-
-    header_path = GENERATED_DIR / "kernel_uids.gen.hpp"
-    if not header_path.exists():
-        return None
-    const_name = rel_path.replace("/", "_").replace("\\", "_").replace(".", "_").upper()
-    content = header_path.read_text()
-    match = re.search(
-        rf"constexpr uint64_t {const_name} = (0x[0-9a-fA-F]+ULL);", content
-    )
-    if match:
-        uid = match.group(1).replace("ULL", "")
-        print(f"[INFO] Resolved UID {uid} for {rel_path}")
-        return uid
-    return None
-
-
-def analyze_total_time(target_model: str):
-    print(f"[INFO] Analyzing total time for model: {target_model}")
-
-    if target_model == "gemma-3-270m":
-        cache_paths = ["gemma-3-270m-cpp.bin"]
-    elif target_model == "flux-klein-4b":
-        cache_paths = ["flux-text.bin", "flux-trans.bin", "flux-vae.bin"]
-    else:
-        cache_paths = [f"{target_model}-cpp.bin"]
-
-    cache_paths = [CACHE_DIR / cache_path for cache_path in cache_paths]
-
-    for check_path in cache_paths:
-        if not check_path.exists():
-            message = f"[WARN] {check_path} file missing, skipping analysis."
-            print(message)
-            return 0.0, set(), message
-
-    total_time = 0.0
-    extracted_uids = set()
-
-    for cache_path in cache_paths:
-        cache_entries = load_cache_file(cache_path)
-        for entry in cache_entries:
-            if entry.get("type") == "compiled_bucket":
-                graph = entry["graph"]
-                node_costs = graph.get("nodeCosts", {})
-
-                for inst in graph["instructions"]:
-                    uid = inst.get("kernelId", inst.get("fullKernelId"))
-                    eclass_id = inst.get("eclassId", inst.get("nodeId"))
-                    extracted_uids.add(uid)
-
-                    runtime = node_costs.get(eclass_id, 0.0)
-                    if runtime == float("inf"):
-                        runtime = 0.0
-                    total_time += runtime
-
-    message = f"[INFO] Analysis complete. Total time: {total_time:.4f}ms, Unique UIDs: {len(extracted_uids)}"
-    print(message)
-    return total_time, extracted_uids, message
-
-
-def get_benchmark_scores(uid_str):
-    scores = []
-    records_path = BENCHMARKS_DIR / "records.bin"
-    if not records_path.exists() or not uid_str:
-        return scores
-    target_uid = int(uid_str, 16)
-    with open(records_path, "rb") as f:
-        br = BinaryReader(f)
+        if payload is not None:
+            process.stdin.write(json.dumps(payload))
+        process.stdin.close()
         while True:
-            r = br.read_record()
-            if r is None:
+            remaining = timeout - (time.monotonic() - started_at)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                process.wait(timeout=min(15, remaining))
                 break
-            if r["kernelId"] == target_uid:
-                scores.append(r["runTime"])
-    return scores
+            except subprocess.TimeoutExpired:
+                logger.info("[%s] Still running after %.0fs", process.pid, time.monotonic() - started_at)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True)
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        reader.join()
+        logger.error("[%s] Timed out after %ss", process.pid, timeout)
+        return {"exit_code": -1, "output": "".join(output_lines) + f"\nTimed out after {timeout}s"}
+    reader.join()
+    logger.info("[%s] Finished in %.1fs (exit %s)", process.pid, time.monotonic() - started_at, process.returncode)
+    return {"exit_code": process.returncode, "output": "".join(output_lines)}
 
 
-def run_worker():
-    print("[SYSTEM] Worker thread started and waiting for jobs...")
-    while True:
-        job_id = None
-        with worker_lock:
-            for jid, job in jobs.items():
-                if job["status"] == "queued":
-                    job_id = jid
-                    job["status"] = "running"
-                    break
+def runNative(workspace, payload, timeout):
+    output_path = workspace / "native_result.json"
+    output_path.unlink(missing_ok=True)
+    result = runCmd([getPythonExe(), "-u", str(Path(__file__).with_name("native_runner.py"))],
+                    workspace, timeout, {**payload, "output_path": str(output_path)})
+    if result["exit_code"] != 0:
+        raise RuntimeError(result["output"])
+    if not output_path.is_file():
+        raise RuntimeError("Native worker returned no structured result")
+    return json.loads(output_path.read_text()), result["output"]
 
-        if not job_id:
-            time.sleep(1)
-            continue
 
-        job = jobs[job_id]
-        job["started_at"] = datetime.now(timezone.utc).isoformat()
-        opname = job["opname"]
-        target_model = job["target_model"]
-
-        print(f"\n[JOB {job_id}] Processing op: {opname} for model: {target_model}")
-
+def initializeGoal(store, cache_path):
+    cache_path = Path(cache_path).resolve()
+    logger.info("Preparing goal cache %s", cache_path)
+    if not cache_path.is_file():
+        raise FileNotFoundError(f"Goal cache is missing: {cache_path}. Set KERNEL_BENCH_GOAL_CACHE to an existing compiled cache.")
+    cache_data = cache_path.read_bytes()
+    archive = sourceArchive()
+    cache_hash = hashlib.sha256(cache_data).hexdigest()
+    hardware = hardwareIdentity()
+    goal_hash = fingerprint({"cache": cache_hash, "sources": hashlib.sha256(archive).hexdigest(), "hardware": hardware})
+    with store.connection() as lock_connection:
+        lock_connection.autocommit = True
+        logger.info("Waiting for the discovery/GPU worker database lock")
+        lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK,))
+        logger.info("Acquired discovery/GPU worker database lock")
         try:
-            kernel_path = find_next_slot(job["backend"])
-            print(f"[JOB {job_id}] Writing kernel source to {kernel_path}")
-            with open(kernel_path, "w") as f:
-                f.write(job["source"])
-            job["kernel_file"] = kernel_path
-            job["agent_file_path"] = (
-                Path(kernel_path).relative_to(KERNELS_DIR).as_posix()
-            )
+            existing = store.query("SELECT id FROM kernel_bench.goals WHERE fingerprint = %s", (goal_hash,))
+            if existing:
+                logger.info("Reusing stored discovery for goal %s", existing[0]["id"])
+                return existing[0]["id"]
+            with tempfile.TemporaryDirectory(prefix="kernel-bench-discover-") as temp_path:
+                workspace = Path(temp_path)
+                with zipfile.ZipFile(io.BytesIO(archive)) as source_zip:
+                    source_zip.extractall(workspace)
+                result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"], workspace, TIMEOUTS["build"])
+                if result["exit_code"] != 0:
+                    raise RuntimeError(result["output"])
+                goal_file = workspace / "goal.bin"
+                goal_file.write_bytes(cache_data)
+                logger.info("Discovering reference matches by CPU graph saturation; no model inference is run")
+                discovered, discovery_log = runNative(workspace, {"action": "discover", "cache_path": str(goal_file)}, TIMEOUTS["discovery"])
+                uid_metadata = json.loads((workspace / "tensor_graphs_cpp/generated/kernel_uids.json").read_text())
+            for kernel in discovered["kernels"]:
+                kernel["source_path"] = "tensor_graphs_cpp/" + uid_metadata[str(kernel["kernel_id"])]["path"]
+            metadata = {"kernels": discovered["kernels"], "discovery_log": discovery_log,
+                        "build_log": result["output"], "scope": "kernel", "cache_path": str(cache_path), "hardware": hardware}
+            groups = {}
+            for call in discovered["calls"]:
+                expression = call["reference_expression"]
+                configuration = {key: call[key] for key in ("input_shapes", "input_strides", "input_dtypes", "input_constants",
+                                                            "output_shape", "output_strides", "output_dtype")}
+                config_hash = fingerprint(configuration)
+                group = groups.setdefault((expression, config_hash), {"configuration": configuration, "kernels": {}})
+                if call["kernel_matches"]:
+                    group["kernels"][str(call["kernel_id"])] = call["kernel_name"]
+            with store.connection() as connection:
+                goal_id = connection.execute("""INSERT INTO kernel_bench.goals
+                    (fingerprint, name, cache_sha256, cache_data, source_archive, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (goal_hash, cache_path.name, cache_hash, cache_data, archive, Jsonb(metadata))).fetchone()["id"]
+                for (expression, config_hash), group in groups.items():
+                    target_id = hashlib.sha256(expression.encode()).hexdigest()
+                    connection.execute("INSERT INTO kernel_bench.targets(id, expression) VALUES (%s, %s) ON CONFLICT DO NOTHING", (target_id, expression))
+                    connection.execute("""INSERT INTO kernel_bench.configurations
+                        (goal_id, target_id, fingerprint, configuration, matching_kernels)
+                        VALUES (%s, %s, %s, %s, %s)""",
+                        (goal_id, target_id, config_hash, Jsonb(group["configuration"]), Jsonb(group["kernels"])))
+            logger.info("Stored goal %s: %s configurations", goal_id, len(groups))
+            return goal_id
+        finally:
+            lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
 
-            del job["source"]
 
-            rel_path = (
-                Path(kernel_path)
-                .relative_to(PROJECT_ROOT / "tensor_graphs_cpp")
-                .as_posix()
-            )
+def createJob(store, goal_id, source, target_id, idea="", backend="cuda"):
+    if backend not in ("cpu", "cuda"):
+        raise ValueError("backend must be cpu or cuda")
+    if not source or len(source.encode()) > 1024 * 1024:
+        raise ValueError("Provide a kernel source file smaller than 1 MiB")
+    names = extractRegisteredKernelNames(source)
+    registrations = re.findall(r"\bREGISTER_(?:REF_)?KERNEL(?:_VIEW)?\s*\(", stripComments(source))
+    if len(names) != 1 or len(registrations) != 1:
+        raise ValueError("Submit exactly one REGISTER_KERNEL with a literal, unique name")
+    if not store.getConfigurations(goal_id, target_id):
+        raise ValueError("Unknown target for this goal")
+    metadata = store.getGoal(goal_id)["metadata"]
+    if any(kernel["name"] == names[0] for kernel in metadata["kernels"]):
+        raise ValueError("Candidate kernel name is already registered in the baseline")
+    job_id = uuid.uuid4()
+    store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)""", (job_id, goal_id, target_id, idea, source, names[0], backend))
+    return str(job_id)
 
-            cache_file = CACHE_DIR / f"{target_model}-cpp.bin"
-            if cache_file.exists():
-                print(f"[JOB {job_id}] Clearing existing cache: {cache_file}")
-                cache_file.unlink()
 
-            python_path = ".venv/Scripts/python.exe" if os.name == "nt" else "python"
-            print(f"[JOB {job_id}] Step 1/7: Compiling...")
-            build_res = run_cmd(
-                (
-                    [python_path, "build.py", "--cuda"]
-                    if job["backend"] == "cuda"
-                    else [python_path, "build.py"]
-                ),
-                TIMEOUTS["build"],
-            )
-            job["steps"]["compile"] = build_res
-            if build_res["exit_code"] != 0:
-                raise Exception(
-                    f"Compilation failed.\nSTDOUT:\n{build_res['stdout']}\nSTDERR:\n{build_res['stderr']}"
-                )
+def evaluateJob(store, job, workspace):
+    goal = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (job["goal_id"],))[0]
+    if not (workspace / "build.py").is_file():
+        with zipfile.ZipFile(io.BytesIO(bytes(goal["source_archive"]))) as archive:
+            archive.extractall(workspace)
+    staging = workspace / "tensor_graphs_cpp/kernels/generated/kernel_bench"
+    staging.mkdir(parents=True, exist_ok=True)
+    for path in staging.iterdir():
+        if path.is_file():
+            path.unlink()
+    candidate_path = staging / ("candidate.cu" if job["backend"] == "cuda" else "candidate.hpp")
+    candidate_path.write_text(job["source"])
+    try:
+        store.addEvent(job["id"], "build", "Building candidate native bindings")
+        result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"], workspace, TIMEOUTS["build"])
+        store.addEvent(job["id"], "build", result["output"])
+        if result["exit_code"] != 0:
+            raise RuntimeError(f"Build failed with exit code {result['exit_code']}")
+        configurations = store.getConfigurations(job["goal_id"], job["target_id"])
+        expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (job["target_id"],))[0]["expression"]
+        store.addEvent(job["id"], "test_bench", "Testing covered goal configurations, then benchmarking against existing kernels")
+        result, log = runNative(workspace, {"action": "evaluate", "kernel_name": job["kernel_name"],
+                                           "reference_expression": expression,
+                                           "configurations": [{"id": row["id"], "configuration": row["configuration"]} for row in configurations]}, TIMEOUTS["evaluate"])
+        store.addEvent(job["id"], "test_bench", log)
+        store.completeJob(job["id"], result)
+    finally:
+        candidate_path.unlink(missing_ok=True)
 
-            uid_str = get_uid_for_file("kernels/" + rel_path)
-            job["assigned_uid"] = uid_str
 
-            print(f"[JOB {job_id}] Step 2/7: Testing without records...")
-            test_no_rec_res = run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"),
-                    opname,
-                    "--no-records",
-                ],
-                TIMEOUTS["test"],
-            )
-            job["steps"]["test_no_records"] = test_no_rec_res
-            if (
-                test_no_rec_res["exit_code"] != 0
-                or "FAILED" in test_no_rec_res["stdout"]
-            ):
-                raise Exception(
-                    f"Test without records failed.\nSTDOUT:\n{test_no_rec_res['stdout']}\nSTDERR:\n{test_no_rec_res['stderr']}"
-                )
-
-            print(f"[JOB {job_id}] Step 3/7: Running inference to build calls.bin...")
-            run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "write_ref_tensors"),
-                    target_model,
-                ],
-                TIMEOUTS["infer"],
-            )
-            run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"),
-                    target_model,
-                    "--only-plan",
-                ],
-                TIMEOUTS["infer"],
-            )
-            calls_path = BENCHMARKS_DIR / "calls.bin"
-            matched = False
-            if calls_path.exists() and uid_str:
-                uid_int = int(uid_str, 16)
-                with open(calls_path, "rb") as f:
-                    br = BinaryReader(f)
-                    while True:
-                        r = br.read_record()
-                        if r is None:
-                            break
-                        if r["kernelId"] == uid_int:
-                            matched = True
-                            break
-            print(f"[JOB {job_id}] UID Match Result: {matched}")
-            job["steps"]["matched"] = matched
-            if not matched:
-                raise Exception(
-                    "Kernel UID not matched in inference plan (calls.bin). The kernel might not be utilized or the operation signature/shapes are incorrect."
-                )
-
-            print(f"[JOB {job_id}] Step 4/7: Testing with records...")
-            test_rec_res = run_cmd(
-                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"), opname],
-                TIMEOUTS["test"],
-            )
-            job["steps"]["test_records"] = test_rec_res
-            if test_rec_res["exit_code"] != 0 or "FAILED" in test_rec_res["stdout"]:
-                raise Exception(
-                    f"Test with records failed.\nSTDOUT:\n{test_rec_res['stdout']}\nSTDERR:\n{test_rec_res['stderr']}"
-                )
-
-            print(f"[JOB {job_id}] Step 5/7: Benchmarking kernel...")
-            bench_res = run_cmd(
-                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench"), opname],
-                TIMEOUTS["bench"],
-            )
-            job["steps"]["bench"] = bench_res
-            if bench_res["exit_code"] != 0:
-                raise Exception(
-                    f"Benchmark failed.\nSTDOUT:\n{bench_res['stdout']}\nSTDERR:\n{bench_res['stderr']}"
-                )
-
-            print(
-                f"[JOB {job_id}] Step 6/7: Regenerating cache with optimized routes..."
-            )
-            run_cmd(
-                [
-                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"),
-                    target_model,
-                    "--only-plan",
-                ],
-                TIMEOUTS["infer"],
-            )
-
-            print(f"[JOB {job_id}] Step 7/7: Final time analysis...")
-            total_time, extracted_uids, message = analyze_total_time(target_model)
-
-            is_extracted = False
-            if uid_str:
-                is_extracted = (
-                    uid_str in extracted_uids
-                    or f"0x{int(uid_str, 16):x}" in extracted_uids
-                )
-
-            job["steps"]["extracted"] = is_extracted
-
-            if not is_extracted:
-                raise Exception(
-                    "Kernel was not extracted in the final optimized graph. It may be functionally valid but benchmarks slower than existing alternatives or unoptimized defaults."
-                )
-
-            job["total_estimated_time_ms"] = total_time
-            job["benchmark_scores"] = get_benchmark_scores(uid_str)
-
-            job["status"] = "completed"
-            print(f"[SUCCESS] Job {job_id} completed successfully.")
-
-        except Exception as e:
-            job["status"] = "failed"
-            job["error"] = str(e)
-            print(f"[ERROR] Job {job_id} failed: {e}")
-
-            if job.get("kernel_file") and os.path.exists(job["kernel_file"]):
-                failed_path = job["kernel_file"] + ".failed"
+def runWorker(store, stop_event):
+    with tempfile.TemporaryDirectory(prefix="kernel-bench-worker-") as temp_path:
+        while not stop_event.is_set():
+            with store.connection() as lock_connection:
+                lock_connection.autocommit = True
+                acquired = lock_connection.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (WORKER_LOCK,)).fetchone()["acquired"]
+                if not acquired:
+                    stop_event.wait(1)
+                    continue
                 try:
-                    os.rename(job["kernel_file"], failed_path)
-                    job["kernel_file"] = failed_path
-                    if "agent_file_path" in job:
-                        job["agent_file_path"] += ".failed"
-                    print(f"[INFO] Renamed failed kernel to {failed_path}")
-                except Exception as rename_err:
-                    print(f"[WARN] Failed to rename {job['kernel_file']}: {rename_err}")
+                    if stop_event.is_set():
+                        break
+                    store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running'")
+                    job = store.nextJob()
+                    if job is not None:
+                        workspace = Path(temp_path) / str(job["goal_id"])
+                        workspace.mkdir(exist_ok=True)
+                        try:
+                            evaluateJob(store, job, workspace)
+                        except Exception as error:  # noqa: BLE001 - persist native/build failures and keep the queue alive
+                            store.addEvent(job["id"], "error", str(error))
+                            store.failJob(job["id"], str(error))
+                finally:
+                    lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
+            if job is None:
+                stop_event.wait(1)
 
-        job["completed_at"] = datetime.now(timezone.utc).isoformat()
-        save_job_history(job)
 
-
-def start_worker():
-    t = threading.Thread(target=run_worker, daemon=True)
-    t.start()
-    return t
-
-
-def create_job(source: str, opname: str, backend: str, target_model: str) -> str:
-    job_id = uuid.uuid4().hex[:12]
-    print(f"[SYSTEM] Creating job {job_id} for {opname} ({backend})")
-    job = {
-        "job_id": job_id,
-        "status": "queued",
-        "backend": backend,
-        "target_model": target_model,
-        "opname": opname,
-        "source": source,
-        "assigned_uid": None,
-        "started_at": None,
-        "completed_at": None,
-        "total_estimated_time_ms": None,
-        "benchmark_scores": [],
-        "steps": {
-            "compile": None,
-            "test_no_records": None,
-            "matched": False,
-            "test_records": None,
-            "bench": None,
-            "extracted": False,
-        },
-    }
-    with worker_lock:
-        jobs[job_id] = job
-    return job_id
+def startWorker(store, stop_event=None):
+    stop_event = stop_event if stop_event is not None else threading.Event()
+    thread = threading.Thread(target=runWorker, args=(store, stop_event), name="kernel-bench-worker", daemon=True)
+    thread.start()
+    return thread

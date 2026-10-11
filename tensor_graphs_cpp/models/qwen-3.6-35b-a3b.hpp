@@ -951,7 +951,7 @@ class Qwen3_6_35B_A3B_Model
 
         uint32_t expert_inter_dim = cfg.shared_expert_dim;
         {
-            auto meta = FileRegistry::get().getMetadata(w_path, prefix + ".mlp.experts.gate_up_proj");
+            auto meta = TensorResolver::get().getMetadata(w_path, prefix + ".mlp.experts.gate_up_proj");
             // gate_up_proj shape: [num_experts, 2 * ffn_dim, hidden_size]
             expert_inter_dim = meta.shape[1] / 2;
         }
