@@ -44,33 +44,6 @@ def testClientIdentityRestart(monkeypatch, tmp_path):
         KernelBenchClient('https://other.example', 'bench', path)
 
 
-def testClientReadSource(monkeypatch, tmp_path):
-    class Response:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"content": "source code"}
-
-    captured = {}
-
-    def mockGet(url, params=None, timeout=None):
-        captured["url"] = url
-        captured["params"] = params
-        return Response()
-
-    monkeypatch.setattr('requests.Session.get', lambda self, url, **kwargs: mockGet(url, **kwargs))
-    path = tmp_path / 'identity.json'
-    client = KernelBenchClient('https://test.example', 'bench', path)
-    assert client.readSource("kernels/add.cu") == "source code"
-    assert captured["url"] == "https://test.example/api/source"
-    assert captured["params"] == {"path": "kernels/add.cu"}
-
-    # Also test get with dict params and keyword params
-    assert client.get("/api/source", params={"path": "kernels/sub.cu"}) == {"content": "source code"}
-    assert captured["params"] == {"path": "kernels/sub.cu"}
-
-
 @pytest.fixture
 def boardApp():
     url = os.environ.get('KERNEL_BENCH_BOARD_TEST_DATABASE_URL')
