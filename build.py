@@ -1790,7 +1790,15 @@ def main() -> None:
         nargs="+",
         help="Specify which target C++ files to build (e.g. main, bench, test, bindings)",
     )
+    parser.add_argument("--lint-candidate", help="Validate only this candidate kernel")
     args = parser.parse_args()
+
+    if args.lint_candidate:
+        candidate_path = Path(args.lint_candidate).resolve()
+        if not candidate_path.is_file() or candidate_path.suffix not in (".hpp", ".cu"):
+            raise ValueError("Candidate must be an existing .hpp or .cu file")
+        KernelLinter()._validate_kernel_file(candidate_path.relative_to(Path.cwd()))
+        return
 
     if args.lint:
         KernelLinter().lint(BuildConfig())

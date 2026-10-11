@@ -179,6 +179,7 @@ def initializeGoal(store, cache_path):
         lock_connection.autocommit = True
         logger.info("Waiting for the discovery/GPU worker database lock")
         lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK,))
+        lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
         logger.info("Acquired discovery/GPU worker database lock")
         try:
             existing = store.query("SELECT id FROM kernel_bench.goals WHERE fingerprint = %s", (goal_hash,))
@@ -226,10 +227,13 @@ def initializeGoal(store, cache_path):
             logger.info("Stored goal %s: %s configurations", goal_id, len(groups))
             return goal_id
         finally:
+            lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
             lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
 
 
-def createJob(store, goal_id, source, target_id, idea="", backend="cuda"):
+def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="evaluate"):
+    if mode not in ("lint", "compile", "evaluate"):
+        raise ValueError("mode must be lint, compile or evaluate")
     if backend not in ("cpu", "cuda"):
         raise ValueError("backend must be cpu or cuda")
     if not source or len(source.encode()) > 1024 * 1024:
@@ -244,8 +248,8 @@ def createJob(store, goal_id, source, target_id, idea="", backend="cuda"):
     if any(kernel["name"] == names[0] for kernel in metadata["kernels"]):
         raise ValueError("Candidate kernel name is already registered in the baseline")
     job_id = uuid.uuid4()
-    store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)""", (job_id, goal_id, target_id, idea, source, names[0], backend))
+    store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend, mode)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (job_id, goal_id, target_id, idea, source, names[0], backend, mode))
     return str(job_id)
 
 
@@ -270,17 +274,31 @@ def evaluateJob(store, job, workspace):
         artifact_ids.append(store.addArtifact(job["id"], name, data, media_type))
 
     saveArtifact("submitted_source", job["source"].encode())
+    mode = job.get("mode", "evaluate")
     build_result = None
     for name in ("native_result.json", "native.stdout", "native.stderr", "native_command.json"):
         (workspace / name).unlink(missing_ok=True)
     try:
-        store.addEvent(job["id"], "build", "Building candidate native bindings")
+        store.addEvent(job["id"], "lint", "Validating candidate source")
         build_env = {**os.environ, "KERNEL_BENCH_SERVER_JOB": "1",
                      "KERNEL_BENCH_DIAGNOSTICS_DIR": str(diagnostic_dir.resolve())}
-        result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"],
-                        workspace, TIMEOUTS["build"], env=build_env)
+        lint_command = [getPythonExe(), "build.py", "--lint-candidate", str(candidate_path.relative_to(workspace))]
+        baseline_marker = workspace / ".baseline_linted"
+        if not baseline_marker.exists() and mode != "lint":
+            candidate_path.unlink()
+            baseline = runCmd([getPythonExe(), "build.py", "--lint"], workspace, TIMEOUTS["build"], env=build_env)
+            candidate_path.write_text(job["source"])
+            build_result = baseline
+            if baseline["exit_code"] != 0:
+                raise JobFailure("Baseline lint failed", {"kind": "lint_error", "stage": "lint", "diagnostic": baseline["output"]})
+            baseline_marker.touch()
+        result = runCmd(lint_command, workspace, TIMEOUTS["build"], env=build_env)
+        if result["exit_code"] == 0 and mode != "lint":
+            store.addEvent(job["id"], "build", "Candidate lint passed; compiling native bindings")
+            result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0", "--no-lint"],
+                            workspace, TIMEOUTS["build"], env=build_env)
         build_result = result
-        store.addEvent(job["id"], "build", result["output"])
+        store.addEvent(job["id"], "lint" if "--lint-candidate" in result["command"] else "build", result["output"])
         if result["exit_code"] != 0:
             compiler_records = []
             for path in sorted(diagnostic_dir.glob("compiler-*.json")):
@@ -300,16 +318,31 @@ def evaluateJob(store, job, workspace):
                 summary = next((line.strip(" │") for line in diagnostic_lines
                                 if "error:" in line.lower() or "DETECTED" in line or "Violation" in line),
                                f"Build failed with exit code {result['exit_code']}")
-            raise JobFailure(summary[:1000], {"kind": kind, "stage": "build", "exit_code": result["exit_code"],
+            raise JobFailure(summary[:1000], {"kind": kind, "stage": "lint" if "--lint-candidate" in result["command"] else "build", "exit_code": result["exit_code"],
                                              "signal": -result["exit_code"] if result["exit_code"] < 0 else None,
                                              "diagnostic": diagnostic, "compiler_diagnostics": failed})
+        validation_fingerprint = fingerprint({"source": job["source"], "goal": store.getGoal(job["goal_id"])["fingerprint"],
+                                              "backend": job["backend"], "build_command": [arg.replace(str(workspace), "<workspace>") for arg in build_result["command"]],
+                                              "metadata": json.loads((diagnostic_dir / "build_metadata.json").read_text())
+                                              if (diagnostic_dir / "build_metadata.json").exists() else {}})
+        if mode == "lint":
+            store.completeJob(job["id"], {"mode": mode, "passed_stages": ["submission", "lint"], "measurements": [],
+                                          "validation_id": str(job["id"]), "source_fingerprint": hashlib.sha256(job["source"].encode()).hexdigest(),
+                                          "build_fingerprint": validation_fingerprint})
+            return
         configurations = store.getConfigurations(job["goal_id"], job["target_id"])
         expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (job["target_id"],))[0]["expression"]
-        store.addEvent(job["id"], "test_bench", "Testing covered goal configurations, then benchmarking against existing kernels")
-        result, log = runNative(workspace, {"action": "evaluate", "kernel_name": job["kernel_name"],
+        native_stage = "registration" if mode == "compile" else "test_bench"
+        store.addEvent(job["id"], native_stage, "Validating executable registration and target" if mode == "compile" else
+                       "Testing covered goal configurations, then benchmarking against existing kernels")
+        result, log = runNative(workspace, {"action": "compile" if mode == "compile" else "evaluate", "kernel_name": job["kernel_name"],
                                            "reference_expression": expression,
                                            "configurations": [{"id": row["id"], "configuration": row["configuration"]} for row in configurations]}, TIMEOUTS["evaluate"])
-        store.addEvent(job["id"], "test_bench", log)
+        store.addEvent(job["id"], native_stage, log)
+        result.update({"mode": mode, "validation_id": str(job["id"]), "source_fingerprint": hashlib.sha256(job["source"].encode()).hexdigest(),
+                       "build_fingerprint": validation_fingerprint,
+                       "passed_stages": ["submission", "lint", "build", "load", "registration", "signature"] +
+                       (["correctness", "benchmark", "comparison"] if mode == "evaluate" else [])})
     except JobFailure as error:
         error.details["artifact_ids"] = artifact_ids
         metadata_path = diagnostic_dir / "build_metadata.json"
@@ -337,25 +370,33 @@ def evaluateJob(store, job, workspace):
     store.completeJob(job["id"], result)
 
 
-def runWorker(store, stop_event):
+def runWorker(store, stop_event, validation=False):
+    worker_lock = WORKER_LOCK + 1 if validation else WORKER_LOCK
     with tempfile.TemporaryDirectory(prefix="kernel-bench-worker-") as temp_path:
         while not stop_event.is_set():
             with store.connection() as lock_connection:
                 lock_connection.autocommit = True
-                acquired = lock_connection.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (WORKER_LOCK,)).fetchone()["acquired"]
+                acquired = lock_connection.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (worker_lock,)).fetchone()["acquired"]
                 if not acquired:
                     stop_event.wait(1)
                     continue
                 try:
                     if stop_event.is_set():
                         break
-                    store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running'")
-                    job = store.nextJob()
+                    store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running' AND (mode <> 'evaluate') = %s", (validation,))
+                    job = store.nextJob(validation)
                     if job is not None:
                         workspace = Path(temp_path) / str(job["goal_id"])
                         workspace.mkdir(exist_ok=True)
                         try:
-                            evaluateJob(store, job, workspace)
+                            if job.get("mode", "evaluate") != "lint":
+                                # Shared across processes: builds and measurements never overlap.
+                                lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
+                            try:
+                                evaluateJob(store, job, workspace)
+                            finally:
+                                if job.get("mode", "evaluate") != "lint":
+                                    lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
                         except Exception as error:  # noqa: BLE001 - persist native/build failures and keep the queue alive
                             details = getattr(error, "details", {})
                             message = str(error)
@@ -368,13 +409,13 @@ def runWorker(store, stop_event):
                                           getattr(error, "details", {"kind": "worker_failure", "stage": job.get("step", "worker")}),
                                           getattr(error, "result", {}))
                 finally:
-                    lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
+                    lock_connection.execute("SELECT pg_advisory_unlock(%s)", (worker_lock,))
             if job is None:
                 stop_event.wait(1)
 
 
-def startWorker(store, stop_event=None):
+def startWorker(store, stop_event=None, validation=False):
     stop_event = stop_event if stop_event is not None else threading.Event()
-    thread = threading.Thread(target=runWorker, args=(store, stop_event), name="kernel-bench-worker", daemon=True)
+    thread = threading.Thread(target=runWorker, args=(store, stop_event, validation), name="kernel-bench-validation-worker" if validation else "kernel-bench-worker", daemon=True)
     thread.start()
     return thread

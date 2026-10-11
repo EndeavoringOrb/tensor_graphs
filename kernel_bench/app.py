@@ -31,7 +31,8 @@ TOOLS = [
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
     {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
     {"name": "read_source", "method": "GET", "path": "/api/source?path=...", "description": "Read baseline kernel/core/reference/hardware source snapshot"},
-    {"name": "submit_iteration", "method": "POST", "path": "/api/iteration/submit", "description": "Submit target_id, source, backend (cpu/cuda), and idea; one REGISTER_KERNEL"},
+    {"name": "lint_iteration", "method": "POST", "path": "/api/iteration/lint", "description": "Validate candidate lint without building or benchmarking; returns a queued validation job"},
+    {"name": "submit_iteration", "method": "POST", "path": "/api/iteration/submit", "description": "Submit target_id, source, backend (cpu/cuda), idea, and mode (lint/compile/evaluate, default evaluate); one REGISTER_KERNEL"},
     {"name": "get_job", "method": "GET", "path": "/api/jobs/{job_id}", "description": "Correctness coverage, measurements, and per-configuration speedups"},
     {"name": "get_job_logs", "method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Build/test/benchmark diagnostics; filters: after_id, tail (1–1000), stage, literal grep (max 200 characters)"},
     {"name": "list_job_artifacts", "method": "GET", "path": "/api/jobs/{job_id}/artifacts", "description": "Durable source, build commands, capabilities and full diagnostics"},
@@ -156,24 +157,26 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
                 return jsonify({"error": "Unknown baseline source path"}), 404
             return jsonify({"path": path, "content": archive.read(path).decode()})
 
+    @app.post("/api/iteration/lint")
     @app.post("/api/iteration/submit")
     @app.post("/api/kernels/test")
     def submit():
         data = request.get_json()
         if not isinstance(data, dict):
             raise TypeError("Expected a JSON object")
-        for key in ("source", "target_id", "idea", "backend"):
+        for key in ("source", "target_id", "idea", "backend", "mode"):
             if key in data and not isinstance(data[key], str):
                 raise TypeError(f"{key} must be a string")
-        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"))
-        return jsonify({"job_id": job_id, "status": "queued"}), 202
+        mode = "lint" if request.path == "/api/iteration/lint" else data.get("mode", "evaluate")
+        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode)
+        return jsonify({"job_id": job_id, "validation_id": job_id, "mode": mode, "status": "queued"}), 202
 
     @app.get("/api/jobs")
     @app.get("/api/history")
     @app.get("/api/versions")
     def jobs():
         target_id = request.args.get("target_id", "")
-        rows = store.query("""SELECT id AS job_id, target_id, idea, kernel_name, backend, status, step,
+        rows = store.query("""SELECT id AS job_id, target_id, idea, kernel_name, backend, mode, status, step,
             result, error, error_details, created_at, completed_at FROM kernel_bench.jobs
             WHERE goal_id = %s AND (%s = '' OR target_id = %s) ORDER BY created_at DESC LIMIT 200""", (goal_id, target_id, target_id))
         return jsonify({"jobs": rows})
@@ -322,6 +325,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     if start_worker:
         app.extensions["kernel_bench_worker"] = startWorker(store, stop_event)
+        app.extensions["kernel_bench_validation_worker"] = startWorker(store, stop_event, validation=True)
     return app
 
 
@@ -358,13 +362,14 @@ def serveApp(args):
             server_thread = threading.Thread(target=server.run, name="kernel-bench-http", daemon=True)
             server_thread.start()
             while not stop_event.wait(1):
-                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive():
+                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive() or not app.extensions["kernel_bench_validation_worker"].is_alive():
                     raise RuntimeError("KernelBench HTTP server or worker exited unexpectedly")
     finally:
         stop_event.set()
         logger.info("Draining KernelBench; waiting for active startup/job processes")
         if app is not None:
             app.extensions["kernel_bench_worker"].join()
+            app.extensions["kernel_bench_validation_worker"].join()
         if server is not None:
             server.task_dispatcher.shutdown()
             server.asyncore.close_all(map=server._map)

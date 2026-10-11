@@ -37,11 +37,14 @@ class KernelBenchClient:
     def getJobs(self, target_id=""):
         return self.get("/api/jobs", target_id=target_id)["jobs"]
 
-    def submitIteration(self, target_id, source, idea="", backend="cuda"):
+    def submitIteration(self, target_id, source, idea="", backend="cuda", mode="evaluate"):
         response = self.session.post(self.base_url + "/api/iteration/submit",
-                                     json={"target_id": target_id, "source": source, "idea": idea, "backend": backend}, timeout=30)
+                                     json={"target_id": target_id, "source": source, "idea": idea, "backend": backend, "mode": mode}, timeout=30)
         response.raise_for_status()
         return response.json()
+
+    def lintIteration(self, target_id, source, idea="", backend="cuda"):
+        return self.submitIteration(target_id, source, idea, backend, mode="lint")
 
     def getJobStatus(self, job_id):
         return self.get(f"/api/jobs/{job_id}")

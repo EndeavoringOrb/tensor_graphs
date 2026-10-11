@@ -47,6 +47,8 @@ def evaluate(payload, state):
                             {"kind": "registration_error", "stage": "registration", "candidate": candidate,
                              "submitted_name": payload["kernel_name"], "observed_match_count": len(candidates),
                              "enabled_capabilities": capabilities})
+    if payload["action"] == "compile":
+        return {"candidate": candidate, "measurements": []}
     matching = []
     for row in payload["configurations"]:
         state["error_details"] = {"stage": "match", "configuration_id": row["id"]}
@@ -120,7 +122,7 @@ def main():
         native = native_module
         if payload["action"] == "discover":
             state["result"] = {"kernels": native.kernel_bench_kernels(), "calls": native.kernel_bench_discover(payload["cache_path"])}
-        elif payload["action"] == "evaluate":
+        elif payload["action"] in ("evaluate", "compile"):
             state["result"] = evaluate(payload, state)
         else:
             raise ValueError("Unknown native runner action")

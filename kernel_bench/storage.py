@@ -76,13 +76,13 @@ class Store:
             connection.execute("UPDATE kernel_bench.jobs SET step = %s WHERE id = %s", (step, job_id))
             connection.execute("INSERT INTO kernel_bench.events(job_id, step, message) VALUES (%s, %s, %s)", (job_id, step, message))
 
-    def nextJob(self):
+    def nextJob(self, validation=False):
         rows = self.query("""
             UPDATE kernel_bench.jobs SET status = 'running', started_at = now(), error = NULL, error_details = NULL
-            WHERE id = (SELECT id FROM kernel_bench.jobs WHERE status = 'queued'
+            WHERE id = (SELECT id FROM kernel_bench.jobs WHERE status = 'queued' AND (mode <> 'evaluate') = %s
                         ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING *
-        """)
+        """, (validation,))
         return rows[0] if rows else None
 
     def completeJob(self, job_id, result):

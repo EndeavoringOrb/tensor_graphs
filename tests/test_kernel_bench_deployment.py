@@ -36,7 +36,7 @@ def testDrainFinishesActiveJobWithoutClaimingAnother(monkeypatch):
         def execute(self, *args):
             pass
 
-        def nextJob(self):
+        def nextJob(self, validation=False):
             self.claims += 1
             return {"goal_id": 1}
 
@@ -117,6 +117,7 @@ def createApp(goal_cache, stop_event):
     thread = threading.Thread(target=worker)
     thread.start()
     app.extensions["kernel_bench_worker"] = thread
+    app.extensions["kernel_bench_validation_worker"] = thread
     return app
 
 module.createApp = createApp

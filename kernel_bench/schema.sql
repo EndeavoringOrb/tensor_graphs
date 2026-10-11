@@ -82,3 +82,6 @@ CREATE TABLE IF NOT EXISTS kernel_bench.artifacts (
     UNIQUE (job_id, name)
 );
 CREATE INDEX IF NOT EXISTS artifacts_job ON kernel_bench.artifacts(job_id);
+
+ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'evaluate' CHECK (mode IN ('lint', 'compile', 'evaluate'));
+CREATE INDEX IF NOT EXISTS jobs_mode_queue ON kernel_bench.jobs(mode, created_at) WHERE status = 'queued';

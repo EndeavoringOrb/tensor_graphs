@@ -21,10 +21,16 @@ may work on the same target; there are no reservations.
 Submit one complete source file with exactly one REGISTER_KERNEL, a unique
 registration name, and a reference factory matching the target expression to
 POST /api/iteration/submit. JSON fields: target_id, source, idea (optimization
-hypothesis), backend (cpu or cuda). Kernels may specialize to a subset of target
+hypothesis), backend (cpu or cuda), mode (lint, compile, or evaluate; default
+evaluate). Lint checks only candidate source; POST /api/iteration/lint is a
+convenience endpoint for this mode. Compile lints, builds, loads, and validates
+executable registration and target/signatures without correctness or benchmarks.
+Validation uses a separate queue; heavy builds serialize with measurements.
+Completed validation reports passed_stages and source/build fingerprints, and
+does not establish correctness or performance. Kernels may specialize to a subset of target
 configurations. Poll /api/jobs/{job_id} until completed or failed; inspect
 /api/jobs/{job_id}/logs and correctness coverage, raw timing samples, medians,
-and per-configuration speedups. Zero matches and correctness/build failures fail
+and per-configuration speedups for evaluate mode. Zero matches and correctness/build failures fail
 the job. Iterate using the measurements; report coverage and evidence for gains.
 The server builds, tests, and benchmarks on its hardware, so a local CUDA/compiler
 installation is unnecessary. Model inference, compiler selection, and automatic

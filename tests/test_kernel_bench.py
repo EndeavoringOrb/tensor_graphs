@@ -186,7 +186,11 @@ def testActionableFailuresAndDurableArtifacts(goal, kind):
     assert client.get(by_name["submitted_source"]["url"], headers=headers).data.decode() == source
     candidate_name = "tensor_graphs_cpp/kernels/generated/kernel_bench/candidate.cu"
     assert client.get(by_name[candidate_name]["url"], headers=headers).data.decode() == source
-    assert "build_diagnostics/build_metadata.json" in by_name
+    if kind == "lint_error":
+        assert "build_diagnostics/build_metadata.json" not in by_name
+        assert persisted["error_details"]["stage"] == "lint"
+    else:
+        assert "build_diagnostics/build_metadata.json" in by_name
     if kind == "compilation_error":
         stderr_artifacts = [row for row in artifacts if row["name"].startswith("build_diagnostics/compiler-") and row["name"].endswith(".stderr")]
         assert any(b"KernelBench diagnostic compile error" in client.get(row["url"], headers=headers).data for row in stderr_artifacts)
@@ -206,3 +210,25 @@ def testActionableFailuresAndDurableArtifacts(goal, kind):
     other_id = createJob(store, goal_id, candidateSource(), addTarget(store, goal_id))
     artifact_id = by_name["submitted_source"]["artifact_id"]
     assert client.get(f"/api/jobs/{other_id}/artifacts/{artifact_id}", headers=headers).status_code == 404
+
+
+@pytest.mark.parametrize("mode", ["lint", "compile"])
+def testValidationModes(goal, mode):
+    store, goal_id, app, workspace = goal
+    target_id = addTarget(store, goal_id)
+    source = candidateSource("KernelBench_Validation_" + mode)
+    client = app.test_client()
+    response = client.post("/api/iteration/lint" if mode == "lint" else "/api/iteration/submit",
+                           headers={"X-Bench-Token": "integration-test-token"},
+                           json={"target_id": target_id, "source": source, "backend": "cuda", "mode": mode})
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    job = store.getJob(job_id)
+    assert job["mode"] == mode
+    evaluateJob(store, job, workspace / ("validation_" + mode))
+    completed = store.getJob(job_id)
+    assert completed["status"] == "completed"
+    assert completed["result"]["mode"] == mode
+    assert completed["result"]["measurements"] == []
+    assert "correctness" not in completed["result"]["passed_stages"]
+    assert not store.query("SELECT * FROM kernel_bench.measurements WHERE job_id = %s", (job_id,))

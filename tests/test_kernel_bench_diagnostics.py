@@ -121,8 +121,11 @@ def testBuildFailureArtifactsSurviveCandidateCleanup(monkeypatch, tmp_path, kind
         def addEvent(self, *args):
             self.events.append(args)
     store = FakeStore()
+    (tmp_path / ".baseline_linted").touch()
     diagnostic = "candidate.cu(187): error: no suitable conversion [0]" if kind == "compilation_error" else "REDUNDANT LOGIC DETECTED: manual Input Count Check\nLinter Violation"
     def run(command, cwd, timeout, env):
+        if "--lint-candidate" in command and kind == "compilation_error":
+            return {"exit_code": 0, "output": "", "stdout": "", "stderr": "", "timed_out": False, "command": command}
         directory = Path(env["KERNEL_BENCH_DIAGNOSTICS_DIR"])
         if kind == "compilation_error":
             (directory / "compiler-test.json").write_text(json.dumps({"stderr": diagnostic, "stdout": "", "exit_code": 1, "command": "nvcc candidate.cu"}))
@@ -225,7 +228,7 @@ def testWorkerPersistsFailureDetailsAndDiagnosticEvent(monkeypatch):
             yield FakeConnection()
         def execute(self, *args):
             pass
-        def nextJob(self):
+        def nextJob(self, validation=False):
             return {"id": "test", "goal_id": 1}
         def addEvent(self, *args):
             self.events.append(args)
@@ -245,3 +248,46 @@ def testWorkerPersistsFailureDetailsAndDiagnosticEvent(monkeypatch):
     assert store.failure[3]["tested_configuration_ids"] == [1]
     assert "actual mismatch" in store.events[-1][2]
     assert "artifact" in store.events[-1][2]
+
+
+def testCompileValidationNeverExecutesCandidate(monkeypatch, tmp_path):
+    from kernel_bench import native_runner
+    native = fakeNative()
+    def forbidden(*args):
+        pytest.fail("Compile validation executed a configuration")
+    native.kernel_bench_matches = forbidden
+    native.kernel_bench_test_diagnostics = forbidden
+    native.kernel_bench_benchmark = forbidden
+    monkeypatch.setattr(native_runner, "native", native)
+    payload = payloadFor(tmp_path)
+    payload["action"] = "compile"
+    result = native_runner.evaluate(payload, {"result": {}})
+    assert result["candidate"]["name"] == "candidate"
+    assert result["measurements"] == []
+
+
+def testLintModeNeverBuildsOrLoads(monkeypatch, tmp_path):
+    (tmp_path / "build.py").touch()
+    class FakeStore:
+        def query(self, *args):
+            return [{"source_archive": b""}]
+        def getGoal(self, *args):
+            return {"fingerprint": "snapshot"}
+        def addArtifact(self, *args):
+            return "artifact"
+        def addEvent(self, *args):
+            pass
+        def completeJob(self, job_id, result):
+            self.result = result
+    commands = []
+    def run(command, *args, **kwargs):
+        commands.append(command)
+        assert "--lint-candidate" in command
+        return {"exit_code": 0, "output": "", "stdout": "", "stderr": "", "command": command}
+    monkeypatch.setattr("kernel_bench.jobs.runCmd", run)
+    store = FakeStore()
+    evaluateJob(store, {"id": "job", "goal_id": 1, "backend": "cpu", "source": "candidate", "mode": "lint"}, tmp_path)
+    assert len(commands) == 1
+    assert store.result["passed_stages"] == ["submission", "lint"]
+    assert store.result["measurements"] == []
+    assert store.result["build_fingerprint"]

@@ -190,3 +190,16 @@ with `getJobArtifacts`, and downloads bytes with `readJobArtifact`. Existing cal
 and existing job error strings remain compatible. Schema additions run at startup;
 older jobs have null `error_details` and no artifacts. Updated source snapshots
 create a new goal on normal startup, including the diagnostic native bindings.
+
+Submission supports `mode: "lint"`, `"compile"`, or `"evaluate"` (default).
+`POST /api/iteration/lint` forces lint mode and accepts the same request fields.
+Lint checks the submitted candidate without compiling. Compile checks lint, build,
+loading, executable registration, target identity, and compiler-checked signatures;
+it does not test correctness or measure performance. Completed jobs report their
+mode, passed stages, validation ID, and source/build fingerprints. Builds are not reused
+between validation and evaluation jobs yet.
+
+Validation has a separate durable queue and isolated workspace. Lint can run during
+an evaluation. Heavy builds and measurements share a PostgreSQL advisory lock,
+so compile validation can wait for an active evaluation, but need not wait for the
+whole evaluation queue. Immutable baseline lint runs once per worker snapshot.
