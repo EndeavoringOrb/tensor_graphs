@@ -41,7 +41,7 @@ class Store:
             connection.execute(sql, parameters)
 
     def getGoal(self, goal_id):
-        rows = self.query("SELECT id, name, fingerprint, cache_sha256, metadata, created_at FROM kernel_bench.goals WHERE id = %s", (goal_id,))
+        rows = self.query("SELECT id, name, definition_id, fingerprint, cache_sha256, metadata, created_at FROM kernel_bench.goals WHERE id = %s", (goal_id,))
         if not rows:
             raise ValueError("Unknown goal")
         return rows[0]
@@ -79,10 +79,10 @@ class Store:
     def nextJob(self, validation=False):
         rows = self.query("""
             UPDATE kernel_bench.jobs SET status = 'running', started_at = now(), error = NULL, error_details = NULL
-            WHERE id = (SELECT id FROM kernel_bench.jobs WHERE status = 'queued' AND (mode <> 'evaluate') = %s
+            WHERE id = (SELECT id FROM kernel_bench.jobs WHERE status = 'queued'
                         ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING *
-        """, (validation,))
+        """, ())
         return rows[0] if rows else None
 
     def completeJob(self, job_id, result):
@@ -116,7 +116,7 @@ class Store:
         rows = self.query("""SELECT mode, count(*) FILTER (WHERE status = 'queued') AS queued,
             count(*) FILTER (WHERE status = 'running') AS running FROM kernel_bench.jobs
             WHERE status IN ('queued', 'running') GROUP BY mode""")
-        depths = {mode: {"queued": 0, "running": 0} for mode in ("lint", "compile", "evaluate")}
+        depths = {mode: {"queued": 0, "running": 0} for mode in ("lint", "compile", "evaluate", "promote", "goal_setup")}
         for row in rows:
             depths[row["mode"]] = {key: row[key] for key in ("queued", "running")}
         statistics = self.query("""SELECT mode, stage, count(*) AS sample_count,
@@ -126,14 +126,14 @@ class Store:
         result = {"depth_by_mode": depths, "workers": self.query("""SELECT w.*, COALESCE(j.step, w.stage) AS running_stage, j.stage_started_at,
                       w.heartbeat_at < now() - interval '30 seconds' AS stale
                       FROM kernel_bench.workers w LEFT JOIN kernel_bench.jobs j ON j.id = w.job_id"""),
-                  "ordering": "created_at ASC, id ASC within validation (lint/compile) or evaluation lane; calibration runs when evaluation is idle",
+                  "ordering": "created_at ASC, id ASC in one shared queue; calibration runs only when the queue is idle",
                   "recent_stage_durations": statistics, "estimated_completion_range_seconds": None}
         if job is not None:
             position = None
             if job["status"] == "queued":
                 position = self.query("""SELECT count(*) + 1 AS position FROM kernel_bench.jobs
-                    WHERE status = 'queued' AND (mode <> 'evaluate') = %s
-                    AND (created_at, id) < (%s, %s)""", (job["mode"] != "evaluate", job["created_at"], job["id"]))[0]["position"]
+                    WHERE status = 'queued'
+                    AND (created_at, id) < (%s, %s)""", (job["created_at"], job["id"]))[0]["position"]
             result["position"] = position
         if (job is None or job["status"] in ("queued", "running")) and not any(worker["stage"] == "baseline" for worker in result["workers"]):
             history = self.query("""SELECT mode, count(*) AS count, min(seconds) AS low, max(seconds) AS high

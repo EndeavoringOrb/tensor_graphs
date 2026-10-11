@@ -52,7 +52,7 @@ def listJobs(store, goal_id):
     conditions = ['goal_id = %s']
     parameters = [goal_id]
     for key, allowed in [('status', {'queued', 'running', 'completed', 'failed'}),
-                         ('mode', {'lint', 'compile', 'evaluate'}), ('target_id', None), ('agent_id', None)]:
+                         ('mode', {'lint', 'compile', 'evaluate', 'promote', 'goal_setup'}), ('target_id', None), ('agent_id', None)]:
         value = request.args.get(key)
         if value:
             if allowed is not None and value not in allowed:

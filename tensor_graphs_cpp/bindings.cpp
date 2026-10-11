@@ -1,5 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <chrono>
 
 #if defined(_WIN32) || defined(_WIN64)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -442,6 +443,10 @@ class LLMSession
 
         session->compile();
     }
+
+    Session &nativeSession() { return *session; }
+    LogicalId rootId() const { return logitsId; }
+    LogicalId inputId() const { return inputIdsId; }
 
     int32_t generate_step(const std::vector<uint32_t> &tokens)
     {
@@ -1065,6 +1070,55 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("ensure_full_bucket", &Session::ensureFullBucket)
         .def("export_ortools_problem", &Session::exportOrtoolsProblem, py::arg("do_saturate") = true)
         .def("ensure_cache_coverage_ortools", &Session::ensureCacheCoverageOrtools, py::arg("do_saturate") = true)
+        .def("benchmark_buckets", [](Session &s, uint32_t warmup, uint32_t iterations) {
+            if (!s.isCompiled || iterations == 0 || iterations > 1000 || warmup > 100)
+                Error::throw_err("benchmark_buckets requires a compiled session and bounded iteration counts");
+            std::vector<std::vector<double>> samples;
+            for (size_t bucket_index = 0; bucket_index < s.cachedGraphs.size(); ++bucket_index)
+            {
+                if (s.manualBuckets.at(bucket_index).weight == 0.0f)
+                {
+                    samples.emplace_back();
+                    continue;
+                }
+                const auto &compiled = s.cachedGraphs[bucket_index];
+                // Restore the full graph before measuring a bucket with clean dependencies.
+                s.executor->run(s.cachedGraphs.at(s.fullBucketIdx));
+                std::vector<double> bucket_samples;
+                for (uint32_t index = 0; index < warmup + iterations; ++index)
+                {
+                    auto started_at = std::chrono::steady_clock::now();
+                    s.executor->run(compiled); // Executor synchronizes every engine before returning.
+                    auto finished_at = std::chrono::steady_clock::now();
+                    if (index >= warmup)
+                        bucket_samples.push_back(std::chrono::duration<double, std::milli>(finished_at - started_at).count());
+                }
+                samples.push_back(std::move(bucket_samples));
+            }
+            return samples;
+        }, py::arg("warmup") = 3, py::arg("iterations") = 16)
+        .def("logical_graph_definition", [](const Session &s) {
+            py::dict nodes;
+            for (const auto &[node_id, node] : s.graph.nodes)
+            {
+                py::dict descriptor;
+                descriptor["op"] = static_cast<int>(node.opType);
+                descriptor["name"] = node.opName;
+                descriptor["dtype"] = static_cast<int>(node.dtype);
+                descriptor["shape"] = node.getShape();
+                descriptor["strides"] = node.strides;
+                descriptor["content_hash"] = node.contentHash;
+                std::vector<uint32_t> children;
+                for (auto child : node.child_ids)
+                    children.push_back(child.value);
+                descriptor["children"] = children;
+                nodes[py::str(std::to_string(node_id.value))] = descriptor;
+            }
+            py::dict result;
+            result["root"] = s.rootId.value;
+            result["nodes"] = nodes;
+            return result;
+        })
         .def("get_compiled_graphs", &Session::getCachedGraphs)
         .def("set_compiled_graphs", &Session::setCachedGraphs)
         .def("write_input_int32", [](Session &s, LogicalId id, const std::vector<int32_t> &values) {
@@ -1073,8 +1127,12 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("write_input_float32", [](Session &s, LogicalId id, const std::vector<float> &values) {
             s.writeInput(id, values.data(), values.size() * sizeof(float));
         })
-        .def("run_float32", [](Session &s, LogicalId root_id) {
-            const float *output = static_cast<const float *>(s.run());
+        .def("run_float32", [](Session &s, LogicalId root_id, int bucket_index) {
+            if (bucket_index < -1 || bucket_index >= static_cast<int>(s.cachedGraphs.size()))
+                Error::throw_err("run_float32 bucket index is out of range");
+            if (bucket_index >= 0 && static_cast<uint32_t>(bucket_index) != s.fullBucketIdx)
+                s.executor->run(s.cachedGraphs.at(s.fullBucketIdx));
+            const float *output = static_cast<const float *>(bucket_index < 0 ? s.run() : s.run(s.cachedGraphs.at(bucket_index).bucket));
             const uint64_t count = countElements(s.graph.getNode(root_id).getShape());
             std::vector<float> result(count);
 #ifdef TG_USE_CUDA
@@ -1087,7 +1145,7 @@ PYBIND11_MODULE(tensor_graphs, m)
 #endif
             std::copy(output, output + count, result.begin());
             return result;
-        })
+        }, py::arg("root_id"), py::arg("bucket_index") = -1)
         .def_readwrite("settings", &Session::settings);
 
     py::class_<TensorNode>(m, "TensorNode")
@@ -1239,6 +1297,9 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
              py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false,
              py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false)
+        .def_property_readonly("native_session", &LLMSession::nativeSession, py::return_value_policy::reference_internal)
+        .def_property_readonly("root_id", &LLMSession::rootId)
+        .def_property_readonly("input_id", &LLMSession::inputId)
         .def("generate_step", &LLMSession::generate_step);
 
     py::class_<Krea2Session>(m, "Krea2Session")

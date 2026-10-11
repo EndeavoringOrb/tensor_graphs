@@ -1,4 +1,5 @@
 """Kernel-only experiments with a durable queue and an exclusive GPU worker."""
+from contextlib import nullcontext
 import hashlib
 import io
 import json
@@ -46,14 +47,15 @@ def extractRegisteredKernelNames(source_text):
 def sourceArchive():
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        paths = [PROJECT_ROOT / "build.py", PROJECT_ROOT / "kernel_linter_rules.py"]
-        for directory in ("tensor_graphs_cpp", "docs/hwinfo/box"):
+        paths = [PROJECT_ROOT / "build.py", PROJECT_ROOT / "kernel_linter_rules.py", PROJECT_ROOT / "kernel_linter.py",
+                 PROJECT_ROOT / "embeddinggemma2.py", PROJECT_ROOT / "goal_validation.py", PROJECT_ROOT / "pyproject.toml", PROJECT_ROOT / "uv.lock"]
+        for directory in ("tensor_graphs_cpp", "docs/hwinfo/box", "tests/embeddinggemma-2", "tests/gemma-3-270m"):
             paths.extend(sorted((PROJECT_ROOT / directory).rglob("*")))
         for path in paths:
             relative = path.relative_to(PROJECT_ROOT)
             if (path.is_file() and not relative.as_posix().startswith("tensor_graphs_cpp/generated/")
                     and not relative.as_posix().startswith("tensor_graphs_cpp/kernels/generated/kernel_bench/")
-                    and path.suffix in (".py", ".cpp", ".hpp", ".h", ".cu", ".cl", ".txt")):
+                    and path.suffix in (".py", ".cpp", ".hpp", ".h", ".cu", ".cl", ".txt", ".toml", ".lock", ".png", ".mp4", ".wav")):
                 info = zipfile.ZipInfo(relative.as_posix())
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, path.read_bytes())
@@ -62,9 +64,15 @@ def sourceArchive():
 
 def hardwareIdentity():
     identity = {"machine": platform.machine(), "processor": platform.processor(),
-                "python": platform.python_version(), "system": platform.system()}
+                "python": platform.python_version(), "system": platform.system(),
+                "hostname": platform.node(), "cpu_count": os.cpu_count()}
+    cpu_info = Path("/proc/cpuinfo")
+    if cpu_info.is_file():
+        identity["memory_bytes"] = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        identity["cpu_model"] = next((line.split(":", 1)[1].strip() for line in cpu_info.read_text().splitlines()
+                                     if line.startswith("model name")), platform.processor())
     if shutil.which("nvidia-smi"):
-        result = runCmd(["nvidia-smi", "--query-gpu=name,uuid,driver_version", "--format=csv,noheader"], PROJECT_ROOT, 30)
+        result = runCmd(["nvidia-smi", "--query-gpu=name,uuid,memory.total,driver_version", "--format=csv,noheader"], PROJECT_ROOT, 30)
         if result["exit_code"] != 0:
             raise RuntimeError("GPU identity query failed: " + result["output"])
         identity["gpus"] = result["output"].strip()
@@ -166,7 +174,7 @@ def runNative(workspace, payload, timeout):
     return envelope.get("result", envelope), result["output"]
 
 
-def initializeGoal(store, cache_path):
+def initializeGoal(store, cache_path, promotion_recipe="environment", already_locked=False):
     cache_path = Path(cache_path).resolve()
     logger.info("Preparing goal cache %s", cache_path)
     if not cache_path.is_file():
@@ -175,14 +183,16 @@ def initializeGoal(store, cache_path):
     archive = sourceArchive()
     cache_hash = hashlib.sha256(cache_data).hexdigest()
     hardware = hardwareIdentity()
+    from .promotion import promotionConfig
+    promotion_config = promotionConfig() if promotion_recipe == "environment" else promotion_recipe
     goal_hash = fingerprint({"cache": cache_hash, "sources": hashlib.sha256(archive).hexdigest(), "hardware": hardware,
-                             "native_interface_version": NATIVE_INTERFACE_VERSION})
-    with store.connection() as lock_connection:
-        lock_connection.autocommit = True
-        logger.info("Waiting for the discovery/GPU worker database lock")
-        lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK,))
-        lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
-        logger.info("Acquired discovery/GPU worker database lock")
+                             "native_interface_version": NATIVE_INTERFACE_VERSION, "promotion_recipe": promotion_config})
+    with (nullcontext(None) if already_locked else store.connection()) as lock_connection:
+        if not already_locked:
+            lock_connection.autocommit = True
+            logger.info("Waiting for the discovery/GPU worker database lock")
+            lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK,))
+            lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
         try:
             existing = store.query("SELECT id FROM kernel_bench.goals WHERE fingerprint = %s", (goal_hash,))
             if existing:
@@ -206,7 +216,9 @@ def initializeGoal(store, cache_path):
             metadata = {"kernels": discovered["kernels"], "discovery_log": discovery_log,
                         "build_log": result["output"], "scope": "kernel", "cache_path": str(cache_path), "hardware": hardware,
                         "enabled_capabilities": discovered["enabled_capabilities"],
-                        "native_interface_version": NATIVE_INTERFACE_VERSION}
+                        "native_interface_version": NATIVE_INTERFACE_VERSION,
+                        "promotion_recipe": promotion_config,
+                        "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True).strip()}
             kernels_by_id = {kernel["kernel_id"]: kernel for kernel in discovered["kernels"]}
             groups = {}
             for call in discovered["calls"]:
@@ -232,8 +244,9 @@ def initializeGoal(store, cache_path):
             logger.info("Stored goal %s: %s configurations", goal_id, len(groups))
             return goal_id
         finally:
-            lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
-            lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
+            if not already_locked:
+                lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
+                lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
 
 
 def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="evaluate", agent_id=None):
@@ -273,6 +286,9 @@ def evaluateJob(store, job, workspace):
     if not (workspace / "build.py").is_file():
         with zipfile.ZipFile(io.BytesIO(bytes(goal["source_archive"]))) as archive:
             archive.extractall(workspace)
+    if not (workspace / "kernel_linter.py").is_file():
+        for name in ("kernel_linter.py", "kernel_linter_rules.py"):
+            shutil.copyfile(PROJECT_ROOT / name, workspace / name)
     staging = workspace / "tensor_graphs_cpp/kernels/generated/kernel_bench"
     staging.mkdir(parents=True, exist_ok=True)
     for path in staging.iterdir():
@@ -297,11 +313,11 @@ def evaluateJob(store, job, workspace):
         store.addEvent(job["id"], "lint", "Validating candidate source")
         build_env = {**os.environ, "KERNEL_BENCH_SERVER_JOB": "1",
                      "KERNEL_BENCH_DIAGNOSTICS_DIR": str(diagnostic_dir.resolve())}
-        lint_command = [getPythonExe(), "build.py", "--lint-candidate", str(candidate_path.relative_to(workspace))]
+        lint_command = [getPythonExe(), "kernel_linter.py", str(candidate_path.relative_to(workspace))]
         baseline_marker = workspace / ".baseline_linted"
         if not baseline_marker.exists() and mode != "lint":
             candidate_path.unlink()
-            baseline = runCmd([getPythonExe(), "build.py", "--lint"], workspace, TIMEOUTS["build"], env=build_env)
+            baseline = runCmd([getPythonExe(), "kernel_linter.py", "--repository"], workspace, TIMEOUTS["build"], env=build_env)
             candidate_path.write_text(job["source"])
             build_result = baseline
             if baseline["exit_code"] != 0:
@@ -313,7 +329,7 @@ def evaluateJob(store, job, workspace):
             result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0", "--no-lint"],
                             workspace, TIMEOUTS["build"], env=build_env)
         build_result = result
-        store.addEvent(job["id"], "lint" if "--lint-candidate" in result["command"] else "build", result["output"])
+        store.addEvent(job["id"], "lint" if "kernel_linter.py" in result["command"] else "build", result["output"])
         if result["exit_code"] != 0:
             compiler_records = []
             for path in sorted(diagnostic_dir.glob("compiler-*.json")):
@@ -333,7 +349,7 @@ def evaluateJob(store, job, workspace):
                 summary = next((line.strip(" │") for line in diagnostic_lines
                                 if "error:" in line.lower() or "DETECTED" in line or "Violation" in line),
                                f"Build failed with exit code {result['exit_code']}")
-            raise JobFailure(summary[:1000], {"kind": kind, "stage": "lint" if "--lint-candidate" in result["command"] else "build", "exit_code": result["exit_code"],
+            raise JobFailure(summary[:1000], {"kind": kind, "stage": "lint" if "kernel_linter.py" in result["command"] else "build", "exit_code": result["exit_code"],
                                              "signal": -result["exit_code"] if result["exit_code"] < 0 else None,
                                              "diagnostic": diagnostic, "compiler_diagnostics": failed})
         validation_fingerprint = fingerprint({"source": job["source"], "goal": store.getGoal(job["goal_id"])["fingerprint"],
@@ -383,6 +399,13 @@ def evaluateJob(store, job, workspace):
                 saveArtifact(name, native_path.read_bytes(), "application/json" if name.endswith(".json") else "text/plain")
         candidate_path.unlink(missing_ok=True)
     store.completeJob(job["id"], result)
+    if mode == "evaluate":
+        from .promotion import enqueuePromotion
+        try:
+            enqueuePromotion(store, job)
+        except Exception as error:  # noqa: BLE001 - retain successful benchmark evidence if promotion submission fails
+            store.addEvent(job["id"], "promotion_error", str(error))
+            logger.exception("Could not enqueue promotion for %s", job["id"])
 
 
 def calibrateNext(store, workspace_root, goal_id):
@@ -439,8 +462,8 @@ def calibrateConfiguration(store, row, workspace_root):
 
 
 def runWorker(store, stop_event, validation=False, goal_id=None):
-    worker_lock = WORKER_LOCK + 1 if validation else WORKER_LOCK
-    lane = "validation" if validation else "evaluation"
+    worker_lock = WORKER_LOCK
+    lane = "evaluation"
     heartbeat_stop = threading.Event()
     def heartbeat(heartbeat_stop):
         while not heartbeat_stop.is_set():
@@ -449,7 +472,7 @@ def runWorker(store, stop_event, validation=False, goal_id=None):
             except Exception:
                 logger.exception("Worker heartbeat failed")
             heartbeat_stop.wait(5)
-    # Heartbeat ownership begins only after acquiring the lane lock.
+    # Heartbeat ownership begins only after acquiring the shared queue lock.
     heartbeat_thread = None
     with tempfile.TemporaryDirectory(prefix="kernel-bench-worker-") as temp_path:
         while not stop_event.is_set():
@@ -462,19 +485,20 @@ def runWorker(store, stop_event, validation=False, goal_id=None):
                 try:
                     if stop_event.is_set():
                         break
+                    store.execute("DELETE FROM kernel_bench.workers WHERE lane = 'validation'")
                     store.execute("""INSERT INTO kernel_bench.workers(lane, stage) VALUES (%s, 'idle')
                         ON CONFLICT(lane) DO UPDATE SET heartbeat_at = now(), job_id = NULL, stage = 'idle'""", (lane,))
                     if heartbeat_thread is None:
                         heartbeat_stop = threading.Event()
                         heartbeat_thread = threading.Thread(target=heartbeat, args=(heartbeat_stop,), daemon=True)
                         heartbeat_thread.start()
-                    store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running' AND (mode <> 'evaluate') = %s", (validation,))
+                    store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running'", ())
                     job = store.nextJob(validation)
-                    if job is None and not validation:
+                    if job is None:
                         store.execute("UPDATE kernel_bench.workers SET stage = 'baseline' WHERE lane = %s", (lane,))
                         lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
                         try:
-                            calibrateNext(store, Path(temp_path), goal_id)
+                            calibrateNext(store, Path(temp_path), goal_id() if callable(goal_id) else goal_id)
                         finally:
                             lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
                     if job is not None:
@@ -486,7 +510,14 @@ def runWorker(store, stop_event, validation=False, goal_id=None):
                                 # Shared across processes: builds and measurements never overlap.
                                 lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
                             try:
-                                evaluateJob(store, job, workspace)
+                                if job.get("mode") == "goal_setup":
+                                    from .admin import prepareGoal
+                                    prepareGoal(store, job)
+                                elif job.get("mode") == "promote":
+                                    from .promotion import promoteJob
+                                    promoteJob(store, job)
+                                else:
+                                    evaluateJob(store, job, workspace)
                             finally:
                                 if job.get("mode", "evaluate") != "lint":
                                     lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
@@ -500,7 +531,7 @@ def runWorker(store, stop_event, validation=False, goal_id=None):
                             store.addEvent(job["id"], "error", message)
                             store.failJob(job["id"], str(error),
                                           getattr(error, "details", {"kind": "worker_failure", "stage": job.get("step", "worker")}),
-                                          getattr(error, "result", {}))
+                                          getattr(error, "result", None) or store.getJob(job["id"])["result"])
                 finally:
                     heartbeat_stop.set()
                     if heartbeat_thread is not None:

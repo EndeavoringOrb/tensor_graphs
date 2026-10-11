@@ -8,7 +8,7 @@ These instructions install user systemd services for `~/services/kernel_bench`. 
 mkdir -p ~/services
 git clone --branch main https://github.com/EndeavoringOrb/tensor_graphs.git ~/services/kernel_bench
 cd ~/services/kernel_bench
-uv sync --locked
+uv sync --locked --extra embeddinggemma --extra ml
 mkdir -p ~/services/kernel_bench_data
 cp ~/Projects/tensor_graphs/dirty_region_caches/embeddinggemma-2-image-current.bin.dirty-cache ~/services/kernel_bench_data/goal.bin.dirty-cache
 cp ~/Projects/tensor_graphs/.env .env
@@ -64,7 +64,7 @@ References: [Nginx proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_m
 
 ## Updates and maintenance
 
-The timer fetches `origin/main` about once a minute after the previous check finishes. When it changes, the updater validates a clean checkout and fast-forward history, drains/stops the service, advances to the fetched commit, runs `uv sync --locked`, starts the service, and checks readiness. Startup builds/discovers changed source snapshots. Queued jobs use their original goal's archived sources. Commits arriving during deployment are picked up on the next check. A file lock serializes updater scripts.
+The timer fetches `origin/main` about once a minute after the previous check finishes. When it changes, the updater validates a clean checkout and fast-forward history, drains/stops the service, advances to the fetched commit, runs `uv sync --locked --extra embeddinggemma --extra ml`, starts the service, and checks readiness. Startup builds/discovers changed source snapshots. Queued jobs use their original goal's archived sources. Commits arriving during deployment are picked up on the next check. A file lock serializes updater scripts.
 
 The updater fails loudly on dirty/divergent history, dependency errors, or startup failure. It never force-resets local work and has no automatic rollback. Dependency failure after draining leaves the service stopped. Once HEAD has advanced, startup failures require manual recovery rather than automatically retrying that same commit.
 
@@ -89,9 +89,28 @@ After resolving a dependency/startup failure:
 
 ```bash
 cd ~/services/kernel_bench
-uv sync --locked
+uv sync --locked --extra embeddinggemma --extra ml
 systemctl --user reset-failed kernelbench.service kernelbench-update.service
 systemctl --user start kernelbench.service
 ```
 
 Wait for discovery, then check `/welcome` and restart the timer. Waitress serves HTTP with four threads and one serial benchmark worker. The checkout is isolated from development files; CPU/GPU resources remain shared with interactive work.
+
+
+## Configure promotion
+
+Copy `deploy/gemma-decode-promotion.json` to
+`~/services/kernel_bench_data/promotion.json`, verify its model path, and add
+`KERNEL_BENCH_PROMOTION_CONFIG=/home/aaron/services/kernel_bench_data/promotion.json`
+to the deployed `.env`. Authenticate `gh` as the service account and configure Git's
+HTTPS credential helper (`gh auth setup-git`). The sample enables PRs in
+`EndeavoringOrb/tensor_graphs`; omit `github_repo` for validation-only operation.
+Restart after draining active work. Source changes must be committed before deployment:
+promotions reject source snapshots that differ from their recorded Git commit.
+
+The updater now retains the `embeddinggemma` and `ml` extras. Recopy the updater script
+into `~/.local/lib/kernelbench/update.sh` when installing this version. `/progress`
+shows reference kernel benchmark history immediately; logical goal measurements appear
+when the queued baseline/full validations finish. All heavy jobs share one FIFO worker.
+
+The initial deployed goal remains the existing 17-bucket Gemma decode cache. `/admin` uses a separate `KERNEL_BENCH_ADMIN_TOKEN` to activate stored snapshots or queue trusted presets from `KERNEL_BENCH_GOAL_CATALOG`. Preset preparation runs on the same worker; see the operator goal switching section in `kernel_bench/README.md` for the catalog format. Keep both tokens in the deployment `.env`, readable only by the service user.

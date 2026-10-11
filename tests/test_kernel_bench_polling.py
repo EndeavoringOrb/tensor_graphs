@@ -1,5 +1,6 @@
 """Polling contracts and additive PostgreSQL migration checks."""
 import os
+import json
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -23,6 +24,35 @@ def testCursor():
     for invalid in ['bad', 'W10=', 'WyJhIiwiYiJd', 'WyIyMDI2LTAxLTAxVDAwOjAwOjAwKzAwOjAwIiwgMTIzXQ==', '']:
         with pytest.raises(ValueError):
             decodeCursor(invalid)
+
+
+def testPromotionPersistenceAndProgress(pollingDatabase, monkeypatch):
+    from kernel_bench.promotion import enqueuePromotion
+    store, _, goal_id, target_id, configuration_id = pollingDatabase
+    recipe = {"command": ["{python}", "runner.py", "{report}", "{cache}"], "kernel_speedup": 1.02}
+    store.execute("UPDATE kernel_bench.goals SET metadata = metadata || %s WHERE id = %s",
+                  (Jsonb({"promotion_recipe": recipe}), goal_id))
+    parent_id = uuid.uuid4()
+    store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend)
+        VALUES (%s, %s, %s, 'idea', 'source', 'candidate', 'cpu')""", (parent_id, goal_id, target_id))
+    store.completeJob(parent_id, {"measurements": [], "comparisons": [{"speedup": 1.2}]})
+    parent = store.getJob(parent_id)
+    promotion_id = enqueuePromotion(store, parent)
+    assert enqueuePromotion(store, parent) == promotion_id
+    promotion = store.getJob(promotion_id)
+    assert promotion["mode"] == "promote"
+    assert promotion["result"]["recipe"] == recipe
+    assert store.queueInfo(goal_id, promotion)["position"] >= 1
+    store.addEvent(promotion_id, "baseline_goal", "test")
+    assert store.getJob(promotion_id)["revision"] > promotion["revision"]
+    monkeypatch.setattr("kernel_bench.app.Store", lambda _: store)
+    client = createApp(token="test", goal_id=goal_id, start_worker=False).test_client()
+    assert client.get("/progress").status_code in (302, 401)
+    headers = {"X-Bench-Token": "test"}
+    assert client.get("/progress", headers=headers).status_code == 200
+    response = client.get("/api/progress", headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["promotions"][0]["job_id"] == promotion_id
 
 
 @pytest.mark.parametrize('url,token', [('', 'token'), ('localhost:8080', 'token'),
@@ -107,6 +137,7 @@ def pollingDatabase():
         connection.execute('DELETE FROM kernel_bench.jobs WHERE goal_id = %s', (goal_id,))
         connection.execute('DELETE FROM kernel_bench.configurations WHERE goal_id = %s', (goal_id,))
         connection.execute('DELETE FROM kernel_bench.targets WHERE id = %s', (key,))
+        connection.execute('DELETE FROM kernel_bench.active_goal WHERE goal_id = %s', (goal_id,))
         connection.execute('DELETE FROM kernel_bench.goals WHERE id = %s', (goal_id,))
 
 
@@ -236,3 +267,41 @@ def testUnavailableBaselinePersistsAcrossRetry(pollingDatabase, monkeypatch, tmp
     response = client.post('/api/baselines/calibrate', json={'goal_id': goal_id}, headers=headers)
     assert response.status_code == 409
     assert response.get_json()['error_details']['kind'] == 'incompatible_native_interface'
+
+
+def testAdminGoalSelectionAndQueuedPreparation(pollingDatabase, monkeypatch, tmp_path):
+    store, client, goal_id, target_id, _ = pollingDatabase
+    monkeypatch.setenv("KERNEL_BENCH_ADMIN_TOKEN", "operator-only")
+    headers = {"X-Bench-Token": "polling-test"}
+    assert client.get("/api/admin/goals", headers=headers).status_code == 403
+    headers["X-Admin-Token"] = "operator-only"
+    assert client.get("/api/admin/goals", headers=headers).get_json()["active_goal_id"] == goal_id
+    response = client.post("/api/admin/goals/activate", headers=headers, json={"goal_id": goal_id})
+    assert response.status_code == 200
+    assert store.query("SELECT goal_id FROM kernel_bench.active_goal WHERE singleton")[0]["goal_id"] == goal_id
+    cache = tmp_path / "goal.bin"
+    cache.write_bytes(b"compiled")
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(json.dumps({"command": ["{python}", "run.py", "{cache}", "{report}"]}))
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"gemma": {"name": "Gemma", "cache_path": str(cache), "promotion_config": str(recipe)}}))
+    monkeypatch.setenv("KERNEL_BENCH_GOAL_CATALOG", str(catalog))
+    assert client.post("/api/admin/goals/prepare", headers=headers, json={"preset_id": "unknown"}).status_code == 400
+    response = client.post("/api/admin/goals/prepare", headers=headers, json={"preset_id": "gemma"})
+    assert response.status_code == 202
+    job = store.getJob(response.get_json()["job_id"])
+    assert job["mode"] == "goal_setup" and job["status"] == "queued"
+    assert job["result"]["cache_path"] == str(cache)
+    assert job["result"]["recipe"]["kernel_speedup"] == 1.02
+    other_id = store.query("""INSERT INTO kernel_bench.goals(fingerprint, name, cache_sha256, cache_data, source_archive, metadata)
+        VALUES (%s, 'alternate goal', '', '', '', '{"kernels": []}') RETURNING id""", (str(uuid.uuid4()),))[0]["id"]
+    try:
+        assert client.post("/api/admin/goals/activate", headers=headers, json={"goal_id": other_id}).status_code == 200
+        assert client.get("/api/status", headers=headers).get_json()["goal"]["id"] == other_id
+        assert client.get("/api/jobs/" + str(job["id"]) + "/logs", headers=headers).status_code == 200
+        assert client.get("/api/jobs/" + str(job["id"]), headers=headers).status_code == 200
+    finally:
+        client.post("/api/admin/goals/activate", headers=headers, json={"goal_id": goal_id})
+        store.execute("DELETE FROM kernel_bench.goals WHERE id = %s", (other_id,))
+    assert client.get("/api/jobs?mode=goal_setup", headers=headers).status_code == 200
+    assert client.get("/api/status", headers=headers).get_json()["queue"]["depth_by_mode"]["goal_setup"]["queued"] >= 1

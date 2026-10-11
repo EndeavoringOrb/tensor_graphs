@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Goal administration</title>
+<style>body{font:16px system-ui;max-width:850px;margin:40px auto;padding:20px;background:#111827;color:#e5e7eb}input,select,button{font:inherit;padding:10px;margin:8px 0;max-width:100%}a{color:#93c5fd}pre{white-space:pre-wrap}</style>
+<a href="/">KernelBench</a> · <a href="/progress">Kernel progress</a>
+<h1>Active goal</h1><p>Select a stored discovery snapshot. Its logical graph, buckets, weights, hardware, and validation recipe remain fixed. Validation runs in the shared benchmark queue.</p>
+<label>Operator token <input id="token" type="password" autocomplete="off"></label><button id="load">Load goals</button><br>
+<label>Goal <select id="goals"></select></label> <button id="activate">Activate goal</button><pre id="status" role="status"></pre>
+<hr><h2>Prepare another goal</h2><p>Operator presets fix the cache and validation recipe. Discovery and validation run in the shared queue; the prepared snapshot becomes active.</p><select id="presets"></select> <button id="prepare">Prepare and activate</button>
+<script>
+const token=document.querySelector('#token'),goals=document.querySelector('#goals'),status=document.querySelector('#status');
+async function call(path,data){const response=await fetch(path,{method:data?'POST':'GET',headers:{'X-Admin-Token':token.value,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});const result=await response.json();if(!response.ok)throw Error(result.error);return result;}
+document.querySelector('#load').onclick=async()=>{try{const result=await call('/api/admin/goals');goals.replaceChildren();const presets=document.querySelector("#presets");presets.replaceChildren();for(const preset of result.presets){const option=document.createElement("option");option.value=preset.id;option.textContent=preset.name;presets.append(option);}for(const goal of result.goals){const option=document.createElement('option');option.value=goal.id;option.textContent=`Snapshot ${goal.id}: ${goal.name} — ${goal.promotion_enabled?'promotion configured':'benchmark only'}`;option.selected=goal.id===result.active_goal_id;goals.append(option);}status.textContent=`Active snapshot: ${result.active_goal_id}`;}catch(error){status.textContent=error.message;}};
+document.querySelector('#activate').onclick=async()=>{try{const result=await call('/api/admin/goals/activate',{goal_id:Number(goals.value)});status.textContent=`Active snapshot: ${result.goal_id}. Validation job: ${result.validation_job_id||'not configured'}`;}catch(error){status.textContent=error.message;}};
+document.querySelector('#prepare').onclick=async()=>{try{const result=await call('/api/admin/goals/prepare',{preset_id:document.querySelector('#presets').value});status.textContent=`Goal preparation queued: ${result.job_id}`;}catch(error){status.textContent=error.message;}};
+</script></html>

@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request, send_file
+from flask import Flask, g, jsonify, redirect, render_template, request, send_file
 from psycopg.types.json import Jsonb
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -44,6 +44,9 @@ TOOLS = [
     {"name": "linter_rules", "method": "GET", "path": "/api/linter/rules", "description": "Shared build linter rule identifiers, descriptions and scopes"},
     {"name": "kernel_names", "method": "GET", "path": "/api/kernels/list?name=...", "description": "Exact baseline name lookup and availability; independent candidate jobs may reuse names"},
     {"name": "baseline_calibration", "method": "POST", "path": "/api/baselines/calibrate", "description": "Schedule calibration for the active goal or explicit goal_id; optional retry_failed boolean; inspect calibrated_baselines on targets"},
+    {"name": "progress", "method": "GET", "path": "/api/progress", "description": "Goal definition, per-reference-graph benchmark history, and promotion results"},
+    {"name": "validate_goal", "method": "POST", "path": "/api/goals/validate", "description": "Queue the configured goal baseline in the shared FIFO worker"},
+    {"name": "promote_kernel", "method": "POST", "path": "/api/jobs/{job_id}/promote", "description": "Idempotently queue a qualifying completed evaluation for full goal validation and PR promotion"},
     {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity, server-wide queue depths by mode, worker heartbeats and recent stage durations"},
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
     {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
@@ -69,7 +72,13 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         raise ValueError("Set BENCH_SECRET_TOKEN before exposing KernelBench")
     store = Store(database_url or os.environ.get("KERNEL_BENCH_DATABASE_URL"))
     store.initialize()
-    goal_id = goal_id or initializeGoal(store, goal_cache or os.environ.get("KERNEL_BENCH_GOAL_CACHE", DEFAULT_GOAL_CACHE))
+    explicit_goal = goal_id is not None
+    active = store.query("SELECT goal_id FROM kernel_bench.active_goal WHERE singleton") if not explicit_goal else []
+    selected_cache = store.getGoal(active[0]["goal_id"])["metadata"]["cache_path"] if active else None
+    goal_id = goal_id or initializeGoal(store, goal_cache or selected_cache or os.environ.get("KERNEL_BENCH_GOAL_CACHE", DEFAULT_GOAL_CACHE),
+        promotion_recipe=store.getGoal(active[0]["goal_id"])["metadata"].get("promotion_recipe") if active and not goal_cache else "environment")
+    if not explicit_goal:
+        store.execute("INSERT INTO kernel_bench.active_goal(singleton, goal_id) VALUES (true, %s) ON CONFLICT(singleton) DO UPDATE SET goal_id = EXCLUDED.goal_id", (goal_id,))
     app = Flask(__name__)
     stop_event = stop_event if stop_event is not None else threading.Event()
     app.extensions["kernel_bench_stop"] = stop_event
@@ -82,8 +91,16 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def authorized(candidate):
         return bool(candidate) and hmac.compare_digest(candidate, token)
 
+    def currentGoalId():
+        if not explicit_goal:
+            active = store.query("SELECT goal_id FROM kernel_bench.active_goal WHERE singleton")
+            if active:
+                app.config["KERNEL_BENCH_GOAL_ID"] = active[0]["goal_id"]
+        return app.config["KERNEL_BENCH_GOAL_ID"]
+
     @app.before_request
     def authenticate():
+        g.goal_id = currentGoalId()
         if stop_event.is_set():
             return jsonify({"error": "KernelBench is draining for shutdown"}), 503, {"Retry-After": "60"}
         if request.path in ("/login", "/welcome", "/api/agent", "/api/agent/index"):
@@ -127,33 +144,33 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/status")
     def status():
-        goal = store.getGoal(goal_id)
+        goal = store.getGoal(g.goal_id)
         metadata = goal.pop("metadata")
-        return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(goal_id)),
+        return jsonify({"scope": "kernel", "goal": goal, "target_count": len(store.getTargets(g.goal_id)),
                         "hardware": metadata.get("hardware", {}),
-                        "queue": store.queueInfo(goal_id),
-                        "pipeline": ["build", "test", "benchmark", "compare"]})
+                        "queue": store.queueInfo(g.goal_id),
+                        "pipeline": ["lint", "build", "test", "benchmark", "compare", "goal_validation", "promotion"]})
 
     @app.get("/api/targets")
     @app.get("/api/analyze")
     def targets():
-        rows = store.getTargets(goal_id)
+        rows = store.getTargets(g.goal_id)
         search = request.args.get("search", "").lower()
         if search:
             rows = [row for row in rows if search in row["reference_expression"].lower()]
-        metadata = store.getGoal(goal_id)["metadata"]
+        metadata = store.getGoal(g.goal_id)["metadata"]
         for row in rows:
             row["matching_kernels"] = {key: value for group in row["matching_kernels"] for key, value in group.items()}
             row["source_paths"] = sorted({kernel["source_path"] for kernel in targetKernels(metadata, row["reference_expression"]) if kernel.get("source_path")})
-        return jsonify({"goal_id": goal_id, "targets": rows})
+        return jsonify({"goal_id": g.goal_id, "targets": rows})
 
     @app.get("/api/targets/<target_id>")
     def target(target_id):
-        configurations = store.getConfigurations(goal_id, target_id)
+        configurations = store.getConfigurations(g.goal_id, target_id)
         if not configurations:
             return jsonify({"error": "Unknown target for this goal"}), 404
         expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (target_id,))[0]["expression"]
-        metadata = store.getGoal(goal_id)["metadata"]
+        metadata = store.getGoal(g.goal_id)["metadata"]
         kernels = targetKernels(metadata, expression)
         for row in configurations:
             row["configuration"]["decoded_input_constants"] = decodeConstants(row["configuration"])
@@ -161,15 +178,15 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
                         "kernels": kernels, "source_paths": sorted({kernel["source_path"] for kernel in kernels if kernel.get("source_path")}),
                         "contract": CONTRACT, "enabled_capabilities": metadata.get("enabled_capabilities"),
                         "capabilities_status": "known" if "enabled_capabilities" in metadata else "unknown_legacy_snapshot",
-                        "calibrated_baselines": store.getBaselines(goal_id, target_id),
-                        "best_recorded_measurements": store.getBestMeasurements(goal_id, target_id)})
+                        "calibrated_baselines": store.getBaselines(g.goal_id, target_id),
+                        "best_recorded_measurements": store.getBestMeasurements(g.goal_id, target_id)})
 
     @app.post("/api/baselines/calibrate")
     def baselineCalibration():
         data = request.get_json()
         if not isinstance(data, dict) or any(key not in ("retry_failed", "goal_id") for key in data):
             raise ValueError("Expected an object with optional retry_failed and goal_id")
-        calibration_goal_id = data.get("goal_id", goal_id)
+        calibration_goal_id = data.get("goal_id", g.goal_id)
         if isinstance(calibration_goal_id, bool) or not isinstance(calibration_goal_id, int):
             raise TypeError("goal_id must be an integer")
         try:
@@ -190,7 +207,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/kernels/list")
     def kernels():
-        rows = store.getGoal(goal_id)["metadata"]["kernels"]
+        rows = store.getGoal(g.goal_id)["metadata"]["kernels"]
         name = request.args.get("name")
         if name is not None:
             rows = [kernel for kernel in rows if kernel["name"] == name]
@@ -206,10 +223,10 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def kernelContract():
         from .onboarding import SKELETONS
         return jsonify({**CONTRACT, "skeletons": SKELETONS,
-                        "enabled_capabilities": store.getGoal(goal_id)["metadata"].get("enabled_capabilities")})
+                        "enabled_capabilities": store.getGoal(g.goal_id)["metadata"].get("enabled_capabilities")})
 
     def readArchive():
-        row = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (goal_id,))[0]
+        row = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (g.goal_id,))[0]
         return zipfile.ZipFile(io.BytesIO(bytes(row["source_archive"])))
 
     @app.get("/api/source/list")
@@ -240,28 +257,27 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
                 raise TypeError(f"{key} must be a string")
         mode = "lint" if request.path == "/api/iteration/lint" else data.get("mode", "evaluate")
         author = authorIdentity(store, authorized) if request.headers.get("X-Agent-Token") else None
-        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode, agent_id=author["id"] if author else None)
+        job_id = createJob(store, g.goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode, agent_id=author["id"] if author else None)
         return jsonify({"job_id": job_id, "validation_id": job_id, "mode": mode, "status": "queued"}), 202
 
     @app.get("/api/jobs")
     @app.get("/api/history")
     @app.get("/api/versions")
     def jobs():
-        return listJobs(store, goal_id)
+        return listJobs(store, g.goal_id)
 
-    def currentJob(job_id):
+    def storedJob(job_id):
         uuid.UUID(job_id)
-        row = store.getJob(job_id)
-        return row if row and row["goal_id"] == goal_id else None
+        return store.getJob(job_id)
 
     @app.get("/api/jobs/<job_id>")
     def job(job_id):
-        return pollJob(store, currentJob, job_id, stop_event)
+        return pollJob(store, storedJob, job_id, stop_event)
 
     @app.get("/api/jobs/<job_id>/logs")
     def logs(job_id):
-        if currentJob(job_id) is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
+        if storedJob(job_id) is None:
+            return jsonify({"error": "Unknown job"}), 404
         clauses = ["job_id = %s"]
         parameters = [job_id]
         after_id = request.args.get("after_id")
@@ -301,8 +317,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/jobs/<job_id>/artifacts")
     def artifacts(job_id):
-        if currentJob(job_id) is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
+        if storedJob(job_id) is None:
+            return jsonify({"error": "Unknown job"}), 404
         rows = store.query("""SELECT id, name, media_type, octet_length(data) AS size_bytes, created_at
             FROM kernel_bench.artifacts WHERE job_id = %s ORDER BY name""", (job_id,))
         for row in rows:
@@ -312,8 +328,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.get("/api/jobs/<job_id>/artifacts/<artifact_id>")
     def artifact(job_id, artifact_id):
-        if currentJob(job_id) is None:
-            return jsonify({"error": "Unknown job for this goal"}), 404
+        if storedJob(job_id) is None:
+            return jsonify({"error": "Unknown job"}), 404
         uuid.UUID(artifact_id)
         rows = store.query("SELECT name, media_type, data FROM kernel_bench.artifacts WHERE job_id = %s AND id = %s",
                            (job_id, artifact_id))
@@ -327,7 +343,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     @app.get("/api/benchmarks/records")
     def measurements():
         rows = store.query("""SELECT m.* FROM kernel_bench.measurements m JOIN kernel_bench.jobs j ON j.id = m.job_id
-            WHERE j.goal_id = %s ORDER BY j.created_at DESC LIMIT 1000""", (goal_id,))
+            WHERE j.goal_id = %s ORDER BY j.created_at DESC LIMIT 1000""", (g.goal_id,))
         return jsonify({"records": rows})
 
     def starterFiles():
@@ -341,7 +357,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def agent():
         from .onboarding import INSTRUCTIONS
         base_url = request.url_root.rstrip("/")
-        return jsonify({"scope": "kernel", "goal_id": goal_id, "tools": TOOLS,
+        return jsonify({"scope": "kernel", "goal_id": g.goal_id, "tools": TOOLS,
                         "instructions": INSTRUCTIONS,
                         "authentication": {"header": "X-Bench-Token", "environment_variable": "BENCH_SECRET_TOKEN"},
                         "setup": {"base_url": base_url, "environment_variable": "BENCH_SERVER_URL",
@@ -395,9 +411,15 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
             return jsonify({"status": "saved"}), 201
         return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
 
+    from .promotion import installPromotion
+    installPromotion(app, store, lambda: g.goal_id)
+    from .admin import installAdmin
+    installAdmin(app, store)
+
     if start_worker:
-        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event, goal_id=goal_id)
-        app.extensions["kernel_bench_validation_worker"] = startWorker(store, stop_event, validation=True, goal_id=goal_id)
+        from .promotion import enqueueGoalValidation
+        enqueueGoalValidation(store, goal_id)
+        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event, goal_id=currentGoalId)
     return app
 
 
@@ -434,14 +456,13 @@ def serveApp(args):
             server_thread = threading.Thread(target=server.run, name="kernel-bench-http", daemon=True)
             server_thread.start()
             while not stop_event.wait(1):
-                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive() or not app.extensions["kernel_bench_validation_worker"].is_alive():
+                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive():
                     raise RuntimeError("KernelBench HTTP server or worker exited unexpectedly")
     finally:
         stop_event.set()
         logger.info("Draining KernelBench; waiting for active startup/job processes")
         if app is not None:
             app.extensions["kernel_bench_worker"].join()
-            app.extensions["kernel_bench_validation_worker"].join()
         if server is not None:
             server.task_dispatcher.shutdown()
             server.asyncore.close_all(map=server._map)
