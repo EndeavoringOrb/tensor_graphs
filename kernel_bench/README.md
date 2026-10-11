@@ -148,3 +148,45 @@ For PostgreSQL/CUDA integration tests, set `KERNEL_BENCH_TEST_DATABASE_URL` in `
 ```
 
 These checks cover API authentication, concurrent submissions, durable queue state, actual CUDA correctness and benchmarks, rejection of incorrect/zero-match candidates, and source cleanup. They do not run the full model.
+
+## Failure diagnostics and artifacts
+
+Jobs keep the existing concise `error` string and add `error_details` with a failure
+`kind`, `stage`, and job-scoped `artifact_ids`. Build failures include the compiler
+or lint diagnostic. Native failures include the exit code/signal and the last
+checkpointed stage/configuration. Registration errors identify the submitted name,
+observed count, enabled capability macros, and suggested checks.
+
+Correctness failures report the mismatched index and values, or output sizes, plus
+the harness comparison rule and reproduction settings. Diagnostic tests reset
+`std::mt19937` to seed 42 per configuration; saved configuration data includes
+constant bytes and strides. The standard library/compiler recorded in build
+metadata affects random distribution implementation. Nonfinite mismatch values
+use `NaN`, `Infinity`, or `-Infinity` strings so responses remain valid JSON.
+Completed correctness checks remain in `result.correctness_results` and
+`result.tested_configuration_ids` when a later configuration fails. Failed jobs do
+not contribute measurements to the best-performance query.
+
+`GET /api/jobs/{job_id}/artifacts` lists artifact IDs, names, media types, sizes,
+and download URLs. `GET /api/jobs/{job_id}/artifacts/{artifact_id}` downloads the
+content. Artifacts include submitted and actual generated sources/headers, build
+commands, build configuration/toolchain metadata, separate full stdout/stderr,
+compiler records, and the native result/checkpoint. Compiler output is written
+before formatting, including partial output on timeout. Access requires the bench
+token and is scoped to the job and current goal; arbitrary filesystem paths are
+not accepted. Artifacts are stored in PostgreSQL before temporary files disappear.
+
+Readable logs remove ANSI escapes and carriage-return progress frames. Raw
+streams remain downloadable. `GET /api/jobs/{job_id}/logs` supports these optional,
+composable filters:
+
+- `after_id`: return events with a larger ID; reuse `next_after_id` on each poll.
+- `tail`: return the last 1–1000 matching events in ascending ID order.
+- `stage`: exact event step, such as `build`, `test_bench`, or `error`.
+- `grep`: case-sensitive literal substring, at most 200 characters.
+
+`KernelBenchClient` supports these filters through `getJobLogs`, lists artifacts
+with `getJobArtifacts`, and downloads bytes with `readJobArtifact`. Existing calls
+and existing job error strings remain compatible. Schema additions run at startup;
+older jobs have null `error_details` and no artifacts. Updated source snapshots
+create a new goal on normal startup, including the diagnostic native bindings.

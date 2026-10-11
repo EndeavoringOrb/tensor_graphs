@@ -46,8 +46,18 @@ class KernelBenchClient:
     def getJobStatus(self, job_id):
         return self.get(f"/api/jobs/{job_id}")
 
-    def getJobLogs(self, job_id):
-        return self.get(f"/api/jobs/{job_id}/logs")
+    def getJobLogs(self, job_id, after_id=None, tail=None, stage=None, grep=None):
+        parameters = {key: value for key, value in {"after_id": after_id, "tail": tail, "stage": stage, "grep": grep}.items()
+                      if value is not None}
+        return self.get(f"/api/jobs/{job_id}/logs", **parameters)
+
+    def getJobArtifacts(self, job_id):
+        return self.get(f"/api/jobs/{job_id}/artifacts")["artifacts"]
+
+    def readJobArtifact(self, job_id, artifact_id):
+        response = self.session.get(self.base_url + f"/api/jobs/{job_id}/artifacts/{artifact_id}", timeout=30)
+        response.raise_for_status()
+        return response.content
 
     def pollJobUntilComplete(self, job_id, interval=5, timeout=1800):
         deadline = time.monotonic() + timeout

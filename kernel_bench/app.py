@@ -33,7 +33,9 @@ TOOLS = [
     {"name": "read_source", "method": "GET", "path": "/api/source?path=...", "description": "Read baseline kernel/core/reference/hardware source snapshot"},
     {"name": "submit_iteration", "method": "POST", "path": "/api/iteration/submit", "description": "Submit target_id, source, backend (cpu/cuda), and idea; one REGISTER_KERNEL"},
     {"name": "get_job", "method": "GET", "path": "/api/jobs/{job_id}", "description": "Correctness coverage, measurements, and per-configuration speedups"},
-    {"name": "get_job_logs", "method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Build/test/benchmark diagnostics from PostgreSQL"},
+    {"name": "get_job_logs", "method": "GET", "path": "/api/jobs/{job_id}/logs", "description": "Build/test/benchmark diagnostics; filters: after_id, tail (1–1000), stage, literal grep (max 200 characters)"},
+    {"name": "list_job_artifacts", "method": "GET", "path": "/api/jobs/{job_id}/artifacts", "description": "Durable source, build commands, capabilities and full diagnostics"},
+    {"name": "read_job_artifact", "method": "GET", "path": "/api/jobs/{job_id}/artifacts/{artifact_id}", "description": "Download an artifact by job-scoped ID"},
     {"name": "list_jobs", "method": "GET", "path": "/api/jobs?target_id=...", "description": "Shared trial history; targets have no reservations"},
 ]
 
@@ -78,7 +80,10 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     @app.errorhandler(ValueError)
     @app.errorhandler(TypeError)
     def invalidRequest(error):
-        return jsonify({"error": str(error)}), 400
+        stage = "submission" if request.path in ("/api/iteration/submit", "/api/kernels/test") else "request"
+        return jsonify({"error": str(error), "error_details": {
+            "kind": "submission_error" if stage == "submission" else "invalid_request",
+            "stage": stage, "artifact_ids": []}}), 400
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -169,7 +174,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def jobs():
         target_id = request.args.get("target_id", "")
         rows = store.query("""SELECT id AS job_id, target_id, idea, kernel_name, backend, status, step,
-            result, error, created_at, completed_at FROM kernel_bench.jobs
+            result, error, error_details, created_at, completed_at FROM kernel_bench.jobs
             WHERE goal_id = %s AND (%s = '' OR target_id = %s) ORDER BY created_at DESC LIMIT 200""", (goal_id, target_id, target_id))
         return jsonify({"jobs": rows})
 
@@ -190,7 +195,67 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     def logs(job_id):
         if currentJob(job_id) is None:
             return jsonify({"error": "Unknown job for this goal"}), 404
-        return jsonify({"events": store.query("SELECT id, step, message, created_at FROM kernel_bench.events WHERE job_id = %s ORDER BY id", (job_id,))})
+        clauses = ["job_id = %s"]
+        parameters = [job_id]
+        after_id = request.args.get("after_id")
+        if after_id is not None:
+            after_id = int(after_id)
+            if after_id < 0:
+                raise ValueError("after_id must be nonnegative")
+            clauses.append("id > %s")
+            parameters.append(after_id)
+        stage = request.args.get("stage")
+        if stage:
+            if len(stage) > 100:
+                raise ValueError("stage must be at most 100 characters")
+            clauses.append("step = %s")
+            parameters.append(stage)
+        literal = request.args.get("grep")
+        if literal is not None:
+            if len(literal) > 200:
+                raise ValueError("grep must be at most 200 characters")
+            clauses.append("strpos(message, %s) > 0")
+            parameters.append(literal)
+        tail = request.args.get("tail")
+        order = "ASC"
+        limit = ""
+        if tail is not None:
+            tail = int(tail)
+            if not 1 <= tail <= 1000:
+                raise ValueError("tail must be between 1 and 1000")
+            order = "DESC"
+            limit = " LIMIT %s"
+            parameters.append(tail)
+        events = store.query("SELECT id, step, message, created_at FROM kernel_bench.events WHERE " +
+                             " AND ".join(clauses) + f" ORDER BY id {order}" + limit, tuple(parameters))
+        if tail is not None:
+            events.reverse()
+        return jsonify({"events": events, "next_after_id": events[-1]["id"] if events else after_id})
+
+    @app.get("/api/jobs/<job_id>/artifacts")
+    def artifacts(job_id):
+        if currentJob(job_id) is None:
+            return jsonify({"error": "Unknown job for this goal"}), 404
+        rows = store.query("""SELECT id, name, media_type, octet_length(data) AS size_bytes, created_at
+            FROM kernel_bench.artifacts WHERE job_id = %s ORDER BY name""", (job_id,))
+        for row in rows:
+            row["artifact_id"] = row.pop("id")
+            row["url"] = f"/api/jobs/{job_id}/artifacts/{row['artifact_id']}"
+        return jsonify({"artifacts": rows})
+
+    @app.get("/api/jobs/<job_id>/artifacts/<artifact_id>")
+    def artifact(job_id, artifact_id):
+        if currentJob(job_id) is None:
+            return jsonify({"error": "Unknown job for this goal"}), 404
+        uuid.UUID(artifact_id)
+        rows = store.query("SELECT name, media_type, data FROM kernel_bench.artifacts WHERE job_id = %s AND id = %s",
+                           (job_id, artifact_id))
+        if not rows:
+            return jsonify({"error": "Unknown artifact for this job"}), 404
+        row = rows[0]
+        return send_file(io.BytesIO(bytes(row["data"])), mimetype=row["media_type"],
+                         as_attachment=True, download_name=Path(row["name"]).name)
+
 
     @app.get("/api/benchmarks/records")
     def measurements():

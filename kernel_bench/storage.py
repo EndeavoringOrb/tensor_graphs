@@ -1,6 +1,7 @@
 """PostgreSQL is the authoritative store; files in workers are disposable."""
 import hashlib
 import json
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -77,7 +78,7 @@ class Store:
 
     def nextJob(self):
         rows = self.query("""
-            UPDATE kernel_bench.jobs SET status = 'running', started_at = now(), error = NULL
+            UPDATE kernel_bench.jobs SET status = 'running', started_at = now(), error = NULL, error_details = NULL
             WHERE id = (SELECT id FROM kernel_bench.jobs WHERE status = 'queued'
                         ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING *
@@ -98,5 +99,14 @@ class Store:
             connection.execute("""UPDATE kernel_bench.jobs SET status = 'completed', step = 'completed',
                 result = %s, completed_at = now() WHERE id = %s""", (Jsonb(result), job_id))
 
-    def failJob(self, job_id, error):
-        self.execute("UPDATE kernel_bench.jobs SET status = 'failed', error = %s, completed_at = now() WHERE id = %s", (error, job_id))
+    def addArtifact(self, job_id, name, data, media_type="text/plain"):
+        rows = self.query("""INSERT INTO kernel_bench.artifacts(id, job_id, name, media_type, data)
+            VALUES (%s, %s, %s, %s, %s) ON CONFLICT (job_id, name)
+            DO UPDATE SET data = EXCLUDED.data, media_type = EXCLUDED.media_type
+            RETURNING id""", (uuid.uuid4(), job_id, name, media_type, data))
+        return str(rows[0]["id"])
+
+    def failJob(self, job_id, error, error_details=None, result=None):
+        self.execute("""UPDATE kernel_bench.jobs SET status = 'failed', error = %s,
+            error_details = %s, result = %s, completed_at = now() WHERE id = %s""",
+            (error, Jsonb(error_details or {}), Jsonb(result or {}), job_id))

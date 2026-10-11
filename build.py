@@ -10,14 +10,15 @@ import subprocess
 import sys
 import sysconfig
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
 from tqdm import tqdm
 
-console = Console()
+SERVER_JOB = os.environ.get("KERNEL_BENCH_SERVER_JOB") == "1"
+console = Console(force_terminal=False, no_color=True, width=160) if SERVER_JOB else Console()
 
 ROOT_DIR = Path("tensor_graphs_cpp")
 GENERATED_DIR = ROOT_DIR / "generated"
@@ -964,6 +965,7 @@ class KernelLinter:
             with tqdm(
                 files,
                 desc=f"linting [{val_idx + 1}/{len(validators)}]",
+                disable=SERVER_JOB,
             ) as pbar:
                 for path in pbar:
                     pbar.set_postfix_str(path.as_posix())
@@ -1357,9 +1359,35 @@ class Toolchain:
             full_command = cmd_str
 
         console.print(f"[dim]Running:[/dim] [cyan]{full_command}[/cyan]")
-        result = subprocess.run(
-            full_command, capture_output=True, text=True, shell=True
-        )
+        diagnostic_dir = os.environ.get("KERNEL_BENCH_DIAGNOSTICS_DIR")
+        if diagnostic_dir:
+            import uuid
+            directory = Path(diagnostic_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            prefix = directory / f"compiler-{uuid.uuid4().hex}"
+            record_path = prefix.with_suffix(".json")
+            record = {"label": label, "command": full_command, "exit_code": None, "stdout": "", "stderr": ""}
+            record_path.write_text(json.dumps(record))
+            # Write directly to separate artifacts, preserving partial compiler
+            # diagnostics even when the entire process group is killed on timeout.
+            with prefix.with_suffix(".stdout").open("wb") as stdout_file, prefix.with_suffix(".stderr").open("wb") as stderr_file:
+                process_result = subprocess.run(full_command, stdout=stdout_file, stderr=stderr_file, shell=True, check=False)
+            result = subprocess.CompletedProcess(full_command, process_result.returncode,
+                prefix.with_suffix(".stdout").read_text(errors="replace"),
+                prefix.with_suffix(".stderr").read_text(errors="replace"))
+            record.update({"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+            temporary_path = record_path.with_suffix(".tmp")
+            temporary_path.write_text(json.dumps(record))
+            temporary_path.replace(record_path)
+        else:
+            result = subprocess.run(full_command, capture_output=True, text=True, shell=True, check=False)
+
+        if SERVER_JOB:
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            if result.returncode != 0:
+                sys.exit(result.returncode)
+            return result
 
         if result.returncode != 0:
             console.print(
@@ -1390,6 +1418,12 @@ class BuildOrchestrator:
         self.toolchain = Toolchain(config, self.platform)
         self.linter = KernelLinter()
         self.code_gen = CodeGenerator(config, self.platform)
+        diagnostic_dir = os.environ.get("KERNEL_BENCH_DIAGNOSTICS_DIR")
+        if diagnostic_dir:
+            directory = Path(diagnostic_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "build_metadata.json").write_text(json.dumps({
+                "platform": asdict(self.platform), "config": asdict(config)}, default=str))
 
     def clean(self) -> None:
         console.print("[bold yellow]Cleaning build artifacts and cache...[/bold yellow]")

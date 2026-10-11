@@ -20,9 +20,10 @@
 
 #include "tests/common.hpp"
 
-void fillRandom(void *ptr, uint64_t elements, DType dtype)
+void fillRandom(void *ptr, uint64_t elements, DType dtype, std::mt19937 *generator = nullptr)
 {
-    static std::mt19937 gen(42);
+    static std::mt19937 default_generator(42);
+    auto &gen = generator ? *generator : default_generator;
     switch (dtype)
     {
     case DType::ANY:
@@ -377,8 +378,10 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     return result;
 }
 
-bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool require_match = false)
+bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool require_match = false,
+                          CorrectnessDiagnostic *diagnostic = nullptr, uint32_t seed = 42)
 {
+    std::mt19937 generator(seed);
     try
     {
         if (rec.inputShapes.size() < kernel.min_num_inputs || rec.inputShapes.size() > kernel.max_num_inputs)
@@ -462,7 +465,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool req
             }
             else
             {
-                fillRandom(contiguousData.data(), elements, rec.inputDTypes[i]);
+                fillRandom(contiguousData.data(), elements, rec.inputDTypes[i], diagnostic ? &generator : nullptr);
                 if (rec.inputDTypes[i] == DType::INT32)
                 {
                     int32_t *iptr = reinterpret_cast<int32_t *>(contiguousData.data());
@@ -529,15 +532,26 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool req
 
         if (refOutput.size() != tgtOutput.size())
         {
+            if (diagnostic)
+            {
+                diagnostic->kind = "output_size_mismatch";
+                diagnostic->reference_size = refOutput.size();
+                diagnostic->actual_size = tgtOutput.size();
+            }
             std::cout << "\n[Record Test Error] Output size mismatch: ref=" << refOutput.size()
                       << " tgt=" << tgtOutput.size() << " kernel=" << kernel.opName << std::endl;
             return false;
         }
 
-        return compareOutputs(refOutput.data(), tgtOutput.data(), refOutput.size());
+        return compareOutputs(refOutput.data(), tgtOutput.data(), refOutput.size(), 1e-4f, diagnostic);
     }
     catch (const std::exception &e)
     {
+        if (diagnostic)
+        {
+            diagnostic->kind = "correctness_exception";
+            diagnostic->message = e.what();
+        }
         std::cerr << "\n[Record Test Exception] " << e.what() << std::endl;
         return false;
     }

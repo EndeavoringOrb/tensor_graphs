@@ -70,3 +70,15 @@ CREATE TABLE IF NOT EXISTS kernel_bench.feedback (
     data jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS error_details jsonb;
+CREATE TABLE IF NOT EXISTS kernel_bench.artifacts (
+    id uuid PRIMARY KEY,
+    job_id uuid NOT NULL REFERENCES kernel_bench.jobs(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    media_type text NOT NULL,
+    data bytea NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (job_id, name)
+);
+CREATE INDEX IF NOT EXISTS artifacts_job ON kernel_bench.artifacts(job_id);

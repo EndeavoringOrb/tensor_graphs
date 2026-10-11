@@ -70,31 +70,43 @@ def hardwareIdentity():
     return identity
 
 
-def runCmd(command, cwd, timeout, payload=None):
+class JobFailure(RuntimeError):
+    def __init__(self, message, details, result=None):
+        super().__init__(message)
+        self.details = details
+        self.result = result or {}
+
+
+def readableOutput(output):
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    lines = output.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    return "\n".join(line for line in lines if not re.match(r"\s*linting \[\d+/\d+\]:", line))
+
+
+def runCmd(command, cwd, timeout, payload=None, env=None):
     started_at = time.monotonic()
-    logger.info("Starting %s (timeout %ss)", Path(command[0]).name + " " + " ".join(command[1:]), timeout)
+    logger.info("Starting %s (timeout %ss)", " ".join(command), timeout)
     process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, start_new_session=os.name != "nt")
-    output_lines = []
+                               stderr=subprocess.PIPE, env=env,
+                               start_new_session=os.name != "nt")
+    streams = {"stdout": [], "stderr": []}
 
-    def readOutput():
-        completed_progress = set()
-        for line in process.stdout:
-            output_lines.append(line)
-            progress = re.match(r"\s*(linting \[\d+/\d+\]):\s*(\d+)%", line)
-            if progress:
-                stage, percent = progress.groups()
-                if percent == "100" and stage not in completed_progress:
-                    completed_progress.add(stage)
-                    logger.info("[%s] %s complete", process.pid, stage)
-                continue
-            logger.info("[%s] %s", process.pid, line.rstrip())
+    def readOutput(stream, name):
+        # Read both pipes concurrently; preserve raw text before any log cleanup.
+        while chunk := stream.read1(8192):
+            streams[name].append(chunk)
+            readable = readableOutput(chunk.decode("utf-8", errors="replace"))
+            if readable.strip():
+                logger.info("[%s %s] %s", process.pid, name, readable)
 
-    reader = threading.Thread(target=readOutput, daemon=True)
-    reader.start()
+    readers = [threading.Thread(target=readOutput, args=(stream, name), daemon=True)
+               for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))]
+    for reader in readers:
+        reader.start()
+    timed_out = False
     try:
         if payload is not None:
-            process.stdin.write(json.dumps(payload))
+            process.stdin.write(json.dumps(payload).encode())
         process.stdin.close()
         while True:
             remaining = timeout - (time.monotonic() - started_at)
@@ -106,17 +118,25 @@ def runCmd(command, cwd, timeout, payload=None):
             except subprocess.TimeoutExpired:
                 logger.info("[%s] Still running after %.0fs", process.pid, time.monotonic() - started_at)
     except subprocess.TimeoutExpired:
+        timed_out = True
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True)
         else:
             os.killpg(process.pid, signal.SIGKILL)
         process.wait()
-        reader.join()
-        logger.error("[%s] Timed out after %ss", process.pid, timeout)
-        return {"exit_code": -1, "output": "".join(output_lines) + f"\nTimed out after {timeout}s"}
-    reader.join()
+    finally:
+        for reader in readers:
+            reader.join()
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
+    stdout, stderr = (b"".join(streams[name]).decode("utf-8", errors="replace") for name in ("stdout", "stderr"))
+    output = readableOutput(stdout + "\n" + stderr)
+    if timed_out:
+        output += f"\nTimed out after {timeout}s"
     logger.info("[%s] Finished in %.1fs (exit %s)", process.pid, time.monotonic() - started_at, process.returncode)
-    return {"exit_code": process.returncode, "output": "".join(output_lines)}
+    return {"exit_code": process.returncode, "stdout": stdout, "stderr": stderr,
+            "output": output, "timed_out": timed_out, "command": command}
 
 
 def runNative(workspace, payload, timeout):
@@ -124,11 +144,25 @@ def runNative(workspace, payload, timeout):
     output_path.unlink(missing_ok=True)
     result = runCmd([getPythonExe(), "-u", str(Path(__file__).with_name("native_runner.py"))],
                     workspace, timeout, {**payload, "output_path": str(output_path)})
-    if result["exit_code"] != 0:
-        raise RuntimeError(result["output"])
-    if not output_path.is_file():
-        raise RuntimeError("Native worker returned no structured result")
-    return json.loads(output_path.read_text()), result["output"]
+    for stream in ("stdout", "stderr"):
+        (workspace / f"native.{stream}").write_text(result[stream])
+    (workspace / "native_command.json").write_text(json.dumps(result["command"]))
+    envelope = json.loads(output_path.read_text()) if output_path.is_file() else {}
+    if result["exit_code"] != 0 or envelope.get("error"):
+        details = envelope.get("error_details", {})
+        details.update({"exit_code": result["exit_code"],
+                        "signal": -result["exit_code"] if result["exit_code"] < 0 else None,
+                        "diagnostic": result["output"]})
+        if result["timed_out"]:
+            details["kind"] = "timeout"
+        else:
+            details.setdefault("kind", "native_crash" if result["exit_code"] < 0 else "native_failure")
+        details.setdefault("stage", "native")
+        raise JobFailure(envelope.get("error") or f"Native {details['stage']} failed (exit {result['exit_code']})",
+                         details, envelope.get("result", {}))
+    if not envelope:
+        raise JobFailure("Native worker returned no structured result", {"kind": "missing_result", "stage": "native"})
+    return envelope.get("result", envelope), result["output"]
 
 
 def initializeGoal(store, cache_path):
@@ -155,7 +189,8 @@ def initializeGoal(store, cache_path):
                 workspace = Path(temp_path)
                 with zipfile.ZipFile(io.BytesIO(archive)) as source_zip:
                     source_zip.extractall(workspace)
-                result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"], workspace, TIMEOUTS["build"])
+                result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"],
+                                workspace, TIMEOUTS["build"], env={**os.environ, "KERNEL_BENCH_SERVER_JOB": "1"})
                 if result["exit_code"] != 0:
                     raise RuntimeError(result["output"])
                 goal_file = workspace / "goal.bin"
@@ -226,12 +261,48 @@ def evaluateJob(store, job, workspace):
             path.unlink()
     candidate_path = staging / ("candidate.cu" if job["backend"] == "cuda" else "candidate.hpp")
     candidate_path.write_text(job["source"])
+    diagnostic_dir = workspace / "build_diagnostics"
+    if diagnostic_dir.exists():
+        shutil.rmtree(diagnostic_dir)
+    diagnostic_dir.mkdir()
+    artifact_ids = []
+    def saveArtifact(name, data, media_type="text/plain"):
+        artifact_ids.append(store.addArtifact(job["id"], name, data, media_type))
+
+    saveArtifact("submitted_source", job["source"].encode())
+    build_result = None
+    for name in ("native_result.json", "native.stdout", "native.stderr", "native_command.json"):
+        (workspace / name).unlink(missing_ok=True)
     try:
         store.addEvent(job["id"], "build", "Building candidate native bindings")
-        result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"], workspace, TIMEOUTS["build"])
+        build_env = {**os.environ, "KERNEL_BENCH_SERVER_JOB": "1",
+                     "KERNEL_BENCH_DIAGNOSTICS_DIR": str(diagnostic_dir.resolve())}
+        result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"],
+                        workspace, TIMEOUTS["build"], env=build_env)
+        build_result = result
         store.addEvent(job["id"], "build", result["output"])
         if result["exit_code"] != 0:
-            raise RuntimeError(f"Build failed with exit code {result['exit_code']}")
+            compiler_records = []
+            for path in sorted(diagnostic_dir.glob("compiler-*.json")):
+                record = json.loads(path.read_text())
+                if record["exit_code"] is None:
+                    for stream in ("stdout", "stderr"):
+                        stream_path = path.with_suffix("." + stream)
+                        if stream_path.is_file():
+                            record[stream] = stream_path.read_text(errors="replace")
+                compiler_records.append(record)
+            failed = [record for record in compiler_records if record["exit_code"] != 0]
+            diagnostic = "\n".join(record["stderr"] or record["stdout"] for record in failed) or result["output"]
+            kind = "timeout" if result["timed_out"] else "compilation_error" if failed else "lint_error" if "Violation" in diagnostic or "DETECTED" in diagnostic else "build_error"
+            diagnostic_lines = diagnostic.splitlines()
+            summary = next((line.strip(" │") for line in diagnostic_lines if "contains a manual" in line), None)
+            if summary is None:
+                summary = next((line.strip(" │") for line in diagnostic_lines
+                                if "error:" in line.lower() or "DETECTED" in line or "Violation" in line),
+                               f"Build failed with exit code {result['exit_code']}")
+            raise JobFailure(summary[:1000], {"kind": kind, "stage": "build", "exit_code": result["exit_code"],
+                                             "signal": -result["exit_code"] if result["exit_code"] < 0 else None,
+                                             "diagnostic": diagnostic, "compiler_diagnostics": failed})
         configurations = store.getConfigurations(job["goal_id"], job["target_id"])
         expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (job["target_id"],))[0]["expression"]
         store.addEvent(job["id"], "test_bench", "Testing covered goal configurations, then benchmarking against existing kernels")
@@ -239,9 +310,31 @@ def evaluateJob(store, job, workspace):
                                            "reference_expression": expression,
                                            "configurations": [{"id": row["id"], "configuration": row["configuration"]} for row in configurations]}, TIMEOUTS["evaluate"])
         store.addEvent(job["id"], "test_bench", log)
-        store.completeJob(job["id"], result)
+    except JobFailure as error:
+        error.details["artifact_ids"] = artifact_ids
+        metadata_path = diagnostic_dir / "build_metadata.json"
+        if metadata_path.is_file():
+            error.details["build_capabilities"] = json.loads(metadata_path.read_text())
+        raise
     finally:
+        # Persist actual generated files before removing the candidate or workspace.
+        saveArtifact(candidate_path.relative_to(workspace).as_posix(), candidate_path.read_bytes())
+        for directory in (workspace / "tensor_graphs_cpp/generated", diagnostic_dir):
+            if directory.exists():
+                for path in sorted(directory.rglob("*")):
+                    if path.is_file() and (directory == diagnostic_dir or path.suffix in (".hpp", ".h", ".cpp", ".cu", ".json")):
+                        saveArtifact(path.relative_to(workspace).as_posix(), path.read_bytes(),
+                                     "application/json" if path.suffix == ".json" else "text/plain")
+        if build_result:
+            for stream in ("stdout", "stderr"):
+                saveArtifact(f"build.{stream}", build_result[stream].encode())
+            saveArtifact("build_command.json", json.dumps(build_result["command"]).encode(), "application/json")
+        for name in ("native_result.json", "native.stdout", "native.stderr", "native_command.json"):
+            native_path = workspace / name
+            if native_path.is_file():
+                saveArtifact(name, native_path.read_bytes(), "application/json" if name.endswith(".json") else "text/plain")
         candidate_path.unlink(missing_ok=True)
+    store.completeJob(job["id"], result)
 
 
 def runWorker(store, stop_event):
@@ -264,8 +357,16 @@ def runWorker(store, stop_event):
                         try:
                             evaluateJob(store, job, workspace)
                         except Exception as error:  # noqa: BLE001 - persist native/build failures and keep the queue alive
-                            store.addEvent(job["id"], "error", str(error))
-                            store.failJob(job["id"], str(error))
+                            details = getattr(error, "details", {})
+                            message = str(error)
+                            if details.get("diagnostic"):
+                                message += "\n" + details["diagnostic"]
+                            if details.get("artifact_ids"):
+                                message += "\nArtifact IDs: " + ", ".join(details["artifact_ids"])
+                            store.addEvent(job["id"], "error", message)
+                            store.failJob(job["id"], str(error),
+                                          getattr(error, "details", {"kind": "worker_failure", "stage": job.get("step", "worker")}),
+                                          getattr(error, "result", {}))
                 finally:
                     lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
             if job is None:
