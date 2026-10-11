@@ -11,6 +11,8 @@ namespace plan
 // InputPruneStartPrecedencePropagator: see docs/core/propagators.md.
 class InputPruneStartPrecedencePropagator : public Propagator
 {
+    std::string conflict_reason_;
+
     struct CachedChild
     {
         EClassId cid;
@@ -117,6 +119,9 @@ class InputPruneStartPrecedencePropagator : public Propagator
                 int32_t input_start_min = state.domains[child.start_var].getMin();
                 if (input_start_min != INT32_MAX && input_start_min >= cand_start_max)
                 {
+                    conflict_reason_ = "consumer=" + state.var_infos[st_var].name +
+                        state.domains[st_var].toString() + " alternative=" + std::to_string(cand_val) +
+                        " child=" + state.var_infos[child.start_var].name + state.domains[child.start_var].toString();
                     remove_cand = true;
                     break;
                 }
@@ -226,7 +231,12 @@ class InputPruneStartPrecedencePropagator : public Propagator
                         if (in_st_dom.setMax(max_allowed_input_start))
                         {
                             if (in_st_dom.isEmpty())
+                            {
+                                conflict_reason_ = "mandatory child=" + state.var_infos[in_st_v].name +
+                                    state.domains[in_st_v].toString() + " consumer=" + state.var_infos[st_var].name +
+                                    state.domains[st_var].toString() + " required-max=" + std::to_string(max_allowed_input_start);
                                 return false;
+                            }
                             state.setDomain(in_st_v, in_st_dom);
                             worklist.push_back(in_st_v);
                         }
@@ -239,8 +249,12 @@ class InputPruneStartPrecedencePropagator : public Propagator
     }
 
   public:
-    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
-    StartSelectionGuard startSelectionGuard() const override { return StartSelectionGuard::FIXED_START_NON_OPTIONAL; }
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START) | varTypeMask(VarType::SELECTED); }
+    // Optional child bounds can invalidate alternatives of a mandatory parent.
+    // pruneEClass itself checks whether each consumer is mandatory.
+    StartSelectionGuard startSelectionGuard() const override { return StartSelectionGuard::NONE; }
+
+    std::string conflictReason() const override { return conflict_reason_; }
 
     std::string name() const override
     {
@@ -249,14 +263,25 @@ class InputPruneStartPrecedencePropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        conflict_reason_.clear();
         if (changed != kInvalidVarId)
         {
-            if (state.var_infos[changed].type != VarType::START)
+            const auto type = state.var_infos.at(changed).type;
+            if (type != VarType::START && type != VarType::SELECTED)
                 return true;
-            uint32_t b = state.var_infos[changed].bucket_idx;
-            EClassId cid = state.var_infos[changed].eclass_id;
-            return pruneEClass(state, b, cid, worklist, changed,
-                               state.var_infos[changed].selection_var);
+            const auto &info = state.var_infos.at(changed);
+            const uint32_t b = info.bucket_idx;
+            const EClassId cid = info.eclass_id;
+            if (!pruneEClass(state, b, cid, worklist))
+                return false;
+            // A child's lower bound can invalidate a consumer alternative even
+            // when that consumer's own start domain did not change.
+            state.ensurePropagationState();
+            const auto &consumers = state.propagation.start_precedence[b].consumers_by_cid.at(cid.value);
+            for (const auto &consumer : consumers)
+                if (!pruneEClass(state, b, consumer.parent_cid, worklist))
+                    return false;
+            return true;
         }
         else
         {

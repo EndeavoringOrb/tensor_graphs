@@ -62,6 +62,10 @@ class SearchEngine
     std::unordered_map<std::string, uint64_t> propagation_conflicts_by_name;
     std::unordered_map<std::string, uint32_t> propagation_conflict_details_by_name;
     uint64_t restore_conflict_log_count = 0;
+    // Bounded storage: preserve recurring concrete witnesses without growing
+    // memory with the search tree. Counts beyond the retained set stay visible.
+    std::unordered_map<std::string, uint64_t> conflict_witness_counts;
+    uint64_t untracked_conflict_witnesses = 0;
 
     SearchEngine(SearchState state, std::shared_ptr<Selector> selector = nullptr,
                  std::shared_ptr<Brancher> brancher = nullptr)
@@ -247,7 +251,7 @@ class SearchEngine
         auto record_conflict = [&](const std::string &prop_name, const std::string &reason) {
             const uint64_t count = ++propagation_conflicts_by_name[prop_name];
             uint32_t &detail_count = propagation_conflict_details_by_name[prop_name];
-            if (detail_count < 3)
+            if (detail_count < 3 || count % 1000 == 0)
             {
                 ++detail_count;
                 LOG(INFO) << "[SearchEngine conflict] propagator=" << prop_name
@@ -428,12 +432,17 @@ class SearchEngine
                 const uint64_t domain_revision_before = state.getDomainRevision();
 #ifdef TG_PROFILE
                 const uint64_t initialization_ns_before = prop->initializationProfileNs();
-                const bool sample_propagator_timing = ((bucket_timing.propagate_calls + 1) % 16) == 0 || initial_propagation;
-                const auto propagate_start = sample_propagator_timing
-                                                 ? std::chrono::steady_clock::now()
-                                                 : std::chrono::steady_clock::time_point{};
+                const auto propagate_start = std::chrono::steady_clock::now();
+                const auto lower_before = state.start_lower_tightenings;
+                const auto upper_before = state.start_upper_tightenings;
+                const auto selection_before = state.selection_values_removed;
 #endif
                 bool propagated = prop->propagate(state, next_changed, prop_worklist);
+#ifdef TG_PROFILE
+                // Stop before queue coalescing, which belongs to dispatcher overhead.
+                const uint64_t propagate_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - propagate_start).count());
+#endif
                 // Propagators append directly to the shared worklist. Coalesce
                 // duplicate pending variables before running the next item;
                 // every queued variable already exposes its latest domain.
@@ -453,24 +462,17 @@ class SearchEngine
                 timing.propagate_calls++;
                 bucket_timing.propagate_calls++;
                 const uint64_t initialization_ns = prop->initializationProfileNs() - initialization_ns_before;
-                timing.propagate_ns += initialization_ns;
-                bucket_timing.propagate_ns += initialization_ns;
                 bucket_timing.initialization_ns += initialization_ns;
-                prop_and_lb_ns_in_call += initialization_ns;
-                if (sample_propagator_timing)
-                {
-                    const uint64_t propagate_ns = static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - propagate_start)
-                            .count());
-                    const uint64_t steady_propagate_ns = propagate_ns > initialization_ns ? propagate_ns - initialization_ns : 0;
-                    const uint64_t estimated_propagate_ns = steady_propagate_ns * (initial_propagation ? 1 : 16);
-                    timing.propagate_ns += estimated_propagate_ns;
-                    bucket_timing.propagate_ns += estimated_propagate_ns;
-                    bucket_timing.max_propagate_ns = std::max(bucket_timing.max_propagate_ns, propagate_ns);
-                    timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
-                    prop_and_lb_ns_in_call += estimated_propagate_ns;
-                }
+                timing.propagate_ns += propagate_ns;
+                bucket_timing.propagate_ns += propagate_ns;
+                bucket_timing.max_propagate_ns = std::max(bucket_timing.max_propagate_ns, propagate_ns);
+                timing.max_propagate_ns = std::max(timing.max_propagate_ns, propagate_ns);
+                prop_and_lb_ns_in_call += propagate_ns;
+                timing.domain_changes += state.getDomainRevision() - domain_revision_before;
+                timing.no_change_calls += state.getDomainRevision() == domain_revision_before;
+                timing.start_lower_tightenings += state.start_lower_tightenings - lower_before;
+                timing.start_upper_tightenings += state.start_upper_tightenings - upper_before;
+                timing.selection_values_removed += state.selection_values_removed - selection_before;
                 if (!propagated)
                     timing.contradictions++;
 #endif
@@ -480,11 +482,20 @@ class SearchEngine
                     std::string reason = "explicit contradiction while processing " +
                                                describe_var(next_changed) + "; " +
                                                describe_last_change(domain_revision_before) +
-                                               "; pending work=" + std::to_string(prop_worklist.size());
+                                               "; pending work=" + std::to_string(prop_worklist.size() - worklist_head) +
+                                               "; deferred batches=" + std::to_string(deferred_count);
                     const std::string detail = prop->conflictReason();
                     if (!detail.empty())
                         reason += "; " + detail;
                     record_conflict(prop->name(), reason);
+                    if (!detail.empty())
+                    {
+                        const std::string signature = prop->name() + ": " + detail;
+                        auto it = conflict_witness_counts.find(signature);
+                        if (it != conflict_witness_counts.end()) ++it->second;
+                        else if (conflict_witness_counts.size() < 256) conflict_witness_counts.emplace(signature, 1);
+                        else ++untracked_conflict_witnesses;
+                    }
                     if (out_conflict_reason)
                         *out_conflict_reason = prop->name() + ": " + reason;
 #ifdef TG_PROFILE
@@ -507,7 +518,8 @@ class SearchEngine
                             *out_conflict_reason += "a domain";
                         *out_conflict_reason += " while processing " + describe_var(next_changed) + "; " +
                                                describe_last_change(domain_revision_before) +
-                                               "; pending work=" + std::to_string(prop_worklist.size());
+                                               "; pending work=" + std::to_string(prop_worklist.size() - worklist_head) +
+                                               "; deferred batches=" + std::to_string(deferred_count);
                     }
                     VarId empty_var = state.getEmptyDomainVar();
                     const std::string empty_detail =
@@ -749,6 +761,9 @@ class SearchEngine
         {
             LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation: "
                          << initial_conflict;
+#ifdef TG_PROFILE
+            reportProfile();
+#endif
             return false;
         }
 
@@ -757,6 +772,7 @@ class SearchEngine
             selector->setIncumbent(incumbent_best_cost);
         }
 
+        reportScheduleDiagnostics();
         root_node->lower_bound = state.lower_bound;
         root_node->priority = root_node->lower_bound;
         root_node->trail_marker = state.getTrailMarker();
@@ -915,8 +931,8 @@ class SearchEngine
             }
 
             const size_t branch_type = static_cast<size_t>(state.var_infos[decision.left_delta.first].type);
-            if (branch_type < branch_counts.size())
-                branch_counts[branch_type]++;
+            if (branch_type >= branch_counts.size()) Error::throw_err("Invalid branch variable type");
+            branch_counts[branch_type]++;
             if (iterations % 1000 == 0)
             {
                 const double elapsed_seconds = std::chrono::duration<double>(
@@ -944,6 +960,7 @@ class SearchEngine
                           << " best=" << (incumbent_best_cost < TGConstants::INF
                                                ? std::to_string(incumbent_best_cost)
                                                : "inf");
+                if (iterations % 10000 == 0) reportScheduleDiagnostics();
             }
 
             // 1. Create Right Child (lazy alternative, pushed to queue without upfront propagation)
@@ -1041,10 +1058,86 @@ class SearchEngine
     }
 
   private:
+    void reportScheduleDiagnostics()
+    {
+        // Sample only at a propagated branch point, never from a contradictory
+        // state with unfinished work. This is an independent closure audit.
+        for (uint32_t bucket = 0; bucket < state.buckets.size(); ++bucket)
+        {
+            size_t mandatory = 0, fixed = 0, forward_gaps = 0, backward_gaps = 0;
+            int32_t earliest = INT32_MAX, latest = INT32_MIN;
+            std::string first_gap;
+            for (const auto &pair : state.selected_vars[bucket])
+            {
+                const Domain &selection = state.domains[pair.second];
+                if (selection.contains(0)) continue;
+                ++mandatory;
+                const VarId start_var = state.start_vars[bucket].at(pair.first);
+                const Domain &domain = state.domains[start_var];
+                fixed += domain.isFixed();
+                earliest = std::min(earliest, domain.getMin());
+                latest = std::max(latest, domain.getMax());
+                const EClass &cls = state.bucket_egraphs[bucket].getEClass(pair.first);
+                int64_t required_min = INT64_MAX;
+                size_t alternatives = 0;
+                std::unordered_map<EClassId, size_t> child_counts;
+                for (uint32_t index = 0; index < cls.enodes.size(); ++index)
+                {
+                    if (!selection.contains(static_cast<int32_t>(index + 1))) continue;
+                    ++alternatives;
+                    int64_t alternative_min = 0;
+                    std::unordered_set<EClassId> seen;
+                    for (EClassId child : state.bucket_egraphs[bucket].getENode(cls.enodes[index]).getChildren())
+                    {
+                        child = state.bucket_egraphs[bucket].findConst(child);
+                        if (!seen.insert(child).second) continue;
+                        ++child_counts[child];
+                        const auto child_start = state.start_vars[bucket].find(child);
+                        const auto child_selection = state.selected_vars[bucket].find(child);
+                        if (child_start == state.start_vars[bucket].end() || child_selection == state.selected_vars[bucket].end()) continue;
+                        const Domain &selected = state.domains[child_selection->second];
+                        if (selected.isFixed() && selected.fixedValue() == 0) continue;
+                        alternative_min = std::max(alternative_min, static_cast<int64_t>(state.domains[child_start->second].getMin()) + 1);
+                    }
+                    required_min = std::min(required_min, alternative_min);
+                }
+                if (alternatives && required_min > domain.getMin())
+                {
+                    ++forward_gaps;
+                    if (first_gap.empty()) first_gap = state.var_infos[start_var].name + domain.toString() + " required-min=" + std::to_string(required_min);
+                }
+                for (const auto &child : child_counts)
+                {
+                    if (child.second != alternatives) continue;
+                    const auto it = state.start_vars[bucket].find(child.first);
+                    if (it == state.start_vars[bucket].end()) continue;
+                    if (state.domains[it->second].getMax() >= domain.getMax())
+                    {
+                        ++backward_gaps;
+                        if (first_gap.empty()) first_gap = state.var_infos[it->second].name + state.domains[it->second].toString() + " consumer=" + state.var_infos[start_var].name + domain.toString();
+                    }
+                }
+            }
+            LOG(INFO) << "[SearchEngine schedule] bucket=" << bucket << " mandatory=" << mandatory
+                      << " fixed=" << fixed << " unfixed=" << mandatory - fixed
+                      << " horizon=[" << earliest << ".." << latest << "]"
+                      << " capacity=" << (mandatory ? static_cast<int64_t>(latest) - earliest + 1 : 0)
+                      << " closure-gaps(forward/backward)=" << forward_gaps << "/" << backward_gaps
+                      << " first-gap=" << first_gap;
+        }
+        std::vector<std::pair<uint64_t, std::string>> witnesses;
+        for (const auto &entry : conflict_witness_counts) witnesses.emplace_back(entry.second, entry.first);
+        std::sort(witnesses.rbegin(), witnesses.rend());
+        for (size_t i = 0; i < std::min<size_t>(5, witnesses.size()); ++i)
+            LOG(INFO) << "[SearchEngine recurring conflict] count=" << witnesses[i].first << " " << witnesses[i].second;
+        LOG(INFO) << "[SearchEngine conflict witnesses] retained=" << witnesses.size()
+                  << " capacity=256 untracked-occurrences=" << untracked_conflict_witnesses;
+    }
+
 #ifdef TG_PROFILE
     void reportProfile()
     {
-        LOG(INFO) << "[SearchEngine profile] branch=" << search_timing.choose_branch_ns / 1.0e9
+        LOG(INFO) << "[SearchEngine profile] timing=measured initialization=included-in-total branch=" << search_timing.choose_branch_ns / 1.0e9
                   << "s restore=" << search_timing.restore_node_ns / 1.0e9
                   << "s propagation-overhead=" << search_timing.run_prop_overhead_ns / 1.0e9
                   << "s leaf-evaluation=" << search_timing.leaf_eval_ns / 1.0e9
@@ -1070,7 +1163,11 @@ class SearchEngine
                       << " initialization=" << propagators[prop_idx]->initializationProfileNs() / 1.0e9 << "s"
                       << " total=" << timing.propagate_ns / 1.0e9
                       << "s max=" << timing.max_propagate_ns / 1.0e6 << "ms"
-                      << " contradictions=" << timing.contradictions;
+                      << " contradictions=" << timing.contradictions
+                      << " domain-changes=" << timing.domain_changes << " no-change-calls=" << timing.no_change_calls
+                      << " start-lower=" << timing.start_lower_tightenings << " start-upper=" << timing.start_upper_tightenings
+                      << " selection-values-removed=" << timing.selection_values_removed
+                      << " " << propagators[prop_idx]->diagnosticSummary();
             for (size_t bucket_slot = 0; bucket_slot < timing.by_bucket.size(); ++bucket_slot)
             {
                 const auto &bucket_timing = timing.by_bucket[bucket_slot];
@@ -1117,6 +1214,11 @@ class SearchEngine
         uint64_t propagate_ns = 0;
         uint64_t max_propagate_ns = 0;
         uint64_t contradictions = 0;
+        uint64_t domain_changes = 0;
+        uint64_t no_change_calls = 0;
+        uint64_t start_lower_tightenings = 0;
+        uint64_t start_upper_tightenings = 0;
+        uint64_t selection_values_removed = 0;
         uint64_t lower_bound_calls = 0;
         uint64_t lower_bound_ns = 0;
         uint64_t max_lower_bound_ns = 0;

@@ -9,7 +9,7 @@ namespace plan
 // ConsumerStartPrecedencePropagator: see docs/core/propagators.md.
 class ConsumerStartPrecedencePropagator : public Propagator
 {
-    bool fixed_starts_only;
+    std::string conflict_reason_;
 
     bool propagateStart(SearchState &state, uint32_t b, EClassId cid, int32_t min_start)
     {
@@ -50,6 +50,12 @@ class ConsumerStartPrecedencePropagator : public Propagator
 
                 if (cannot_start)
                 {
+                    // Retain the actual edge, rather than only the triggering variable.
+                    conflict_reason_ = "source=" + state.var_infos[state.start_vars[b].at(cid)].name +
+                        state.domains[state.start_vars[b].at(cid)].toString() +
+                        " via=" + std::to_string(current.value) + " consumer=" + state.var_infos[p_st_v].name +
+                        start_dom.toString() + " selection=" + p_sel_dom.toString() +
+                        " required-min=" + std::to_string(required_consumer_start);
                     Domain updated_selection = p_sel_dom;
                     bool domain_changed = false;
                     if (updated_selection.is_mask && updated_selection.min_val == 0 && consumer.total_enodes <= 31)
@@ -149,7 +155,7 @@ class ConsumerStartPrecedencePropagator : public Propagator
                     }
 
                     const EClassId p_cid = consumer.parent_cid;
-                    if (can_be_view && p_cid.value < precedence.visited_stamp.size() &&
+                    if (can_be_view && any_candidate && all_candidates_depend && p_cid.value < precedence.visited_stamp.size() &&
                         precedence.visited_stamp[p_cid.value] != stamp)
                     {
                         precedence.visited_stamp[p_cid.value] = stamp;
@@ -162,17 +168,17 @@ class ConsumerStartPrecedencePropagator : public Propagator
     }
 
   public:
-    explicit ConsumerStartPrecedencePropagator(bool fixed_starts_only = false)
-        : fixed_starts_only(fixed_starts_only)
+    explicit ConsumerStartPrecedencePropagator(bool /*fixed_starts_only*/ = false)
     {
     }
 
-    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
+    uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START) | varTypeMask(VarType::SELECTED); }
     StartSelectionGuard startSelectionGuard() const override
     {
-        return fixed_starts_only ? StartSelectionGuard::FIXED_START_NON_OPTIONAL_WITH_CONSUMERS
-                                 : StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS;
+        return StartSelectionGuard::NON_OPTIONAL_WITH_CONSUMERS;
     }
+
+    std::string conflictReason() const override { return conflict_reason_; }
 
     std::string name() const override
     {
@@ -181,11 +187,13 @@ class ConsumerStartPrecedencePropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        conflict_reason_.clear();
+        state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
+            if (state.var_infos[changed].type == VarType::SELECTED)
+                changed = state.start_vars[state.var_infos[changed].bucket_idx].at(state.var_infos[changed].eclass_id);
             if (state.var_infos[changed].type != VarType::START)
-                return true;
-            if (fixed_starts_only && !state.domains[changed].isFixed())
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
@@ -215,11 +223,9 @@ class ConsumerStartPrecedencePropagator : public Propagator
                     EClassId cid = pair.first;
                     VarId sel_v = pair.second;
                     const Domain &sel_dom = state.domains[sel_v];
-                    if (sel_dom.isFixed() && sel_dom.fixedValue() > 0)
+                    if (!sel_dom.contains(0))
                     {
                         VarId st_v = state.start_vars[b].at(cid);
-                        if (fixed_starts_only && !state.domains[st_v].isFixed())
-                            continue;
                         if (!propagateStart(state, b, cid, state.domains[st_v].getMin()))
                             return false;
                     }

@@ -241,21 +241,57 @@ When a base e-class is fixed as not cached `{0}`, remove e-node choices selectio
 
 ### `InputPruneStartPrecedencePropagator`
 
-An e-class must start after its inputs. On start upper bound change, if 0 not in `selected_<bucket_id>_<e-class_id>`:
--For each candidate e $\in$ selected_C, if any input I $\in$ inputs(e) has start_min(I) ≥ start_max(C), remove candidate e from selected_C. if selected_C empty, return false.
--For any input I that is present in all remaining candidates of selected, start_max(I) <= start_max(C)-1
+On start or selection changes, revisit the changed class and its consumers.
+Starts need not be fixed. Remove an alternative when one of its inputs has a
+minimum start greater than or equal to the consumer's maximum. For every input
+shared by all remaining alternatives of a mandatory consumer, enforce
+`input.max <= consumer.max - 1`. Report the actual consumer, input, alternative,
+and bounds on contradiction.
 
 ### `ConsumerStartPrecedencePropagator`
 
-An e-class must start after its inputs. On start lower bound change, if 0 not in `selected_<bucket_id>_<e-class_id>`, for all consumers where 0 not in selected, set consumer start min to max(consumer start min, min(e-node start min for e-node in domain)) where e-node start min = max(input start min + 1 for input in e-node inputs, 0 for case with no inputs). if consumer start_min > start_max, return false.
+On start lower-bound or selection changes of a mandatory class, propagate its
+minimum plus one to consumers that require it in every remaining alternative.
+Remove dependent alternatives whose consumer maximum cannot support that bound.
+The legacy `fixed_starts_only` constructor argument is retained for source
+compatibility but no longer weakens propagation. Existing view traversal is
+restricted to classes whose remaining alternatives all depend on the traversed
+producer, so a bypass alternative cannot impose an unconditional bound. Conflicts include the source, traversed class, actual consumer,
+selection domain, and required minimum.
 
 ### `StartPrecedencePropagator`
 
-An e-class must start after its inputs. On select change, if 0 not in `selected_<bucket_id>_<e-class_id>`, set start min to max(start min, min(e-node start min for e-node in domain)) where e-node start min = max(input start min + 1 for input in e-node inputs)
+On selection or start changes, compute each remaining alternative's earliest
+start as the maximum of its inputs' minima plus one. Raise a mandatory class's
+minimum to the minimum of these alternative bounds. Revisit consumers on child
+changes. Selection changes also enqueue starts on affected input edges so both
+forward and backward propagation reach closure without waiting for assignment.
 
 ### `StartUniquePropagator`
 
 When a selected e-class's start is fixed, remove that start value from the start domains of other e-classes whose start is not fixed to {0}. This prevents two active operations from occupying the same execution step. Because we cannot represent holes in the start domain when it is a range, only remove if value is equal to min/max (maybe keep a hashmap for fast lookup of values based on min/max). But also, I want domains to be able to switch between mask and range so for example if we manage to narrow down start to a range < 32 we can swap it to a mask and then we can remove in the middle.
+
+### `StartBoundsPropagator`
+
+Enforce all-different bounds consistency for mandatory start variables within
+each bucket. Optional classes are excluded until their selection excludes zero.
+At propagation quiescence, first check fixed-start collisions and remove occupied
+fixed slots from the rank coordinate system. Sweep only the remaining domains in
+ascending maximum order, then repeat with negated bounds to tighten maxima.
+Removing fixed slots from the coordinates preserves interval capacity while
+avoiding repeated singleton Hall reservations for every assigned operation.
+If the interval hulls of n remaining variables share at least n available ranks,
+every bound has interval support, so the sweeps can be skipped safely. A segment tree counts variables contained
+in intervals and tracks saturated Hall reservations. An interval `[a,b]` cannot
+contain more than `b-a+1` mandatory domains. If exactly that many domains are
+contained, other variables cannot use its slots at their bounds. Interior holes
+are not removed; this is bounds consistency, not domain consistency for masks.
+Changes re-enter the propagation queue until closure. All scratch state is rebuilt
+from current domains, making backtracking independent of cached reservations.
+Conflicts report overload capacity/count and up to eight witnesses, fixed-start
+collisions, or the start whose bounds are covered by occupied slots/Hall
+reservations. `available-rank-interval` uses the compressed coordinates, so its
+capacity counts available slots; witness domains remain in original start ranks.
 
 ### `MemoryNoOverlapPropagator`
 
@@ -506,3 +542,67 @@ For a base e-class fixed as cached, all corresponding offset variables across bu
 ### `WriteAfterReadStartPropagator`
 
 When a selected start variable becomes fixed, inspect active allocations with overlapping fixed offsets whose start domains already establish an order. If the later allocation does not read the earlier one, raise its minimum start to after the earliest last reader of the earlier allocation. This performs the reader ordering before branching on individual starts.
+
+
+### Search diagnostics and timing
+
+Profile builds measure every propagator call directly. `total` includes
+initialization; initialization and internal phase timers are subsets, not extra
+costs. Dispatcher overhead excludes measured propagator bodies and includes queue
+coalescing. Maxima are measured over all calls, rather than sampled calls.
+Per-propagator counters report domain changes, calls with no domain changes,
+start minimum/maximum tightenings, and removed selection values. Counters count
+work performed across branches and are intentionally not undone on restoration.
+
+Conflict details are logged for the first three occurrences and every thousandth
+occurrence thereafter. Actual pending work and deferred batches are reported
+separately. Up to 256 concrete conflict signatures are retained; every 10,000
+iterations the five most frequent retained signatures and untracked occurrence
+count are emitted. This bounded diagnostic is not conflict learning.
+
+After successful root propagation and at those propagated branch points, the schedule audit reports mandatory/fixed
+start counts, the current horizon/capacity, and forward/backward precedence gaps
+computed independently from remaining alternatives. A nonzero gap is evidence
+that a wakeup or propagation rule is missing. This audit does not run inside an
+unfinished conflicting propagation call.
+
+Write-after-read profiling separates allocation gathering, reader-index lookup/building,
+and overlap processing. `reader-rebuilds` counts actual index builds;
+`reader-cache-hits` counts calls reusing an existing index, and `reader-index-skips`
+counts scans needing no reader index. Candidate and ordered overlap pair counts
+show how much scan work leads to an established ordering. The generic domain-change
+counters show whether that work tightens any start bounds.
+
+### Write-after-read reader caching
+
+The start propagator caches every selected value's readers, including aliases
+through selected view chains, per bucket and selection revision. Selection changes
+and restoration both advance the revision, invalidating the cached relationships.
+Only build or retrieve the index after finding the first eligible overlapping pair
+whose start bounds establish an order. Calls with no such pairs build no index.
+Reader start minima are read from the live domains on every call, so start-only
+changes reuse relationships without retaining stale bounds. Reusing a propagator
+on a different search state clears the indexes. Graph structure stays immutable
+during a search, as required by the other planner indexes.
+
+### Future incremental allocation processing
+
+Allocation overlap has different invalidation requirements: selected alternatives
+change shapes/view status, offsets change physical intervals, and cache status
+changes persistence. A reader cache keyed only by selection revision must not be
+used as an allocation cache. Index allocations by memory space and physical
+interval, with reverse links from readers to the values they read.
+
+When a start changes, reconsider pairs involving that allocation and pairs whose
+earlier value is read by the changed operation. Changes to either endpoint can
+establish ordering; reader lower-bound changes can raise the required overwrite
+rank. Enqueue newly changed starts until closure. Selection, offset, and cache
+changes must invalidate the relevant indexes; restoration must rebuild or restore
+them as well. Keep a full-scan reference implementation for randomized equivalence
+checks, especially view aliases, persistence, and branch restoration.
+
+Reader construction now happens at most once per needed selection revision.
+Incremental allocation processing would additionally replace repeated whole-bucket
+overlap scanning with pair processing driven by affected allocations/readers. Dense overlaps can still require many pairs. The new phase
+and effectiveness counters should establish the likely gain before implementing
+this additional stateful optimization.
