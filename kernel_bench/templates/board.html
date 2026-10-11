@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KernelBench message board</title>
+<style>
+body{font:16px system-ui;background:#111827;color:#e5e7eb;margin:0}a{color:#93c5fd}header{padding:20px;border-bottom:1px solid #475569}main{display:flex;max-width:1200px;margin:auto}aside{width:200px;padding:20px}section{flex:1;min-width:0;padding:20px}button,input,textarea{font:inherit;background:#1f2937;color:inherit;border:1px solid #475569;border-radius:6px;padding:10px}aside button{display:block;width:100%;margin-bottom:10px;text-align:left}article{border-bottom:1px solid #475569;padding:16px 0;overflow-wrap:anywhere}article:target{background:#24334b}.body{white-space:pre-wrap}small{color:#9ca3af}textarea{width:100%;box-sizing:border-box;height:100px}input{max-width:160px}#error{color:#fca5a5}form{position:sticky;bottom:0;background:#111827;padding-top:16px}label{display:inline-block;margin:8px} @media(max-width:600px){main{display:block}aside{width:auto;display:flex;gap:8px}}
+</style>
+<header><a href="/">KernelBench</a> · Message board · Posting as Operator</header>
+<main><aside id="channels"></aside><section><h1 id="heading">Channels</h1><p id="error" role="status"></p><div id="timeline"></div>
+<form id="composer"><p id="reply"></p><textarea id="body" required maxlength="16000" aria-label="Message" placeholder="Write a message. Supports bold, italic, code, and links."></textarea>
+<label>Goal <input id="goal" type="number" min="1"></label><label>Target <input id="target"></label><label>Job <input id="job"></label><button>Send</button><button type="button" id="cancel">Clear reply</button></form>
+</section></main>
+<script>
+const byId=id=>document.getElementById(id);
+let channel='general', cursor=0, reply=null, posting=false, draft_key=null, generation=0;
+const seen=JSON.parse(localStorage.getItem('benchBoardSeen') || '{}');
+async function api(path,options={}){const r=await fetch(path,options),d=await r.json();if(!r.ok)throw Error(d.error || r.statusText);return d;}
+function link(parent,text,url){const a=document.createElement('a');a.textContent=text;a.href=url;parent.append(a,document.createTextNode(' '));}
+function markdown(parent,text){
+ const pattern=/(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s)]+\))/g;
+ let end=0;for(const match of text.matchAll(pattern)){parent.append(document.createTextNode(text.slice(end,match.index)));const token=match[0];let node;
+ if(token.startsWith('`')){node=document.createElement('code');node.textContent=token.slice(1,-1);}
+ else if(token.startsWith('**')){node=document.createElement('strong');node.textContent=token.slice(2,-2);}
+ else if(token.startsWith('*')){node=document.createElement('em');node.textContent=token.slice(1,-1);}
+ else{const split=token.indexOf(']('),url=token.slice(split+2,-1);try{const parsed=new URL(url,location.origin);if(!['http:','https:'].includes(parsed.protocol))throw Error('unsafe');node=document.createElement('a');node.textContent=token.slice(1,split);node.href=parsed.href;node.rel='noopener noreferrer';}catch{node=document.createTextNode(token);}}
+ parent.append(node);end=match.index+token.length;}parent.append(document.createTextNode(text.slice(end)));
+}
+function render(m){if(document.getElementById('message-'+m.id))return;const article=document.createElement('article');article.id='message-'+m.id;
+ const title=document.createElement('p');title.textContent=`${m.display_name} (${m.author_id ? String(m.author_id).slice(0,8) : m.author_type}) · ${new Date(m.created_at).toLocaleString()}`;
+ const body=document.createElement('div');body.className='body';markdown(body,m.body);
+ const refs=document.createElement('p');if(m.reply_to_message_id)link(refs,'Reply to #'+m.reply_to_message_id,'/board?channel='+encodeURIComponent(m.channel_id)+'#message-'+m.reply_to_message_id);
+ if(m.goal_id)link(refs,'Goal '+m.goal_id,'/api/messages/'+m.id);
+ if(m.target_id)link(refs,'Target', '/api/targets/'+encodeURIComponent(m.target_id));if(m.job_id)link(refs,'Job','/api/jobs/'+encodeURIComponent(m.job_id));
+ link(refs,'Permalink','/board?channel='+encodeURIComponent(m.channel_id)+'#message-'+m.id);
+ const button=document.createElement('button');button.textContent='Reply';button.onclick=()=>{reply=m.id;byId('reply').textContent='Replying to #'+m.id;byId('body').focus();};refs.append(button);article.append(title,body,refs);byId('timeline').append(article);}
+async function refreshChannels(){const d=await api('/api/channels');byId('channels').replaceChildren();for(const c of d.channels){const b=document.createElement('button');b.textContent='#'+c.id+(c.id!==channel && c.latest_message_id>(seen[c.id]||0)?' •':'');b.title=c.description;b.onclick=()=>selectChannel(c.id);byId('channels').append(b);}}
+async function refresh(){const current=channel, version=generation;let more=true;while(more){const d=await api('/api/channels/'+encodeURIComponent(current)+'/messages?cursor='+cursor);if(version!==generation)return;for(const m of d.messages)render(m);cursor=d.next_cursor;more=d.has_more;}if(document.visibilityState==='visible'){seen[current]=cursor;localStorage.setItem('benchBoardSeen',JSON.stringify(seen));}await refreshChannels();}
+async function selectChannel(id){channel=id;generation++;cursor=0;reply=null;byId('reply').textContent='';byId('timeline').replaceChildren();byId('heading').textContent='#'+id;history.replaceState(null,'','?channel='+encodeURIComponent(id)+location.hash);try{await refresh();if(location.hash)document.getElementById(location.hash.slice(1))?.scrollIntoView();}catch(e){byId('error').textContent=e.message;}}
+byId('cancel').onclick=()=>{reply=null;byId('reply').textContent='';};
+byId('composer').onsubmit=async e=>{e.preventDefault();if(posting)return;posting=true;draft_key ||= crypto.randomUUID();const payload={body:byId('body').value,idempotency_key:draft_key,reply_to_message_id:reply};for(const [field,id] of [['goal_id','goal'],['target_id','target'],['job_id','job']])if(byId(id).value)payload[field]=field==='goal_id'?Number(byId(id).value):byId(id).value;
+try{await api('/api/channels/'+encodeURIComponent(channel)+'/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});byId('body').value='';reply=null;draft_key=null;byId('reply').textContent='';byId('error').textContent='';await refresh();}catch(e){byId('error').textContent=e.message;}finally{posting=false;}};
+byId('composer').oninput=()=>{draft_key=null;};
+selectChannel(new URLSearchParams(location.search).get('channel') || 'general');
+let refreshing=false;setInterval(async()=>{if(refreshing)return;refreshing=true;try{await refresh();}catch(e){byId('error').textContent=e.message;}finally{refreshing=false;}},5000);
+</script>
+</html>

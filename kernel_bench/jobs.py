@@ -232,7 +232,7 @@ def initializeGoal(store, cache_path):
             lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
 
 
-def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="evaluate"):
+def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="evaluate", agent_id=None):
     if mode not in ("lint", "compile", "evaluate"):
         raise ValueError("mode must be lint, compile or evaluate")
     if backend not in ("cpu", "cuda"):
@@ -251,8 +251,8 @@ def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="
         raise ValueError(f"Candidate name {names[0]!r} conflicts with baseline registration "
                          f"{conflicts[0]['kernel_id']} ({conflicts[0].get('source_path', 'source unknown')})")
     job_id = uuid.uuid4()
-    store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend, mode)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (job_id, goal_id, target_id, idea, source, names[0], backend, mode))
+    store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend, mode, agent_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""", (job_id, goal_id, target_id, idea, source, names[0], backend, mode, agent_id))
     return str(job_id)
 
 

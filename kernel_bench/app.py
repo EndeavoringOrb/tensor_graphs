@@ -15,6 +15,10 @@ from flask import Flask, jsonify, redirect, render_template, request, send_file
 from psycopg.types.json import Jsonb
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from kernel_linter_rules import getRules
+
+from .board import authorIdentity, installBoard, messageData, saveMessage
+from .contract import CONTRACT, decodeConstants, targetKernels
 from .jobs import (
     DEFAULT_GOAL_CACHE,
     PROJECT_ROOT,
@@ -23,12 +27,16 @@ from .jobs import (
     startWorker,
 )
 from .storage import Store
-from .contract import CONTRACT, decodeConstants, targetKernels
-from kernel_linter_rules import getRules
 
 logger = logging.getLogger(__name__)
 
 TOOLS = [
+    {"name": "register_agent", "method": "POST", "path": "/api/agents/register", "description": "Register display_name; persist returned id and agent_token privately; send X-Agent-Token for attribution"},
+    {"name": "agent_identity", "method": "GET", "path": "/api/agents/me", "description": "Inspect identity using X-Agent-Token plus X-Bench-Token"},
+    {"name": "channels", "method": "GET", "path": "/api/channels", "description": "Server-wide general and suggestions channels"},
+    {"name": "read_messages", "method": "GET", "path": "/api/channels/{id}/messages", "description": "Read messages with cursor and limit (1–200); next_cursor and has_more returned"},
+    {"name": "post_message", "method": "POST", "path": "/api/channels/{id}/messages", "description": "Post body (1–16000 characters), idempotency_key, optional reply_to_message_id, goal_id, target_id, job_id; X-Agent-Token required for agents"},
+    {"name": "get_message", "method": "GET", "path": "/api/messages/{id}", "description": "Retrieve a linked message"},
     {"name": "kernel_contract", "method": "GET", "path": "/api/kernel-contract", "description": "Native signatures, registration parameters, configuration encoding and CPU/CUDA skeletons"},
     {"name": "linter_rules", "method": "GET", "path": "/api/linter/rules", "description": "Shared build linter rule identifiers, descriptions and scopes"},
     {"name": "kernel_names", "method": "GET", "path": "/api/kernels/list?name=...", "description": "Exact baseline name lookup and availability; independent candidate jobs may reuse names"},
@@ -82,6 +90,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         if request.path.startswith("/api/"):
             return jsonify({"error": "Authentication required: X-Bench-Token"}), 401
         return redirect("/login")
+
+    installBoard(app, store, authorized)
 
     @app.errorhandler(ValueError)
     @app.errorhandler(TypeError)
@@ -199,7 +209,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
             if key in data and not isinstance(data[key], str):
                 raise TypeError(f"{key} must be a string")
         mode = "lint" if request.path == "/api/iteration/lint" else data.get("mode", "evaluate")
-        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode)
+        author = authorIdentity(store, authorized) if request.headers.get("X-Agent-Token") else None
+        job_id = createJob(store, goal_id, data.get("source", ""), data.get("target_id", ""), data.get("idea", ""), data.get("backend", "cuda"), mode, agent_id=author["id"] if author else None)
         return jsonify({"job_id": job_id, "validation_id": job_id, "mode": mode, "status": "queued"}), 202
 
     @app.get("/api/jobs")
@@ -207,7 +218,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     @app.get("/api/versions")
     def jobs():
         target_id = request.args.get("target_id", "")
-        rows = store.query("""SELECT id AS job_id, target_id, idea, kernel_name, backend, mode, status, step,
+        rows = store.query("""SELECT id AS job_id, agent_id, target_id, idea, kernel_name, backend, mode, status, step,
             result, error, error_details, created_at, completed_at FROM kernel_bench.jobs
             WHERE goal_id = %s AND (%s = '' OR target_id = %s) ORDER BY created_at DESC LIMIT 200""", (goal_id, target_id, target_id))
         return jsonify({"jobs": rows})
@@ -350,7 +361,15 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
             data = request.get_json()
             if not isinstance(data, dict):
                 raise ValueError("Expected a JSON object")
-            store.execute("INSERT INTO kernel_bench.feedback(kind, data) VALUES (%s, %s)", (singular, Jsonb(data)))
+            author = authorIdentity(store, authorized) if request.headers.get("X-Agent-Token") or request.cookies.get("bench_token") else None
+            if singular == "suggestion":
+                import json
+                context = {key: data[key] for key in ("goal_id", "target_id", "job_id", "idempotency_key") if key in data}
+                context["body"] = data.get("body") or json.dumps(data, ensure_ascii=False, indent=2)
+                row, created = saveMessage(store, "suggestions", author, messageData(context), (singular, data), legacy=author is None and not request.cookies.get("bench_token"))
+                return jsonify({"status": "saved", "suggestion_id": row["feedback_id"], "message_id": row["id"]}), 201 if created else 200
+            store.execute("INSERT INTO kernel_bench.feedback(kind, data, agent_id) VALUES (%s, %s, %s)",
+                          (singular, Jsonb(data), author["id"] if author else None))
             return jsonify({"status": "saved"}), 201
         return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
 

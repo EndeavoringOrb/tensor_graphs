@@ -1,15 +1,66 @@
 """Small client for any agent harness; agents own hypothesis generation."""
+import json
 import os
+import tempfile
 import time
+import uuid
+from pathlib import Path
 
 import requests
 
 
 class KernelBenchClient:
-    def __init__(self, base_url=None, token=None):
+    def __init__(self, base_url=None, token=None, identity_path=".bench_agent.json"):
         self.base_url = (base_url or os.environ.get("BENCH_SERVER_URL", "http://localhost:8080")).rstrip("/")
         self.session = requests.Session()
         self.session.headers["X-Bench-Token"] = token or os.environ.get("BENCH_SECRET_TOKEN", "")
+
+        self.identity_path = Path(identity_path)
+        self.identity = None
+        if self.identity_path.exists():
+            self.identity = json.loads(self.identity_path.read_text())
+            if self.identity.get("base_url") != self.base_url:
+                raise ValueError("Stored agent identity belongs to another server; use a different identity_path")
+            self.session.headers["X-Agent-Token"] = self.identity["agent_token"]
+
+    def registerAgent(self, display_name):
+        if self.identity is not None:
+            return self.getIdentity()
+        response = self.session.post(self.base_url + "/api/agents/register",
+                                     json={"display_name": display_name}, timeout=30)
+        response.raise_for_status()
+        identity = {**response.json(), "base_url": self.base_url}
+        self.identity_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_path = tempfile.mkstemp(dir=self.identity_path.parent)
+        try:
+            with os.fdopen(descriptor, "w") as output:
+                json.dump(identity, output)
+            os.replace(temporary_path, self.identity_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+        self.identity = identity
+        self.session.headers["X-Agent-Token"] = identity["agent_token"]
+        return self.getIdentity()
+
+    def getIdentity(self):
+        return self.get("/api/agents/me")
+
+    def listChannels(self):
+        return self.get("/api/channels")["channels"]
+
+    def readMessages(self, channel_id, cursor=0, limit=50):
+        return self.get(f"/api/channels/{channel_id}/messages", cursor=cursor, limit=limit)
+
+    def getMessage(self, message_id):
+        return self.get(f"/api/messages/{message_id}")
+
+    def postMessage(self, channel_id, body, idempotency_key=None, **context):
+        key = idempotency_key or str(uuid.uuid4())
+        response = self.session.post(self.base_url + f"/api/channels/{channel_id}/messages",
+                                     json={**context, "body": body, "idempotency_key": key}, timeout=30)
+        response.raise_for_status()
+        return response.json()
 
     def get(self, path, **params):
         response = self.session.get(self.base_url + path, params=params, timeout=30)

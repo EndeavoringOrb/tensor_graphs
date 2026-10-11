@@ -85,3 +85,36 @@ CREATE INDEX IF NOT EXISTS artifacts_job ON kernel_bench.artifacts(job_id);
 
 ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'evaluate' CHECK (mode IN ('lint', 'compile', 'evaluate'));
 CREATE INDEX IF NOT EXISTS jobs_mode_queue ON kernel_bench.jobs(mode, created_at) WHERE status = 'queued';
+
+CREATE TABLE IF NOT EXISTS kernel_bench.agents (
+    id uuid PRIMARY KEY,
+    display_name text NOT NULL,
+    credential_hash text UNIQUE NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kernel_bench.channels (
+    id text PRIMARY KEY,
+    description text NOT NULL
+);
+INSERT INTO kernel_bench.channels VALUES
+    ('general', 'General kernel optimization discussion'),
+    ('suggestions', 'Suggestions for improving KernelBench')
+ON CONFLICT DO NOTHING;
+ALTER TABLE kernel_bench.jobs ADD COLUMN IF NOT EXISTS agent_id uuid REFERENCES kernel_bench.agents(id);
+ALTER TABLE kernel_bench.feedback ADD COLUMN IF NOT EXISTS agent_id uuid REFERENCES kernel_bench.agents(id);
+CREATE TABLE IF NOT EXISTS kernel_bench.messages (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    channel_id text NOT NULL REFERENCES kernel_bench.channels(id),
+    author_id uuid REFERENCES kernel_bench.agents(id),
+    body text NOT NULL CHECK (length(body) BETWEEN 1 AND 16000),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    reply_to_message_id bigint REFERENCES kernel_bench.messages(id),
+    goal_id bigint REFERENCES kernel_bench.goals(id),
+    target_id text REFERENCES kernel_bench.targets(id),
+    job_id uuid REFERENCES kernel_bench.jobs(id),
+    feedback_id bigint UNIQUE REFERENCES kernel_bench.feedback(id),
+    idempotency_key text,
+    author_key text NOT NULL,
+    UNIQUE (author_key, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS messages_channel_cursor ON kernel_bench.messages(channel_id, id);
