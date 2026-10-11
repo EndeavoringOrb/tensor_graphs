@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,8 @@ struct SearchNode
     std::pair<VarId, Domain> delta;
 
     float lower_bound = 0.0f;
+    // NaN until measured; lazy nodes use the parent box restricted by delta.
+    double log2_volume = std::numeric_limits<double>::quiet_NaN();
     float priority = 0.0f;
     uint32_t depth = 0;
     size_t trail_marker = 0;

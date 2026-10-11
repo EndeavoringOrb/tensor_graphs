@@ -95,6 +95,11 @@ class EngineWorkloadPropagator : public Propagator
             return;
         ENodeId en_id = cls.enodes[en_idx];
         const ENode &enode = state.bucket_egraphs[bucket_idx].getENode(en_id);
+        // Views carry dependencies but occupy no execution engine, matching
+        // MakespanSimulator even when their nominal cost is nonzero.
+        if (en_id.value < state.bucket_enode_infos[bucket_idx].size() &&
+            state.bucket_enode_infos[bucket_idx][en_id.value].is_view)
+            return;
         const float cost = en_id.value < state.bucket_enode_infos[bucket_idx].size()
                                ? state.bucket_enode_infos[bucket_idx][en_id.value].cost
                                : 0.0f;

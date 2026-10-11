@@ -1,0 +1,11 @@
+{
+  "name": "shared child is charged once even with duplicate edges",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["left", "right"], "cost": 1}]},
+    "left": {"alternatives": [{"children": ["shared", "shared"], "cost": 2}]},
+    "right": {"alternatives": [{"children": ["shared"], "cost": 3}]},
+    "shared": {"alternatives": [{"cost": 4}]}
+  },
+  "expected_optimum": 10
+}

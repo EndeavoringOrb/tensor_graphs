@@ -1,0 +1,10 @@
+{
+  "name": "producer cannot be overwritten while its reader is executing",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["value"]}], "offset": [0]},
+    "value": {"offset": [0]}
+  },
+  "capacity_pages": 1,
+  "expected_optimum": null
+}

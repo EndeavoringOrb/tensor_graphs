@@ -1,0 +1,9 @@
+{
+  "name": "cyclic alternative has a feasible bypass",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a"], "cost": 1}]},
+    "a": {"alternatives": [{"children": ["out"], "cost": 0}, {"cost": 3}]}
+  },
+  "expected_optimum": 4
+}

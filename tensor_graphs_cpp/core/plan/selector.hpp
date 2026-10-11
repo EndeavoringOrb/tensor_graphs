@@ -22,6 +22,10 @@ class Selector
     virtual void clear() = 0;
     virtual void setIncumbent(float cost) {}
     virtual bool hasIncumbent() const { return false; }
+    virtual void appendRemainingBoxBits(float incumbent_cost, std::vector<double> &box_bits) const
+    {
+        Error::throw_err("Selector does not support search volume evaluation");
+    }
 };
 
 class PriorityQueueSelector : public Selector
@@ -32,6 +36,13 @@ class PriorityQueueSelector : public Selector
     float incumbent_cost = TGConstants::INF;
 
   public:
+    void appendRemainingBoxBits(float cost, std::vector<double> &box_bits) const override
+    {
+        for (const auto &node : queue)
+            if (node && node->lower_bound < cost)
+                box_bits.push_back(node->log2_volume);
+    }
+
     void setIncumbent(float cost) override
     {
         incumbent_cost = cost;
@@ -97,6 +108,13 @@ class LIFOSelector : public Selector
     std::vector<std::shared_ptr<SearchNode>> stack;
 
   public:
+    void appendRemainingBoxBits(float cost, std::vector<double> &box_bits) const override
+    {
+        for (const auto &node : stack)
+            if (node && node->lower_bound < cost)
+                box_bits.push_back(node->log2_volume);
+    }
+
     void push(const std::shared_ptr<SearchNode> &node) override
     {
         stack.push_back(node);

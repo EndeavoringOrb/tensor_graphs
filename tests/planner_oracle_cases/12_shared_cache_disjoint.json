@@ -1,0 +1,16 @@
+{
+  "name": "disjoint cached address domains forbid the cached alternative",
+  "caches": {"value": {}},
+  "capacity_pages": 4,
+  "buckets": [
+    {"root": "out", "nodes": {
+      "out": {"alternatives": [{"children": ["value"]}], "offset": [3]},
+      "value": {"alternatives": [{"cost": 5}], "offset": [0]}
+    }},
+    {"root": "out", "nodes": {
+      "out": {"alternatives": [{"children": ["value"]}], "offset": [3]},
+      "value": {"alternatives": [{"cost": 5}, {"op": "cache", "cost": 0}], "offset": [1]}
+    }}
+  ],
+  "expected_optimum": 12
+}

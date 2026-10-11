@@ -1,0 +1,9 @@
+{
+  "name": "sparse rank and address domains retain their holes",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["value"], "cost": 2}], "start": [2, 4], "offset": [0, 2]},
+    "value": {"alternatives": [{"cost": 3}], "start": [0, 2], "offset": [1, 3]}
+  },
+  "expected_optimum": 5
+}

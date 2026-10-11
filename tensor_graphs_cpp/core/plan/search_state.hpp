@@ -18,6 +18,7 @@
 #include "core/logging.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/enode_info.hpp"
+#include "core/plan/search_volume.hpp"
 #include "core/types.hpp"
 
 struct CacheCandidate
@@ -746,6 +747,7 @@ class SearchState
     std::unordered_set<VarId> empty_domains;
 
     uint64_t domain_revision = 0;
+    DomainVolumeTracker domain_volume_tracker;
 
     VarId last_domain_change_var = kInvalidVarId;
     Domain last_domain_change_before;
@@ -768,6 +770,8 @@ class SearchState
 
     void updateDomainIndexes(VarId var_id, const Domain &old_domain, const Domain &new_domain)
     {
+        if (domain_volume_tracker.initialized())
+            domain_volume_tracker.setDomain(var_id, new_domain);
         if (var_id >= var_infos.size())
             return;
 
@@ -972,6 +976,8 @@ class SearchState
 
     VarId addVar(VarInfo info, const Domain &initial_domain)
     {
+        if (domain_volume_tracker.initialized())
+            Error::throw_err("Cannot add variables after initializing search volume");
         assert(!propagation.initialized);
         VarId id = static_cast<VarId>(var_infos.size());
         info.id = id;
@@ -982,6 +988,16 @@ class SearchState
             empty_domains.insert(id);
         markDomainDirty(id);
         return id;
+    }
+
+    void initializeDomainVolume()
+    {
+        domain_volume_tracker.initialize(domains);
+    }
+
+    double domainLog2Volume() const
+    {
+        return domain_volume_tracker.log2Volume();
     }
 
     // Call once per bucket, after CACHE insertion and enode pruning are complete.

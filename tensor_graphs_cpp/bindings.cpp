@@ -263,6 +263,7 @@ struct InstallCrashHandler
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "bindings/kernel_bench.hpp"
+#include "bindings/planner_oracle.hpp"
 #include "models/deepseek-v4-flash.hpp"
 #include "models/krea-2-turbo.hpp"
 #include "models/qwen-image-vae.hpp"
@@ -742,6 +743,9 @@ class Krea2Session
 
 PYBIND11_MODULE(tensor_graphs, m)
 {
+    m.def("_run_planner_oracle_case", &planner_oracle::runCase,
+          py::arg("problem_json"), py::arg("mode"), py::arg("cutoff") = TGConstants::INF,
+          "Diagnostic adapter for independent exhaustive planner correctness cases.");
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
     KernelBench::registerBindings(m);
 

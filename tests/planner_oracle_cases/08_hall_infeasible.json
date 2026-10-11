@@ -1,0 +1,10 @@
+{
+  "name": "three mandatory operations cannot occupy two dispatch ranks",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a", "b"]}], "start": [0, 1]},
+    "a": {"start": [0, 1]},
+    "b": {"start": [0, 1]}
+  },
+  "expected_optimum": null
+}

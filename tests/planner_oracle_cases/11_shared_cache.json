@@ -1,0 +1,16 @@
+{
+  "name": "shared cache fixes persistent addresses across buckets",
+  "caches": {"value": {"domain": [0, 1]}},
+  "capacity_pages": 4,
+  "buckets": [
+    {"root": "out", "weight": 0, "nodes": {
+      "out": {"alternatives": [{"children": ["value"], "cost": 1}], "offset": [3]},
+      "value": {"alternatives": [{"cost": 5}], "offset": [0, 1]}
+    }},
+    {"root": "out", "weight": 1, "nodes": {
+      "out": {"alternatives": [{"children": ["value"], "cost": 1}], "offset": [3]},
+      "value": {"alternatives": [{"cost": 5}, {"op": "cache", "cost": 0}], "offset": [0, 1]}
+    }}
+  ],
+  "expected_optimum": 1
+}

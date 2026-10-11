@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,12 +67,31 @@ class SearchEngine
     // memory with the search tree. Counts beyond the retained set stay visible.
     std::unordered_map<std::string, uint64_t> conflict_witness_counts;
     uint64_t untracked_conflict_witnesses = 0;
+    bool measure_search_volume = false;
+    double total_domain_bits = 0.0;
+    uint64_t incomplete_volume_branches = 0;
 
     SearchEngine(SearchState state, std::shared_ptr<Selector> selector = nullptr,
                  std::shared_ptr<Brancher> brancher = nullptr)
         : state(std::move(state)), selector(selector ? selector : std::make_shared<PriorityQueueSelector>()),
           brancher(brancher ? brancher : std::make_shared<HeuristicBrancher>())
     {
+        const char *volume_setting = std::getenv("TG_SEARCH_VOLUME");
+        measure_search_volume = volume_setting && std::string(volume_setting) == "1";
+    }
+
+    // At an iteration boundary, active_node is null. At a propagated branch
+    // point, pass the popped node so its region is counted exactly once.
+    SearchVolumeEvaluation evaluateSearchVolume(const std::shared_ptr<SearchNode> &active_node = nullptr) const
+    {
+        if (!measure_search_volume)
+            Error::throw_err("Search volume is disabled; set TG_SEARCH_VOLUME=1 before creating the engine");
+        std::vector<double> box_bits;
+        box_bits.reserve(selector->size() + (active_node ? 1 : 0));
+        selector->appendRemainingBoxBits(incumbent_best_cost, box_bits);
+        if (active_node && active_node->lower_bound < incumbent_best_cost)
+            box_bits.push_back(active_node->log2_volume);
+        return plan::evaluateSearchVolume(total_domain_bits, box_bits);
     }
 
     void addPropagator(std::unique_ptr<Propagator> prop)
@@ -180,6 +200,8 @@ class SearchEngine
             }
             all_nodes[nid]->lower_bound = state.lower_bound;
             all_nodes[nid]->trail_marker = state.getTrailMarker();
+            if (measure_search_volume)
+                all_nodes[nid]->log2_volume = state.domainLog2Volume();
         }
 
         current_node_id = target_node->id;
@@ -729,6 +751,10 @@ class SearchEngine
     {
         TimeoutChecker timer(timeout_seconds);
         const auto search_start_time = std::chrono::steady_clock::now();
+        const char *deadline_text = std::getenv("TG_PROGRAM_DEADLINE");
+        const double program_deadline = deadline_text ? std::stod(deadline_text) : 0.0;
+        if (deadline_text && (!std::isfinite(program_deadline) || program_deadline <= 0 || !measure_search_volume))
+            throw std::runtime_error("Invalid program evaluation deadline or disabled volume tracking");
 
         LOG(DEBUG) << "[SearchEngine] Starting solve: num_vars=" << state.numVars()
                    << ", candidates=" << state.candidates.size()
@@ -751,6 +777,14 @@ class SearchEngine
         }
 
         // 1. Root node
+        if (measure_search_volume)
+        {
+            state.initializeDomainVolume();
+            total_domain_bits = state.domainLog2Volume();
+            if (!std::isfinite(total_domain_bits))
+                Error::throw_err("Search volume requires nonempty initial domains");
+            incomplete_volume_branches = 0;
+        }
         auto root_node = std::make_shared<SearchNode>(0, UINT32_MAX, std::make_pair(kInvalidVarId, Domain{}), 0.0f,
                                                       0.0f, 0);
         all_nodes.push_back(root_node);
@@ -761,6 +795,8 @@ class SearchEngine
         {
             LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation: "
                          << initial_conflict;
+            if (measure_search_volume)
+                reportSearchVolume(0, search_start_time);
 #ifdef TG_PROFILE
             reportProfile();
 #endif
@@ -776,6 +812,8 @@ class SearchEngine
         root_node->lower_bound = state.lower_bound;
         root_node->priority = root_node->lower_bound;
         root_node->trail_marker = state.getTrailMarker();
+        if (measure_search_volume)
+            root_node->log2_volume = state.domainLog2Volume();
 #ifdef TG_PROFILE
         {
             auto push_start = std::chrono::steady_clock::now();
@@ -799,6 +837,18 @@ class SearchEngine
         std::array<uint64_t, 4> branch_counts = {};
         while (!selector->empty())
         {
+            if (deadline_text)
+            {
+                const double now = std::chrono::duration<double>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                if (now >= program_deadline)
+                {
+                    reportSearchVolume(iterations, search_start_time);
+                    LOG(INFO) << "[Program deadline] overshoot=" << (now - program_deadline);
+                    // Evaluation worker only: no incumbent is required and no plan is returned.
+                    std::exit(0);
+                }
+            }
 #ifdef TG_PROFILE
             if (iterations > 0 && iterations % 10000 == 0 && iterations != last_profile_iteration)
             {
@@ -864,6 +914,9 @@ class SearchEngine
 
             if (node->lower_bound >= incumbent_best_cost)
                 continue;
+
+            if (measure_search_volume)
+                node->log2_volume = state.domainLog2Volume();
 
             // Check if branching is needed or all variables are fixed
             BranchDecision decision;
@@ -964,12 +1017,36 @@ class SearchEngine
             }
 
             // 1. Create Right Child (lazy alternative, pushed to queue without upfront propagation)
+            double right_box_bits = std::numeric_limits<double>::quiet_NaN();
+            if (measure_search_volume)
+            {
+                const VarId branch_var = decision.left_delta.first;
+                if (branch_var >= state.numVars() || decision.right_delta.first != branch_var)
+                    Error::throw_err("Search volume requires both branch children to restrict the same valid variable");
+                const Domain &parent_domain = state.domains[branch_var];
+                const Domain &left_domain = decision.left_delta.second;
+                const Domain &right_domain = decision.right_delta.second;
+                const uint64_t parent_count = domainCardinality(parent_domain);
+                const uint64_t left_count = domainCardinality(left_domain);
+                const uint64_t right_count = domainCardinality(right_domain);
+                if (left_count == 0 || right_count == 0 ||
+                    domainIntersectionCardinality(parent_domain, left_domain) != left_count ||
+                    domainIntersectionCardinality(parent_domain, right_domain) != right_count)
+                    Error::throw_err("Search volume branch children must be nonempty subsets of the parent domain");
+                if (domainIntersectionCardinality(left_domain, right_domain) != 0)
+                    Error::throw_err("Overlapping branch children would double-count the search volume union");
+                if (left_count + right_count != parent_count)
+                    ++incomplete_volume_branches;
+                right_box_bits = node->log2_volume + std::log2(static_cast<double>(right_count)) -
+                                 std::log2(static_cast<double>(parent_count));
+            }
             uint32_t right_id = static_cast<uint32_t>(all_nodes.size());
             float right_lb = node->lower_bound;
             float right_prio = right_lb + 1.0f;
             auto right_node = std::make_shared<SearchNode>(
                 right_id, node->id, decision.right_delta, right_lb,
                 right_prio, node->depth + 1);
+            right_node->log2_volume = right_box_bits;
             all_nodes.push_back(right_node);
 #ifdef TG_PROFILE
             {
@@ -997,6 +1074,8 @@ class SearchEngine
                 auto left_node = std::make_shared<SearchNode>(
                     left_id, node->id, decision.left_delta, left_lb,
                     left_prio, node->depth + 1, state.getTrailMarker());
+                if (measure_search_volume)
+                    left_node->log2_volume = state.domainLog2Volume();
                 all_nodes.push_back(left_node);
                 current_node_id = left_id; // Current state stays at left_node!
 #ifdef TG_PROFILE
@@ -1044,6 +1123,8 @@ class SearchEngine
 
         const double search_elapsed_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - search_start_time).count();
+        if (measure_search_volume)
+            reportSearchVolume(iterations, search_start_time);
         LOG(INFO) << "[SearchEngine] Search finished after " << iterations << " iterations in "
                   << std::fixed << std::setprecision(2)
                   << search_elapsed_seconds << "s ("
@@ -1058,6 +1139,26 @@ class SearchEngine
     }
 
   private:
+    void reportSearchVolume(uint32_t iterations, std::chrono::steady_clock::time_point start_time,
+                            const std::shared_ptr<SearchNode> &active_node = nullptr) const
+    {
+        const auto volume = evaluateSearchVolume(active_node);
+        const double elapsed_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start_time).count();
+        std::ostringstream summary;
+        summary << std::setprecision(17)
+                << "[SearchEngine volume] iterations=" << iterations
+                << " elapsed=" << elapsed_seconds
+                << " total-domain-bits=" << volume.total_domain_bits
+                << " remaining-domain-bits=" << volume.remaining_domain_bits
+                << " log2-remaining-fraction=" << volume.log2_remaining_fraction
+                << " eliminated-bits=" << volume.eliminated_bits
+                << " remaining-nodes=" << volume.remaining_nodes
+                << " exhausted=" << (volume.exhausted() ? "true" : "false")
+                << " incomplete-branches=" << incomplete_volume_branches;
+        LOG(INFO) << summary.str();
+    }
+
     void reportScheduleDiagnostics()
     {
         // Sample only at a propagated branch point, never from a contradictory

@@ -1,0 +1,10 @@
+{
+  "name": "empty engine list uses the default CPU",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a", "b"], "cost": 1, "engines": []}]},
+    "a": {"alternatives": [{"cost": 2, "engines": []}]},
+    "b": {"alternatives": [{"cost": 3, "engines": [0]}]}
+  },
+  "expected_optimum": 6
+}

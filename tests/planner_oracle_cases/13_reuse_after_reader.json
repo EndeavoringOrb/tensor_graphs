@@ -1,0 +1,11 @@
+{
+  "name": "memory reuse is allowed after the last reader",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["reuse"]}], "offset": [3]},
+    "reuse": {"alternatives": [{"children": ["read"]}], "offset": [0]},
+    "read": {"alternatives": [{"children": ["value"]}], "offset": [2]},
+    "value": {"offset": [0]}
+  },
+  "expected_optimum": 4
+}

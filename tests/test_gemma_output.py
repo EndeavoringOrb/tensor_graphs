@@ -1,10 +1,11 @@
 import argparse
+import os
+import math
+import re
+import subprocess
+import sys
+import time
 from pathlib import Path
-
-import tensor_graphs
-
-from main import decode_tokens, encode_text
-from utils.decode import load_tokenizer
 
 
 CONFIGS = {
@@ -24,6 +25,10 @@ CONFIGS = {
 
 
 def run_gemma_output(config_name, cache_file="", min_compile_time=0.0):
+    import tensor_graphs
+    from main import decode_tokens, encode_text
+    from utils.decode import load_tokenizer
+
     if config_name not in CONFIGS:
         raise ValueError(f"Unknown Gemma test config: {config_name}")
 
@@ -99,7 +104,46 @@ def main():
         action="store_true",
         help="Search until the planner exhausts its search space",
     )
+    parser.add_argument(
+        "--search-volume",
+        action="store_true",
+        help="Report remaining frontier hyperbox volume relative to initial domains, in bits",
+    )
+    parser.add_argument("--timeout", type=float,
+                        help="Whole worker process budget in seconds; report frontier and stop")
     args = parser.parse_args()
+    if args.timeout is not None:
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            parser.error("--timeout must be finite and positive")
+        if args.config == "all" or not args.optimal or args.cache_file:
+            parser.error("--timeout requires one --config, --optimal, and no compiled cache")
+        if "TG_PROGRAM_DEADLINE" not in os.environ:
+            start_time = time.monotonic()
+            environment = os.environ.copy()
+            environment["TG_PROGRAM_DEADLINE"] = str(time.time() + args.timeout)
+            environment["TG_SEARCH_VOLUME"] = "1"
+            command = [sys.executable, "-u", "-m", "tests.test_gemma_output", *sys.argv[1:]]
+            worker = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True)
+            try:
+                output, _ = worker.communicate(timeout=max(0.001, args.timeout - (time.monotonic() - start_time)) + 2.0)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                output, _ = worker.communicate()
+                print(output, end="", flush=True)
+                raise SystemExit("Evaluation failed: program exceeded deadline and reporting grace")
+            elapsed = time.monotonic() - start_time
+            print(output, end="", flush=True)
+            print(f"[Program evaluation] elapsed={elapsed:.9f} budget={args.timeout}", flush=True)
+            if worker.returncode != 0 or "[SearchEngine volume]" not in output:
+                raise SystemExit("Evaluation failed: worker failed or did not report frontier volume")
+            overshoots = re.findall(r"\[Program deadline\] overshoot=([0-9.eE+\-]+)", output)
+            overshoot = float(overshoots[-1]) if overshoots else max(0.0, elapsed - args.timeout)
+            if not math.isfinite(overshoot) or overshoot > 0.05:
+                raise SystemExit("Evaluation failed: deadline overshoot exceeds 50 ms")
+            return
+    if args.search_volume:
+        os.environ["TG_SEARCH_VOLUME"] = "1"
 
     config_names = CONFIGS if args.config == "all" else [args.config]
     for config_name in config_names:
