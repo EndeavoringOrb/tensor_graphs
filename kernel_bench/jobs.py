@@ -254,6 +254,8 @@ def runWorker(store, stop_event):
                     stop_event.wait(1)
                     continue
                 try:
+                    if stop_event.is_set():
+                        break
                     store.execute("UPDATE kernel_bench.jobs SET status = 'queued', step = 'recovered' WHERE status = 'running'")
                     job = store.nextJob()
                     if job is not None:
@@ -270,8 +272,8 @@ def runWorker(store, stop_event):
                 stop_event.wait(1)
 
 
-def startWorker(store):
-    stop_event = threading.Event()
+def startWorker(store, stop_event=None):
+    stop_event = stop_event if stop_event is not None else threading.Event()
     thread = threading.Thread(target=runWorker, args=(store, stop_event), name="kernel-bench-worker", daemon=True)
     thread.start()
-    return stop_event
+    return thread

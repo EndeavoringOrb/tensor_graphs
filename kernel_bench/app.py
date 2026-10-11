@@ -4,6 +4,8 @@ import hmac
 import io
 import logging
 import os
+import signal
+import threading
 import uuid
 import zipfile
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request, send_file
 from psycopg.types.json import Jsonb
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .jobs import (
     DEFAULT_GOAL_CACHE,
@@ -20,6 +23,8 @@ from .jobs import (
     startWorker,
 )
 from .storage import Store
+
+logger = logging.getLogger(__name__)
 
 TOOLS = [
     {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity and kernel-level scope"},
@@ -33,7 +38,7 @@ TOOLS = [
 ]
 
 
-def createApp(database_url=None, goal_cache=None, token=None, start_worker=True, goal_id=None):
+def createApp(database_url=None, goal_cache=None, token=None, start_worker=True, goal_id=None, stop_event=None):
     load_dotenv(PROJECT_ROOT / ".env")
     token = token or os.environ.get("BENCH_SECRET_TOKEN", "").strip()
     if not token:
@@ -46,6 +51,10 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     store.initialize()
     goal_id = goal_id or initializeGoal(store, goal_cache or os.environ.get("KERNEL_BENCH_GOAL_CACHE", DEFAULT_GOAL_CACHE))
     app = Flask(__name__)
+    stop_event = stop_event if stop_event is not None else threading.Event()
+    app.extensions["kernel_bench_stop"] = stop_event
+    if os.environ.get("BENCH_TRUST_PROXY") == "1":
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
     app.extensions["kernel_bench_store"] = store
     app.config["KERNEL_BENCH_GOAL_ID"] = goal_id
@@ -55,6 +64,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
 
     @app.before_request
     def authenticate():
+        if stop_event.is_set():
+            return jsonify({"error": "KernelBench is draining for shutdown"}), 503, {"Retry-After": "60"}
         if request.path in ("/login", "/welcome", "/api/agent", "/api/agent/index"):
             return None
         candidate = request.headers.get("X-Bench-Token", "") or request.cookies.get("bench_token", "")
@@ -245,7 +256,7 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
 
     if start_worker:
-        app.extensions["kernel_bench_stop"] = startWorker(store)
+        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event)
     return app
 
 
@@ -253,11 +264,49 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="KernelBench kernel-level server")
     parser.add_argument("--goal-cache", type=Path)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--host", default=os.environ.get("BENCH_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("BENCH_PORT", "8080")))
     args = parser.parse_args()
-    app = createApp(goal_cache=args.goal_cache)
-    app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
+    serveApp(args)
+
+
+def serveApp(args):
+    from waitress import create_server
+
+    stop_event = threading.Event()
+
+    def requestStop(signum, frame):
+        stop_event.set()
+
+    previous_handlers = {signum: signal.signal(signum, requestStop) for signum in (signal.SIGTERM, signal.SIGINT)}
+    app = None
+    server = None
+    server_thread = None
+    try:
+        # Install handlers before discovery: a stop during startup waits for its native process too.
+        app = createApp(goal_cache=args.goal_cache, stop_event=stop_event)
+        if not stop_event.is_set():
+            server = create_server(app, host=args.host, port=args.port, threads=4,
+                                   trusted_proxy="127.0.0.1" if os.environ.get("BENCH_TRUST_PROXY") == "1" else None,
+                                   trusted_proxy_headers={"x-forwarded-proto", "x-forwarded-host"}
+                                   if os.environ.get("BENCH_TRUST_PROXY") == "1" else set())
+            server_thread = threading.Thread(target=server.run, name="kernel-bench-http", daemon=True)
+            server_thread.start()
+            while not stop_event.wait(1):
+                if not server_thread.is_alive() or not app.extensions["kernel_bench_worker"].is_alive():
+                    raise RuntimeError("KernelBench HTTP server or worker exited unexpectedly")
+    finally:
+        stop_event.set()
+        logger.info("Draining KernelBench; waiting for active startup/job processes")
+        if app is not None:
+            app.extensions["kernel_bench_worker"].join()
+        if server is not None:
+            server.task_dispatcher.shutdown()
+            server.asyncore.close_all(map=server._map)
+        if server_thread is not None:
+            server_thread.join()
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

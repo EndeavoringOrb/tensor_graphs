@@ -66,6 +66,8 @@ PostgreSQL references: [CREATE ROLE](https://www.postgresql.org/docs/current/sql
 
 ## Running the server
 
+For deployment at `~/services/kernel_bench`, website proxy integration, and automatic drain/update/restart on GitHub main changes, follow [the deployment guide](../deploy/README.md). The command below uses Waitress and gracefully drains on SIGTERM/SIGINT.
+
 Install project dependencies:
 
 ```bash

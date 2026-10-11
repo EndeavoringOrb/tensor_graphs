@@ -30,6 +30,7 @@ dependencies = [
     "pytest>=8.4.2",
     "python-dotenv>=1.2.1",
     "psycopg[binary]>=3.2,<4",
+    "waitress>=3.0,<4",
 ]
 
 [project.optional-dependencies]

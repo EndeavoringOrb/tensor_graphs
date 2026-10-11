@@ -1,17 +1,19 @@
 [Unit]
-Description=KernelBench Flask Service
+Description=KernelBench API and serial benchmark worker
 After=network.target
 
 [Service]
 Type=simple
-User=aaron
-WorkingDirectory=/home/aaron/Projects/tensor_graphs
-ExecStart=/home/aaron/Projects/tensor_graphs/.venv/bin/python -m kernel_bench.app
-Restart=always
+WorkingDirectory=%h/services/kernel_bench
+ExecStart=%h/services/kernel_bench/.venv/bin/python -m kernel_bench.app
+Restart=on-failure
 RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=infinity
 Environment=PYTHONUNBUFFERED=1
 Environment=BENCH_HOST=127.0.0.1
 Environment=BENCH_PORT=8080
+Environment=BENCH_TRUST_PROXY=1
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
