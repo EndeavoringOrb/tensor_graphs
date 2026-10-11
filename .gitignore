@@ -20,6 +20,7 @@ egraph_cycles*.txt
 tmp*
 tools
 scratch
+kernel_bench_data/
 patching
 out.log
 run*.txt
