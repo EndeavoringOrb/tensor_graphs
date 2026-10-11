@@ -377,12 +377,16 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     return result;
 }
 
-bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
+bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool require_match = false)
 {
     try
     {
         if (rec.inputShapes.size() < kernel.min_num_inputs || rec.inputShapes.size() > kernel.max_num_inputs)
-            return true; // Skip mismatched variadic/arity records
+        {
+            if (require_match)
+                Error::throw_err("Requested correctness configuration has mismatched arity");
+            return true; // Legacy record sweeps may contain mismatched arities.
+        }
 
         // Build dummy nodes for validation against centralized matching logic
         std::vector<TensorNode> dummyInputs(rec.inputShapes.size());
@@ -398,7 +402,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
         std::vector<uint64_t> outStrides;
         DType outDType = DType::FLOAT32;
 
-        if (!rec.outputShape.empty())
+        if (!rec.outputShape.empty() || require_match)
         {
             outShape = rec.outputShape;
             outStrides = rec.outputStrides;
@@ -418,8 +422,12 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             dummyOutput.dtype = outDType;
         }
 
-        if (!kernel.matches(dummyInputs, dummyOutput))
-            return true; // Skip invalid records
+        if (!kernel.matches(dummyInputs, dummyOutput, rec.output_mem_space, rec.input_mem_spaces, rec.engines))
+        {
+            if (require_match)
+                Error::throw_err("Requested correctness configuration does not match the kernel");
+            return true; // Legacy record sweeps may contain invalid configurations.
+        }
 
         Graph graph;
         std::vector<std::vector<uint8_t>> rawData(rec.inputShapes.size());
@@ -443,6 +451,9 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             std::vector<uint8_t> contiguousData(elements * dtypeSize);
 
             bool isConstant = false;
+            if (require_match && i < rec.inputConstants.size() && !rec.inputConstants[i].empty() &&
+                rec.inputConstants[i].size() != elements * dtypeSize)
+                Error::throw_err("Requested correctness configuration has invalid constant byte count");
             if (i < rec.inputConstants.size() && !rec.inputConstants[i].empty() &&
                 rec.inputConstants[i].size() == elements * dtypeSize)
             {

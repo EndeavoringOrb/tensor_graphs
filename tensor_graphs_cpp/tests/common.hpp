@@ -55,7 +55,9 @@ inline bool compareOutputs(const float *ref, const float *test, uint64_t element
 {
     for (uint64_t i = 0; i < elements; ++i)
     {
-        if (std::abs(ref[i] - test[i]) > eps)
+        if (ref[i] == test[i] || (std::isnan(ref[i]) && std::isnan(test[i])))
+            continue;
+        if (!std::isfinite(ref[i]) || !std::isfinite(test[i]) || std::abs(ref[i] - test[i]) > eps)
         {
             std::cout << "\nMismatch at index " << i << ": (ref)" << ref[i] << " != (test)" << test[i] << std::endl;
             return false;

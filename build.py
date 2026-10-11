@@ -1529,7 +1529,7 @@ class BuildOrchestrator:
         for main_file in self.config.targets:
             main_src = ROOT_DIR / main_file
             target_stem = main_file.split(".")[0]
-            is_py = (main_file == "bindings.cpp")
+            is_py = main_file in ("bindings.cpp", "kernel_bench_bindings.cpp")
 
             main_obj = GENERATED_DIR / f"{target_stem}{obj_ext}"
             dep_file = GENERATED_DIR / f"{target_stem}.d"
@@ -1618,7 +1618,8 @@ class BuildOrchestrator:
 
             if is_py:
                 _, py_link_flags, ext_suffix = self.toolchain.get_pybind11_flags()
-                out_path = Path(f"tensor_graphs{ext_suffix}")
+                module_name = "tensor_graphs" if main_file == "bindings.cpp" else "kernel_bench_native"
+                out_path = Path(f"{module_name}{ext_suffix}")
                 dep_objs = [main_obj] + [Path(co) for co in cuda_objs]
                 # Python extensions must remain position independent. The
                 # no-CUDA static-link option is intended for native executables

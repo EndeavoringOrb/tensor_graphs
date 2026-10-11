@@ -261,6 +261,7 @@ struct InstallCrashHandler
 #include "core/plan/planner.hpp"
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
+#include "bindings/kernel_bench.hpp"
 #include "models/deepseek-v4-flash.hpp"
 #include "models/krea-2-turbo.hpp"
 #include "models/qwen-image-vae.hpp"
@@ -737,6 +738,7 @@ class Krea2Session
 PYBIND11_MODULE(tensor_graphs, m)
 {
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
+    KernelBench::registerBindings(m);
 
     m.def("set_num_threads", &set_num_threads, py::arg("num_threads"),
           "Set the number of threads used by TensorGraph thread pools and parallel execution.");

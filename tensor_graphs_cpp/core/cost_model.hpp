@@ -6,6 +6,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -632,6 +633,11 @@ struct CostModel
     std::mutex logMtx;
     std::atomic<bool> doneWarning{false};
     bool enableLogging = false;
+    // In-memory consumers (KernelBench) need every matching cost call, including
+    // configurations that already have measurements. No calls.bin is required.
+    std::function<void(const Record &)> callObserver;
+    std::function<void(const std::string &, const std::vector<TensorNode> &, const TensorNode &,
+                       const std::vector<std::vector<uint8_t>> &)> referenceObserver;
 
     CostModel(bool logCalls = true, const std::string &recordsPath = "benchmarks/records.bin") : enableLogging(logCalls)
     {
@@ -685,7 +691,7 @@ struct CostModel
                   const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
                   const std::vector<std::vector<uint8_t>> &inConstants)
     {
-        if (!enableLogging)
+        if (!enableLogging && !callObserver)
             return;
 
         Record r;
@@ -723,6 +729,11 @@ struct CostModel
             }
         }
         r.runTime = 0.0f;
+
+        if (callObserver)
+            callObserver(r);
+        if (!enableLogging)
+            return;
 
         std::string callStr = serializeToString(r);
         uint64_t callHash = std::hash<std::string>{}(callStr);
@@ -852,6 +863,8 @@ struct CostModel
                        const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
                        const std::vector<std::vector<uint8_t>> &inConstants = {}, bool exactRecordOnly = false)
     {
+        if (callObserver)
+            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
         {

@@ -36,6 +36,8 @@ tensor_graphs_cpp/bench_model
 tensor_graphs_cpp/test
 tensor_graphs_cpp/embed
 tensor_graphs_cpp/test_inst
+tensor_graphs_cpp/test_kernel_bench
+tensor_graphs_cpp/test_kernel_bench.exe
 tensor_graphs_cpp/main.exe
 tensor_graphs_cpp/bench.exe
 tensor_graphs_cpp/bench_model.exe

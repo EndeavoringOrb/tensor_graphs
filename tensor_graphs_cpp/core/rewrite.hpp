@@ -620,6 +620,12 @@ struct FusionRule : public Rule
             outputNode.setShape(outShape);
             outputNode.strides = outStrides;
 
+            // Discovery must see reference expressions even when every current
+            // implementation rejects this shape/layout. This does not add an
+            // executable candidate or change normal compiler matching.
+            if (ctx.costModel && ctx.costModel->referenceObserver)
+                ctx.costModel->referenceObserver(pattern.opName, inputNodes, outputNode, application_key.constants);
+
             bool ignoreInputMemSpaces = (pattern.rootOpType != OpType::COPY_TO);
 
             std::vector<MemSpace> candidateSpaces = {matchedClass.mem_space};
