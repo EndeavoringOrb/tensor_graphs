@@ -57,6 +57,40 @@ inline py::dict kernelToDict(const KernelEntry &kernel)
 
 inline void registerBindings(py::module_ &module)
 {
+    module.def("kernel_bench_write_records", [](const std::string &path, const py::list &measurements) {
+        std::ofstream stream(path, std::ios::binary | std::ios::app);
+        if (!stream)
+            Error::throw_err("Could not open compiler records for writing: " + path);
+        BinaryWriter writer(stream);
+        size_t count = 0;
+        for (auto item : measurements)
+        {
+            auto data = py::cast<py::dict>(item);
+            const auto name = data["kernel_name"].cast<std::string>();
+            const KernelEntry *matched = nullptr;
+            for (const auto &[uid, kernel] : KernelRegistry::get().getAllKernels())
+                if (kernel.getName() == name)
+                {
+                    if (matched)
+                        Error::throw_err("Compiler record kernel name is ambiguous: " + name);
+                    matched = &kernel;
+                }
+            if (!matched)
+                Error::throw_err("Compiler record kernel is not registered: " + name);
+            auto record = recordFromDict(data["configuration"].cast<py::dict>());
+            if (!bindRecord(*matched, record))
+                Error::throw_err("Compiler record configuration no longer matches: " + name);
+            record.runTime = data["median_ms"].cast<float>();
+            if (!std::isfinite(record.runTime) || record.runTime <= 0)
+                Error::throw_err("Compiler record timing must be finite and positive");
+            writer.write(record);
+            ++count;
+        }
+        stream.flush();
+        if (!stream)
+            Error::throw_err("Could not persist compiler records: " + path);
+        return count;
+    }, py::arg("path"), py::arg("measurements"));
     module.def("kernel_bench_capabilities", []() {
         std::vector<std::string> capabilities;
 #ifdef TG_USE_CUDA

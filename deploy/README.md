@@ -9,7 +9,8 @@ mkdir -p ~/services
 git clone --branch main https://github.com/EndeavoringOrb/tensor_graphs.git ~/services/kernel_bench
 cd ~/services/kernel_bench
 uv sync --locked --extra embeddinggemma --extra ml
-mkdir -p ~/services/kernel_bench_data
+mkdir -p ~/services/kernel_bench_data benchmarks
+cp ~/Projects/tensor_graphs/benchmarks/records.bin benchmarks/records.bin
 cp ~/Projects/tensor_graphs/dirty_region_caches/embeddinggemma-2-image-current.bin.dirty-cache ~/services/kernel_bench_data/goal.bin.dirty-cache
 cp ~/Projects/tensor_graphs/.env .env
 chmod 600 .env

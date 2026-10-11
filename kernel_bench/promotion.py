@@ -3,6 +3,7 @@
 Only operators configure executable recipes. Candidate submissions cannot supply
 commands, paths, environment variables, or GitHub credentials.
 """
+import gzip
 import hashlib
 import json
 import math
@@ -170,8 +171,36 @@ def promoteJob(store, job):
                 if not (workspace / name).is_file() or (workspace / name).read_bytes() != archive.read(name):
                     raise ValueError("Discovery snapshot differs from its Git commit; deploy committed sources before promoting")
 
+        # Planning needs finite costs for existing kernels and the new candidate.
+        # Preserve the operator corpus and supplement it with measured parent
+        # configurations, remapped by name into each freshly built registry.
+        records_path = Path(config.get("compiler_records", PROJECT_ROOT / "benchmarks/records.bin"))
+        if not records_path.is_file():
+            raise ValueError("Compiler calibration corpus is missing: " + str(records_path))
+        compiler_records = records_path.read_bytes()
+        supplemental = store.query("""SELECT DISTINCT ON (m.kernel_id, c.fingerprint)
+            m.kernel_id, m.kernel_name, COALESCE(m.job_id = %s AND m.is_candidate, false) AS is_candidate,
+            m.median_ms, c.configuration
+            FROM kernel_bench.measurements m JOIN kernel_bench.configurations c ON c.id = m.configuration_id
+            JOIN kernel_bench.jobs j ON j.id = m.job_id JOIN kernel_bench.goals g ON g.id = j.goal_id
+            WHERE j.status = 'completed' AND g.metadata->'hardware' = %s
+            ORDER BY m.kernel_id, c.fingerprint, j.completed_at DESC, j.id DESC""",
+                                   (job.get("parent_job_id"), Jsonb(metadata["hardware"])))
+        store.addArtifact(job["id"], "compiler_records.bin.gz", gzip.compress(compiler_records, compresslevel=1), "application/gzip")
+        store.addArtifact(job["id"], "compiler_measurements.json", json.dumps(supplemental).encode(), "application/json")
+        store.addEvent(job["id"], "compiler_calibration", "Corpus SHA256: " + hashlib.sha256(compiler_records).hexdigest())
+
         def measure(label):
             command([getPythonExe(), "build.py", "--targets", "bindings", "--opencl", "0", "--log-level", "WARNING"], workspace, label + "_build")
+            target_records = workspace / "benchmarks/records.bin"
+            target_records.parent.mkdir(exist_ok=True)
+            target_records.write_bytes(compiler_records)
+            measurements = [row for row in supplemental if label == "candidate" or not row["is_candidate"]]
+            if measurements:
+                measurement_path = Path(temp_path) / (label + "_measurements.json")
+                measurement_path.write_text(json.dumps(measurements))
+                command([getPythonExe(), "kernel_bench/cost_records.py", "--records", str(target_records),
+                         "--measurements", str(measurement_path)], workspace, label + "_calibration")
             report_path, cache_path = Path(temp_path) / (label + ".json"), Path(temp_path) / (label + ".dirty-cache")
             argv = [arg.replace("{python}", getPythonExe()).replace("{report}", str(report_path)).replace("{cache}", str(cache_path))
                     for arg in config["command"]]
