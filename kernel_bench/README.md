@@ -299,11 +299,11 @@ Phase 5 polling and calibration:
 - The evaluation worker calibrates baseline configurations when candidate work
   is idle, one configuration at a time under the hardware lock. Completed
   configurations survive restarts; interrupted configurations resume. Each target
-  returns `calibrated_baselines` with pending/measured/failed status, samples,
+  returns `calibrated_baselines` with pending/measured/failed/unavailable status, samples,
   medians, winner, measurement time, and hardware/toolchain identity. Calibration
   tests eligible kernels with seed 42 and uses the same two-round, eight-iteration
-  benchmark policy as candidate evaluation. Optimized kernels are preferred;
-  references are used when no optimized kernel is eligible. Native crashes and
+  benchmark policy as candidate evaluation. Only executable non-reference kernels
+  with reference factories are eligible. Native crashes and
   correctness/build failures are retained as failure reasons.
   `POST /api/baselines/calibrate` schedules missing goal configurations; send
   `{"retry_failed": true}` to retry failures without discarding completed measurements.
@@ -317,3 +317,16 @@ Phase 5 polling and calibration:
   `BENCH_SECRET_TOKEN`; HTTP exceptions include the server's response body.
   Configure `BENCH_TRUST_PROXY=1` only behind a trusted proxy to use its scheme
   and host for public onboarding URLs.
+
+Automatic baseline calibration processes only the active goal. Calibration uses
+matching executable, non-reference kernels with reference factories, the same
+eligibility policy used during discovery and candidate comparisons. Configurations
+without such kernels remain available as optimization targets; their baseline
+status is `unavailable`, with a reason, rather than `failed`.
+
+`POST /api/baselines/calibrate` accepts an optional integer `goal_id` to explicitly
+schedule another goal. Incompatible native interface versions receive HTTP 409;
+archived goals without the current interface version cannot be evaluated or
+calibrated. Interface versions are included in goal fingerprints, so startup
+creates a current goal rather than reusing an incompatible snapshot. There is
+no legacy runner fallback. `retry_failed` retries failures, not unavailable baselines.

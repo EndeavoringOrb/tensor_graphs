@@ -41,13 +41,25 @@ def fakeNative(fail_id=None):
                     "tolerance": {"absolute": 1e-4}, "reproduction": {"seed": seed}}
         return {"passed": True}
     return SimpleNamespace(kernel_bench_capabilities=lambda: ["TG_USE_CUDA"], kernel_bench_kernels=lambda: [candidate], kernel_bench_matches=lambda *args: True,
-                           kernel_bench_test_diagnostics=test, kernel_bench_benchmark=lambda *args: [1.] * 8)
+                           kernel_bench_match_diagnostics=lambda *args: {"matched": True, "reasons": []}, kernel_bench_test_diagnostics=test, kernel_bench_benchmark=lambda *args: [1.] * 8)
 
 
 def payloadFor(tmp_path):
     return {"action": "evaluate", "kernel_name": "candidate", "reference_expression": "ADD",
             "configurations": [{"id": idx, "configuration": {"id": idx}} for idx in (10, 11)],
             "output_path": str(tmp_path / "native_result.json")}
+
+
+def testBaselineFailureReportsExcludedKernels(monkeypatch, tmp_path):
+    module = fakeNative()
+    module.kernel_bench_matches = lambda *args: False
+    monkeypatch.setattr(native_runner, "native", module)
+    payload = payloadFor(tmp_path)
+    payload["configuration"] = payload["configurations"][0]
+    with pytest.raises(native_runner.NativeFailure) as exception:
+        native_runner.calibrate(payload, {"result": {}})
+    assert exception.value.details["configuration_id"] == 10
+    assert exception.value.details["target_kernels"][0]["matches_configuration"] is False
 
 
 def testNativeFailureEnvelopePreservesCompletedCorrectness(monkeypatch, tmp_path):
@@ -89,6 +101,8 @@ def kernel_bench_kernels():
     return [{"name": "candidate", "kernel_id": 1, "reference_expression": "ADD", "has_reference_factory": True, "is_reference": False, "is_view": False}]
 def kernel_bench_matches(*args):
     return True
+def kernel_bench_match_diagnostics(*args):
+    return {"matched": True, "reasons": []}
 def kernel_bench_test_diagnostics(*args):
     if TIMEOUT:
         time.sleep(30)
@@ -113,6 +127,8 @@ def testBuildFailureArtifactsSurviveCandidateCleanup(monkeypatch, tmp_path, kind
         def __init__(self):
             self.artifacts = {}
             self.events = []
+        def getGoal(self, *args):
+            return {"metadata": {"native_interface_version": 1}}
         def query(self, *args):
             return [{"source_archive": b""}]
         def addArtifact(self, job_id, name, data, media_type):
@@ -272,7 +288,7 @@ def testLintModeNeverBuildsOrLoads(monkeypatch, tmp_path):
         def query(self, *args):
             return [{"source_archive": b""}]
         def getGoal(self, *args):
-            return {"fingerprint": "snapshot"}
+            return {"fingerprint": "snapshot", "metadata": {"native_interface_version": 1}}
         def addArtifact(self, *args):
             return "artifact"
         def addEvent(self, *args):

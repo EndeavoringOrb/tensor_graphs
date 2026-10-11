@@ -19,6 +19,7 @@ from pathlib import Path
 from psycopg.types.json import Jsonb
 
 from .storage import fingerprint
+from .policy import NATIVE_INTERFACE_VERSION, baselineEligible
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GOAL_CACHE = PROJECT_ROOT / "dirty_region_caches/embeddinggemma-2-image-current.bin.dirty-cache"
@@ -174,7 +175,8 @@ def initializeGoal(store, cache_path):
     archive = sourceArchive()
     cache_hash = hashlib.sha256(cache_data).hexdigest()
     hardware = hardwareIdentity()
-    goal_hash = fingerprint({"cache": cache_hash, "sources": hashlib.sha256(archive).hexdigest(), "hardware": hardware})
+    goal_hash = fingerprint({"cache": cache_hash, "sources": hashlib.sha256(archive).hexdigest(), "hardware": hardware,
+                             "native_interface_version": NATIVE_INTERFACE_VERSION})
     with store.connection() as lock_connection:
         lock_connection.autocommit = True
         logger.info("Waiting for the discovery/GPU worker database lock")
@@ -203,7 +205,9 @@ def initializeGoal(store, cache_path):
                 kernel["source_path"] = "tensor_graphs_cpp/" + uid_metadata[str(kernel["kernel_id"])]["path"]
             metadata = {"kernels": discovered["kernels"], "discovery_log": discovery_log,
                         "build_log": result["output"], "scope": "kernel", "cache_path": str(cache_path), "hardware": hardware,
-                        "enabled_capabilities": discovered["enabled_capabilities"]}
+                        "enabled_capabilities": discovered["enabled_capabilities"],
+                        "native_interface_version": NATIVE_INTERFACE_VERSION}
+            kernels_by_id = {kernel["kernel_id"]: kernel for kernel in discovered["kernels"]}
             groups = {}
             for call in discovered["calls"]:
                 expression = call["reference_expression"]
@@ -211,7 +215,7 @@ def initializeGoal(store, cache_path):
                                                             "output_shape", "output_strides", "output_dtype")}
                 config_hash = fingerprint(configuration)
                 group = groups.setdefault((expression, config_hash), {"configuration": configuration, "kernels": {}})
-                if call["kernel_matches"]:
+                if call["kernel_matches"] and baselineEligible(kernels_by_id[call["kernel_id"]]):
                     group["kernels"][str(call["kernel_id"])] = call["kernel_name"]
             with store.connection() as connection:
                 goal_id = connection.execute("""INSERT INTO kernel_bench.goals
@@ -256,7 +260,15 @@ def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="
     return str(job_id)
 
 
+def requireNativeInterface(store, goal_id):
+    version = store.getGoal(goal_id)["metadata"].get("native_interface_version")
+    if version != NATIVE_INTERFACE_VERSION:
+        raise JobFailure(f"Goal {goal_id} has incompatible native interface {version}; expected {NATIVE_INTERFACE_VERSION}. Use the current goal.",
+                         {"kind": "incompatible_native_interface", "stage": "snapshot"})
+
+
 def evaluateJob(store, job, workspace):
+    requireNativeInterface(store, job["goal_id"])
     goal = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (job["goal_id"],))[0]
     if not (workspace / "build.py").is_file():
         with zipfile.ZipFile(io.BytesIO(bytes(goal["source_archive"]))) as archive:
@@ -373,14 +385,15 @@ def evaluateJob(store, job, workspace):
     store.completeJob(job["id"], result)
 
 
-def calibrateNext(store, workspace_root):
+def calibrateNext(store, workspace_root, goal_id):
     # Called only by the exclusive evaluation worker, while holding the hardware lock.
     store.execute("""INSERT INTO kernel_bench.baselines(configuration_id)
-        SELECT id FROM kernel_bench.configurations ON CONFLICT DO NOTHING""")
+        SELECT id FROM kernel_bench.configurations WHERE goal_id = %s ON CONFLICT DO NOTHING""", (goal_id,))
     rows = store.query("""SELECT c.*, t.expression FROM kernel_bench.baselines b
         JOIN kernel_bench.configurations c ON c.id = b.configuration_id
         JOIN kernel_bench.targets t ON t.id = c.target_id
-        WHERE b.status IN ('pending', 'running') ORDER BY c.goal_id, c.id LIMIT 1""")
+        WHERE b.status IN ('pending', 'running') AND (c.goal_id = %s OR b.requested)
+        ORDER BY c.goal_id, c.id LIMIT 1""", (goal_id,))
     if not rows:
         return False
     calibrateConfiguration(store, rows[0], workspace_root)
@@ -392,6 +405,11 @@ def calibrateConfiguration(store, row, workspace_root):
     workspace = workspace_root / ("baseline-" + str(row["goal_id"]))
     workspace.mkdir(exist_ok=True)
     try:
+        requireNativeInterface(store, row["goal_id"])
+        if not row["matching_kernels"]:
+            store.execute("UPDATE kernel_bench.baselines SET status = 'unavailable', error = %s WHERE configuration_id = %s",
+                          ("No matching executable kernels with a reference factory", row["id"]))
+            return True
         marker = workspace / ".baseline_built"
         if not marker.exists():
             goal = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (row["goal_id"],))[0]
@@ -409,17 +427,18 @@ def calibrateConfiguration(store, row, workspace_root):
         identity = {"hardware": hardwareIdentity(), "goal_fingerprint": store.getGoal(row["goal_id"])["fingerprint"],
                     "toolchain": json.loads(metadata_path.read_text()) if metadata_path.exists() else {},
                     "enabled_capabilities": result["enabled_capabilities"],
-                    "methodology": {"seed": 42, "rounds": 2, "iterations": 8, "competitors": "optimized kernels or reference fallback"}}
+                    "methodology": {"seed": 42, "rounds": 2, "iterations": 8, "competitors": "matching non-reference kernels with reference factories"}}
         store.execute("""UPDATE kernel_bench.baselines SET status = 'measured', measurements = %s,
             winner = %s, identity = %s, measured_at = now(), error = NULL WHERE configuration_id = %s""",
             (Jsonb(result["measurements"]), Jsonb(result["winner"]), Jsonb(identity), row["id"]))
     except Exception as error:  # noqa: BLE001 - retain per-configuration failures and continue calibration
-        store.execute("UPDATE kernel_bench.baselines SET status = 'failed', error = %s, measured_at = now() WHERE configuration_id = %s",
-                      (str(error), row["id"]))
+        status = "unavailable" if isinstance(error, JobFailure) and error.details.get("kind") == "no_matching_kernels" else "failed"
+        store.execute("UPDATE kernel_bench.baselines SET status = %s, error = %s, measured_at = now() WHERE configuration_id = %s",
+                      (status, str(error), row["id"]))
     return True
 
 
-def runWorker(store, stop_event, validation=False):
+def runWorker(store, stop_event, validation=False, goal_id=None):
     worker_lock = WORKER_LOCK + 1 if validation else WORKER_LOCK
     lane = "validation" if validation else "evaluation"
     heartbeat_stop = threading.Event()
@@ -455,7 +474,7 @@ def runWorker(store, stop_event, validation=False):
                         store.execute("UPDATE kernel_bench.workers SET stage = 'baseline' WHERE lane = %s", (lane,))
                         lock_connection.execute("SELECT pg_advisory_lock(%s)", (WORKER_LOCK + 2,))
                         try:
-                            calibrateNext(store, Path(temp_path))
+                            calibrateNext(store, Path(temp_path), goal_id)
                         finally:
                             lock_connection.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK + 2,))
                     if job is not None:
@@ -493,8 +512,8 @@ def runWorker(store, stop_event, validation=False):
                 stop_event.wait(1)
 
 
-def startWorker(store, stop_event=None, validation=False):
+def startWorker(store, stop_event=None, validation=False, goal_id=None):
     stop_event = stop_event if stop_event is not None else threading.Event()
-    thread = threading.Thread(target=runWorker, args=(store, stop_event, validation), name="kernel-bench-validation-worker" if validation else "kernel-bench-worker", daemon=True)
+    thread = threading.Thread(target=runWorker, args=(store, stop_event, validation, goal_id), name="kernel-bench-validation-worker" if validation else "kernel-bench-worker", daemon=True)
     thread.start()
     return thread

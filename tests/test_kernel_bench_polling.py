@@ -95,7 +95,7 @@ def pollingDatabase():
     store.initialize()  # migrations are repeatable
     key = str(uuid.uuid4())
     goal_id = store.query("""INSERT INTO kernel_bench.goals(fingerprint, name, cache_sha256, cache_data, source_archive, metadata)
-        VALUES (%s, 'polling test', '', '', '', %s) RETURNING id""", (key, Jsonb({'kernels': []})))[0]['id']
+        VALUES (%s, 'polling test', '', '', '', %s) RETURNING id""", (key, Jsonb({'kernels': [], 'native_interface_version': 1})))[0]['id']
     store.execute('INSERT INTO kernel_bench.targets(id, expression) VALUES (%s, %s)', (key, key))
     configuration_id = store.query("""INSERT INTO kernel_bench.configurations(goal_id, target_id, fingerprint, configuration, matching_kernels)
         VALUES(%s, %s, %s, '{"input_dtypes": [], "input_constants": []}', '{}') RETURNING id""", (goal_id, key, key))[0]['id']
@@ -157,7 +157,7 @@ def testCalibrationRecovery(pollingDatabase, monkeypatch, tmp_path):
     measurement = {'kernel_id': 1, 'kernel_name': 'baseline', 'samples_ms': [1, 2], 'median_ms': 1.5}
     monkeypatch.setattr(jobs, 'hardwareIdentity', lambda: {'machine': 'test'})
     monkeypatch.setattr(jobs, 'runNative', lambda *args: ({'measurements': [measurement], 'winner': measurement, 'enabled_capabilities': []}, ''))
-    row = {'id': configuration_id, 'goal_id': goal_id, 'expression': target_id, 'configuration': {}}
+    row = {'id': configuration_id, 'goal_id': goal_id, 'expression': target_id, 'configuration': {}, 'matching_kernels': {'1': 'baseline'}}
     store.execute("UPDATE kernel_bench.baselines SET status='running' WHERE configuration_id=%s", (configuration_id,))
     jobs.calibrateConfiguration(store, row, tmp_path)
     baseline = store.getBaselines(goal_id, target_id)[0]
@@ -215,3 +215,24 @@ def testLongPollCapacity():
             pass  # Immediate requests retain capacity.
     with app.test_request_context('/'), waitSlot(1):
         pass  # All slots are released after the earlier requests finish.
+
+
+def testUnavailableBaselinePersistsAcrossRetry(pollingDatabase, monkeypatch, tmp_path):
+    from kernel_bench import jobs
+    store, client, goal_id, target_id, configuration_id = pollingDatabase
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unavailable baseline attempted a build')
+    monkeypatch.setattr(jobs, 'runCmd', forbidden)
+    headers = {'X-Bench-Token': 'polling-test'}
+    assert client.post('/api/baselines/calibrate', json={'goal_id': goal_id}, headers=headers).status_code == 202
+    row = {'id': configuration_id, 'goal_id': goal_id, 'matching_kernels': {}}
+    jobs.calibrateConfiguration(store, row, tmp_path)
+    assert store.getBaselines(goal_id, target_id)[0]['status'] == 'unavailable'
+    client.post('/api/baselines/calibrate', json={'retry_failed': True}, headers=headers)
+    assert store.getBaselines(goal_id, target_id)[0]['status'] == 'unavailable'
+    requested = store.query('SELECT requested FROM kernel_bench.baselines WHERE configuration_id = %s', (configuration_id,))[0]
+    assert requested['requested'] is True
+    store.execute("UPDATE kernel_bench.goals SET metadata = '{}' WHERE id = %s", (goal_id,))
+    response = client.post('/api/baselines/calibrate', json={'goal_id': goal_id}, headers=headers)
+    assert response.status_code == 409
+    assert response.get_json()['error_details']['kind'] == 'incompatible_native_interface'

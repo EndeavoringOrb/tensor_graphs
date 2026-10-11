@@ -22,6 +22,8 @@ from .contract import CONTRACT, decodeConstants, targetKernels
 from .jobs import (
     DEFAULT_GOAL_CACHE,
     PROJECT_ROOT,
+    JobFailure,
+    requireNativeInterface,
     createJob,
     initializeGoal,
     startWorker,
@@ -41,7 +43,7 @@ TOOLS = [
     {"name": "kernel_contract", "method": "GET", "path": "/api/kernel-contract", "description": "Native signatures, registration parameters, configuration encoding and CPU/CUDA skeletons"},
     {"name": "linter_rules", "method": "GET", "path": "/api/linter/rules", "description": "Shared build linter rule identifiers, descriptions and scopes"},
     {"name": "kernel_names", "method": "GET", "path": "/api/kernels/list?name=...", "description": "Exact baseline name lookup and availability; independent candidate jobs may reuse names"},
-    {"name": "baseline_calibration", "method": "POST", "path": "/api/baselines/calibrate", "description": "Schedule resumable goal calibration; optional retry_failed boolean; inspect calibrated_baselines on targets"},
+    {"name": "baseline_calibration", "method": "POST", "path": "/api/baselines/calibrate", "description": "Schedule calibration for the active goal or explicit goal_id; optional retry_failed boolean; inspect calibrated_baselines on targets"},
     {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity, server-wide queue depths by mode, worker heartbeats and recent stage durations"},
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
     {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
@@ -165,18 +167,26 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
     @app.post("/api/baselines/calibrate")
     def baselineCalibration():
         data = request.get_json()
-        if not isinstance(data, dict) or any(key not in ("retry_failed",) for key in data):
-            raise ValueError("Expected an object with optional retry_failed")
+        if not isinstance(data, dict) or any(key not in ("retry_failed", "goal_id") for key in data):
+            raise ValueError("Expected an object with optional retry_failed and goal_id")
+        calibration_goal_id = data.get("goal_id", goal_id)
+        if isinstance(calibration_goal_id, bool) or not isinstance(calibration_goal_id, int):
+            raise TypeError("goal_id must be an integer")
+        try:
+            requireNativeInterface(store, calibration_goal_id)
+        except JobFailure as error:
+            return jsonify({"error": str(error), "error_details": error.details}), 409
         retry_failed = data.get("retry_failed", False)
         if not isinstance(retry_failed, bool):
             raise TypeError("retry_failed must be a boolean")
-        store.execute("""INSERT INTO kernel_bench.baselines(configuration_id)
-            SELECT id FROM kernel_bench.configurations WHERE goal_id = %s ON CONFLICT DO NOTHING""", (goal_id,))
+        store.execute("""INSERT INTO kernel_bench.baselines(configuration_id, requested)
+            SELECT id, true FROM kernel_bench.configurations WHERE goal_id = %s
+            ON CONFLICT (configuration_id) DO UPDATE SET requested = true""", (calibration_goal_id,))
         if retry_failed:
             store.execute("""UPDATE kernel_bench.baselines SET status = 'pending', error = NULL, measured_at = NULL
                 WHERE status = 'failed' AND configuration_id IN
-                (SELECT id FROM kernel_bench.configurations WHERE goal_id = %s)""", (goal_id,))
-        return jsonify({"goal_id": goal_id, "status": "scheduled", "ordering": "calibration runs when evaluation is idle"}), 202
+                (SELECT id FROM kernel_bench.configurations WHERE goal_id = %s)""", (calibration_goal_id,))
+        return jsonify({"goal_id": calibration_goal_id, "status": "scheduled", "ordering": "calibration runs when evaluation is idle"}), 202
 
     @app.get("/api/kernels/list")
     def kernels():
@@ -386,8 +396,8 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         return jsonify({kind: store.query("SELECT * FROM kernel_bench.feedback WHERE kind = %s ORDER BY id DESC LIMIT 200", (singular,))})
 
     if start_worker:
-        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event)
-        app.extensions["kernel_bench_validation_worker"] = startWorker(store, stop_event, validation=True)
+        app.extensions["kernel_bench_worker"] = startWorker(store, stop_event, goal_id=goal_id)
+        app.extensions["kernel_bench_validation_worker"] = startWorker(store, stop_event, validation=True, goal_id=goal_id)
     return app
 
 

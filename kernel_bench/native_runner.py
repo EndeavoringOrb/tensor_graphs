@@ -6,6 +6,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
+if __package__:
+    from .policy import baselineEligible
+else:
+    from policy import baselineEligible
+
 native = None
 
 
@@ -55,12 +60,7 @@ def evaluate(payload, state):
     for row in payload["configurations"]:
         state["error_details"] = {"stage": "match", "configuration_id": row["id"]}
         checkpoint(payload, state)
-        if hasattr(native, "kernel_bench_match_diagnostics"):
-            diagnostic = native.kernel_bench_match_diagnostics(candidate["kernel_id"], row["configuration"])
-        else:
-            # Immutable pre-phase-3 snapshots cannot supply built-in rejection reasons.
-            matched = native.kernel_bench_matches(candidate["kernel_id"], row["configuration"])
-            diagnostic = {"matched": matched, "reasons": [] if matched else ["unknown_legacy_snapshot"]}
+        diagnostic = native.kernel_bench_match_diagnostics(candidate["kernel_id"], row["configuration"])
         if diagnostic["matched"]:
             matching.append(row)
             result["matched_configuration_ids"].append(row["id"])
@@ -95,10 +95,8 @@ def evaluate(payload, state):
         competitors = [kernel for kernel in kernels
                        if kernel["kernel_id"] != candidate["kernel_id"]
                        and kernel["reference_expression"] == payload["reference_expression"]
-                       and not kernel["is_view"]
+                       and baselineEligible(kernel)
                        and native.kernel_bench_matches(kernel["kernel_id"], configuration)]
-        optimized = [kernel for kernel in competitors if not kernel["is_reference"]]
-        competitors = optimized or competitors
         ordered = [candidate] + sorted(competitors, key=lambda kernel: kernel["kernel_id"])
         samples = {kernel["kernel_id"]: [] for kernel in ordered}
         for round_idx in range(2):
@@ -129,14 +127,19 @@ def calibrate(payload, state):
     """Same correctness seed, benchmark rounds and competitor policy as evaluation."""
     row = payload["configuration"]
     configuration = row["configuration"]
-    eligible = [kernel for kernel in native.kernel_bench_kernels()
+    kernels = native.kernel_bench_kernels()
+    eligible = [kernel for kernel in kernels
                 if kernel["reference_expression"] == payload["reference_expression"]
-                and not kernel["is_view"] and kernel["has_reference_factory"]
+                and baselineEligible(kernel)
                 and native.kernel_bench_matches(kernel["kernel_id"], configuration)]
-    optimized = [kernel for kernel in eligible if not kernel["is_reference"]]
-    ordered = sorted(optimized or eligible, key=lambda kernel: kernel["kernel_id"])
+    ordered = sorted(eligible, key=lambda kernel: kernel["kernel_id"])
     if not ordered:
-        raise NativeFailure("No eligible baseline kernels", {"kind": "no_matching_kernels", "stage": "baseline"})
+        raise NativeFailure("No eligible baseline kernels", {
+            "kind": "no_matching_kernels", "stage": "baseline", "configuration_id": row["id"],
+            "reference_expression": payload["reference_expression"],
+            "target_kernels": [{**kernel, "matches_configuration": native.kernel_bench_matches(
+                kernel["kernel_id"], configuration)} for kernel in kernels
+                if kernel["reference_expression"] == payload["reference_expression"]]})
     for kernel in ordered:
         state["error_details"] = {"stage": "test", "configuration_id": row["id"], "kernel_name": kernel["name"]}
         checkpoint(payload, state)
