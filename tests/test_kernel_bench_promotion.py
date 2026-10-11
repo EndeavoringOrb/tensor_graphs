@@ -133,11 +133,15 @@ def testPackagedLinterMatchesBuildAndServer(tmp_path):
 
 
 @pytest.mark.parametrize("selected,candidate_ms,github,outcome", [(True, 1, False, "validated"), (False, 1, False, "unselected"), (True, 3, False, "no_goal_speedup"), (True, 1, True, "pr_created")])
-def testFullPromotionStages(monkeypatch, selected, candidate_ms, github, outcome):
+def testFullPromotionStages(monkeypatch, tmp_path, selected, candidate_ms, github, outcome):
     archive_bytes = io.BytesIO()
     with zipfile.ZipFile(archive_bytes, "w"):
         pass
     commands = []
+    (tmp_path / "benchmarks").mkdir()
+    (tmp_path / "benchmarks/records.bin").write_bytes(b"calibration")
+    monkeypatch.setattr("kernel_bench.jobs.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("kernel_bench.jobs.getPythonExe", lambda: sys.executable)
     class Connection:
         def execute(self, *args):
             return self
@@ -146,7 +150,9 @@ def testFullPromotionStages(monkeypatch, selected, candidate_ms, github, outcome
     class FakeStore:
         def getGoal(self, goal_id):
             return {"metadata": {"source_commit": "commit", "hardware": {"gpu": "box"}}}
-        def query(self, *args):
+        def query(self, sql, *args):
+            if "kernel_bench.measurements" in sql:
+                return [{"kernel_name": "candidate", "is_candidate": True, "median_ms": 1, "configuration": {}}]
             return [{"source_archive": archive_bytes.getvalue(), "cache_data": b"cache"}]
         @contextmanager
         def connection(self):
@@ -190,6 +196,8 @@ def testFullPromotionStages(monkeypatch, selected, candidate_ms, github, outcome
     if github:
         job["result"]["recipe"]["github_repo"] = "owner/repo"
     promoteJob(store, job)
+    calibration_commands = [argv for argv in commands if "kernel_bench/cost_records.py" in argv]
+    assert len(calibration_commands) == 1  # candidate costs never contaminate the baseline
     if github:
         assert store.result["pr_url"] == "https://github.com/owner/repo/pull/1"
         assert any(argv[:2] == ["git", "push"] for argv in commands)
@@ -227,3 +235,28 @@ def testDiscoveryGoalRejectsDifferentBuckets(monkeypatch):
     value["buckets"][1]["weight"] = 1
     with pytest.raises(ValueError, match="differs"):
         verifyDiscoveryGoal(value, "cache")
+
+
+def testCompilerCostsExcludeStaleImplementationsAndRequireCandidate(monkeypatch, tmp_path):
+    import runpy
+    rows = [{"kernel_name": "existing", "kernel_id": "1", "is_candidate": False},
+            {"kernel_name": "existing", "kernel_id": "2", "is_candidate": False},
+            {"kernel_name": "removed", "kernel_id": "3", "is_candidate": False},
+            {"kernel_name": "candidate", "kernel_id": "old-context", "is_candidate": True}]
+    imported = []
+    def writeRecords(path, values):
+        imported.extend(values)
+        return len(values)
+    monkeypatch.setitem(sys.modules, "tensor_graphs", SimpleNamespace(
+        kernel_bench_kernels=lambda: [{"name": "existing", "kernel_id": 1}, {"name": "candidate", "kernel_id": 9}],
+        kernel_bench_write_records=writeRecords))
+    path = tmp_path / "measurements.json"
+    path.write_text(json.dumps(rows))
+    monkeypatch.setattr(sys, "argv", ["cost_records.py", "--records", "corpus.bin", "--measurements", str(path)])
+    script = Path(__file__).resolve().parents[1] / "kernel_bench/cost_records.py"
+    runpy.run_path(str(script), run_name="__main__")
+    assert imported == [rows[0], rows[3]]
+    rows[3]["kernel_name"] = "missing-candidate"
+    path.write_text(json.dumps(rows))
+    with pytest.raises(ValueError, match="candidate is missing"):
+        runpy.run_path(str(script), run_name="__main__")
