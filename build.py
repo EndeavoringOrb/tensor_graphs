@@ -16,6 +16,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from tqdm import tqdm
+from kernel_linter_rules import REDUNDANCY_PATTERNS, ruleLabel
 
 SERVER_JOB = os.environ.get("KERNEL_BENCH_SERVER_JOB") == "1"
 console = Console(force_terminal=False, no_color=True, width=160) if SERVER_JOB else Console()
@@ -605,32 +606,7 @@ class KernelLinter:
         re.MULTILINE,
     )
 
-    REDUNDANCY_PATTERNS = {
-        r"inputs\.size\(\)": (
-            "Input Count Check",
-            "The engine already validates input count based on the macro arguments.",
-        ),
-        r"inputs\s*\[\d+\]\.backend": (
-            "Input Backend Check",
-            "Input backends are validated via the backend list in the registration macro.",
-        ),
-        r"output\.backend": (
-            "Output Backend Check",
-            "The output backend is validated by the registry before calling match().",
-        ),
-        r"isContiguous\s*\(\s*(inputs|inViews)\s*\[": (
-            "Input Contiguity Check",
-            "The Planner handles 'Contiguity Repair'. Use the boolean list in the macro instead.",
-        ),
-        r"inputs\s*\[\d+\]\.dtype != DType::": (
-            "Input DType Check",
-            "DTypes are already validated against the DType list in the registration macro.",
-        ),
-        r"inputs\s*\[0\]\.storageType\s*==\s*StorageType::PERSISTENT": (
-            "Persistent Storage Check",
-            "The engine's inplace safety logic now handles this automatically.",
-        ),
-    }
+    REDUNDANCY_PATTERNS = REDUNDANCY_PATTERNS
 
     EGRAPH_MUTATION_PATTERNS = [
         r"\baddOpToEGraph\b",
@@ -702,7 +678,7 @@ class KernelLinter:
                         console.print(
                             Panel(
                                 f"[bold red]REDUNDANT LOGIC DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
-                                f"The match function [yellow]{match_func_name}[/yellow] contains a manual [bold]{name}[/bold] on line {line_num}.\n\n"
+                                f"Rule: {name.lower().replace(chr(32), chr(95))}\nThe match function [yellow]{match_func_name}[/yellow] contains a manual [bold]{name}[/bold] on line {line_num}.\n\n"
                                 f"[white]Reason:[/white] {reason}\n\n"
                                 f"[white]Fix:[/white] Remove the check from the C++ body. Use registration macro parameters.",
                                 title="Linter Violation",
@@ -713,7 +689,7 @@ class KernelLinter:
         if (not file_path.name.endswith("utils.hpp")) and (n_matches == 0):
             console.print(
                 Panel(
-                    f"[bold red]KERNEL REGISTRATION DETECTION ERROR:[/bold red] no kernel registration found in [cyan]{ROOT_DIR / rel_path}[/cyan]",
+                    f"[bold red]{ruleLabel('kernel_registration_detection_error')}:[/bold red] no kernel registration found in [cyan]{ROOT_DIR / rel_path}[/cyan]",
                     title="Linter Error",
                     border_style="red",
                 )
@@ -740,7 +716,7 @@ class KernelLinter:
             nested_ref = sorted(nested_ref_paths)[0]
             console.print(
                 Panel(
-                    f"[bold red]NESTED REFERENCE FACTORY HEADER:[/bold red] [cyan]{nested_ref}[/cyan]\n\n"
+                    f"[bold red]{ruleLabel('nested_reference_factory_header')}:[/bold red] [cyan]{nested_ref}[/cyan]\n\n"
                     "Keep ref.hpp at the fused kernel folder root and have nested kernel implementations include it.",
                     title="Linter Violation",
                     border_style="red",
@@ -757,7 +733,7 @@ class KernelLinter:
             if not ref_path.is_file():
                 console.print(
                     Panel(
-                        f"[bold red]REFERENCE FACTORY HEADER MISSING:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
+                        f"[bold red]{ruleLabel('reference_factory_header_missing')}:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
                         "Every fused kernel folder must contain a ref.hpp.",
                         title="Linter Violation",
                         border_style="red",
@@ -772,7 +748,7 @@ class KernelLinter:
             if len(factories) != 1:
                 console.print(
                     Panel(
-                        f"[bold red]INVALID REFERENCE FACTORY COUNT:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
+                        f"[bold red]{ruleLabel('invalid_reference_factory_count')}:[/bold red] [cyan]{ref_path}[/cyan]\n\n"
                         f"Expected exactly one ref factory definition, found {len(factories)}.",
                         title="Linter Violation",
                         border_style="red",
@@ -797,7 +773,7 @@ class KernelLinter:
             if is_opencl_kernel and len(rel_path.parts) < 3:
                 console.print(
                     Panel(
-                        f"[bold red]OPENCL KERNEL MUST BE NESTED:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
+                        f"[bold red]{ruleLabel('opencl_kernel_must_be_nested')}:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
                         "Place each OpenCL source and wrapper in a subfolder beneath its fused kernel folder.",
                         title="Linter Violation",
                         border_style="red",
@@ -812,7 +788,7 @@ class KernelLinter:
                 if source_match and (ROOT_DIR / source_match.group(1)).parent != file_path.parent:
                     console.print(
                         Panel(
-                            f"[bold red]OPENCL SOURCE AND WRAPPER MUST BE TOGETHER:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
+                            f"[bold red]{ruleLabel('opencl_source_and_wrapper_must_be_together')}:[/bold red] [cyan]{ROOT_DIR / file_path.relative_to(ROOT_DIR)}[/cyan]\n\n"
                             f"The referenced source {source_match.group(1)} must be in the wrapper's subfolder.",
                             title="Linter Violation",
                             border_style="red",
@@ -824,7 +800,7 @@ class KernelLinter:
                 rel_path = file_path.relative_to(ROOT_DIR)
                 console.print(
                     Panel(
-                        f"[bold red]REFERENCE FACTORY IN KERNEL FILE:[/bold red] [cyan]{ROOT_DIR / rel_path}[/cyan]\n\n"
+                        f"[bold red]{ruleLabel('reference_factory_in_kernel_file')}:[/bold red] [cyan]{ROOT_DIR / rel_path}[/cyan]\n\n"
                         "Move the LogicalId ref factory definition into the folder's ref.hpp.",
                         title="Linter Violation",
                         border_style="red",
@@ -886,7 +862,7 @@ class KernelLinter:
                 rel_path = file_path.relative_to(ROOT_DIR)
                 console.print(
                     Panel(
-                        f"[bold red]DANGLING REFERENCE HAZARD DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
+                        f"[bold red]{ruleLabel('dangling_reference_hazard_detected')}:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
                         f"In function [yellow]{func_name}[/yellow] (line {line_num}):\n"
                         f"Parameter [bold]{ref_param_match.group(0)}[/bold] is passed by reference in a function that mutates [bold]egraph[/bold].\n\n"
                         f"[white]Reason:[/white] Modifying the egraph (via addOpToEGraph, addEClass, addENode, merge, etc.) "
@@ -935,7 +911,7 @@ class KernelLinter:
                         rel_path = file_path.relative_to(ROOT_DIR)
                         console.print(
                             Panel(
-                                f"[bold red]DANGLING REFERENCE HAZARD DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
+                                f"[bold red]{ruleLabel('dangling_reference_hazard_detected')}:[/bold red] in [cyan]{ROOT_DIR / rel_path}:{line_num}[/cyan]\n\n"
                                 f"In function [yellow]{func_name}[/yellow] (line {line_num}):\n"
                                 f"Local variable reference [bold]{local_match.group(0)}[/bold] is active while [bold]egraph[/bold] is mutated.\n\n"
                                 f"[white]Reason:[/white] Modifying the egraph (via addOpToEGraph, addEClass, addENode, merge, etc.) "

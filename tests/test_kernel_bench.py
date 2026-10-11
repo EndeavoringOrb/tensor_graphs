@@ -232,3 +232,32 @@ def testValidationModes(goal, mode):
     assert completed["result"]["measurements"] == []
     assert "correctness" not in completed["result"]["passed_stages"]
     assert not store.query("SELECT * FROM kernel_bench.measurements WHERE job_id = %s", (job_id,))
+
+
+def testPhaseThreeContractAndSkeletons(goal):
+    from kernel_bench.onboarding import SKELETONS
+    store, goal_id, app, workspace = goal
+    client = app.test_client()
+    headers = {'X-Bench-Token': 'integration-test-token'}
+    contract = client.get('/api/kernel-contract', headers=headers).get_json()
+    assert 'TG_USE_CUDA' in contract['enabled_capabilities']
+    assert contract['run'] == 'void run(const KernelContext &ctx)'
+    import hashlib
+    from psycopg.types.json import Jsonb
+    from kernel_bench.storage import fingerprint
+    expression = 'COPY_TO($0,)'
+    copy_target = hashlib.sha256(expression.encode()).hexdigest()
+    configuration = {'input_shapes': [[8]], 'input_strides': [[1]], 'input_dtypes': [0],
+                     'input_constants': [[]], 'output_shape': [8], 'output_strides': [1], 'output_dtype': 0}
+    with store.connection() as connection:
+        connection.execute("INSERT INTO kernel_bench.targets(id, expression) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                           (copy_target, expression))
+        connection.execute("""INSERT INTO kernel_bench.configurations
+            (goal_id, target_id, fingerprint, configuration, matching_kernels)
+            VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+            (goal_id, copy_target, fingerprint(configuration), Jsonb(configuration), Jsonb({})))
+    for backend, source in SKELETONS.items():
+        job_id = createJob(store, goal_id, source, copy_target, backend=backend, mode='compile')
+        evaluateJob(store, store.getJob(job_id), workspace / ('skeleton_' + backend))
+        result = store.getJob(job_id)['result']
+        assert 'registration' in result['passed_stages']

@@ -45,7 +45,7 @@ def extractRegisteredKernelNames(source_text):
 def sourceArchive():
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        paths = [PROJECT_ROOT / "build.py"]
+        paths = [PROJECT_ROOT / "build.py", PROJECT_ROOT / "kernel_linter_rules.py"]
         for directory in ("tensor_graphs_cpp", "docs/hwinfo/box"):
             paths.extend(sorted((PROJECT_ROOT / directory).rglob("*")))
         for path in paths:
@@ -202,7 +202,8 @@ def initializeGoal(store, cache_path):
             for kernel in discovered["kernels"]:
                 kernel["source_path"] = "tensor_graphs_cpp/" + uid_metadata[str(kernel["kernel_id"])]["path"]
             metadata = {"kernels": discovered["kernels"], "discovery_log": discovery_log,
-                        "build_log": result["output"], "scope": "kernel", "cache_path": str(cache_path), "hardware": hardware}
+                        "build_log": result["output"], "scope": "kernel", "cache_path": str(cache_path), "hardware": hardware,
+                        "enabled_capabilities": discovered["enabled_capabilities"]}
             groups = {}
             for call in discovered["calls"]:
                 expression = call["reference_expression"]
@@ -245,8 +246,10 @@ def createJob(store, goal_id, source, target_id, idea="", backend="cuda", mode="
     if not store.getConfigurations(goal_id, target_id):
         raise ValueError("Unknown target for this goal")
     metadata = store.getGoal(goal_id)["metadata"]
-    if any(kernel["name"] == names[0] for kernel in metadata["kernels"]):
-        raise ValueError("Candidate kernel name is already registered in the baseline")
+    conflicts = [kernel for kernel in metadata["kernels"] if kernel["name"] == names[0]]
+    if conflicts:
+        raise ValueError(f"Candidate name {names[0]!r} conflicts with baseline registration "
+                         f"{conflicts[0]['kernel_id']} ({conflicts[0].get('source_path', 'source unknown')})")
     job_id = uuid.uuid4()
     store.execute("""INSERT INTO kernel_bench.jobs(id, goal_id, target_id, idea, source, kernel_name, backend, mode)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (job_id, goal_id, target_id, idea, source, names[0], backend, mode))

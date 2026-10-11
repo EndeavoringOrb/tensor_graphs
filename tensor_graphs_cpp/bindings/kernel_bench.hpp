@@ -98,6 +98,15 @@ inline void registerBindings(py::module_ &module)
         }
         return result;
     }, py::arg("cache_path"));
+    module.def("kernel_bench_match_diagnostics", [](uint64_t kernel_id, const py::dict &configuration) {
+        auto record = recordFromDict(configuration);
+        std::vector<std::string> reasons;
+        bool matched = bindRecord(KernelRegistry::get().getKernel(KernelId{kernel_id}), record, &reasons);
+        py::dict result;
+        result["matched"] = matched;
+        result["reasons"] = reasons;
+        return result;
+    }, py::arg("kernel_id"), py::arg("configuration"));
     module.def("kernel_bench_matches", [](uint64_t kernel_id, const py::dict &configuration) {
         auto record = recordFromDict(configuration);
         return bindRecord(KernelRegistry::get().getKernel(KernelId{kernel_id}), record);

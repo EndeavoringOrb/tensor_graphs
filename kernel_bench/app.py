@@ -23,10 +23,15 @@ from .jobs import (
     startWorker,
 )
 from .storage import Store
+from .contract import CONTRACT, decodeConstants, targetKernels
+from kernel_linter_rules import getRules
 
 logger = logging.getLogger(__name__)
 
 TOOLS = [
+    {"name": "kernel_contract", "method": "GET", "path": "/api/kernel-contract", "description": "Native signatures, registration parameters, configuration encoding and CPU/CUDA skeletons"},
+    {"name": "linter_rules", "method": "GET", "path": "/api/linter/rules", "description": "Shared build linter rule identifiers, descriptions and scopes"},
+    {"name": "kernel_names", "method": "GET", "path": "/api/kernels/list?name=...", "description": "Exact baseline name lookup and availability; independent candidate jobs may reuse names"},
     {"name": "get_status", "method": "GET", "path": "/api/status", "description": "Goal identity and kernel-level scope"},
     {"name": "list_targets", "method": "GET", "path": "/api/targets", "description": "All reference expressions matching the saturated goal graph"},
     {"name": "get_target", "method": "GET", "path": "/api/targets/{target_id}", "description": "Exact workload configurations, constants, strides, and matching kernels"},
@@ -121,6 +126,10 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         search = request.args.get("search", "").lower()
         if search:
             rows = [row for row in rows if search in row["reference_expression"].lower()]
+        metadata = store.getGoal(goal_id)["metadata"]
+        for row in rows:
+            row["matching_kernels"] = {key: value for group in row["matching_kernels"] for key, value in group.items()}
+            row["source_paths"] = sorted({kernel["source_path"] for kernel in targetKernels(metadata, row["reference_expression"]) if kernel.get("source_path")})
         return jsonify({"goal_id": goal_id, "targets": rows})
 
     @app.get("/api/targets/<target_id>")
@@ -129,13 +138,35 @@ def createApp(database_url=None, goal_cache=None, token=None, start_worker=True,
         if not configurations:
             return jsonify({"error": "Unknown target for this goal"}), 404
         expression = store.query("SELECT expression FROM kernel_bench.targets WHERE id = %s", (target_id,))[0]["expression"]
-        kernels = [kernel for kernel in store.getGoal(goal_id)["metadata"]["kernels"] if kernel["reference_expression"] == expression]
+        metadata = store.getGoal(goal_id)["metadata"]
+        kernels = targetKernels(metadata, expression)
+        for row in configurations:
+            row["configuration"]["decoded_input_constants"] = decodeConstants(row["configuration"])
         return jsonify({"id": target_id, "reference_expression": expression, "configurations": configurations,
-                        "kernels": kernels, "best_recorded_measurements": store.getBestMeasurements(goal_id, target_id)})
+                        "kernels": kernels, "source_paths": sorted({kernel["source_path"] for kernel in kernels if kernel.get("source_path")}),
+                        "contract": CONTRACT, "enabled_capabilities": metadata.get("enabled_capabilities"),
+                        "capabilities_status": "known" if "enabled_capabilities" in metadata else "unknown_legacy_snapshot",
+                        "best_recorded_measurements": store.getBestMeasurements(goal_id, target_id)})
 
     @app.get("/api/kernels/list")
     def kernels():
-        return jsonify({"kernels": store.getGoal(goal_id)["metadata"]["kernels"]})
+        rows = store.getGoal(goal_id)["metadata"]["kernels"]
+        name = request.args.get("name")
+        if name is not None:
+            rows = [kernel for kernel in rows if kernel["name"] == name]
+        return jsonify({"kernels": rows, "name": name, "available": not rows if name else None,
+                        "availability_reason": ("baseline_registration_conflict" if rows else "available") if name else "name_not_requested",
+                        "uniqueness_scope": "goal baseline; candidate names may be reused across independent jobs"})
+
+    @app.get("/api/linter/rules")
+    def linterRules():
+        return jsonify({"rules": getRules()})
+
+    @app.get("/api/kernel-contract")
+    def kernelContract():
+        from .onboarding import SKELETONS
+        return jsonify({**CONTRACT, "skeletons": SKELETONS,
+                        "enabled_capabilities": store.getGoal(goal_id)["metadata"].get("enabled_capabilities")})
 
     def readArchive():
         row = store.query("SELECT source_archive FROM kernel_bench.goals WHERE id = %s", (goal_id,))[0]

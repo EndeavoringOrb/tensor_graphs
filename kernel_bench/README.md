@@ -203,3 +203,28 @@ Validation has a separate durable queue and isolated workspace. Lint can run dur
 an evaluation. Heavy builds and measurements share a PostgreSQL advisory lock,
 so compile validation can wait for an active evaluation, but need not wait for the
 whole evaluation queue. Immutable baseline lint runs once per worker snapshot.
+
+The native contract is published at `/api/kernel-contract`, including executable
+CPU/CUDA copy examples (adapt the reference factory to the requested target).
+Target detail includes that contract, snapshot capability macros, source paths,
+and decoded input constants alongside the original raw bytes. Legacy snapshots
+report unknown capabilities explicitly. Shapes use `uint32_t`; strides use
+`uint64_t` and count elements. `run` takes `const KernelContext &`, whose input
+pointers are const and output pointers are mutable.
+
+`REGISTER_KERNEL` arguments, in order, are name, minimum/maximum input counts,
+match, run, reference factory, safe in-place input indices, output memory space,
+engines, input dtypes, dummy input shapes, input contiguity booleans, and input
+memory spaces (followed by optional `is_view=false`, `isReference=false`, and
+`inferView=nullptr` flags). The first list after the factory describes aliasing safety.
+`/api/linter/rules` shares match rule identifiers and descriptions with the build
+linter; input-count checks belong in registration, not `match`.
+
+Use `/api/kernels/list?name=ExactName` to check baseline name availability.
+Candidate names may be reused across independent jobs. Matching kernels indicate
+eligibility; measured winners appear in `best_recorded_measurements`. Evaluation
+results include `matched_configuration_ids` and `unmatched_configurations` with
+reasons. The harness resolves candidate topology independently of the original
+workload's memory spaces and engines; a topology failure reports
+`memory_space_or_engine`. Arbitrary callback rejection reports
+`custom_match_rejected`; old immutable snapshots report `unknown_legacy_snapshot`.

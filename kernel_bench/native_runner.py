@@ -49,12 +49,25 @@ def evaluate(payload, state):
                              "enabled_capabilities": capabilities})
     if payload["action"] == "compile":
         return {"candidate": candidate, "measurements": []}
+    result = state["result"]
+    result.update({"matched_configuration_ids": [], "unmatched_configuration_ids": [], "unmatched_configurations": []})
     matching = []
     for row in payload["configurations"]:
         state["error_details"] = {"stage": "match", "configuration_id": row["id"]}
         checkpoint(payload, state)
-        if native.kernel_bench_matches(candidate["kernel_id"], row["configuration"]):
+        if hasattr(native, "kernel_bench_match_diagnostics"):
+            diagnostic = native.kernel_bench_match_diagnostics(candidate["kernel_id"], row["configuration"])
+        else:
+            # Immutable pre-phase-3 snapshots cannot supply built-in rejection reasons.
+            matched = native.kernel_bench_matches(candidate["kernel_id"], row["configuration"])
+            diagnostic = {"matched": matched, "reasons": [] if matched else ["unknown_legacy_snapshot"]}
+        if diagnostic["matched"]:
             matching.append(row)
+            result["matched_configuration_ids"].append(row["id"])
+        else:
+            result["unmatched_configuration_ids"].append(row["id"])
+            result["unmatched_configurations"].append({"configuration_id": row["id"], "reasons": diagnostic["reasons"]})
+        checkpoint(payload, state)
     if not matching:
         raise NativeFailure("Candidate matches zero goal configurations", {"kind": "no_matching_configurations", "stage": "match"})
     result = state["result"]
@@ -121,7 +134,7 @@ def main():
         import kernel_bench_native as native_module
         native = native_module
         if payload["action"] == "discover":
-            state["result"] = {"kernels": native.kernel_bench_kernels(), "calls": native.kernel_bench_discover(payload["cache_path"])}
+            state["result"] = {"kernels": native.kernel_bench_kernels(), "calls": native.kernel_bench_discover(payload["cache_path"]), "enabled_capabilities": native.kernel_bench_capabilities()}
         elif payload["action"] in ("evaluate", "compile"):
             state["result"] = evaluate(payload, state)
         else:

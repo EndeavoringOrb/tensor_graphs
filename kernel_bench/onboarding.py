@@ -60,3 +60,39 @@ dependencies = ["requests>=2.32.5"]
         if name.startswith("docs/hwinfo/box/"):
             files[name] = archive.read(name)
     return files
+
+
+# Working copy examples; choose the target whose expression matches this factory.
+SKELETONS = {
+    "cpu": """#include <cstring>
+#include \"kernels/fused/copy/ref.hpp\"
+inline bool matchCopyExample(const std::vector<TensorNode> &inputs, const TensorNode &output)
+{ return inputs[0].getShape() == output.getShape() && output.dtype == inputs[0].dtype && output.strides == inputs[0].strides; }
+inline void runCopyExample(const KernelContext &ctx)
+{ std::memcpy(ctx.outputs[0], ctx.inputs[0], countElements(ctx.outViews[0]) * getDTypeSize(ctx.outViews[0].dtype)); }
+REGISTER_KERNEL("ExampleCopyCPU", 1, 1, matchCopyExample, runCopyExample, ref_copy_cuda_cuda,
+{}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1024}}, {true}, {MemSpace(1, HandleType::CPP)});
+""",
+    "cuda": """#if defined(TG_USE_CUDA)
+#include \"kernels/fused/copy/ref.hpp\"
+#include <cuda_runtime.h>
+inline bool matchCopyCudaExample(const std::vector<TensorNode> &inputs, const TensorNode &output)
+{ return inputs[0].getShape() == output.getShape() && output.dtype == inputs[0].dtype && output.strides == inputs[0].strides; }
+inline void runCopyCudaExample(const KernelContext &ctx)
+{ auto error = cudaMemcpyAsync(ctx.outputs[0], ctx.inputs[0], countElements(ctx.outViews[0]) * getDTypeSize(ctx.outViews[0].dtype), cudaMemcpyDeviceToDevice, reinterpret_cast<cudaStream_t>(ctx.cuda_stream()));
+  if (error != cudaSuccess) Error::throw_err(cudaGetErrorString(error)); }
+REGISTER_KERNEL("ExampleCopyCUDA", 1, 1, matchCopyCudaExample, runCopyCudaExample, ref_copy_cuda_cuda,
+{}, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_DMA)}, {DType::FLOAT32}, {{1024}}, {true}, {MemSpace(1, HandleType::CUDA)});
+#endif
+"""}
+INSTRUCTIONS += """
+Read /api/kernel-contract for exact signatures, all REGISTER_KERNEL parameters,
+configuration encoding and working CPU/CUDA copy skeletons. Adapt their reference
+factory to your target; fused implementations include kernels/fused/<folder>/ref.hpp.
+Read /api/linter/rules before submission: manual inputs.size() checks in match are
+forbidden because registration validates input count. Check /api/kernels/list?name=...
+for baseline conflicts. Names can be reused across independent candidate jobs.
+Target kernels indicate eligibility; best_recorded_measurements indicates measured
+performance. Evaluation returns matched_configuration_ids and unmatched_configurations
+with built-in reasons or custom_match_rejected for arbitrary match callbacks.
+"""
