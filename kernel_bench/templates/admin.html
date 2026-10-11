@@ -1,14 +1,467 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><title>Goal administration</title>
-<style>body{font:16px system-ui;max-width:850px;margin:40px auto;padding:20px;background:#111827;color:#e5e7eb}input,select,button{font:inherit;padding:10px;margin:8px 0;max-width:100%}a{color:#93c5fd}pre{white-space:pre-wrap}</style>
-<a href="/">KernelBench</a> · <a href="/progress">Kernel progress</a>
-<h1>Active goal</h1><p>Select a stored discovery snapshot. Its logical graph, buckets, weights, hardware, and validation recipe remain fixed. Validation runs in the shared benchmark queue.</p>
-<label>Operator token <input id="token" type="password" autocomplete="off"></label><button id="load">Load goals</button><br>
-<label>Goal <select id="goals"></select></label> <button id="activate">Activate goal</button><pre id="status" role="status"></pre>
-<hr><h2>Prepare another goal</h2><p>Operator presets fix the cache and validation recipe. Discovery and validation run in the shared queue; the prepared snapshot becomes active.</p><select id="presets"></select> <button id="prepare">Prepare and activate</button>
-<script>
-const token=document.querySelector('#token'),goals=document.querySelector('#goals'),status=document.querySelector('#status');
-async function call(path,data){const response=await fetch(path,{method:data?'POST':'GET',headers:{'X-Admin-Token':token.value,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});const result=await response.json();if(!response.ok)throw Error(result.error);return result;}
-document.querySelector('#load').onclick=async()=>{try{const result=await call('/api/admin/goals');goals.replaceChildren();const presets=document.querySelector("#presets");presets.replaceChildren();for(const preset of result.presets){const option=document.createElement("option");option.value=preset.id;option.textContent=preset.name;presets.append(option);}for(const goal of result.goals){const option=document.createElement('option');option.value=goal.id;option.textContent=`Snapshot ${goal.id}: ${goal.name} — ${goal.promotion_enabled?'promotion configured':'benchmark only'}`;option.selected=goal.id===result.active_goal_id;goals.append(option);}status.textContent=`Active snapshot: ${result.active_goal_id}`;}catch(error){status.textContent=error.message;}};
-document.querySelector('#activate').onclick=async()=>{try{const result=await call('/api/admin/goals/activate',{goal_id:Number(goals.value)});status.textContent=`Active snapshot: ${result.goal_id}. Validation job: ${result.validation_job_id||'not configured'}`;}catch(error){status.textContent=error.message;}};
-document.querySelector('#prepare').onclick=async()=>{try{const result=await call('/api/admin/goals/prepare',{preset_id:document.querySelector('#presets').value});status.textContent=`Goal preparation queued: ${result.job_id}`;}catch(error){status.textContent=error.message;}};
-</script></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>KernelBench Admin · Queue & Live Logs</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #f87171;
+      --code-bg: #020617;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font: 14px/1.5 system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    header nav a {
+      color: var(--primary);
+      text-decoration: none;
+      margin-right: 16px;
+      font-weight: 500;
+    }
+    header nav a:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-running { background: #0369a1; color: #bae6fd; }
+    .badge-queued { background: #854d0e; color: #fef08a; }
+    .badge-completed { background: #166534; color: #bbf7d0; }
+    .badge-failed { background: #991b1b; color: #fecaca; }
+    .badge-unavailable { background: #374151; color: #9ca3af; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .card h2 { font-size: 16px; margin-bottom: 12px; color: var(--text); display: flex; justify-content: space-between; align-items: center; }
+    
+    input, select, button {
+      font: inherit;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+    }
+    button {
+      cursor: pointer;
+      background: #0284c7;
+      color: #fff;
+      border: none;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    button:hover { background: #0369a1; }
+    button.secondary { background: #334155; }
+    button.secondary:hover { background: #475569; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--text-muted); font-weight: 600; background: rgba(0,0,0,0.15); }
+    tr:hover { background: rgba(255,255,255,0.02); }
+
+    .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: var(--text-muted); }
+    .stat-value { font-weight: 600; }
+
+    #log-viewer {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      height: 380px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-line { display: flex; margin-bottom: 3px; }
+    .log-ts { color: var(--text-muted); margin-right: 12px; flex-shrink: 0; user-select: none; }
+    .log-msg { color: #e2e8f0; flex-grow: 1; }
+    .log-msg.highlight { color: #38bdf8; font-weight: 600; }
+    .log-msg.error { color: #f87171; }
+    .log-msg.warn { color: #fbbf24; }
+
+    .pulse {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+      margin-right: 6px;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+    .auth-banner {
+      background: #1e1b4b;
+      border: 1px solid #4338ca;
+      padding: 12px 16px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 style="font-size: 20px; font-weight: 700;">KernelBench Operator Dashboard</h1>
+      <p style="color: var(--text-muted); font-size: 13px;">Live queue management, worker status &amp; journal logs</p>
+    </div>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/progress">Progress</a>
+      <a href="/board">Board</a>
+    </nav>
+  </header>
+
+  <div class="auth-banner">
+    <label for="token" style="font-weight: 600;">Operator Token:</label>
+    <input id="token" type="password" placeholder="Enter X-Admin-Token" style="width: 320px;" autocomplete="off">
+    <button id="save-token">Connect &amp; Start Live Feed</button>
+    <span id="auth-status" style="color: var(--text-muted); margin-left: auto; font-size: 12px;">Waiting for token...</span>
+  </div>
+
+  <div class="grid">
+    <!-- Active Workers & Lanes -->
+    <div class="card">
+      <h2><span><span class="pulse"></span>Workers &amp; Lanes</span> <span id="lane-count" class="badge badge-running">Idle</span></h2>
+      <div id="worker-list">No active worker state yet.</div>
+    </div>
+
+    <!-- Queue Counts & Baselines -->
+    <div class="card">
+      <h2>Queue Depth &amp; Calibration</h2>
+      <div id="queue-breakdown">Connecting...</div>
+    </div>
+
+    <!-- Active Goal Switcher -->
+    <div class="card">
+      <h2>Goal Management</h2>
+      <div style="margin-bottom: 8px;">
+        <label style="font-size: 12px; color: var(--text-muted);">Switch Snapshot:</label>
+        <div style="display: flex; gap: 8px; margin-top: 4px;">
+          <select id="goals" style="flex: 1;"></select>
+          <button id="activate-goal" class="secondary" style="font-size: 12px;">Activate</button>
+        </div>
+      </div>
+      <div>
+        <label style="font-size: 12px; color: var(--text-muted);">Prepare Preset:</label>
+        <div style="display: flex; gap: 8px; margin-top: 4px;">
+          <select id="presets" style="flex: 1;"></select>
+          <button id="prepare-preset" class="secondary" style="font-size: 12px;">Prepare</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Active Jobs Table -->
+  <div class="card" style="margin-bottom: 24px;">
+    <h2>
+      <span>Active Job Queue (Running &amp; Queued)</span>
+      <span id="active-jobs-count" style="font-size: 13px; color: var(--text-muted); font-weight: normal;">0 jobs</span>
+    </h2>
+    <div style="overflow-x: auto;">
+      <table id="active-jobs-table">
+        <thead>
+          <tr>
+            <th>Kernel</th>
+            <th>Mode</th>
+            <th>Status</th>
+            <th>Step</th>
+            <th>Agent</th>
+            <th>Running / Queued</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="7" style="color: var(--text-muted); text-align: center;">No active jobs in queue</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Live Journal Logs -->
+  <div class="card">
+    <h2>
+      <span>Live System &amp; Worker Logs</span>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <label style="font-size: 12px; color: var(--text-muted); font-weight: normal;">
+          <input type="checkbox" id="autoscroll" checked> Auto-scroll
+        </label>
+        <button id="clear-logs" class="secondary" style="font-size: 12px; padding: 4px 8px;">Clear</button>
+      </div>
+    </h2>
+    <div id="log-viewer">Waiting for logs...</div>
+  </div>
+
+  <script>
+    const byId = id => document.getElementById(id);
+    const tokenInput = byId('token');
+    const authStatus = byId('auth-status');
+    const logViewer = byId('log-viewer');
+    let lastLogCursor = null;
+    let pollTimer = null;
+
+    tokenInput.value = localStorage.getItem('kb_admin_token') || '';
+
+    async function api(path, method = 'GET', body = null) {
+      const headers = {
+        'X-Admin-Token': tokenInput.value.trim(),
+        'Content-Type': 'application/json'
+      };
+      const res = await fetch(path, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || res.statusText);
+      }
+      return await res.json();
+    }
+
+    function timeAgo(dateString) {
+      if (!dateString) return '—';
+      const sec = Math.max(0, Math.floor((Date.now() - new Date(dateString)) / 1000));
+      if (sec < 60) return `${sec}s ago`;
+      if (sec < 3600) return `${Math.floor(sec/60)}m ${sec%60}s`;
+      return `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m`;
+    }
+
+    async function refreshQueue() {
+      if (!tokenInput.value.trim()) return;
+      try {
+        const data = await api('/api/admin/queue');
+        authStatus.textContent = `Connected · Active Goal: ${data.active_goal_id}`;
+        authStatus.style.color = 'var(--success)';
+
+        // 1. Worker status
+        const workers = data.queue_summary.workers || [];
+        const workerContainer = byId('worker-list');
+        if (workers.length === 0) {
+          workerContainer.innerHTML = '<div style="color: var(--text-muted);">No workers registered.</div>';
+          byId('lane-count').textContent = 'Idle';
+          byId('lane-count').className = 'badge badge-unavailable';
+        } else {
+          byId('lane-count').textContent = `${workers.length} active`;
+          byId('lane-count').className = 'badge badge-running';
+          workerContainer.innerHTML = workers.map(w => `
+            <div class="stat-row">
+              <span class="stat-label">Lane <strong>${w.lane}</strong></span>
+              <span>
+                <span class="badge badge-${w.stale ? 'failed' : 'running'}">${w.running_stage || w.stage}</span>
+                <span style="font-size: 11px; color: var(--text-muted); margin-left: 6px;">${timeAgo(w.stage_started_at || w.heartbeat_at)}</span>
+              </span>
+            </div>
+          `).join('');
+        }
+
+        // 2. Queue & Calibration breakdown
+        const depth = data.queue_summary.depth_by_mode || {};
+        const baselines = data.baseline_calibration || {};
+        const queueTotal = Object.values(depth).reduce((acc, m) => acc + (m.queued || 0) + (m.running || 0), 0);
+        
+        byId('queue-breakdown').innerHTML = `
+          <div class="stat-row">
+            <span class="stat-label">Total in Queue:</span>
+            <span class="stat-value">${queueTotal}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Lint / Compile / Eval:</span>
+            <span class="stat-value">
+              ${(depth.lint?.running || 0) + (depth.lint?.queued || 0)} / 
+              ${(depth.compile?.running || 0) + (depth.compile?.queued || 0)} / 
+              ${(depth.evaluate?.running || 0) + (depth.evaluate?.queued || 0)}
+            </span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Goal Promotions:</span>
+            <span class="stat-value">${(depth.promote?.running || 0) + (depth.promote?.queued || 0)}</span>
+          </div>
+          <div class="stat-row" style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border);">
+            <span class="stat-label">Baselines Measured:</span>
+            <span class="stat-value" style="color: var(--success);">${baselines.measured || 0} / 267</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Baselines Pending / Running:</span>
+            <span class="stat-value" style="color: var(--warning);">${(baselines.pending || 0) + (baselines.running || 0)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Unavailable / Failed:</span>
+            <span class="stat-value" style="color: var(--text-muted);">${baselines.unavailable || 0} / ${baselines.failed || 0}</span>
+          </div>
+        `;
+
+        // 3. Active Jobs Table
+        const activeTable = byId('active-jobs-table').querySelector('tbody');
+        const activeJobs = data.active_jobs || [];
+        byId('active-jobs-count').textContent = `${activeJobs.length} active`;
+        if (activeJobs.length === 0) {
+          activeTable.innerHTML = '<tr><td colspan="7" style="color: var(--text-muted); text-align: center;">Queue is currently idle.</td></tr>';
+        } else {
+          activeTable.innerHTML = activeJobs.map(job => `
+            <tr>
+              <td><strong>${job.kernel_name}</strong><br><span style="font-size: 11px; color: var(--text-muted);">${job.id}</span></td>
+              <td><code>${job.mode}</code></td>
+              <td><span class="badge badge-${job.status}">${job.status}</span></td>
+              <td><code>${job.step}</code></td>
+              <td>${job.agent_name}</td>
+              <td>${job.status === 'running' ? 'Running ' + timeAgo(job.stage_started_at || job.started_at) : 'Queued ' + timeAgo(job.created_at)}</td>
+              <td><a href="/api/jobs/${job.id}/logs" target="_blank" style="color: var(--primary);">Logs</a></td>
+            </tr>
+          `).join('');
+        }
+      } catch (err) {
+        authStatus.textContent = 'Auth error: ' + err.message;
+        authStatus.style.color = 'var(--danger)';
+      }
+    }
+
+    async function streamLogs() {
+      if (!tokenInput.value.trim()) return;
+      try {
+        const query = lastLogCursor ? `?cursor=${encodeURIComponent(lastLogCursor)}` : `?lines=80`;
+        const data = await api('/api/admin/logs' + query);
+        if (data.cursor) lastLogCursor = data.cursor;
+
+        if (data.logs && data.logs.length > 0) {
+          if (logViewer.textContent === 'Waiting for logs...') {
+            logViewer.innerHTML = '';
+          }
+          for (const entry of data.logs) {
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            const msg = entry.message || '';
+            let msgClass = 'log-msg';
+            if (msg.includes('ERROR') || msg.includes('failed') || msg.includes('Exception')) msgClass += ' error';
+            else if (msg.includes('WARN') || msg.includes('Still running')) msgClass += ' warn';
+            else if (msg.includes('Starting') || msg.includes('Finished')) msgClass += ' highlight';
+
+            div.innerHTML = `<span class="log-ts">${entry.time || ''}</span><span class="${msgClass}">${escapeHtml(msg)}</span>`;
+            logViewer.appendChild(div);
+          }
+          if (byId('autoscroll').checked) {
+            logViewer.scrollTop = logViewer.scrollHeight;
+          }
+        }
+      } catch (err) {
+        // silent fail on background log tick
+      }
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    async function loadGoalOptions() {
+      if (!tokenInput.value.trim()) return;
+      try {
+        const res = await api('/api/admin/goals');
+        const goalsSelect = byId('goals');
+        const presetsSelect = byId('presets');
+        goalsSelect.replaceChildren();
+        presetsSelect.replaceChildren();
+
+        for (const preset of (res.presets || [])) {
+          const opt = document.createElement('option');
+          opt.value = preset.id;
+          opt.textContent = preset.name;
+          presetsSelect.appendChild(opt);
+        }
+        for (const goal of (res.goals || [])) {
+          const opt = document.createElement('option');
+          opt.value = goal.id;
+          opt.textContent = `Snapshot #${goal.id}: ${goal.name}`;
+          opt.selected = (goal.id === res.active_goal_id);
+          goalsSelect.appendChild(opt);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    byId('save-token').onclick = () => {
+      localStorage.setItem('kb_admin_token', tokenInput.value.trim());
+      lastLogCursor = null;
+      logViewer.innerHTML = 'Connecting to journal stream...';
+      refreshQueue();
+      loadGoalOptions();
+      streamLogs();
+    };
+
+    byId('activate-goal').onclick = async () => {
+      try {
+        const goalId = Number(byId('goals').value);
+        await api('/api/admin/goals/activate', 'POST', { goal_id: goalId });
+        alert(`Activated snapshot ${goalId}`);
+        refreshQueue();
+      } catch (err) { alert('Error: ' + err.message); }
+    };
+
+    byId('prepare-preset').onclick = async () => {
+      try {
+        const presetId = byId('presets').value;
+        const res = await api('/api/admin/goals/prepare', 'POST', { preset_id: presetId });
+        alert(`Goal setup job queued: ${res.job_id}`);
+        refreshQueue();
+      } catch (err) { alert('Error: ' + err.message); }
+    };
+
+    byId('clear-logs').onclick = () => {
+      logViewer.innerHTML = '';
+    };
+
+    // Auto-boot if token exists
+    if (tokenInput.value.trim()) {
+      refreshQueue();
+      loadGoalOptions();
+      streamLogs();
+    }
+
+    setInterval(refreshQueue, 3000);
+    setInterval(streamLogs, 1500);
+  </script>
+</body>
+</html>

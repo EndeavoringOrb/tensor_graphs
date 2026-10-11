@@ -7,6 +7,7 @@ from psycopg.types.json import Jsonb
 
 import hmac
 import os
+import subprocess
 
 from flask import jsonify, render_template, request
 
@@ -56,6 +57,77 @@ def installAdmin(app, store):
         store.execute("INSERT INTO kernel_bench.active_goal(singleton, goal_id) VALUES (true, %s) ON CONFLICT(singleton) DO UPDATE SET goal_id = EXCLUDED.goal_id, updated_at = now()", (goal_id,))
         app.config["KERNEL_BENCH_GOAL_ID"] = goal_id
         return jsonify({"goal_id": goal_id, "validation_job_id": job_id})
+
+    @app.get("/api/admin/queue")
+    def adminQueue():
+        token = os.environ.get("KERNEL_BENCH_ADMIN_TOKEN", "")
+        candidate = request.headers.get("X-Admin-Token", "")
+        if not token or not candidate or not hmac.compare_digest(token, candidate):
+            return jsonify({"error": "Operator authentication required: X-Admin-Token"}), 403
+        queue_summary = store.queueInfo(app.config["KERNEL_BENCH_GOAL_ID"])
+        active_jobs = store.query("""SELECT j.id, j.goal_id, j.kernel_name, j.backend, j.mode, j.status, j.step,
+            j.created_at, j.started_at, j.stage_started_at,
+            COALESCE(a.display_name, 'anonymous') AS agent_name
+            FROM kernel_bench.jobs j LEFT JOIN kernel_bench.agents a ON a.id = j.agent_id
+            WHERE j.status IN ('running', 'queued')
+            ORDER BY CASE WHEN j.status = 'running' THEN 0 ELSE 1 END, j.created_at ASC, j.id ASC
+            LIMIT 50""")
+        recent_jobs = store.query("""SELECT j.id, j.goal_id, j.kernel_name, j.backend, j.mode, j.status, j.step,
+            j.created_at, j.started_at, j.completed_at, j.error,
+            COALESCE(a.display_name, 'anonymous') AS agent_name
+            FROM kernel_bench.jobs j LEFT JOIN kernel_bench.agents a ON a.id = j.agent_id
+            WHERE j.status IN ('completed', 'failed')
+            ORDER BY j.completed_at DESC NULLS LAST, j.created_at DESC
+            LIMIT 30""")
+        baselines = store.query("""SELECT b.status, count(*) AS count
+            FROM kernel_bench.baselines b JOIN kernel_bench.configurations c ON c.id = b.configuration_id
+            WHERE c.goal_id = %s GROUP BY b.status""", (app.config["KERNEL_BENCH_GOAL_ID"],))
+        return jsonify({
+            "queue_summary": queue_summary,
+            "active_jobs": active_jobs,
+            "recent_jobs": recent_jobs,
+            "baseline_calibration": {row["status"]: row["count"] for row in baselines},
+            "active_goal_id": app.config["KERNEL_BENCH_GOAL_ID"]
+        })
+
+    @app.get("/api/admin/logs")
+    def adminLogs():
+        token = os.environ.get("KERNEL_BENCH_ADMIN_TOKEN", "")
+        candidate = request.headers.get("X-Admin-Token", "")
+        if not token or not candidate or not hmac.compare_digest(token, candidate):
+            return jsonify({"error": "Operator authentication required: X-Admin-Token"}), 403
+        cursor = request.args.get("cursor")
+        lines = int(request.args.get("lines", 60))
+        lines = max(1, min(lines, 300))
+        cmd = ["journalctl", "--user", "-u", "kernelbench.service", "-o", "json"]
+        if cursor:
+            cmd.extend(["--after-cursor", cursor])
+        else:
+            cmd.extend(["-n", str(lines)])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+            log_entries = []
+            last_cursor = cursor
+            for line in result.stdout.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    msg = entry.get("MESSAGE", "")
+                    cur = entry.get("__CURSOR", "")
+                    ts_micro = entry.get("__REALTIME_TIMESTAMP")
+                    time_str = ""
+                    if ts_micro:
+                        import datetime
+                        time_str = datetime.datetime.fromtimestamp(int(ts_micro) / 1_000_000, datetime.timezone.utc).strftime("%H:%M:%S")
+                    log_entries.append({"time": time_str, "message": msg, "cursor": cur})
+                    if cur:
+                        last_cursor = cur
+                except Exception:
+                    continue
+            return jsonify({"logs": log_entries, "cursor": last_cursor})
+        except Exception as err:
+            return jsonify({"error": str(err)}), 500
 
 
 def prepareGoal(store, job):

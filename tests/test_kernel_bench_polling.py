@@ -305,3 +305,11 @@ def testAdminGoalSelectionAndQueuedPreparation(pollingDatabase, monkeypatch, tmp
         store.execute("DELETE FROM kernel_bench.goals WHERE id = %s", (other_id,))
     assert client.get("/api/jobs?mode=goal_setup", headers=headers).status_code == 200
     assert client.get("/api/status", headers=headers).get_json()["queue"]["depth_by_mode"]["goal_setup"]["queued"] >= 1
+    admin_queue = client.get("/api/admin/queue", headers=headers)
+    assert admin_queue.status_code == 200
+    queue_data = admin_queue.get_json()
+    assert "active_jobs" in queue_data and "baseline_calibration" in queue_data
+    assert any(j["id"] == str(job["id"]) for j in queue_data["active_jobs"])
+    admin_logs = client.get("/api/admin/logs", headers=headers)
+    assert admin_logs.status_code == 200
+    assert "logs" in admin_logs.get_json()
