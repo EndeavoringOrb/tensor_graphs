@@ -1,3 +1,4 @@
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <chrono>
@@ -449,10 +450,12 @@ class LLMSession
     LogicalId rootId() const { return logitsId; }
     LogicalId inputId() const { return inputIdsId; }
 
-    int32_t generate_step(const std::vector<uint32_t> &tokens)
+    // Runs the model on `tokens` (only positions that differ from the previous
+    // call are marked dirty) and returns the logits row of the last position.
+    std::vector<float> step_logits(const std::vector<uint32_t> &tokens)
     {
-        if (tokens.empty() || tokens.size() >= max_seq_len)
-            return -1;
+        if (tokens.empty() || tokens.size() > max_seq_len)
+            throw std::runtime_error("step_logits: token count must be in [1, max_sequence_length]");
 
         std::vector<Region> dirty_regions;
         uint32_t i = 0;
@@ -524,7 +527,22 @@ class LLMSession
         {
             host_output.assign(device_output + tokIdx * vocab_size, device_output + tokIdx * vocab_size + vocab_size);
         }
+        prev_tokens = tokens;
+        return host_output;
+    }
 
+    // Forget the previous tokens so the next step marks every position dirty.
+    void reset() { prev_tokens.clear(); }
+
+    uint32_t maxSequenceLength() const { return max_seq_len; }
+    uint32_t vocabSize() const { return vocab_size; }
+
+    int32_t generate_step(const std::vector<uint32_t> &tokens)
+    {
+        if (tokens.empty() || tokens.size() >= max_seq_len)
+            return -1;
+        const uint32_t tokIdx = static_cast<uint32_t>(tokens.size() - 1);
+        const std::vector<float> host_output = step_logits(tokens);
         float max_val = -1e9f;
         int32_t argmax_idx = 0;
         for (uint32_t k = 0; k < vocab_size; ++k)
@@ -540,7 +558,6 @@ class LLMSession
                   << " host_output[0]=" << host_output[0] << " host_output[1]=" << host_output[1]
                   << " host_output[563]=" << (563 < host_output.size() ? host_output[563] : -999.0f)
                   << " tokIdx=" << tokIdx << std::endl;
-        prev_tokens = tokens;
         return argmax_idx;
     }
 };
@@ -1304,7 +1321,14 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_property_readonly("native_session", &LLMSession::nativeSession, py::return_value_policy::reference_internal)
         .def_property_readonly("root_id", &LLMSession::rootId)
         .def_property_readonly("input_id", &LLMSession::inputId)
-        .def("generate_step", &LLMSession::generate_step);
+        .def("generate_step", &LLMSession::generate_step)
+        .def("step_logits", [](LLMSession &s, const std::vector<uint32_t> &tokens) {
+            std::vector<float> row = s.step_logits(tokens);
+            return py::array_t<float>(static_cast<py::ssize_t>(row.size()), row.data());
+        }, py::arg("tokens"), "Run on tokens (dirty positions only) and return the last position's logits")
+        .def("reset", &LLMSession::reset, "Forget previous tokens so the next step recomputes every position")
+        .def_property_readonly("max_sequence_length", &LLMSession::maxSequenceLength)
+        .def_property_readonly("vocab_size", &LLMSession::vocabSize);
 
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,

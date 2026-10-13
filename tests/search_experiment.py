@@ -2,6 +2,7 @@
 
 Usage (from the repository root):
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> -m tests.test_gemma_output --config decode --optimal --timeout 600
+  .venv/Scripts/python.exe tests/search_experiment.py --record inference <run_id> -m tests.inference_benchmark --run-dir logs/inference_runs/<run_id>
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> build.py --targets bindings test --no-lint --log-level INFO
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> --native-command tensor_graphs_cpp/test.exe --start-rank-window
 
@@ -26,6 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 RECORDS = {
     "gap": ("logs/gap_improvements", "docs/agents/GAP_IMPROVEMENTS.md"),
     "search": ("logs/search_improvements", "docs/agents/SEARCH_IMPROVEMENTS.md"),
+    "inference": ("logs/inference_improvements", "docs/agents/INFERENCE_IMPROVEMENTS.md"),
 }
 PATCH_PATHS = ["tensor_graphs_cpp", "tests", "docs/core"]
 
@@ -48,6 +50,7 @@ def parseMetrics(output, timeout):
         "gap_report": re.findall(r"\[Program gap\].*", output),
         "incumbent_events": re.findall(r"\[SearchEngine\] New best cost:.*", output),
         "oracle_verdict": re.findall(r"\d+/\d+ cases passed", output),
+        "inference_lines": re.findall(r"\[Inference (?:compile\] supervisor|case|failure|summary)\].*", output),
     }
     first = None
     for line in metrics["incumbent_events"]:
@@ -134,6 +137,8 @@ def main():
                        + f"; best cost {record['best_incumbent_cost']}.\n")
         if record["oracle_verdict"]:
             file.write(f"- Oracle verdict: {record['oracle_verdict'][-1]}.\n")
+        for line in record["inference_lines"]:
+            file.write(f"  `{line}`\n")
     print(json.dumps({k: record[k] for k in ("id", "exit_status", "first_incumbent", "best_incumbent_cost")
                       if k in record} | {"gap": record.get("gap"), "eliminated_bits": record.get("eliminated_bits")},
                      indent=2))

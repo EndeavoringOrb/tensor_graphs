@@ -97,3 +97,5 @@ tensor_graphs_cpp/generated/
 OpenCL-SDK
 
 .bench_agent.json
+# Full HF reference logits for the inference benchmark (~202 MiB; regenerate with -m tests.inference_reference)
+tests/inference_reference/*.logits.npy
