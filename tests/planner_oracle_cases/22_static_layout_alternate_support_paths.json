@@ -1,0 +1,15 @@
+{
+  "name": "static layout unions alternate reachability supports",
+  "description": "p is reached either directly or through r. The second path can require both p and q, so the direct root alternative is not a necessary condition for p and cannot certify exclusive slots.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["p"], "cost": 8}, {"children": ["r"], "cost": 1}], "start": [4], "offset": [0, 1, 2, 3]},
+    "p": {"alternatives": [{"cost": 5}, {"op": "cache"}], "start": [1], "offset": [0, 1, 2, 3]},
+    "q": {"alternatives": [{"children": ["s"], "cost": 2}, {"op": "cache"}], "start": [2], "offset": [0, 1, 2, 3]},
+    "r": {"alternatives": [{"children": ["p", "q"], "cost": 1}], "start": [3], "offset": [0, 1, 2, 3]},
+    "s": {"alternatives": [{"cost": 1}], "start": [0], "offset": [0, 1, 2, 3]}
+  },
+  "caches": {"p": {"domain": [0, 1], "size_pages": 1}, "q": {"domain": [0], "size_pages": 1}},
+  "capacity_pages": 4,
+  "expected_optimum": 5
+}

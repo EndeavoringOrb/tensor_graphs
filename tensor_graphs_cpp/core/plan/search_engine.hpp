@@ -791,6 +791,7 @@ class SearchEngine
         current_node_id = 0;
 
         std::string initial_conflict;
+        state.recordStartDomainShapeAtEntry();
         if (!runPropagators(kInvalidVarId, &initial_conflict))
         {
             LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation: "
@@ -968,7 +969,10 @@ class SearchEngine
                     }
 
                     LOG(INFO) << "[SearchEngine] New best cost: " << incumbent_best_cost
-                              << " at iteration " << iterations;
+                              << " at iteration " << iterations
+                              << " event-epoch=" << std::setprecision(17)
+                              << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+                              << " program-deadline=" << program_deadline;
                     state.best_cost = incumbent_best_cost;
                 }
                 continue;

@@ -9,35 +9,37 @@ namespace plan
 // StartUniquePropagator: see docs/core/propagators.md.
 class StartUniquePropagator : public Propagator
 {
-    uint64_t active_start_selection_revision_ = UINT64_MAX;
+    // Per-bucket active lists, each rebuilt only when that bucket is used
+    // after a selection change.
+    std::vector<uint64_t> active_start_selection_revision_;
     std::vector<std::vector<VarId>> active_start_vars_;
 
-    void ensureActiveStarts(SearchState &state)
+    void ensureActiveStarts(SearchState &state, uint32_t b)
     {
         const uint64_t selection_revision = state.getSelectionRevision();
-        if (active_start_selection_revision_ == selection_revision &&
-            active_start_vars_.size() == state.buckets.size())
+        if (active_start_vars_.size() != state.buckets.size())
+        {
+            active_start_vars_.assign(state.buckets.size(), {});
+            active_start_selection_revision_.assign(state.buckets.size(), UINT64_MAX);
+        }
+        if (active_start_selection_revision_[b] == selection_revision)
             return;
 
-        active_start_vars_.clear();
-        active_start_vars_.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        auto &active = active_start_vars_[b];
+        active.clear();
+        active.reserve(state.selected_vars[b].size());
+        for (const auto &pair : state.selected_vars[b])
         {
-            auto &active = active_start_vars_[b];
-            active.reserve(state.selected_vars[b].size());
-            for (const auto &pair : state.selected_vars[b])
-            {
-                if (!state.domains[pair.second].contains(0))
-                    active.push_back(state.start_vars[b].at(pair.first));
-            }
-            std::sort(active.begin(), active.end());
+            if (!state.domains[pair.second].contains(0))
+                active.push_back(state.start_vars[b].at(pair.first));
         }
-        active_start_selection_revision_ = selection_revision;
+        std::sort(active.begin(), active.end());
+        active_start_selection_revision_[b] = selection_revision;
     }
 
     bool removeStartVal(SearchState &state, uint32_t b, VarId source_st_v, int32_t st_val)
     {
-        ensureActiveStarts(state);
+        ensureActiveStarts(state, b);
         for (VarId other_st_v : active_start_vars_[b])
         {
             if (other_st_v == source_st_v)

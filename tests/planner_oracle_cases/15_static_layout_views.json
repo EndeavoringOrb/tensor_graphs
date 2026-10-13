@@ -1,0 +1,13 @@
+{
+  "name": "static private layout keeps views aliased to their base",
+  "description": "Wide address domains and ample capacity activate the static private layout; a view must keep its base address and the optional alternative must survive.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a"], "cost": 1}, {"children": ["v"], "cost": 2}], "offset": [0, 1, 2, 3, 4, 5]},
+    "a": {"alternatives": [{"cost": 6}], "offset": [0, 1, 2, 3, 4, 5]},
+    "v": {"alternatives": [{"children": ["b"], "view": true}], "offset": [0, 1, 2, 3, 4, 5]},
+    "b": {"alternatives": [{"cost": 1}], "offset": [0, 1, 2, 3, 4, 5]}
+  },
+  "capacity_pages": 6,
+  "expected_optimum": 3
+}

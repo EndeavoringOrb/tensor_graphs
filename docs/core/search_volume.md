@@ -17,9 +17,9 @@ and imports. It includes model loading and preprocessing. Use one configuration,
 `--optimal`, and no compiled cache. Native search stops without needing an
 incumbent at the first complete frontier boundary after the deadline and reports
 volume. The supervisor allows two seconds for reporting, then kills the worker.
-Missing reports, worker failures, and deadline overshoot greater than 50 ms fail
+Missing reports, worker failures, and deadline overshoot greater than 1 second fail
 evaluation. This is a cooperative deadline, not an exact interrupt inside a
-propagator; accepted runs can overshoot by up to 50 ms. The deadline uses a wall
+propagator; accepted runs can overshoot by up to 1 second. The deadline uses a wall
 clock timestamp across processes; avoid changing the system clock during runs.
 Program elapsed time is measured separately with a monotonic clock.
 

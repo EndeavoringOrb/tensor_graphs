@@ -1,0 +1,13 @@
+{
+  "name": "shared static layout must not overlap classes co-active through another path",
+  "description": "b is reachable from root alternative 2 directly and from alternative 1 through m, so a and b can be active together. The cheap alternative 1 makes m read a and b at once (5 pages live) and does not fit in 4 pages; a certificate that wrongly called a and b exclusive would overlap them and accept that infeasible cheaper plan.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["m"], "cost": 1}, {"children": ["b"], "cost": 5}], "offset": [0, 1, 2, 3]},
+    "m": {"alternatives": [{"children": ["a", "b"], "cost": 1}], "offset": [0, 1, 2, 3]},
+    "a": {"alternatives": [{"cost": 1}], "size_pages": 2, "offset": [0, 1, 2]},
+    "b": {"alternatives": [{"cost": 1}], "size_pages": 2, "offset": [0, 1, 2]}
+  },
+  "capacity_pages": 4,
+  "expected_optimum": 6
+}

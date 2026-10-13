@@ -1,0 +1,14 @@
+{
+  "name": "static layout validates all addresses of nested multi-base views",
+  "description": "The outer view has a sparse address domain. Its child view can alias either allocation, so fixing private addresses must not remove the cheaper completion through q.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["w"], "cost": 1}], "offset": [0, 1, 2, 3]},
+    "w": {"alternatives": [{"children": ["v"], "view": true}], "offset": [0, 1]},
+    "v": {"alternatives": [{"children": ["p"], "view": true}, {"children": ["q"], "view": true}], "offset": [0, 1, 2, 3]},
+    "p": {"alternatives": [{"cost": 4}], "offset": [0, 1, 2, 3]},
+    "q": {"alternatives": [{"cost": 2}], "offset": [0, 1, 2, 3]}
+  },
+  "capacity_pages": 4,
+  "expected_optimum": 3
+}

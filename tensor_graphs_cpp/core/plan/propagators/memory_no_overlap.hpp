@@ -39,6 +39,14 @@ class WriteAfterReadPropagator : public Propagator
 
     static inline const std::vector<EClassId> empty_readers{};
 
+    // Allocations in a certified static private layout never overlap a
+    // distinct non-alias allocation, so they are excluded from every scan.
+    static bool inPrivateLayoutSpace(const SearchState &state, uint32_t b, EClassId cid)
+    {
+        return !state.private_layout_spaces.empty() &&
+               state.private_layout_spaces.count(state.bucket_egraphs[b].getEClass(cid).mem_space) != 0;
+    }
+
     static bool getAlloc(const SearchState &state, uint32_t b, EClassId cid, FixedAlloc &out,
                          bool require_fixed_offset = true, bool require_fixed_start = true)
     {
@@ -634,7 +642,8 @@ class WriteAfterReadPropagator : public Propagator
 
             const VarInfo &info = state.var_infos[changed];
             FixedAlloc alloc;
-            if (getAlloc(state, info.bucket_idx, info.eclass_id, alloc,
+            if (!inPrivateLayoutSpace(state, info.bucket_idx, info.eclass_id) &&
+                getAlloc(state, info.bucket_idx, info.eclass_id, alloc,
                          /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
             {
                 const std::pair<uint32_t, uint32_t> key{alloc.offset, alloc.cid.value};
@@ -663,7 +672,8 @@ class WriteAfterReadPropagator : public Propagator
         for (const auto &pair : state.selected_vars[b])
         {
             FixedAlloc alloc;
-            if (!getAlloc(state, b, pair.first, alloc,
+            if (inPrivateLayoutSpace(state, b, pair.first) ||
+                !getAlloc(state, b, pair.first, alloc,
                           /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
                 continue;
 
@@ -706,6 +716,36 @@ class WriteAfterReadPropagator : public Propagator
         if (a_start < c_start)
             return c_start <= a_info.max_reader_start_max;
         return a_start <= c_info.max_reader_start_max;
+    }
+
+    // Read the selected alias chain directly, before constructing reader
+    // metadata. Failed/long/optional chains defer to the full pair check.
+    static bool isSelectedViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cid)
+    {
+        for (uint32_t step = 0; step < 32; ++step)
+        {
+            if (view_cid == base)
+                return true;
+            const auto selected_it = state.selected_vars[b].find(view_cid);
+            if (selected_it == state.selected_vars[b].end())
+                return false;
+            const Domain &selection = state.domains[selected_it->second];
+            if (!selection.isFixed() || selection.fixedValue() <= 0)
+                return false;
+            const EClass &cls = state.bucket_egraphs[b].getEClass(view_cid);
+            const uint32_t en_idx = static_cast<uint32_t>(selection.fixedValue() - 1);
+            if (en_idx >= cls.enodes.size())
+                Error::throw_err("Selected view alternative is outside the e-class");
+            const ENodeId en_id = cls.enodes[en_idx];
+            if (en_id.value >= state.bucket_enode_infos[b].size() ||
+                !state.bucket_enode_infos[b][en_id.value].is_view)
+                return false;
+            const auto &children = state.bucket_egraphs[b].getENode(en_id).getChildren();
+            if (children.empty())
+                return false;
+            view_cid = state.bucket_egraphs[b].findConst(children[0]);
+        }
+        return view_cid == base;
     }
 
     static bool isViewOf(const SearchState &state, uint32_t b, EClassId base, EClassId view_cand)
@@ -1261,59 +1301,62 @@ class WriteAfterReadPropagator : public Propagator
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 buildBucketInfo(state, b);
-                std::vector<FixedAlloc> fixed_allocs;
+                buildFixedOffsetIndex(state, b, kInvalidVarId);
                 std::vector<FixedAlloc> all_allocs;
-                for (const auto &pair : state.selected_vars[b])
+                for (const auto &[cid, sel_v] : state.selected_vars[b])
                 {
-                    FixedAlloc a;
-                    if (getAlloc(state, b, pair.first, a, /*require_fixed_offset=*/false))
-                    {
-                        all_allocs.push_back(a);
-                        if (state.domains[a.offset_var].isFixed())
-                        {
-                            fixed_allocs.push_back(a);
-                        }
-                    }
+                    FixedAlloc alloc;
+                    if (!inPrivateLayoutSpace(state, b, cid) &&
+                        getAlloc(state, b, cid, alloc, /*require_fixed_offset=*/false))
+                        all_allocs.push_back(alloc);
                 }
-
                 for (auto &target : all_allocs)
                 {
+                    const auto &index_by_space = state.propagation.write_after_read[b].fixed_offset_spatial_index;
+                    auto index_it = index_by_space.find(target.mem_space);
+                    if (index_it == index_by_space.end())
+                        continue;
                     bool pushed = true;
                     while (pushed)
                     {
                         pushed = false;
-                        for (const FixedAlloc &fixed : fixed_allocs)
-                        {
-                            if (target.cid == fixed.cid)
-                                continue;
-                            if (target.mem_space != fixed.mem_space)
-                                continue;
-                            if (!mayOverlapInTime(state, b, target.cid, fixed.cid))
-                                continue;
-
+                        bool valid = true;
+                        auto check_candidate = [&](const FixedOffsetAllocation &candidate) {
+                            if (target.cid == candidate.cid ||
+                                !state.domains[candidate.start_var].isFixed() ||
+                                !mayOverlapInTime(state, b, target.cid, candidate.cid))
+                                return true;
+                            FixedAlloc fixed;
+                            if (!getFixedAlloc(state, b, candidate.cid, fixed))
+                                Error::throw_err("Global memory index contains an invalid fixed allocation");
                             std::string share_reason;
                             if (!canShare(state, target, fixed, &share_reason))
                             {
                                 std::string offset_failure;
                                 if (!enforceDisjoint(state, fixed, target, worklist, pushed, &offset_failure))
                                 {
-                                    conflict_reason_ = describePair(
-                                        state, target, fixed,
+                                    conflict_reason_ = describePair(state, target, fixed,
                                         share_reason + "; offset disjointness failed: " + offset_failure);
+                                    valid = false;
                                     return false;
                                 }
                                 if (pushed)
-                                    break;
+                                    return false; // restart query with narrowed hull
                             }
-                            else if (state.domains[target.offset_var].isFixed())
+                            else if (state.domains[target.offset_var].isFixed() &&
+                                     !checkPair(state, target, fixed, worklist))
                             {
-                                if (std::max(target.offset, fixed.offset) < std::min(target.offset + target.size, fixed.offset + fixed.size))
-                                {
-                                    if (!checkPair(state, target, fixed, worklist))
-                                        return false;
-                                }
+                                valid = false;
+                                return false;
                             }
-                        }
+                            return true;
+                        };
+                        const auto &domain = state.domains[target.offset_var];
+                        visitSpatialOverlaps(index_it->second, index_it->second.root,
+                                             domain.getMin(), static_cast<uint64_t>(domain.getMax()) + target.size,
+                                             check_candidate);
+                        if (!valid)
+                            return false;
                     }
                 }
             }
@@ -1788,9 +1831,7 @@ class FixedOffsetStartPropagator : public Propagator
 
             uint32_t b = info.bucket_idx;
             EClassId cid = info.eclass_id;
-            if (info.type == VarType::OFFSET ||
-                !state.propagation.write_after_read[b].fixed_offset_index_initialized ||
-                state.propagation.write_after_read[b].fixed_offset_structure_dirty)
+            if (info.type == VarType::OFFSET)
                 WriteAfterReadPropagator::buildFixedOffsetIndex(state, b, changed);
 
             // If offset changed, it must be fixed to establish memory footprint
@@ -1806,28 +1847,33 @@ class FixedOffsetStartPropagator : public Propagator
             if (!WriteAfterReadPropagator::getAlloc(state, b, cid, curr, /*require_fixed_offset=*/true, /*require_fixed_start=*/false))
                 return true;
 
-            WriteAfterReadPropagator::buildBucketInfo(state, b);
+            // A START event with no selected allocation cannot inspect a pair.
+            // Defer structural rebuilds until a query actually needs the index;
+            // OFFSET events above still update/remove entries immediately.
+            if (info.type == VarType::START &&
+                (!state.propagation.write_after_read[b].fixed_offset_index_initialized ||
+                 state.propagation.write_after_read[b].fixed_offset_structure_dirty))
+                WriteAfterReadPropagator::buildFixedOffsetIndex(state, b, changed);
             auto &schedule = state.propagation.write_after_read[b];
-            auto space_it = schedule.fixed_offset_allocations.find(curr.mem_space);
-            if (space_it == schedule.fixed_offset_allocations.end())
+            auto space_it = schedule.fixed_offset_spatial_index.find(curr.mem_space);
+            if (space_it == schedule.fixed_offset_spatial_index.end())
                 return true;
-            const auto &candidates = space_it->second;
-            const uint32_t max_size = schedule.max_fixed_allocation_size[curr.mem_space];
-            const uint64_t first_possible_offset = curr.offset >= max_size
-                                                       ? static_cast<uint64_t>(curr.offset) - max_size + 1
-                                                       : 0;
             const uint64_t curr_end = static_cast<uint64_t>(curr.offset) + curr.size;
-            auto candidate_it = candidates.lower_bound(
-                {static_cast<uint32_t>(first_possible_offset), 0});
 
             bool curr_start_fixed = state.domains[curr.start_var].isFixed();
-            for (; candidate_it != candidates.end() && candidate_it->first.first < curr_end; ++candidate_it)
+            auto check_candidate = [&](const auto &candidate)
             {
-                const auto &candidate = candidate_it->second;
-                if (candidate.cid == cid || candidate.end <= curr.offset)
-                    continue;
+                if (candidate.cid == cid)
+                    return true;
+                // These pairs are accepted by resolvePair independently of
+                // starts/readers, so no reader index is needed for them.
+                if ((curr.is_view && candidate.is_view) ||
+                    (curr.is_view && WriteAfterReadPropagator::isSelectedViewOf(state, b, candidate.cid, cid)) ||
+                    (candidate.is_view && WriteAfterReadPropagator::isSelectedViewOf(state, b, cid, candidate.cid)))
+                    return true;
+                WriteAfterReadPropagator::buildBucketInfo(state, b);
                 if (!WriteAfterReadPropagator::mayOverlapInTime(state, b, cid, candidate.cid))
-                    continue;
+                    return true;
 
                 FixedAlloc other;
                 other.cid = candidate.cid;
@@ -1868,7 +1914,11 @@ class FixedOffsetStartPropagator : public Propagator
                                << ", other_off=" << other.offset << ", other_sz=" << other.size << ")";
                     return false;
                 }
-            }
+                return true;
+            };
+            if (!WriteAfterReadPropagator::visitSpatialOverlaps(
+                    space_it->second, space_it->second.root, curr.offset, curr_end, check_candidate))
+                return false;
         }
         else
         {
@@ -1883,6 +1933,8 @@ class FixedOffsetStartPropagator : public Propagator
                 for (EClassId cid : active_cids)
                 {
                     FixedAlloc a;
+                    if (WriteAfterReadPropagator::inPrivateLayoutSpace(state, b, cid))
+                        continue;
                     if (WriteAfterReadPropagator::getAlloc(state, b, cid, a, /*require_fixed_offset=*/true, /*require_fixed_start=*/true))
                     {
                         fixed_start_allocs.push_back(a);
@@ -1893,50 +1945,38 @@ class FixedOffsetStartPropagator : public Propagator
                     }
                 }
 
-                // Check fixed with fixed
-                for (size_t i = 0; i < fixed_start_allocs.size(); ++i)
+                // Group by space and sweep by address. A pair can matter only
+                // while the later allocation starts before the earlier one ends.
+                // This enumerates every spatial overlap, including contained
+                // intervals and view aliases, without scanning disjoint slots.
+                std::unordered_map<MemSpace, std::vector<FixedAlloc>> by_space;
+                for (const auto &alloc : fixed_start_allocs)
+                    by_space[alloc.mem_space].push_back(alloc);
+                for (const auto &alloc : unfixed_start_allocs)
+                    by_space[alloc.mem_space].push_back(alloc);
+                for (auto &[space, allocs] : by_space)
                 {
-                    for (size_t j = i + 1; j < fixed_start_allocs.size(); ++j)
+                    std::sort(allocs.begin(), allocs.end(), [](const auto &a, const auto &other) {
+                        return a.offset < other.offset || (a.offset == other.offset && a.cid.value < other.cid.value);
+                    });
+                    for (size_t i = 0; i < allocs.size(); ++i)
                     {
-                        const auto &a = fixed_start_allocs[i];
-                        const auto &b_alloc = fixed_start_allocs[j];
-                        if (a.mem_space != b_alloc.mem_space)
-                            continue;
-                        if (std::max(a.offset, b_alloc.offset) >= std::min(a.offset + a.size, b_alloc.offset + b_alloc.size))
-                            continue;
-                        if (!resolvePair(state, b, a, b_alloc, worklist))
-                            return false;
-                    }
-                }
-
-                // Check fixed with unfixed
-                for (const auto &a : fixed_start_allocs)
-                {
-                    for (const auto &b_alloc : unfixed_start_allocs)
-                    {
-                        if (a.mem_space != b_alloc.mem_space)
-                            continue;
-                        if (std::max(a.offset, b_alloc.offset) >= std::min(a.offset + a.size, b_alloc.offset + b_alloc.size))
-                            continue;
-                        if (!resolvePair(state, b, a, b_alloc, worklist))
-                            return false;
-                    }
-                }
-
-                // Check unfixed with unfixed if either is persistent
-                for (size_t i = 0; i < unfixed_start_allocs.size(); ++i)
-                {
-                    for (size_t j = i + 1; j < unfixed_start_allocs.size(); ++j)
-                    {
-                        const auto &a = unfixed_start_allocs[i];
-                        const auto &b_alloc = unfixed_start_allocs[j];
-                        if (a.mem_space != b_alloc.mem_space)
-                            continue;
-                        if (std::max(a.offset, b_alloc.offset) >= std::min(a.offset + a.size, b_alloc.offset + b_alloc.size))
-                            continue;
-                        if (a.is_input_or_cache || a.is_root || b_alloc.is_input_or_cache || b_alloc.is_root)
+                        const auto &a = allocs[i];
+                        const uint64_t end = static_cast<uint64_t>(a.offset) + a.size;
+                        for (size_t j = i + 1; j < allocs.size() && allocs[j].offset < end; ++j)
                         {
-                            if (!resolvePair(state, b, a, b_alloc, worklist))
+                            const auto &other = allocs[j];
+                            const bool a_fixed = state.domains[a.start_var].isFixed();
+                            const bool other_fixed = state.domains[other.start_var].isFixed();
+                            if (!a_fixed && !other_fixed && !a.is_input_or_cache && !a.is_root &&
+                                !other.is_input_or_cache && !other.is_root)
+                                continue;
+                            if (a_fixed || !other_fixed)
+                            {
+                                if (!resolvePair(state, b, a, other, worklist))
+                                    return false;
+                            }
+                            else if (!resolvePair(state, b, other, a, worklist))
                                 return false;
                         }
                     }
@@ -2007,6 +2047,14 @@ class MemoryNoOverlapPropagator : public Propagator
                 auto offset_it = state.offset_vars[info.bucket_idx].find(info.eclass_id);
                 if (offset_it == state.offset_vars[info.bucket_idx].end() ||
                     !state.domains[offset_it->second].isFixed())
+                return true;
+                if (state.private_layout_spaces.count(state.var_infos[offset_it->second].mem_space))
+                    return true;
+            }
+            else if (state.private_layout_spaces.count(info.mem_space))
+            {
+                // OFFSET change inside a certified private layout: only view
+                // offsets still narrow onto their base address (an alias).
                 return true;
             }
         }

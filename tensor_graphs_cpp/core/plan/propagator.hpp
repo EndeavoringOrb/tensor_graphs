@@ -8,6 +8,8 @@
 #include "core/plan/propagators/selection_children.hpp"
 #include "core/plan/propagators/selection_parent_support.hpp"
 #include "core/plan/propagators/unselected_start_offset.hpp"
+#include "core/plan/propagators/static_private_layout.hpp"
+#include "core/plan/propagators/start_rank_window.hpp"
 #include "core/plan/propagators/cache_exclusion.hpp"
 #include "core/plan/propagators/input_prune_start_precedence.hpp"
 #include "core/plan/propagators/consumer_start_precedence.hpp"
@@ -71,6 +73,8 @@ inline void addBasePropagators(EngineT &engine, bool fixed_starts_only = false, 
     engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(is_dag));
     engine.addPropagator(std::make_unique<SelectionParentSupportPropagator>());
     engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
+    engine.addPropagator(std::make_unique<StaticPrivateLayoutPropagator>());
+    engine.addPropagator(std::make_unique<StartRankWindowPropagator>());
     engine.addPropagator(std::make_unique<UnselectedStartOffsetPropagator>());
     engine.addPropagator(std::make_unique<CacheExclusionPropagator>());
     engine.addPropagator(std::make_unique<InputPruneStartPrecedencePropagator>());

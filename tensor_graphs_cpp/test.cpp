@@ -20,10 +20,14 @@
 #include "tests/start_run_makespan.hpp"
 #include "tests/start_bounds.hpp"
 #include "tests/write_after_read_cache.hpp"
+#include "tests/private_layout_regression.hpp"
+#include "tests/start_rank_window_regression.hpp"
 
 int main(int argc, char *argv[])
 {
     ArgParser parser("test", "Run tests.");
+    parser.add_flag({"--private-layout"}, "Run private-layout storage-span regression tests.");
+    parser.add_flag({"--start-rank-window"}, "Run start rank window group regression tests.");
     parser.add_flag({"--no-records"}, "Disable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
@@ -52,6 +56,18 @@ int main(int argc, char *argv[])
     bool useRecords = !parser.get_flag("--no-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--private-layout"))
+    {
+        try { PrivateLayoutRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    if (parser.get_flag("--start-rank-window"))
+    {
+        try { StartRankWindowRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
     if (parser.get_flag("--write-after-read-cache"))
     {
         runWriteAfterReadCacheTests();

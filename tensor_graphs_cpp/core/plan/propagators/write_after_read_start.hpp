@@ -36,6 +36,15 @@ class WriteAfterReadStartPropagator : public Propagator
         bool is_persistent;
     };
 
+    struct AllocationIndex
+    {
+        uint64_t revision = UINT64_MAX;
+        std::vector<ActiveAllocation> active;
+        std::vector<std::pair<size_t, size_t>> overlaps;
+    };
+    mutable const SearchState *allocation_state_ = nullptr;
+    mutable std::vector<AllocationIndex> allocation_indexes_;
+
     bool addReaderAncestors(const SearchState &state, uint32_t b, EClassId child,
                             EClassId reader, std::vector<std::vector<EClassId>> &readers_by_value) const
     {
@@ -68,21 +77,27 @@ class WriteAfterReadStartPropagator : public Propagator
         return true;
     }
 
-    bool propagateBucket(SearchState &state, uint32_t b, std::vector<VarId> &worklist) const
+    // Selection, offsets and persistence change allocation overlaps; starts
+    // only change temporal eligibility. The revision also advances on undo.
+    const AllocationIndex &getAllocationIndex(const SearchState &state, uint32_t b) const
     {
-#ifdef TG_PROFILE
-        auto phase_start = std::chrono::steady_clock::now();
-        auto finish_phase = [&](uint64_t &total) {
-            const auto now = std::chrono::steady_clock::now();
-            total += std::chrono::duration_cast<std::chrono::nanoseconds>(now - phase_start).count();
-            phase_start = now;
-        };
-#endif
+        if (allocation_state_ != &state)
+        {
+            allocation_indexes_.clear();
+            allocation_state_ = &state;
+        }
+        allocation_indexes_.resize(state.buckets.size());
+        auto &index = allocation_indexes_.at(b);
+        if (index.revision == state.getAllocationRevision())
+            return index;
+        index.revision = state.getAllocationRevision();
+        index.active.clear();
+        index.overlaps.clear();
         const auto &fixed_offset_vars = state.getFixedOffsetVars(b);
         if (fixed_offset_vars.size() < 2)
-            return true;
+            return index;
 
-        std::vector<ActiveAllocation> active;
+        auto &active = index.active;
         active.reserve(fixed_offset_vars.size());
 
         for (const auto &pair : fixed_offset_vars)
@@ -126,104 +141,123 @@ class WriteAfterReadStartPropagator : public Propagator
         }
 
         if (active.size() < 2)
-            return true;
+            return index;
 
-#ifdef TG_PROFILE
-        finish_phase(allocation_ns_);
-#endif
-        const std::vector<std::vector<EClassId>> *readers_by_value = nullptr;
         std::unordered_map<MemSpace, std::vector<size_t>> allocations_by_space;
         for (size_t i = 0; i < active.size(); ++i)
             allocations_by_space[active[i].mem_space].push_back(i);
-
-        for (auto &space_pair : allocations_by_space)
+        for (auto &[space, indices] : allocations_by_space)
         {
-            auto &indices = space_pair.second;
             std::sort(indices.begin(), indices.end(), [&](size_t lhs, size_t rhs) {
                 return active[lhs].offset < active[rhs].offset;
             });
-
             for (size_t i = 0; i < indices.size(); ++i)
             {
-                const ActiveAllocation &first = active[indices[i]];
-                const int64_t first_end = static_cast<int64_t>(first.offset) + first.size;
-                for (size_t j = i + 1; j < indices.size() && active[indices[j]].offset < first_end; ++j)
+                const auto &first = active[indices[i]];
+                const int64_t end = static_cast<int64_t>(first.offset) + first.size;
+                for (size_t j = i + 1; j < indices.size() && active[indices[j]].offset < end; ++j)
                 {
-#ifdef TG_PROFILE
-                    ++overlap_candidates_;
-#endif
-                    const ActiveAllocation &second = active[indices[j]];
+                    const auto &second = active[indices[j]];
                     if (first.cid == second.cid || first.base_id == second.base_id || first.is_view ||
                         second.is_view || first.is_persistent || second.is_persistent)
                         continue;
                     if (static_cast<int64_t>(second.offset) + second.size <= first.offset)
                         continue;
-
-                    const bool first_before_second = first.start_domain.getMax() < second.start_domain.getMin();
-                    const bool second_before_first = second.start_domain.getMax() < first.start_domain.getMin();
-                    if (!first_before_second && !second_before_first)
-                        continue;
-
-#ifdef TG_PROFILE
-                    ++ordered_pairs_;
-#endif
-                    const ActiveAllocation &earlier = first_before_second ? first : second;
-                    const ActiveAllocation &later = first_before_second ? second : first;
-                    if (readers_by_value == nullptr)
-                    {
-#ifdef TG_PROFILE
-                        finish_phase(overlap_ns_);
-#endif
-                        readers_by_value = &getReaderIndex(state, b);
-#ifdef TG_PROFILE
-                        finish_phase(reader_index_ns_);
-#endif
-                    }
-                    const auto &readers = readers_by_value->at(earlier.cid.value);
-                    int32_t earliest_last_reader = -1;
-                    bool later_reads_earlier = false;
-                    for (EClassId reader_cid : readers)
-                    {
-                        if (reader_cid == later.cid)
-                        {
-                            later_reads_earlier = true;
-                            break;
-                        }
-                        const auto reader_start_it = state.start_vars[b].find(reader_cid);
-                        const auto reader_sel_it = state.selected_vars[b].find(reader_cid);
-                        if (reader_start_it == state.start_vars[b].end() ||
-                            reader_sel_it == state.selected_vars[b].end())
-                            continue;
-                        const Domain &reader_selection = state.domains[reader_sel_it->second];
-                        if (!reader_selection.isFixed() || reader_selection.fixedValue() <= 0)
-                            continue;
-                        earliest_last_reader = std::max(
-                            earliest_last_reader,
-                            state.domains[reader_start_it->second].getMin());
-                    }
-                    if (later_reads_earlier || earliest_last_reader < 0)
-                        continue;
-
-                    Domain later_start = state.domains[later.start_var];
-                    const int32_t required_start = earliest_last_reader + 1;
-                    if (later_start.setMin(required_start))
-                    {
-                        if (later_start.isEmpty())
-                        {
-                            conflict_reason_ = "bucket=" + std::to_string(b) + " earlier=" +
-                                state.var_infos[earlier.start_var].name + state.domains[earlier.start_var].toString() +
-                                " later=" + state.var_infos[later.start_var].name + state.domains[later.start_var].toString() +
-                                " overlap-offsets=" + std::to_string(earlier.offset) + "/" + std::to_string(later.offset) +
-                                " last-reader-min=" + std::to_string(earliest_last_reader) + " required-min=" + std::to_string(required_start);
-#ifdef TG_PROFILE
-                            finish_phase(overlap_ns_);
-#endif
-                            return false;
-                        }
-                        state.setDomain(later.start_var, later_start);
-                        worklist.push_back(later.start_var);
-                    }
+                    index.overlaps.emplace_back(indices[i], indices[j]);
                 }
+            }
+        }
+        return index;
+    }
+
+    bool propagateBucket(SearchState &state, uint32_t b, std::vector<VarId> &worklist) const
+    {
+#ifdef TG_PROFILE
+        auto phase_start = std::chrono::steady_clock::now();
+        auto finish_phase = [&](uint64_t &total) {
+            const auto now = std::chrono::steady_clock::now();
+            total += std::chrono::duration_cast<std::chrono::nanoseconds>(now - phase_start).count();
+            phase_start = now;
+        };
+#endif
+        const auto &allocation_index = getAllocationIndex(state, b);
+
+#ifdef TG_PROFILE
+        finish_phase(allocation_ns_);
+#endif
+        const std::vector<std::vector<EClassId>> *readers_by_value = nullptr;
+        for (const auto &[first_idx, second_idx] : allocation_index.overlaps)
+        {
+#ifdef TG_PROFILE
+            ++overlap_candidates_;
+#endif
+            ActiveAllocation first = allocation_index.active.at(first_idx);
+            ActiveAllocation second = allocation_index.active.at(second_idx);
+            first.start_domain = state.domains[first.start_var];
+            second.start_domain = state.domains[second.start_var];
+            const bool first_before_second = first.start_domain.getMax() < second.start_domain.getMin();
+            const bool second_before_first = second.start_domain.getMax() < first.start_domain.getMin();
+            if (!first_before_second && !second_before_first)
+                continue;
+
+#ifdef TG_PROFILE
+            ++ordered_pairs_;
+#endif
+            const ActiveAllocation &earlier = first_before_second ? first : second;
+            const ActiveAllocation &later = first_before_second ? second : first;
+            if (readers_by_value == nullptr)
+            {
+#ifdef TG_PROFILE
+                finish_phase(overlap_ns_);
+#endif
+                readers_by_value = &getReaderIndex(state, b);
+#ifdef TG_PROFILE
+                finish_phase(reader_index_ns_);
+#endif
+            }
+            const auto &readers = readers_by_value->at(earlier.cid.value);
+            int32_t earliest_last_reader = -1;
+            bool later_reads_earlier = false;
+            for (EClassId reader_cid : readers)
+            {
+                if (reader_cid == later.cid)
+                {
+                    later_reads_earlier = true;
+                    break;
+                }
+                const auto reader_start_it = state.start_vars[b].find(reader_cid);
+                const auto reader_sel_it = state.selected_vars[b].find(reader_cid);
+                if (reader_start_it == state.start_vars[b].end() ||
+                    reader_sel_it == state.selected_vars[b].end())
+                    continue;
+                const Domain &reader_selection = state.domains[reader_sel_it->second];
+                if (!reader_selection.isFixed() || reader_selection.fixedValue() <= 0)
+                    continue;
+                earliest_last_reader = std::max(
+                    earliest_last_reader,
+                    state.domains[reader_start_it->second].getMin());
+            }
+            if (later_reads_earlier || earliest_last_reader < 0)
+                continue;
+
+            Domain later_start = state.domains[later.start_var];
+            const int32_t required_start = earliest_last_reader + 1;
+            if (later_start.setMin(required_start))
+            {
+                if (later_start.isEmpty())
+                {
+                    conflict_reason_ = "bucket=" + std::to_string(b) + " earlier=" +
+                        state.var_infos[earlier.start_var].name + state.domains[earlier.start_var].toString() +
+                        " later=" + state.var_infos[later.start_var].name + state.domains[later.start_var].toString() +
+                        " overlap-offsets=" + std::to_string(earlier.offset) + "/" + std::to_string(later.offset) +
+                        " last-reader-min=" + std::to_string(earliest_last_reader) + " required-min=" + std::to_string(required_start);
+#ifdef TG_PROFILE
+                    finish_phase(overlap_ns_);
+#endif
+                    return false;
+                }
+                state.setDomain(later.start_var, later_start);
+                worklist.push_back(later.start_var);
             }
         }
 #ifdef TG_PROFILE
@@ -321,3 +355,4 @@ class WriteAfterReadStartPropagator : public Propagator
 
 
 } // namespace plan
+

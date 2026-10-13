@@ -1,0 +1,13 @@
+{
+  "name": "start rank windows keep unselected classes with positive lower bounds",
+  "description": "mid has a necessary descendant, so its rank window excludes 0; the optimum leaves it unselected. a has several parents whose necessary ancestors intersect only at out.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["mid"], "cost": 1}, {"children": ["p", "q"], "cost": 1}]},
+    "mid": {"alternatives": [{"children": ["a"], "cost": 5}]},
+    "p": {"alternatives": [{"children": ["a"], "cost": 1, "engines": [0]}]},
+    "q": {"alternatives": [{"children": ["a"], "cost": 1, "engines": [1]}]},
+    "a": {"alternatives": [{"op": "input"}]}
+  },
+  "expected_optimum": 2
+}

@@ -766,6 +766,7 @@ class SearchState
     // only when the selected graph or start times change.
     uint64_t selection_revision = 0;
     uint64_t schedule_revision = 0;
+    uint64_t allocation_revision = 0;
     std::vector<std::set<std::pair<int32_t, VarId>>> fixed_offset_vars;
 
     void updateDomainIndexes(VarId var_id, const Domain &old_domain, const Domain &new_domain)
@@ -776,6 +777,8 @@ class SearchState
             return;
 
         const VarInfo &info = var_infos[var_id];
+        if (info.type != VarType::START)
+            ++allocation_revision;
         if (info.type == VarType::SELECTED)
         {
             ++selection_revision;
@@ -905,6 +908,26 @@ class SearchState
     std::unordered_map<MemSpace, uint64_t> mem_caps;
     std::unordered_map<MemSpace, uint32_t> page_alignments;
     std::unordered_map<MemSpace, uint32_t> preallocated_pages;
+    // Spaces whose root offsets StaticPrivateLayoutPropagator fixed to
+    // pairwise-disjoint private ranges: distinct non-alias allocations there
+    // can never overlap, so memory reuse checks are vacuous for the search.
+    std::unordered_set<MemSpace> private_layout_spaces;
+    // Per bucket, whether every start domain was downward closed from 0 at
+    // solve entry (before root propagation). Rank compression stays inside
+    // such domains.
+    std::vector<char> start_domains_downward_closed_at_entry;
+
+    void recordStartDomainShapeAtEntry()
+    {
+        start_domains_downward_closed_at_entry.assign(buckets.size(), 1);
+        for (uint32_t b = 0; b < buckets.size() && b < start_vars.size(); ++b)
+            for (const auto &[cid, st_v] : start_vars[b])
+            {
+                const Domain &dom = domains[st_v];
+                if (dom.isEmpty() || dom.getMin() != 0 || dom.size() != dom.getMax() + 1)
+                    start_domains_downward_closed_at_entry[b] = 0;
+            }
+    }
     std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
     std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
     std::unordered_set<VarId> fixed_cached_vars;
@@ -966,6 +989,11 @@ class SearchState
     uint64_t getScheduleRevision() const
     {
         return schedule_revision;
+    }
+
+    uint64_t getAllocationRevision() const
+    {
+        return allocation_revision;
     }
 
     const std::set<std::pair<int32_t, VarId>> &getFixedOffsetVars(uint32_t bucket_idx) const

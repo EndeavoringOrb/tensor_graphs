@@ -1,0 +1,13 @@
+{
+  "name": "static private layout must not apply when only reuse fits",
+  "description": "Four buffers but three pages: a private layout does not fit, so the plan must still be found by reusing the first producer's page after its reader finishes.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["c"], "cost": 1}], "offset": [0, 1, 2]},
+    "c": {"alternatives": [{"children": ["b"], "cost": 1}], "offset": [0, 1, 2]},
+    "b": {"alternatives": [{"children": ["a"], "cost": 1}], "offset": [0, 1, 2]},
+    "a": {"alternatives": [{"cost": 1}], "offset": [0, 1, 2]}
+  },
+  "capacity_pages": 3,
+  "expected_optimum": 4
+}

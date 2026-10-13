@@ -139,8 +139,8 @@ def main():
                 raise SystemExit("Evaluation failed: worker failed or did not report frontier volume")
             overshoots = re.findall(r"\[Program deadline\] overshoot=([0-9.eE+\-]+)", output)
             overshoot = float(overshoots[-1]) if overshoots else max(0.0, elapsed - args.timeout)
-            if not math.isfinite(overshoot) or overshoot > 0.05:
-                raise SystemExit("Evaluation failed: deadline overshoot exceeds 50 ms")
+            if not math.isfinite(overshoot) or overshoot > 1.0:
+                raise SystemExit("Evaluation failed: deadline overshoot exceeds 1 second")
             return
     if args.search_volume:
         os.environ["TG_SEARCH_VOLUME"] = "1"

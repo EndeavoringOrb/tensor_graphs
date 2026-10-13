@@ -16,8 +16,13 @@ class UnselectedStartOffsetPropagator : public Propagator
         {
             VarId st_v = st_it->second;
             const Domain &st_dom = state.domains[st_v];
-            if (!st_dom.isFixed() || st_dom.fixedValue() != 0)
-                state.setDomain(st_v, Domain::makeFixed(0, false));
+            if (st_dom.isEmpty())
+                return false;
+            // The start of an unselected class is irrelevant. Prefer 0, but
+            // stay inside a domain narrowed by a root rank window.
+            const int32_t canonical = st_dom.contains(0) ? 0 : st_dom.getMin();
+            if (!st_dom.isFixed() || st_dom.fixedValue() != canonical)
+                state.setDomain(st_v, Domain::makeFixed(canonical, false));
         }
         auto off_it = state.offset_vars[b].find(cid);
         if (off_it != state.offset_vars[b].end())
@@ -31,9 +36,16 @@ class UnselectedStartOffsetPropagator : public Propagator
             const auto prealloc_it = state.preallocated_pages.find(cls.mem_space);
             uint32_t min_p = (prealloc_it == state.preallocated_pages.end()) ? 0 : prealloc_it->second;
             const Domain &off_dom = state.domains[off_v];
-            if (!off_dom.isFixed() || off_dom.fixedValue() != static_cast<int32_t>(min_p))
+            // Any fixed address already represents the irrelevant coordinate
+            // (for example a static private layout slot).
+            if (!off_dom.isFixed())
             {
-                state.setDomain(off_v, Domain::makeFixed(min_p, false));
+                if (off_dom.isEmpty())
+                    return false;
+                // Stay inside a domain narrowed by a root layout certificate.
+                const int32_t canonical = off_dom.contains(static_cast<int32_t>(min_p)) ? static_cast<int32_t>(min_p)
+                                                                                      : off_dom.getMin();
+                state.setDomain(off_v, Domain::makeFixed(canonical, false));
             }
         }
         return true;
