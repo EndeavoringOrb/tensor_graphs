@@ -70,6 +70,13 @@ class SearchEngine
     bool measure_search_volume = false;
     double total_domain_bits = 0.0;
     uint64_t incomplete_volume_branches = 0;
+    // Primal-dual gap tracking (docs/core/search_gap.md). The certified bound
+    // is the smallest stored lower bound over open nodes below the incumbent
+    // (the incumbent itself once the frontier is exhausted).
+    bool measure_search_gap = false;
+    double gap_sample_interval_seconds = 0.25;
+    float max_certified_bound = -TGConstants::INF;
+    float root_lower_bound = 0.0f;
 
     SearchEngine(SearchState state, std::shared_ptr<Selector> selector = nullptr,
                  std::shared_ptr<Brancher> brancher = nullptr)
@@ -78,6 +85,24 @@ class SearchEngine
     {
         const char *volume_setting = std::getenv("TG_SEARCH_VOLUME");
         measure_search_volume = volume_setting && std::string(volume_setting) == "1";
+        const char *gap_setting = std::getenv("TG_SEARCH_GAP");
+        measure_search_gap = gap_setting && std::string(gap_setting) == "1";
+        // Diagnostic override of the periodic sampling interval (seconds).
+        if (const char *interval = std::getenv("TG_SEARCH_GAP_INTERVAL"))
+        {
+            gap_sample_interval_seconds = std::stod(interval);
+            if (!std::isfinite(gap_sample_interval_seconds) || gap_sample_interval_seconds < 0.0)
+                Error::throw_err("TG_SEARCH_GAP_INTERVAL must be a finite non-negative number of seconds");
+        }
+    }
+
+    // Valid lower bound on the optimum over everything not yet excluded.
+    // Without an incumbent and with an empty frontier the problem is
+    // infeasible (INF).
+    float certifiedBound() const
+    {
+        const float open = selector->minOpenLowerBound(incumbent_best_cost);
+        return std::min(open, incumbent_best_cost);
     }
 
     // At an iteration boundary, active_node is null. At a propagated branch
@@ -796,6 +821,7 @@ class SearchEngine
         {
             LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation: "
                          << initial_conflict;
+            sampleSearchGap(0, "final", true);
             if (measure_search_volume)
                 reportSearchVolume(0, search_start_time);
 #ifdef TG_PROFILE
@@ -827,6 +853,8 @@ class SearchEngine
 #else
         selector->push(root_node);
 #endif
+        root_lower_bound = root_node->lower_bound;
+        sampleSearchGap(0, "root", true);
 
         uint32_t iterations = 0;
 #ifdef TG_PROFILE
@@ -844,12 +872,14 @@ class SearchEngine
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 if (now >= program_deadline)
                 {
+                    sampleSearchGap(iterations, "deadline", true);
                     reportSearchVolume(iterations, search_start_time);
                     LOG(INFO) << "[Program deadline] overshoot=" << (now - program_deadline);
                     // Evaluation worker only: no incumbent is required and no plan is returned.
                     std::exit(0);
                 }
             }
+            sampleSearchGap(iterations, "sample", false);
 #ifdef TG_PROFILE
             if (iterations > 0 && iterations % 10000 == 0 && iterations != last_profile_iteration)
             {
@@ -974,6 +1004,7 @@ class SearchEngine
                               << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
                               << " program-deadline=" << program_deadline;
                     state.best_cost = incumbent_best_cost;
+                    sampleSearchGap(iterations, "incumbent", true);
                 }
                 continue;
             }
@@ -1127,6 +1158,7 @@ class SearchEngine
 
         const double search_elapsed_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - search_start_time).count();
+        sampleSearchGap(iterations, "final", true);
         if (measure_search_volume)
             reportSearchVolume(iterations, search_start_time);
         LOG(INFO) << "[SearchEngine] Search finished after " << iterations << " iterations in "
@@ -1143,6 +1175,30 @@ class SearchEngine
     }
 
   private:
+    double last_gap_sample_ = -1.0;
+
+    // Logs (epoch, incumbent, certified bound). The supervisor integrates the
+    // gap as a step function holding each sample until the next one; bounds
+    // only rise and incumbents only fall, so this over-estimates the integral.
+    void sampleSearchGap(uint32_t iterations, const char *event, bool force)
+    {
+        if (!measure_search_gap)
+            return;
+        const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        if (!force && last_gap_sample_ >= 0.0 && now - last_gap_sample_ < gap_sample_interval_seconds)
+            return;
+        last_gap_sample_ = now;
+        const float bound = certifiedBound();
+        if (bound < TGConstants::INF)
+            max_certified_bound = std::max(max_certified_bound, bound);
+        std::ostringstream line;
+        line << std::setprecision(17) << "[SearchEngine gap] epoch=" << now << " event=" << event
+             << " iterations=" << iterations << " incumbent="
+             << (incumbent_best_cost < TGConstants::INF ? std::to_string(incumbent_best_cost) : std::string("inf"))
+             << " bound=" << (bound < TGConstants::INF ? std::to_string(bound) : std::string("inf"));
+        LOG(INFO) << line.str();
+    }
+
     void reportSearchVolume(uint32_t iterations, std::chrono::steady_clock::time_point start_time,
                             const std::shared_ptr<SearchNode> &active_node = nullptr) const
     {

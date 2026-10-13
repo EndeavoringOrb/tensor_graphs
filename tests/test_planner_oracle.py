@@ -88,6 +88,12 @@ def checkSearch(problem, reference, limit):
         return
     require(result["solved"] and result["cost"] is not None,
             f"Native search lost every feasible plan; optimum={optimum}, witness={reference['witness']}")
+    # The certified bound reported for gap scoring must never exceed the optimum.
+    for field in ("root_lower_bound", "max_certified_bound"):
+        bound = result.get(field)
+        require(bound is not None and math.isfinite(bound), f"Native search reported no finite {field}")
+        require(bound <= float(optimum) + 1e-5,
+                f"Invalid {field} {bound} exceeds independent optimum {optimum}; witness={reference['witness']}")
     require(result["cost"] == float(optimum),
             f"Wrong native optimum: expected={optimum}, got={result['cost']}; witness={reference['witness']}")
     require("witness" in result, "Native search returned no checkable incumbent")

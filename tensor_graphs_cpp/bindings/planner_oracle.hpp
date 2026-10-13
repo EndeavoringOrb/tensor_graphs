@@ -165,7 +165,14 @@ inline std::string runCase(const std::string &problem_text, const std::string &m
     }
     else if (mode == "solve")
     {
+        // Sample the certified bound at every iteration so its validity is
+        // checked against the independent optimum.
+        engine.measure_search_gap = true;
+        engine.gap_sample_interval_seconds = 0.0;
         out["solved"] = engine.solve(-1.0f);
+        out["root_lower_bound"] = engine.root_lower_bound;
+        out["max_certified_bound"] = engine.max_certified_bound > -TGConstants::INF
+                                         ? json(engine.max_certified_bound) : json(nullptr);
         out["exhausted"] = engine.selector->empty();
         out["cost"] = engine.incumbent_best_cost < TGConstants::INF ? json(engine.incumbent_best_cost) : json(nullptr);
         if (!engine.incumbent_extractions.empty())

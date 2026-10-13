@@ -120,8 +120,10 @@ def main():
         if "TG_PROGRAM_DEADLINE" not in os.environ:
             start_time = time.monotonic()
             environment = os.environ.copy()
-            environment["TG_PROGRAM_DEADLINE"] = str(time.time() + args.timeout)
+            program_deadline = time.time() + args.timeout
+            environment["TG_PROGRAM_DEADLINE"] = repr(program_deadline)
             environment["TG_SEARCH_VOLUME"] = "1"
+            environment["TG_SEARCH_GAP"] = "1"
             command = [sys.executable, "-u", "-m", "tests.test_gemma_output", *sys.argv[1:]]
             worker = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True)
@@ -141,6 +143,12 @@ def main():
             overshoot = float(overshoots[-1]) if overshoots else max(0.0, elapsed - args.timeout)
             if not math.isfinite(overshoot) or overshoot > 1.0:
                 raise SystemExit("Evaluation failed: deadline overshoot exceeds 1 second")
+            from tests.search_gap import formatGapReport, gapIntegral, parseGapSamples
+            try:
+                gap = gapIntegral(parseGapSamples(output), program_deadline - args.timeout, args.timeout)
+            except ValueError as error:
+                raise SystemExit(f"Evaluation failed: invalid search gap samples: {error}")
+            print(formatGapReport(gap), flush=True)
             return
     if args.search_volume:
         os.environ["TG_SEARCH_VOLUME"] = "1"

@@ -26,7 +26,23 @@ class Selector
     {
         Error::throw_err("Selector does not support search volume evaluation");
     }
+    // Smallest stored lower bound among open nodes below the incumbent;
+    // INF when there is none.
+    virtual float minOpenLowerBound(float incumbent_cost) const
+    {
+        Error::throw_err("Selector does not support search gap evaluation");
+        return TGConstants::INF;
+    }
 };
+
+inline float minNodeLowerBound(const std::vector<std::shared_ptr<SearchNode>> &nodes, float incumbent_cost)
+{
+    float bound = TGConstants::INF;
+    for (const auto &node : nodes)
+        if (node && node->lower_bound < incumbent_cost)
+            bound = std::min(bound, node->lower_bound);
+    return bound;
+}
 
 class PriorityQueueSelector : public Selector
 {
@@ -41,6 +57,11 @@ class PriorityQueueSelector : public Selector
         for (const auto &node : queue)
             if (node && node->lower_bound < cost)
                 box_bits.push_back(node->log2_volume);
+    }
+
+    float minOpenLowerBound(float cost) const override
+    {
+        return minNodeLowerBound(queue, cost);
     }
 
     void setIncumbent(float cost) override
@@ -113,6 +134,11 @@ class LIFOSelector : public Selector
         for (const auto &node : stack)
             if (node && node->lower_bound < cost)
                 box_bits.push_back(node->log2_volume);
+    }
+
+    float minOpenLowerBound(float cost) const override
+    {
+        return minNodeLowerBound(stack, cost);
     }
 
     void push(const std::shared_ptr<SearchNode> &node) override
