@@ -1355,6 +1355,30 @@ class SearchEngine
                       << " schedules=" << evaluations << " search=" << ls_seconds << "s"
                       << (failure.empty() ? "" : " failure=" + failure);
         }
+        // Cache-set moves on the best local optimum.
+        {
+            size_t best = 0;
+            for (size_t i = 1; i < plans.size(); ++i)
+                if (plans[i].cost < plans[best].cost)
+                    best = i;
+            const double initial = plans[best].cost;
+            uint32_t dropped = 0;
+            const auto cs_start = std::chrono::steady_clock::now();
+            improveCacheSet(state, contexts, plans[best], ls_deadline, evaluations, dropped);
+            const double cs_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - cs_start).count();
+            if (dropped > 0 && plans[best].cost < incumbent_best_cost - 1e-6)
+            {
+                failure.clear();
+                const float cs_cost = tryPlan(plans[best], contexts, 0, program_deadline, failure);
+                LOG(INFO) << "[PrimalHeuristic] cache-set moves " << initial << " -> " << plans[best].cost
+                          << " dropped=" << dropped << " evaluated="
+                          << (std::isfinite(cs_cost) ? std::to_string(cs_cost) : std::string("rejected"))
+                          << " search=" << cs_seconds << "s" << (failure.empty() ? "" : " failure=" + failure);
+            }
+            else
+                LOG(INFO) << "[PrimalHeuristic] cache-set moves " << initial << " -> " << plans[best].cost
+                          << " (no improvement; dropped=" << dropped << ", " << cs_seconds << "s)";
+        }
     }
 
     // Logs (epoch, incumbent, certified bound). The supervisor integrates the

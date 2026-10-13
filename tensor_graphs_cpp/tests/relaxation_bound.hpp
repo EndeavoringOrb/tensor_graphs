@@ -32,6 +32,7 @@ class RelaxationBoundRegression
         const std::vector<Engine> &engines;
         std::vector<int> choice;
         std::vector<std::vector<double>> plan_loads;
+        double min_makespan = std::numeric_limits<double>::infinity();
 
         double duration(const AlternativeSpec &alt) const
         {
@@ -39,8 +40,77 @@ class RelaxationBoundRegression
                 return 0.0;
             return std::isinf(alt.cost) ? 1.0 : alt.cost;
         }
+        size_t engineIndex(const Engine &e) const
+        {
+            for (size_t i = 0; i < engines.size(); ++i)
+                if (engines[i] == e)
+                    return i;
+            return engines.size();
+        }
+        // Every dispatch order of the active classes (children first),
+        // simulated like MakespanSimulator; keeps the minimum makespan.
+        void orders(std::vector<uint32_t> &active, std::vector<uint8_t> &done, std::vector<double> &finish,
+                    std::vector<double> &engine_free, size_t placed, double makespan)
+        {
+            if (makespan >= min_makespan)
+                return;
+            if (placed == active.size())
+            {
+                min_makespan = makespan;
+                return;
+            }
+            for (uint32_t u : active)
+            {
+                if (done[u])
+                    continue;
+                const AlternativeSpec &alt = spec[u][static_cast<size_t>(choice[u])];
+                bool ready = true;
+                double start = 0.0;
+                for (uint32_t ch : alt.children)
+                {
+                    if (!done[ch])
+                        ready = false;
+                    else
+                        start = std::max(start, finish[ch]);
+                }
+                if (!ready)
+                    continue;
+                const bool source = alt.op_type == OpType::INPUT || alt.op_type == OpType::CACHE;
+                std::vector<double> saved = engine_free;
+                std::vector<size_t> used;
+                if (source)
+                    start = 0.0;
+                else if (!alt.is_view)
+                {
+                    if (alt.engines.empty())
+                        used.push_back(engineIndex(cpu()));
+                    for (const Engine &e : alt.engines)
+                        used.push_back(engineIndex(e));
+                    for (size_t idx : used)
+                    {
+                        require(idx < engines.size(), "plan uses an engine unknown to the relaxation");
+                        start = std::max(start, engine_free[idx]);
+                    }
+                }
+                const double end = start + duration(alt);
+                for (size_t idx : used)
+                    engine_free[idx] = end;
+                done[u] = 1;
+                finish[u] = end;
+                orders(active, done, finish, engine_free, placed + 1, std::max(makespan, end));
+                done[u] = 0;
+                engine_free = saved;
+            }
+        }
         void record()
         {
+            std::vector<uint32_t> active;
+            for (uint32_t u = 0; u < spec.size(); ++u)
+                if (choice[u] >= 0)
+                    active.push_back(u);
+            std::vector<uint8_t> done(spec.size(), 0);
+            std::vector<double> finish(spec.size(), 0.0), engine_free(engines.size(), 0.0);
+            orders(active, done, finish, engine_free, 0, 0.0);
             std::vector<double> loads(engines.size(), 0.0);
             for (uint32_t u = 0; u < spec.size(); ++u)
             {
@@ -236,7 +306,54 @@ class RelaxationBoundRegression
         const double best = maximizeRelaxationBound(computer, ne);
         require(best <= minmax + 1e-9, "trial " + std::to_string(trial) + ": maximized bound " +
                                            std::to_string(best) + " exceeds min-max load " + std::to_string(minmax));
+        // The best dyadic partition over strides 1, 2, 4, 8 must be valid,
+        // both with exact window values and with the cut DP.
+        for (uint64_t exact_nodes : {uint64_t(20000), uint64_t(0)})
+        {
+            computer.setExactWindowNodes(exact_nodes);
+            std::vector<IntervalRun> runs;
+            for (size_t stride : {size_t(1), size_t(2), size_t(3), size_t(4)})
+                for (size_t phase = 0; phase < stride; ++phase)
+                {
+                    computer.intervalBound(stride, phase);
+                    runs.push_back({computer.windowLastLinks(), computer.windowValues()});
+                }
+            const double combined = bestWindowPartition(computer.intervalChainLength(), runs);
+            ++dyadic_checks;
+            require(combined <= brute.min_makespan + 1e-9,
+                    "trial " + std::to_string(trial) + ": best window partition " + std::to_string(combined) +
+                        " exceeds the minimum makespan " + std::to_string(brute.min_makespan));
+        }
+        computer.setExactWindowNodes(20000);
+        // Every chain stride gives its own windows; each must be valid.
+        for (size_t stride : {size_t(1), size_t(2), size_t(3)})
+        {
+            const double interval = computer.intervalBound(stride);
+            ++interval_checks;
+            interval_positive += interval > 1e-9;
+            interval_stronger += interval > best + 1e-9;
+            require(interval <= brute.min_makespan + 1e-9,
+                    "trial " + std::to_string(trial) + ": interval bound " + std::to_string(interval) +
+                        " (stride " + std::to_string(stride) + ") exceeds the minimum makespan " +
+                        std::to_string(brute.min_makespan));
+            // Without exact enumeration the cut DP takes over: still valid,
+            // and never above the exact window values.
+            computer.setExactWindowNodes(0);
+            const double cut = computer.intervalBound(stride);
+            computer.setExactWindowNodes(20000);
+            ++cut_checks;
+            cut_tight += cut >= interval - 1e-6;
+            require(cut <= brute.min_makespan + 1e-9,
+                    "trial " + std::to_string(trial) + ": cut-DP interval bound " + std::to_string(cut) + " (stride " +
+                        std::to_string(stride) + ") exceeds the minimum makespan " +
+                        std::to_string(brute.min_makespan));
+            require(cut <= interval + 1e-9, "trial " + std::to_string(trial) + ": cut-DP interval bound " +
+                                                std::to_string(cut) + " exceeds the exact window value " +
+                                                std::to_string(interval));
+        }
     }
+    static inline size_t interval_checks = 0, interval_positive = 0, interval_stronger = 0;
+    static inline size_t cut_checks = 0, cut_tight = 0, dyadic_checks = 0;
 
   public:
     static void run()
@@ -248,7 +365,11 @@ class RelaxationBoundRegression
         for (uint32_t trial = 0; trial < 2000; ++trial)
             checkGraph(layeredGraph(rng), 100000 + trial, checks, positive);
         require(positive > checks / 4, "bound is almost always zero; the test is not exercising it");
+        require(interval_stronger > interval_checks / 20, "interval bound rarely beats the load bound; the test is "
+                                                          "not exercising it");
         std::cout << "Relaxation bound regression passed (" << checks << " weighted checks, " << positive
-                  << " positive)" << std::endl;
+                  << " positive; " << interval_checks << " interval checks, " << interval_positive << " positive, "
+                  << interval_stronger << " above the load bound; " << cut_checks << " cut-DP checks, " << cut_tight
+                  << " reaching the exact window values; " << dyadic_checks << " window partitions)" << std::endl;
     }
 };

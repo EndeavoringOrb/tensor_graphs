@@ -1,0 +1,12 @@
+{
+  "name": "path-weighted interval bound on a sequential chain with engine choices",
+  "description": "a and b each run for 2 on either engine, b after a, out (1) after b: the optimum is 5 whatever the engines. A min-max load relaxation proves only 2.5 (half of each step on each engine); the chain term proves the full 5. Charging a step on both engines would claim more than 5.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["b"], "cost": 1, "engines": [0]}, {"children": ["b"], "cost": 1, "engines": [1]}]},
+    "b": {"alternatives": [{"children": ["a"], "cost": 2, "engines": [0]}, {"children": ["a"], "cost": 2, "engines": [1]}]},
+    "a": {"alternatives": [{"children": ["inp"], "cost": 2, "engines": [0]}, {"children": ["inp"], "cost": 2, "engines": [1]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 5
+}

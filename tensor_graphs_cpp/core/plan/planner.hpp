@@ -11,8 +11,10 @@
 #include <limits>
 #include <memory>
 #include <queue>
+#include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -244,6 +246,13 @@ struct Planner
 
     EGraph baseState;
     bool baseStateInitialized = false;
+
+    struct CostMemo
+    {
+        std::shared_mutex mutex;
+        std::unordered_map<std::string, float> costs;
+    };
+    std::shared_ptr<CostMemo> cost_memo_; // set only inside planAll, where the cost model is fixed
 
     Planner(CostModel &costModel, const Settings &settings = Settings::get_default())
         : costModel(costModel), settings(settings)
@@ -1041,6 +1050,51 @@ struct Planner
         }
     }
 
+    // estimateCost is a pure function of its arguments; the buckets of one
+    // planAll share most e-nodes, so remember each distinct query.
+    float memoizedCost(KernelId kernel_id, const std::vector<uint32_t> &out_shape,
+                       const std::vector<uint64_t> &out_strides, DType out_dtype,
+                       const std::vector<std::vector<uint32_t>> &in_shapes,
+                       const std::vector<std::vector<uint64_t>> &in_strides, const std::vector<DType> &in_dtypes,
+                       const std::vector<std::vector<uint8_t>> &in_constants)
+    {
+        if (!cost_memo_ || costModel.callObserver) // observers expect every call
+            return costModel.estimateCost(kernel_id, out_shape, out_strides, out_dtype, in_shapes, in_strides,
+                                          in_dtypes, in_constants);
+        std::string key;
+        auto put = [&](const void *data, size_t bytes) { key.append(static_cast<const char *>(data), bytes); };
+        auto putVec = [&](const auto &v) {
+            const uint64_t n = v.size();
+            put(&n, sizeof(n));
+            if (n)
+                put(v.data(), n * sizeof(v[0]));
+        };
+        put(&kernel_id.value, sizeof(kernel_id.value));
+        putVec(out_shape);
+        putVec(out_strides);
+        put(&out_dtype, sizeof(out_dtype));
+        const uint64_t ni = in_shapes.size();
+        put(&ni, sizeof(ni));
+        for (size_t i = 0; i < in_shapes.size(); ++i)
+        {
+            putVec(in_shapes[i]);
+            putVec(in_strides[i]);
+            put(&in_dtypes[i], sizeof(in_dtypes[i]));
+            putVec(in_constants[i]);
+        }
+        {
+            std::shared_lock<std::shared_mutex> lock(cost_memo_->mutex);
+            auto it = cost_memo_->costs.find(key);
+            if (it != cost_memo_->costs.end())
+                return it->second;
+        }
+        const float cost = costModel.estimateCost(kernel_id, out_shape, out_strides, out_dtype, in_shapes, in_strides,
+                                                  in_dtypes, in_constants);
+        std::unique_lock<std::shared_mutex> lock(cost_memo_->mutex);
+        cost_memo_->costs.emplace(std::move(key), cost);
+        return cost;
+    }
+
     std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
@@ -1092,8 +1146,8 @@ struct Planner
                     }
                 }
 
-                info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
-                                                   enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
+                info.cost = memoizedCost(enode.getKernelId(), enode.getShape(), enode.getStrides(), enode.getDType(),
+                                         inShapes, inStrides, inDTypes, inConstants);
             }
             else
             {
@@ -1973,6 +2027,13 @@ struct Planner
             const std::vector<float> &bucket_weights, bool doSaturate = true, TGStore *repo = nullptr,
             float minCompileSeconds = 0.0f, std::shared_ptr<plan::Brancher> brancher = nullptr)
     {
+        struct CostMemoScope
+        {
+            Planner &planner;
+            explicit CostMemoScope(Planner &p) : planner(p) { planner.cost_memo_ = std::make_shared<CostMemo>(); }
+            ~CostMemoScope() { planner.cost_memo_.reset(); }
+        } cost_memo_scope(*this);
+
         LOG(INFO) << "[Planner.planAll] Planning " << buckets.size() << " bucket(s) with weights:";
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
@@ -2139,95 +2200,143 @@ struct Planner
 
         // Compute enode infos and prune egraphs
         std::vector<std::vector<ENodeInfo>> all_enode_infos(buckets.size());
-        std::ofstream cycleLogBeforeClean("egraph_cycles0.txt", std::ios::out | std::ios::trunc);
-        std::ofstream cycleLogAfterClean("egraph_cycles1.txt", std::ios::out | std::ios::trunc);
-        std::ofstream cycleLogAfterClean2("egraph_cycles2.txt", std::ios::out | std::ios::trunc);
-        std::ofstream cycleLogAfterClean3("egraph_cycles3.txt", std::ios::out | std::ios::trunc);
-        if (!cycleLogBeforeClean)
-            LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles0.txt for cycle diagnostics.";
-        if (!cycleLogAfterClean)
-            LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles1.txt for cycle diagnostics.";
-        if (!cycleLogAfterClean2)
-            LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
-        if (!cycleLogAfterClean3)
-            LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles3.txt for cycle diagnostics.";
+        // Full cycle listings (egraph_cycles{0..3}.txt) are debug output and
+        // cost seconds per bucket to format; write them only on request.
+        const bool cycle_diagnostics = std::getenv("TG_CYCLE_DIAGNOSTICS") != nullptr;
+        std::ofstream cycleLogBeforeClean, cycleLogAfterClean, cycleLogAfterClean2, cycleLogAfterClean3;
+        if (cycle_diagnostics)
+        {
+            cycleLogBeforeClean.open("egraph_cycles0.txt", std::ios::out | std::ios::trunc);
+            cycleLogAfterClean.open("egraph_cycles1.txt", std::ios::out | std::ios::trunc);
+            cycleLogAfterClean2.open("egraph_cycles2.txt", std::ios::out | std::ios::trunc);
+            cycleLogAfterClean3.open("egraph_cycles3.txt", std::ios::out | std::ios::trunc);
+            if (!cycleLogBeforeClean)
+                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles0.txt for cycle diagnostics.";
+            if (!cycleLogAfterClean)
+                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles1.txt for cycle diagnostics.";
+            if (!cycleLogAfterClean2)
+                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
+            if (!cycleLogAfterClean3)
+                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles3.txt for cycle diagnostics.";
+        }
+        // Buckets are independent here: run them in parallel and emit their
+        // diagnostics afterwards in bucket order.
+        struct BucketCycleReport
+        {
+            std::ostringstream before, after1, after2, after3;
+            uint32_t initial = 0, pass1 = 0, pass2 = 0, pass3 = 0, pass4 = 0, pass5 = 0;
+            uint32_t removed1 = 0, removed2 = 0, removed3 = 0, removed4 = 0, removed5 = 0;
+        };
+        std::vector<BucketCycleReport> cycle_reports(buckets.size());
+        auto reduceBucket = [&](uint32_t b) {
+            BucketCycleReport &r = cycle_reports[b];
+            bucket_states[b].rebuild(true);
+
+            all_enode_infos[b] = computeENodeInfos(bucket_states[b]);
+            pruneEGraph(bucket_states[b], all_enode_infos[b]);
+
+            r.initial = countCyclicComponents(bucket_states[b]);
+            if (cycle_diagnostics)
+            {
+                r.before << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n";
+                printEGraphCycles(bucket_states[b], r.before);
+            }
+
+            r.removed1 = removeDirectSelfReferenceENodes(bucket_states[b]);
+            r.pass1 = countCyclicComponents(bucket_states[b]);
+            if (cycle_diagnostics)
+            {
+                r.after1 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                         << "[Planner.planAll] Removed " << r.removed1 << " enode(s) with direct self-references.\n";
+                printEGraphCycles(bucket_states[b], r.after1);
+            }
+
+            r.removed2 = removeSingleExternalConnectionCycleENodes(bucket_states[b]);
+            r.pass2 = countCyclicComponents(bucket_states[b]);
+            if (cycle_diagnostics)
+            {
+                r.after2 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                         << "[Planner.planAll] Removed " << r.removed2
+                         << " enode(s) from single-external-connection cycles.\n";
+                printEGraphCycles(bucket_states[b], r.after2);
+            }
+
+            r.removed3 = removeSingleExternalInputCycleENodes(bucket_states[b]);
+            r.pass3 = countCyclicComponents(bucket_states[b]);
+            if (cycle_diagnostics)
+            {
+                r.after3 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                         << "[Planner.planAll] Removed " << r.removed3
+                         << " enode(s) from single-external-input cycles.\n";
+                printEGraphCycles(bucket_states[b], r.after3);
+            }
+
+            r.removed4 = removeSingleExternalConsumerCycleENodes(bucket_states[b]);
+            r.pass4 = countCyclicComponents(bucket_states[b]);
+
+            r.removed5 = removeSingleExternalComputationalProducerCycleENodes(bucket_states[b]);
+            r.pass5 = countCyclicComponents(bucket_states[b]);
+        };
+        {
+            // The first bucket fills the cost memo the others mostly reuse.
+            const uint32_t nb = static_cast<uint32_t>(buckets.size());
+            if (nb > 0)
+                reduceBucket(0);
+            const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), std::max(nb, 1u)));
+            std::atomic<uint32_t> next_bucket{1};
+            std::vector<std::thread> threads;
+            std::vector<std::exception_ptr> errors(hw);
+            for (unsigned t = 0; t < hw; ++t)
+                threads.emplace_back([&, t]() {
+                    try
+                    {
+                        for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
+                            reduceBucket(b);
+                    }
+                    catch (...)
+                    {
+                        errors[t] = std::current_exception();
+                    }
+                });
+            for (auto &thread : threads)
+                thread.join();
+            for (auto &error : errors)
+                if (error)
+                    std::rethrow_exception(error);
+        }
+
         bool all_buckets_dag = true;
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
-            bucket_states[b].rebuild(true);
-
-            all_enode_infos[b] =
-                computeENodeInfos(bucket_states[b]);
-            pruneEGraph(bucket_states[b], all_enode_infos[b]);
-
-            const uint32_t initial_cycles = countCyclicComponents(bucket_states[b]);
-            if (cycleLogBeforeClean)
-            {
-                cycleLogBeforeClean << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n";
-                printEGraphCycles(bucket_states[b], cycleLogBeforeClean);
-                cycleLogBeforeClean.flush();
-            }
-
-            const uint32_t removed_self_references = removeDirectSelfReferenceENodes(bucket_states[b]);
-            const uint32_t post_pass1_cycles = countCyclicComponents(bucket_states[b]);
-            if (cycleLogAfterClean)
-            {
-                cycleLogAfterClean << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                                   << "[Planner.planAll] Removed " << removed_self_references
-                                   << " enode(s) with direct self-references.\n";
-                printEGraphCycles(bucket_states[b], cycleLogAfterClean);
-                cycleLogAfterClean.flush();
-            }
-
-            const uint32_t removed_single_ext = removeSingleExternalConnectionCycleENodes(bucket_states[b]);
-            const uint32_t post_pass2_cycles = countCyclicComponents(bucket_states[b]);
-            if (cycleLogAfterClean2)
-            {
-                cycleLogAfterClean2 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                                    << "[Planner.planAll] Removed " << removed_single_ext
-                                    << " enode(s) from single-external-connection cycles.\n";
-                printEGraphCycles(bucket_states[b], cycleLogAfterClean2);
-                cycleLogAfterClean2.flush();
-            }
-
-            const uint32_t removed_single_input = removeSingleExternalInputCycleENodes(bucket_states[b]);
-            const uint32_t post_pass3_cycles = countCyclicComponents(bucket_states[b]);
-            if (cycleLogAfterClean3)
-            {
-                cycleLogAfterClean3 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                                    << "[Planner.planAll] Removed " << removed_single_input
-                                    << " enode(s) from single-external-input cycles.\n";
-                printEGraphCycles(bucket_states[b], cycleLogAfterClean3);
-                cycleLogAfterClean3.flush();
-            }
-
-            const uint32_t removed_single_consumer = removeSingleExternalConsumerCycleENodes(bucket_states[b]);
-            const uint32_t post_pass4_cycles = countCyclicComponents(bucket_states[b]);
-
-            const uint32_t removed_single_compute_producer =
-                removeSingleExternalComputationalProducerCycleENodes(bucket_states[b]);
-            const uint32_t post_pass5_cycles = countCyclicComponents(bucket_states[b]);
-            if (post_pass5_cycles > 0)
+            const BucketCycleReport &r = cycle_reports[b];
+            if (cycleLogBeforeClean.is_open())
+                cycleLogBeforeClean << r.before.str();
+            if (cycleLogAfterClean.is_open())
+                cycleLogAfterClean << r.after1.str();
+            if (cycleLogAfterClean2.is_open())
+                cycleLogAfterClean2 << r.after2.str();
+            if (cycleLogAfterClean3.is_open())
+                cycleLogAfterClean3 << r.after3.str();
+            if (r.pass5 > 0)
                 all_buckets_dag = false;
 
             LOG(INFO) << "[Planner.planAll] Bucket " << b << " cycle reduction:";
-            LOG(INFO) << "  Initial cyclic components: " << initial_cycles;
-            LOG(INFO) << "  Pass 1 (direct self-references): " << initial_cycles << " -> " << post_pass1_cycles
-                      << " (-" << (initial_cycles - post_pass1_cycles) << ", removed "
-                      << removed_self_references << " enodes)";
-            LOG(INFO) << "  Pass 2 (single-external connection): " << post_pass1_cycles << " -> " << post_pass2_cycles
-                      << " (-" << (post_pass1_cycles - post_pass2_cycles) << ", removed "
-                      << removed_single_ext << " enodes)";
-            LOG(INFO) << "  Pass 3 (single-external input): " << post_pass2_cycles << " -> " << post_pass3_cycles
-                      << " (-" << (post_pass2_cycles - post_pass3_cycles) << ", removed "
-                      << removed_single_input << " enodes)";
-            LOG(INFO) << "  Pass 4 (single-external consumer): " << post_pass3_cycles << " -> " << post_pass4_cycles
-                      << " (-" << (post_pass3_cycles - post_pass4_cycles) << ", removed "
-                      << removed_single_consumer << " enodes)";
-            LOG(INFO) << "  Pass 5 (single-external compute producer): " << post_pass4_cycles << " -> " << post_pass5_cycles
-                      << " (-" << (post_pass4_cycles - post_pass5_cycles) << ", removed "
-                      << removed_single_compute_producer << " enodes)";
+            LOG(INFO) << "  Initial cyclic components: " << r.initial;
+            LOG(INFO) << "  Pass 1 (direct self-references): " << r.initial << " -> " << r.pass1 << " (-"
+                      << (r.initial - r.pass1) << ", removed " << r.removed1 << " enodes)";
+            LOG(INFO) << "  Pass 2 (single-external connection): " << r.pass1 << " -> " << r.pass2 << " (-"
+                      << (r.pass1 - r.pass2) << ", removed " << r.removed2 << " enodes)";
+            LOG(INFO) << "  Pass 3 (single-external input): " << r.pass2 << " -> " << r.pass3 << " (-"
+                      << (r.pass2 - r.pass3) << ", removed " << r.removed3 << " enodes)";
+            LOG(INFO) << "  Pass 4 (single-external consumer): " << r.pass3 << " -> " << r.pass4 << " (-"
+                      << (r.pass3 - r.pass4) << ", removed " << r.removed4 << " enodes)";
+            LOG(INFO) << "  Pass 5 (single-external compute producer): " << r.pass4 << " -> " << r.pass5 << " (-"
+                      << (r.pass4 - r.pass5) << ", removed " << r.removed5 << " enodes)";
         }
+        cycleLogBeforeClean.flush();
+        cycleLogAfterClean.flush();
+        cycleLogAfterClean2.flush();
+        cycleLogAfterClean3.flush();
 
         if (all_buckets_dag)
         {

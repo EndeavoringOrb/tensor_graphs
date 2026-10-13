@@ -645,7 +645,9 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
 inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vector<double> &lambda,
                                      const std::vector<double> &estimates,
                                      const std::unordered_set<BaseEClassId> &cached, PrimalBucketPlan &plan,
-                                     std::chrono::steady_clock::time_point deadline, uint64_t &evaluations)
+                                     std::chrono::steady_clock::time_point deadline, uint64_t &evaluations,
+                                     const std::unordered_set<BaseEClassId> *releasable = nullptr,
+                                     std::unordered_map<BaseEClassId, uint32_t> *blocked = nullptr)
 {
     const uint32_t n = static_cast<uint32_t>(rb.classes.size());
     const size_t ne = rb.engines.size();
@@ -717,6 +719,7 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
     std::vector<Touch> undo;
     std::vector<double> undo_loads;
     bool violated = false;
+    std::vector<BaseEClassId> blocked_now; // cached bases a rejected move would release
     auto touch = [&](uint32_t u) {
         if (touched_stamp[u] != stamp)
         {
@@ -746,8 +749,11 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
             Error::throw_err("Primal local search: reference count underflow");
         if (--refs[c] > 0)
             return;
-        if (cached.count(rb.classes[c].base))
+        if (cached.count(rb.classes[c].base) && !(releasable && releasable->count(rb.classes[c].base)))
+        {
             violated = true; // a cached base must stay selected
+            blocked_now.push_back(rb.classes[c].base);
+        }
         const int32_t a = alt_of[c];
         addLoad(c, a, -1.0);
         alt_of[c] = -1;
@@ -792,6 +798,7 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
                 undo.clear();
                 undo_loads = loads;
                 violated = false;
+                blocked_now.clear();
                 const double before = maxLoad();
                 touch(u);
                 addLoad(u, current, -1.0);
@@ -803,6 +810,9 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
                     decRef(ch);
                 if (violated || maxLoad() > before + 1e-9)
                 {
+                    if (blocked && violated && maxLoad() < before - 1e-9)
+                        for (BaseEClassId base : blocked_now)
+                            ++(*blocked)[base];
                     rollback();
                     continue;
                 }
@@ -829,11 +839,13 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
 // Improves every weighted bucket in parallel until convergence or deadline.
 inline bool improvePrimalPlan(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
                               PrimalPlan &plan, std::chrono::steady_clock::time_point deadline,
-                              uint64_t &evaluations)
+                              uint64_t &evaluations, const std::unordered_set<BaseEClassId> *releasable = nullptr,
+                              std::unordered_map<BaseEClassId, uint32_t> *blocked = nullptr)
 {
     const uint32_t nb = static_cast<uint32_t>(contexts.size());
     std::vector<uint8_t> improved(nb, 0);
     std::vector<uint64_t> evals(nb, 0);
+    std::vector<std::unordered_map<BaseEClassId, uint32_t>> bucket_blocked(nb);
     const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 16u));
     std::vector<std::thread> threads;
     std::vector<std::exception_ptr> errors(hw);
@@ -847,7 +859,8 @@ inline bool improvePrimalPlan(const SearchState &state, const std::vector<Primal
                     if (!(w > 0.0f))
                         continue;
                     improved[b] = improveBucketLocalSearch(contexts[b].rb, plan.bucket_lambda[b], plan.estimates[b],
-                                                           plan.cached, plan.buckets[b], deadline, evals[b]);
+                                                           plan.cached, plan.buckets[b], deadline, evals[b],
+                                                           releasable, blocked ? &bucket_blocked[b] : nullptr);
                 }
             }
             catch (...)
@@ -868,8 +881,90 @@ inline bool improvePrimalPlan(const SearchState &state, const std::vector<Primal
         total += w * plan.buckets[b].makespan;
         any |= improved[b] != 0;
         evaluations += evals[b];
+        if (blocked)
+            for (const auto &[base, count] : bucket_blocked[b])
+                (*blocked)[base] += count;
     }
     plan.cost = total;
+    return any;
+}
+
+// Cache-set moves. A cached base must stay selected in every bucket, which
+// blocks local-search moves that would stop using it. For bases that block
+// otherwise load-reducing moves, try dropping the base from the cache set:
+// re-run local search with the base releasable, require that no weighted
+// bucket still uses its cache-only alternatives, and keep the change if the
+// weighted makespan decreases. Repeats until no candidate helps.
+inline bool improveCacheSet(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
+                            PrimalPlan &plan, std::chrono::steady_clock::time_point deadline, uint64_t &evaluations,
+                            uint32_t &dropped)
+{
+    bool any = false;
+    std::unordered_set<BaseEClassId> rejected;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        std::unordered_map<BaseEClassId, uint32_t> blocked;
+        improvePrimalPlan(state, contexts, plan, deadline, evaluations, nullptr, &blocked);
+        std::vector<std::pair<uint32_t, BaseEClassId>> candidates;
+        for (const auto &[base, count] : blocked)
+            if (plan.cached.count(base) && !rejected.count(base))
+                candidates.push_back({count, base});
+        std::sort(candidates.begin(), candidates.end(), [](const auto &x, const auto &y) {
+            return x.first > y.first || (x.first == y.first && x.second.value < y.second.value);
+        });
+        // A move may be blocked by several bases at once: try dropping all
+        // blocking bases together first, then each one alone.
+        std::vector<std::vector<BaseEClassId>> sets;
+        if (candidates.size() > 1)
+        {
+            sets.emplace_back();
+            for (const auto &[count, base] : candidates)
+                sets.back().push_back(base);
+        }
+        for (const auto &[count, base] : candidates)
+            sets.push_back({base});
+        bool improved = false;
+        for (const auto &set : sets)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
+            PrimalPlan trial = plan;
+            for (BaseEClassId base : set)
+                trial.cached.erase(base);
+            const std::unordered_set<BaseEClassId> releasable(set.begin(), set.end());
+            const uint32_t count = static_cast<uint32_t>(set.size());
+            const BaseEClassId base = set.front();
+            improvePrimalPlan(state, contexts, trial, deadline, evaluations, &releasable, nullptr);
+            bool valid = true;
+            for (uint32_t b = 0; b < contexts.size() && valid; ++b)
+            {
+                const float w = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
+                if (!(w > 0.0f))
+                    continue;
+                const RelaxationBucket &rb = contexts[b].rb;
+                for (uint32_t u = 0; u < rb.classes.size() && valid; ++u)
+                {
+                    if (trial.buckets[b].value[u] <= 0)
+                        continue;
+                    for (const auto &alt : rb.classes[u].alternatives)
+                        if (alt.value == trial.buckets[b].value[u] && alt.requires_cache &&
+                            !trial.cached.count(rb.classes[u].base))
+                            valid = false;
+                }
+            }
+            if (valid && trial.cost < plan.cost - 1e-9)
+            {
+                plan = std::move(trial);
+                dropped += count;
+                improved = any = true;
+                break;
+            }
+            if (set.size() == 1)
+                rejected.insert(base);
+        }
+        if (!improved)
+            break;
+    }
     return any;
 }
 

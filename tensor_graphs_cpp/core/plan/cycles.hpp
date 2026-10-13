@@ -20,22 +20,46 @@ struct CycleEdge
     uint32_t childIndex;
 };
 
+// Flat (CSR) per-class edge lists; `adjacency[c]` is the range of c's edges in
+// insertion order.
+struct CycleAdjacency
+{
+    struct Range
+    {
+        const CycleEdge *first = nullptr;
+        const CycleEdge *last = nullptr;
+        const CycleEdge *begin() const { return first; }
+        const CycleEdge *end() const { return last; }
+        bool empty() const { return first == last; }
+    };
+    std::vector<uint32_t> offsets;
+    std::vector<CycleEdge> edges;
+    Range operator[](uint32_t class_id) const
+    {
+        return Range{edges.data() + offsets[class_id], edges.data() + offsets[class_id + 1]};
+    }
+};
+
 inline std::vector<std::vector<uint32_t>> findCyclicComponents(
     const EGraph &egraph,
-    std::vector<std::vector<CycleEdge>> &outgoing,
-    std::vector<std::vector<CycleEdge>> &incoming,
+    CycleAdjacency &outgoing,
+    CycleAdjacency &incoming,
     std::vector<uint8_t> &canonical)
 {
     const uint32_t class_count = static_cast<uint32_t>(egraph.getClasses().size());
-    outgoing.assign(class_count, {});
-    incoming.assign(class_count, {});
     canonical.assign(class_count, 0);
 
     for (uint32_t class_id = 0; class_id < class_count; ++class_id)
         canonical[class_id] = egraph.findConst(EClassId{class_id}).value == class_id;
 
+    // Edges in class order, then enode order, then child order; `incoming`
+    // keeps the same relative order per child.
+    outgoing.offsets.assign(class_count + 1, 0);
+    outgoing.edges.clear();
+    std::vector<uint32_t> in_count(class_count + 1, 0);
     for (uint32_t class_id = 0; class_id < class_count; ++class_id)
     {
+        outgoing.offsets[class_id] = static_cast<uint32_t>(outgoing.edges.size());
         if (!canonical[class_id])
             continue;
         const EClass &eclass = egraph.getEClass(EClassId{class_id});
@@ -48,11 +72,20 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
                 const uint32_t child_id = egraph.findConst(children[child_index]).value;
                 if (child_id >= class_count || !canonical[child_id])
                     continue;
-                CycleEdge edge{class_id, child_id, enode_id, child_index};
-                outgoing[class_id].push_back(edge);
-                incoming[child_id].push_back(edge);
+                outgoing.edges.push_back(CycleEdge{class_id, child_id, enode_id, child_index});
+                ++in_count[child_id + 1];
             }
         }
+    }
+    outgoing.offsets[class_count] = static_cast<uint32_t>(outgoing.edges.size());
+    for (uint32_t c = 0; c < class_count; ++c)
+        in_count[c + 1] += in_count[c];
+    incoming.offsets = in_count;
+    incoming.edges.resize(outgoing.edges.size());
+    {
+        std::vector<uint32_t> cursor(in_count.begin(), in_count.end() - 1);
+        for (const CycleEdge &edge : outgoing.edges)
+            incoming.edges[cursor[edge.to]++] = edge;
     }
 
     std::vector<int32_t> index(class_count, -1);
@@ -62,46 +95,55 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
     std::vector<std::vector<uint32_t>> components;
     int32_t next_index = 0;
 
-    std::function<void(uint32_t)> strong_connect = [&](uint32_t node)
-    {
+    // Iterative Tarjan; visits children in the same order as the recursive form.
+    std::vector<std::pair<uint32_t, uint32_t>> frames; // (node, next outgoing edge offset)
+    auto open = [&](uint32_t node) {
         index[node] = next_index;
         low_link[node] = next_index++;
         stack.push_back(node);
         on_stack[node] = 1;
-
-        for (const CycleEdge &edge : outgoing[node])
-        {
-            const uint32_t child = edge.to;
-            if (index[child] == -1)
-            {
-                strong_connect(child);
-                low_link[node] = std::min(low_link[node], low_link[child]);
-            }
-            else if (on_stack[child])
-            {
-                low_link[node] = std::min(low_link[node], index[child]);
-            }
-        }
-
-        if (low_link[node] == index[node])
-        {
-            std::vector<uint32_t> component;
-            while (true)
-            {
-                const uint32_t member = stack.back();
-                stack.pop_back();
-                on_stack[member] = 0;
-                component.push_back(member);
-                if (member == node)
-                    break;
-            }
-            components.push_back(std::move(component));
-        }
+        frames.push_back({node, outgoing.offsets[node]});
     };
-
-    for (uint32_t class_id = 0; class_id < class_count; ++class_id)
-        if (canonical[class_id] && index[class_id] == -1)
-            strong_connect(class_id);
+    for (uint32_t root = 0; root < class_count; ++root)
+    {
+        if (!canonical[root] || index[root] != -1)
+            continue;
+        open(root);
+        while (!frames.empty())
+        {
+            auto &[node, cursor] = frames.back();
+            if (cursor < outgoing.offsets[node + 1])
+            {
+                const uint32_t child = outgoing.edges[cursor++].to;
+                if (index[child] == -1)
+                    open(child);
+                else if (on_stack[child])
+                    low_link[node] = std::min(low_link[node], index[child]);
+                continue;
+            }
+            const uint32_t done = node;
+            frames.pop_back();
+            if (low_link[done] == index[done])
+            {
+                std::vector<uint32_t> component;
+                while (true)
+                {
+                    const uint32_t member = stack.back();
+                    stack.pop_back();
+                    on_stack[member] = 0;
+                    component.push_back(member);
+                    if (member == done)
+                        break;
+                }
+                components.push_back(std::move(component));
+            }
+            if (!frames.empty())
+            {
+                const uint32_t parent = frames.back().first;
+                low_link[parent] = std::min(low_link[parent], low_link[done]);
+            }
+        }
+    }
 
     std::vector<std::vector<uint32_t>> cyclic_components;
     for (auto &component : components)
@@ -127,14 +169,14 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
 
 inline uint32_t countCyclicComponents(const EGraph &egraph)
 {
-    std::vector<std::vector<CycleEdge>> outgoing, incoming;
+    CycleAdjacency outgoing, incoming;
     std::vector<uint8_t> canonical;
     return static_cast<uint32_t>(findCyclicComponents(egraph, outgoing, incoming, canonical).size());
 }
 
 inline void printEGraphCycles(const EGraph &egraph, std::ostream &output)
 {
-    std::vector<std::vector<CycleEdge>> outgoing, incoming;
+    CycleAdjacency outgoing, incoming;
     std::vector<uint8_t> canonical;
     auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
 
@@ -219,7 +261,7 @@ inline uint32_t removeDirectSelfReferenceENodes(EGraph &egraph)
 
 inline uint32_t removeSingleExternalConnectionCycleENodes(EGraph &egraph)
 {
-    std::vector<std::vector<CycleEdge>> outgoing, incoming;
+    CycleAdjacency outgoing, incoming;
     std::vector<uint8_t> canonical;
     auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
 
@@ -315,7 +357,7 @@ inline uint32_t removeSingleExternalInputCycleENodes(EGraph &egraph)
 
     while (true)
     {
-        std::vector<std::vector<CycleEdge>> outgoing, incoming;
+        CycleAdjacency outgoing, incoming;
         std::vector<uint8_t> canonical;
         auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
         if (cyclic_components.empty())
@@ -404,7 +446,7 @@ inline uint32_t removeSingleExternalConsumerCycleENodes(EGraph &egraph)
 
     while (true)
     {
-        std::vector<std::vector<CycleEdge>> outgoing, incoming;
+        CycleAdjacency outgoing, incoming;
         std::vector<uint8_t> canonical;
         auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
         if (cyclic_components.empty())
@@ -487,7 +529,7 @@ inline uint32_t removeSingleExternalComputationalProducerCycleENodes(EGraph &egr
 
     while (true)
     {
-        std::vector<std::vector<CycleEdge>> outgoing, incoming;
+        CycleAdjacency outgoing, incoming;
         std::vector<uint8_t> canonical;
         auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
         if (cyclic_components.empty())

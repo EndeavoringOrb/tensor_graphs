@@ -19,22 +19,26 @@ class CacheFreshnessPropagator : public Propagator
 #ifdef TG_PROFILE
         InitializationProfileScope initialization_scope(initialization_profile_ns_);
 #endif
+        // One pass over the selection variables (bucket order, then map
+        // order), then insertion in cached-variable order as before.
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            if (b >= state.selected_vars.size())
+                continue;
+            for (const auto &[cid, sel_vid] : state.selected_vars[b])
+            {
+                const BaseEClassId base_id = state.bucket_egraphs[b].getEClass(cid).base_eclass_id;
+                if (state.cached_vars.count(base_id))
+                    base_to_selected_[base_id].push_back(sel_vid);
+            }
+        }
         for (const auto &[base_id, cached_vid] : state.cached_vars)
         {
-            for (uint32_t b = 0; b < state.buckets.size(); ++b)
-            {
-                if (b >= state.selected_vars.size())
-                    continue;
-                for (const auto &[cid, sel_vid] : state.selected_vars[b])
-                {
-                    const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-                    if (cls.base_eclass_id == base_id)
-                    {
-                        base_to_selected_[base_id].push_back(sel_vid);
-                        selected_to_cached_[sel_vid] = cached_vid;
-                    }
-                }
-            }
+            auto it = base_to_selected_.find(base_id);
+            if (it == base_to_selected_.end())
+                continue;
+            for (VarId sel_vid : it->second)
+                selected_to_cached_[sel_vid] = cached_vid;
         }
         initialized_ = true;
     }

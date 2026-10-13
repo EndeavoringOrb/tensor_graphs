@@ -24,6 +24,35 @@ For each class `c`, the recursion computes `L(c)` and a support set `S(c)` with 
 
 **Floating point.** The simulator accumulates engine finish times in float. Over `n` operations it can undershoot the exact sum by a relative `n·2^-24`, so the stored bound is `B·(1 − (n + 64)·1.2e-7) − 1e-7`, rounded toward zero.
 
+## Interval bound
+
+The load bound treats the engines as if all work could overlap. Decode graphs are mostly sequential, so a second bound splits time into windows.
+
+**Chain and windows.** Take the root's necessary groups ordered by descendant-set size and keep a chain `G_1, …, G_k` in which every member of `G_i` necessarily depends on `G_{i-1}` (`G_{i-1} ∈ GND(m)`). Let `t_i` be the earliest finish of an active member of `G_i` (`t_0 = 0`; the last window ends at the root's finish). The earliest member of `G_i` depends on an active member of `G_{i-1}`, so `t_{i-1} ≤ t_i`. A class `x` with `G_{i-1} ∈ GND(x)` starts after some active member of `G_{i-1}` finishes, so at or after `t_{i-1}`. A class in the selected sub-DAG of the earliest member of `G_i` finishes by `t_i`. So the classes counted for window `i` (necessarily after `G_{i-1}`; the recursion only collects them below a member of `G_i`) run inside `[t_{i-1}, t_i]`. Necessary groups are transitive, so any subsequence of the chain is again such a chain. The bound uses every `s`-th link for strides `s = k/4, k/16, …` (down to 16 windows) and keeps the best.
+
+**Window value.** On every engine the window's load is at most its length. Any dependency chain of window classes runs sequentially inside the window. So for `μ ∈ [0, 1]` and any probability vector `λ`:
+
+> `t_i − t_{i-1} ≥ μ · (duration of a chain) + (1 − μ) · Σ_e λ_e load_e(window)`.
+
+`P(c)` extends the recursion of `L(c)`: the load part uses the same anchors, supports and charged groups (scaled by `1 − μ`). The chain part continues either through one anchor (whose `P` replaces its `(1 − μ) L`, so its load is still counted once) or through any child (`μ` times its window critical path, no load). A class's own duration enters the chain part only if it is counted in the window. The window value is `max(critical path, max over λ, μ of min over the members of G_i of P)` (golden-section search on `λ`, `μ ∈ {0, 0.2, …, 0.9}`). `μ = 0` is the load bound, `μ = 1` the critical path. The window values add up to a lower bound on the bucket makespan. The propagator stores `max(load bound, interval bound)` with the same float margin.
+
+On Gemma decode the interval bound is 31.25 per decode bucket (load bound 29.99). Tests: `test.exe --relaxation-bound` checks strides 1, 2 and 3 against the minimum makespan over all selections and dispatch orders of 6000 random graphs. Oracle cases 33 (parallel work that does not depend on the opening link must not be charged to the window) and 34 (a sequential chain with engine choices: load bound 2.5, interval bound 5 = optimum) pin the inequality.
+
+**Exact window value.** When a window's selections (below a member of the closing link) can be enumerated within 20000 search nodes, the window value is the exact minimum over them of max(chain, engine loads), shared classes counted once. Every plan's window is at least its chain and each engine's load.
+
+**Cut DP (threshold).** For larger windows (up to 512 classes), a bisection on `T` proves that no selection has max(chain, loads) ≤ `T`:
+1. Alternatives whose shortest chain below (head) plus shortest chain up to a target (tail) exceeds `T` are removed, to a fixpoint. They cannot appear in such a selection.
+2. A dynamic program over the window's classes, parents first, enumerates the remaining selections exactly. A state is the set of required, not yet processed classes, so each class is processed once and shared classes count once. Each state keeps a Pareto set of points: engine loads plus, for each required class, the longest chain from the target down to it. A class may take an alternative only if that chain plus the alternative's duration and its children's shortest heads is at most `T`.
+3. If the minimum largest load over the surviving selections exceeds `T`, the window is longer than `T`.
+
+Limits keep it valid. Past 5000 states the DP gives up (no proof). Past 16 Pareto points the two closest are merged into their componentwise minimum, which only weakens pruning and lowers the computed minimum. On Gemma this exact DP needs at most a few hundred states per layer-sized window, because the dataflow cut is narrow.
+
+**Window partitions.** Runs at strides 1, 2, 4, … (each also shifted by half a stride) give windows between different links. Any sequence of consecutive windows covering the chain, followed by the final window to the root, is a valid chain of disjoint time windows. An interval DP (`bestWindowPartition`) keeps the best such partition. The strides stop once a stride's own total falls more than 1% below the best.
+
+**Identical buckets.** The propagator serializes each weighted bucket's relaxation (`relaxationSignature`) and computes each distinct relaxation once; decode buckets usually share one. Windows are evaluated in parallel.
+
+On Gemma decode the interval bound is 36.06 per decode bucket (load bound 29.99), in about 1.9 s at the root. Tests: `test.exe --relaxation-bound` checks the exact and cut-DP window values (with enumeration disabled), and the window partition over strides 1–4 with every phase, against the minimum makespan over all selections and dispatch orders of 6000 random graphs.
+
 ## Where the bound lives
 
 `RelaxationBoundPropagator` runs once, as a GLOBAL batch at the quiescence of the first (root) propagation, and stores `SearchState::bucket_relaxation_lower_bounds`. `updateLowerBoundBucket` takes the maximum with the other bucket bounds. Nodes below the root only have smaller domains, and the relaxation over a superset of plans is still a lower bound, so the stored values stay valid in the whole tree and the certified bound (`docs/core/search_gap.md`) never drops below their weighted sum. Zero-weight buckets are skipped. Cyclic buckets get no bound. A bucket whose root has no feasible alternative in the relaxation has no plan at all, so the propagator reports a conflict.
@@ -42,6 +71,8 @@ After root propagation, `SearchEngine` builds complete plans and evaluates them 
 6. Local search: from every distinct initial plan (one per weighting), each weighted bucket is improved in parallel by single-class switches. Newly needed children are completed greedily, unneeded classes are released, cached bases stay selected, and cache-only alternatives stay limited to cached bases. Moves that raise the maximum engine load are skipped; others are kept only if the list-scheduled makespan decreases. A start stops when a full pass finds no improvement (or at the program deadline). Each improved plan is validated as in step 5.
 
 The heuristic never changes a domain or bound that survives the restore, so it does not affect bound semantics.
+
+7. Cache-set moves: local search records cached bases whose required selection blocks an otherwise load-reducing move. For those bases (all of them together, then each alone) the base is dropped from the cache set and local search runs again with the base releasable. The result is kept if no weighted bucket still uses the base's cache-only alternatives and the weighted makespan drops. The improved plan is validated as in step 5.
 
 ## Proof phase: largest box first
 

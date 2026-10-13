@@ -5,6 +5,7 @@
 #include <optional>
 #include <tuple>
 
+#include "core/common/thread_pool.hpp"
 #include "core/plan/propagators/base.hpp"
 
 namespace plan
@@ -521,9 +522,14 @@ class StaticPrivateLayoutPropagator : public Propagator
         // Per base: (bucket, class index, offset var).
         std::map<uint32_t, std::vector<std::tuple<uint32_t, uint32_t, VarId>>> bases;
         std::vector<std::vector<std::pair<uint32_t, VarId>>> plain(state.buckets.size());
+        // Buckets are independent; build their conditions in parallel.
+        std::vector<uint8_t> acyclic(state.buckets.size(), 0);
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
+            acyclic[b] = buildConditions(state, b, conditions[b]) ? 1 : 0;
+        });
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
-            if (!buildConditions(state, b, conditions[b]))
+            if (!acyclic[b])
             {
                 layout.skip_reason = "shared layout needs an acyclic bucket graph";
                 return layout;
@@ -589,27 +595,43 @@ class StaticPrivateLayoutPropagator : public Propagator
                     }
             return !common;
         };
+        // Pairwise conflicts in placement order, computed in parallel; row i
+        // holds the conflicts of base_order[i] with every earlier base.
+        const uint32_t nbases = static_cast<uint32_t>(base_order.size());
+        std::vector<std::vector<uint8_t>> conflicts(nbases);
+        ThreadPool::get().parallel_for(nbases, [&](uint32_t i) {
+            conflicts[i].assign(i, 0);
+            for (uint32_t j = 0; j < i; ++j)
+                conflicts[i][j] = basesConflict(base_order[i].second, base_order[j].second) ? 1 : 0;
+        });
+        std::vector<Placed> order_slot(nbases);
         int64_t max_end = prealloc_end;
-        for (const auto &[pages, base] : base_order)
+        for (uint32_t i = 0; i < nbases; ++i)
         {
+            const auto &[pages, base] = base_order[i];
             std::vector<std::pair<int64_t, int64_t>> blockers;
-            for (const auto &[other, slot] : base_slot)
-                if (basesConflict(base, other))
-                    blockers.push_back({slot.lo, slot.hi});
+            for (uint32_t j = 0; j < i; ++j)
+                if (conflicts[i][j])
+                    blockers.push_back({order_slot[j].lo, order_slot[j].hi});
             const int64_t offset = firstFit(blockers, prealloc_end, pages);
-            base_slot[base] = {offset, offset + pages};
+            order_slot[i] = {offset, offset + pages};
+            base_slot[base] = order_slot[i];
             max_end = std::max(max_end, offset + static_cast<int64_t>(pages));
         }
 
         // Per bucket: plain allocations, largest first, avoiding every
         // non-exclusive base (absent bases conflict conservatively) and
         // every non-exclusive placed allocation of the same bucket.
+        // Buckets are independent, so they are placed in parallel.
         std::vector<std::pair<VarId, int32_t>> fixes;
         for (const auto &[base, slot] : base_slot)
             for (const auto &[b, idx, off_v] : bases.at(base))
                 fixes.push_back({off_v, static_cast<int32_t>(slot.lo)});
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
+        std::vector<std::vector<std::pair<VarId, int32_t>>> bucket_fixes(state.buckets.size());
+        std::vector<int64_t> bucket_end(state.buckets.size(), prealloc_end);
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
+            auto &fixes = bucket_fixes[b];
+            int64_t &max_end = bucket_end[b];
             std::vector<std::tuple<uint32_t, uint32_t, VarId>> items; // (pages, idx, var)
             for (const auto &[idx, off_v] : plain[b])
                 items.emplace_back(allocationPages(state, off_v), idx, off_v);
@@ -637,6 +659,11 @@ class StaticPrivateLayoutPropagator : public Propagator
                 fixes.push_back({off_v, static_cast<int32_t>(offset)});
                 max_end = std::max(max_end, offset + static_cast<int64_t>(pages));
             }
+        });
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            fixes.insert(fixes.end(), bucket_fixes[b].begin(), bucket_fixes[b].end());
+            max_end = std::max(max_end, bucket_end[b]);
         }
         if (max_end > cap_pages || max_end > std::numeric_limits<int32_t>::max())
         {

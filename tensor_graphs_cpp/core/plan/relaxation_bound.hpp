@@ -7,14 +7,18 @@
 // heuristic. See docs/core/relaxation_bound.md.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/logging.hpp"
 #include "core/plan/search_state.hpp"
 
@@ -243,6 +247,44 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
     return rb;
 }
 
+// Everything the bounds depend on, serialized: two buckets with equal
+// signatures have identical relaxations and therefore identical bounds.
+inline std::vector<uint64_t> relaxationSignature(const RelaxationBucket &rb)
+{
+    std::vector<uint64_t> sig;
+    auto bits = [](double d) {
+        uint64_t u = 0;
+        std::memcpy(&u, &d, sizeof(u));
+        return u;
+    };
+    sig.push_back(rb.classes.size());
+    sig.push_back(rb.root);
+    sig.push_back(rb.acyclic ? 1 : 0);
+    sig.push_back(rb.engines.size());
+    for (const Engine &e : rb.engines)
+        sig.push_back((static_cast<uint64_t>(e.type) << 32) | static_cast<uint64_t>(e.idx));
+    for (uint32_t u : rb.topo)
+        sig.push_back(u);
+    for (uint32_t g : rb.group)
+        sig.push_back(g);
+    for (const RelaxationClass &rc : rb.classes)
+    {
+        sig.push_back(rc.alternatives.size());
+        for (const RelaxationAlternative &alt : rc.alternatives)
+        {
+            sig.push_back(static_cast<uint64_t>(static_cast<uint32_t>(alt.value)));
+            sig.push_back(bits(alt.duration));
+            sig.push_back((static_cast<uint64_t>(alt.engine_mask) << 32) | alt.sched_mask);
+            sig.push_back((alt.is_copy ? 1u : 0u) | (alt.is_view ? 2u : 0u) | (alt.is_source ? 4u : 0u) |
+                          (alt.requires_cache ? 8u : 0u));
+            sig.push_back(alt.children.size());
+            for (uint32_t ch : alt.children)
+                sig.push_back(ch);
+        }
+    }
+    return sig;
+}
+
 namespace relaxation_detail
 {
 inline size_t words(size_t bits) { return (bits + 63) / 64; }
@@ -275,6 +317,130 @@ class RelaxationBoundComputer
 
     bool ready() const { return ready_; }
     size_t numRegions() const { return regions_.size(); }
+    size_t numIntervals() const { return intervals_.size(); }
+    // Per-window values of the last interval bound, in chain order; the last
+    // window ends at the root. With stride s, window l (but the last) spans
+    // chain links l*s .. (l+1)*s - 1, so the windows of stride 2s are unions
+    // of two consecutive windows of stride s.
+    const std::vector<double> &windowValues() const { return window_values_; }
+    // Chain index of the closing link of each window but the last (the last
+    // window closes at the root); window l spans links after
+    // windowLastLinks()[l-1] up to windowLastLinks()[l].
+    const std::vector<size_t> &windowLastLinks() const { return window_last_link_; }
+
+    // Time-interval bound (docs/core/relaxation_bound.md, "Interval bound").
+    // Along a chain G_1, ..., G_k of the root's necessary groups in which every
+    // member of G_i necessarily depends on G_{i-1}, let t_i be the earliest
+    // finish of an active member of G_i (t_0 = 0, the final link is the root).
+    // A class that necessarily depends on G_{i-1} starts at or after t_{i-1};
+    // one in the selected sub-DAG of the earliest member of G_i finishes by t_i.
+    // So such classes run inside [t_{i-1}, t_i], and that window is at least
+    // their longest dependency chain, at least their lambda-weighted load and
+    // at least mu * (any chain) + (1 - mu) * (weighted load), with lambda and
+    // mu chosen per window. The windows are disjoint and ordered, so their
+    // values add up to a lower bound on the makespan.
+    size_t intervalChainLength() const { return ichain_.size(); }
+
+    // Search-node budget of the exact window enumeration (tests set 0 to
+    // exercise the cut DP).
+    void setExactWindowNodes(uint64_t nodes) { exact_window_nodes_ = nodes; }
+
+    // Interval bound with windows at every `stride`-th chain link.
+    double intervalBound(size_t stride, size_t phase = 0)
+    {
+        if (!ready_)
+            Error::throw_err("Interval bound evaluated on an unprepared bucket");
+        buildIntervals(stride, phase);
+        return evaluateIntervals();
+    }
+
+    double evaluateIntervals()
+    {
+        if (!ready_)
+            Error::throw_err("Interval bound evaluated on an unprepared bucket");
+        const size_t ne = rb_.engines.size();
+        if (ne == 0)
+            return 0.0;
+        alt_weight_.resize(alt_offset_.back());
+        double total = 0.0;
+        std::vector<double> lambda(ne);
+        window_values_.clear();
+        for (Region &region : intervals_)
+        {
+            window_values_.push_back(0.0);
+            if (region.zero_value)
+                continue;
+            std::vector<double> cp_nodes, path;
+            const double cp = criticalPathRegion(region, cp_nodes);
+            static const double kMu[] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.9};
+            auto at = [&](double l0) {
+                if (ne == 1)
+                    lambda[0] = 1.0;
+                else
+                {
+                    lambda[0] = l0;
+                    for (size_t e = 1; e < ne; ++e)
+                        lambda[e] = (1.0 - l0) / static_cast<double>(ne - 1);
+                }
+                fillRegionWeights(region, lambda);
+                double v = evaluateRegion(region);
+                for (double mu : kMu)
+                    if (mu > 0.0)
+                        v = std::max(v, evaluateRegionPath(region, mu, cp_nodes, path));
+                return v;
+            };
+            double best = 0.0;
+            if (ne == 1)
+                best = at(1.0);
+            else
+            {
+                // Golden-section search on lambda_0; every evaluated point is valid.
+                const double phi = (std::sqrt(5.0) - 1.0) / 2.0;
+                double a = 0.0, b = 1.0;
+                double c = b - phi * (b - a), d = a + phi * (b - a);
+                double fc = at(c), fd = at(d);
+                best = std::max({at(0.0), at(1.0), fc, fd});
+                for (int it = 0; it < 16; ++it)
+                {
+                    if (fc < fd)
+                    {
+                        a = c;
+                        c = d;
+                        fc = fd;
+                        d = a + phi * (b - a);
+                        fd = at(d);
+                        best = std::max(best, fd);
+                    }
+                    else
+                    {
+                        b = d;
+                        d = c;
+                        fd = fc;
+                        c = b - phi * (b - a);
+                        fc = at(c);
+                        best = std::max(best, fc);
+                    }
+                }
+            }
+            window_values_.back() = std::max(cp, best);
+        }
+        // Exact enumeration and cut DP read only the window and the bucket,
+        // so windows are processed in parallel.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(intervals_.size()), [&](uint32_t w) {
+            const Region &region = intervals_[w];
+            if (region.zero_value)
+                return;
+            const double exact = exactWindow(region, exact_window_nodes_);
+            const double proven = std::max(window_values_[w], exact);
+            // A finished enumeration is already the window relaxation's optimum.
+            window_values_[w] = exact > 0.0 || region.nodes.size() > kCutDpMaxClasses
+                                    ? proven
+                                    : cutDpWindow(region, proven, kCutDpStates, kCutDpPoints);
+        });
+        for (double v : window_values_)
+            total += v;
+        return total;
+    }
 
     // After evaluate(): each class's bound within its own region, i.e. its
     // cost excluding the shared history below the region (0 outside regions).
@@ -318,6 +484,8 @@ class RelaxationBoundComputer
         uint32_t alt_index = 0;
         std::vector<uint32_t> kids;   // region-local indices of positive children
         std::vector<uint32_t> extras; // region-local groups with positive production cost
+        std::vector<uint32_t> all_kids; // region-local indices of every child in the region
+        bool weighted = true;           // interval regions: the alternative runs inside the window
     };
     struct Region
     {
@@ -337,6 +505,13 @@ class RelaxationBoundComputer
     const RelaxationBucket &rb_;
     bool ready_ = false;
     std::vector<Region> regions_;
+    std::vector<Region> intervals_;
+    std::vector<double> window_values_;
+    std::vector<size_t> window_last_link_;
+    std::vector<uint32_t> ichain_;                   // interval chain (groups), smallest first
+    std::vector<std::vector<uint64_t>> ichain_desc_; // descendant bits of each chain group
+    std::vector<uint64_t> desc_, gnd_;
+    size_t wc_ = 0, wg_ = 0;
     std::vector<uint32_t> alt_offset_;
     std::vector<double> alt_weight_;
 
@@ -441,13 +616,150 @@ class RelaxationBoundComputer
                 region_bits[w] = top[w] & ~below[w];
             std::vector<uint32_t> targets_global =
                 final_region ? std::vector<uint32_t>{rb_.root} : rb_.group_members[chain[link]];
-            buildRegion(region_bits, below, targets_global);
+            buildRegion(regions_, region_bits, below, targets_global, nullptr);
             below = top;
+        }
+
+        // Interval chain: every member of the next link necessarily depends on
+        // the previous link, so the earliest finishes t_i are nondecreasing.
+        // Any subsequence is again such a chain (necessary groups are
+        // transitive), which intervalBound uses to form coarser windows.
+        ichain_.clear();
+        for (const auto &[count, g] : necessary)
+        {
+            if (!ichain_.empty())
+            {
+                const uint32_t last = ichain_.back();
+                if (necessary_desc[g] == necessary_desc[last])
+                    continue;
+                bool after = true;
+                for (uint32_t m : rb_.group_members[g])
+                    if (!testBit(&gnd[static_cast<size_t>(m) * wg], last))
+                        after = false;
+                if (!after)
+                    continue;
+            }
+            ichain_.push_back(g);
+        }
+        ichain_desc_.clear();
+        for (uint32_t g : ichain_)
+            ichain_desc_.push_back(std::move(necessary_desc[g]));
+        desc_ = std::move(desc);
+        gnd_ = std::move(gnd);
+        wc_ = wc;
+        wg_ = wg;
+    }
+
+    // Windows for every `stride`-th link of the interval chain (and the root).
+    // A class runs inside window i when it necessarily depends on link i-1;
+    // only classes with a member of link i-1 below them are kept.
+    void buildIntervals(size_t stride, size_t phase = 0)
+    {
+        using namespace relaxation_detail;
+        if (stride == 0)
+            Error::throw_err("Interval bound stride must be positive");
+        intervals_.clear();
+        const uint32_t n = static_cast<uint32_t>(rb_.classes.size());
+        std::vector<size_t> links;
+        for (size_t i = 0; i < ichain_.size(); ++i)
+            if ((i + 1) % stride == phase % stride || i + 1 == ichain_.size())
+                links.push_back(i);
+        window_last_link_.assign(links.begin(), links.end());
+        const std::vector<uint64_t> none(wc_, 0);
+        std::vector<uint64_t> region_bits(wc_, 0);
+        std::vector<uint8_t> weighted(alt_offset_.back(), 1);
+        for (size_t l = 0; l <= links.size(); ++l)
+        {
+            const bool final_region = l == links.size();
+            const uint64_t *top = final_region ? &desc_[static_cast<size_t>(rb_.root) * wc_]
+                                               : ichain_desc_[links[l]].data();
+            std::fill(region_bits.begin(), region_bits.end(), 0);
+            if (l == 0)
+            {
+                std::fill(weighted.begin(), weighted.end(), 1);
+                for (size_t w = 0; w < wc_; ++w)
+                    region_bits[w] = top[w];
+            }
+            else
+            {
+                const uint32_t prev = ichain_[links[l - 1]];
+                for (uint32_t u = 0; u < n; ++u)
+                {
+                    const uint8_t after = testBit(&gnd_[static_cast<size_t>(u) * wg_], prev) ? 1 : 0;
+                    for (uint32_t a = 0; a < rb_.classes[u].alternatives.size(); ++a)
+                        weighted[alt_offset_[u] + a] = after;
+                    if (!testBit(top, u))
+                        continue;
+                    const uint64_t *du = &desc_[static_cast<size_t>(u) * wc_];
+                    for (uint32_t m : rb_.group_members[prev])
+                        if (testBit(du, m))
+                        {
+                            setBit(region_bits.data(), u);
+                            break;
+                        }
+                }
+            }
+            std::vector<uint32_t> targets_global =
+                final_region ? std::vector<uint32_t>{rb_.root} : rb_.group_members[ichain_[links[l]]];
+            buildRegion(intervals_, region_bits, none, targets_global, &weighted);
         }
     }
 
-    void buildRegion(const std::vector<uint64_t> &region_bits, const std::vector<uint64_t> &below,
-                     const std::vector<uint32_t> &targets_global)
+    void fillRegionWeights(const Region &region, const std::vector<double> &lambda)
+    {
+        for (size_t i = 0; i < region.nodes.size(); ++i)
+        {
+            const uint32_t u = region.nodes[i];
+            const auto &alts = rb_.classes[u].alternatives;
+            for (uint32_t a = 0; a < alts.size(); ++a)
+            {
+                double scale = 0.0;
+                if (region.alts[i][a].weighted)
+                    for (uint32_t e = 0; e < lambda.size(); ++e)
+                        if (alts[a].engine_mask & (1u << e))
+                            scale += lambda[e];
+                alt_weight_[alt_offset_[u] + a] = alts[a].duration * scale;
+            }
+        }
+    }
+
+    // Longest chain of window classes: for every plan in which the class is
+    // active and the value is positive, the class finishes at least this long
+    // after the window opens (children finish before their consumer starts).
+    double criticalPathRegion(const Region &region) const
+    {
+        std::vector<double> cp;
+        return criticalPathRegion(region, cp);
+    }
+    double criticalPathRegion(const Region &region, std::vector<double> &cp) const
+    {
+        const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        cp.assign(rn, 0.0);
+        for (uint32_t i = 0; i < rn; ++i)
+        {
+            const auto &alts = rb_.classes[region.nodes[i]].alternatives;
+            double best = std::numeric_limits<double>::infinity();
+            for (const AltInfo &info : region.alts[i])
+            {
+                double below = 0.0;
+                for (uint32_t k : info.all_kids)
+                    below = std::max(below, cp[k]);
+                const double own = info.weighted && alts[info.alt_index].engine_mask
+                                       ? alts[info.alt_index].duration
+                                       : 0.0;
+                best = std::min(best, own + below);
+            }
+            cp[i] = std::isfinite(best) ? best : 0.0;
+        }
+        double value = std::numeric_limits<double>::infinity();
+        for (uint32_t t : region.targets)
+            value = std::min(value, cp[t]);
+        return std::isfinite(value) ? value : 0.0;
+    }
+
+    void buildRegion(std::vector<Region> &out, const std::vector<uint64_t> &region_bits,
+                     const std::vector<uint64_t> &below, const std::vector<uint32_t> &targets_global,
+                     const std::vector<uint8_t> *weighted)
     {
         using namespace relaxation_detail;
         Region region;
@@ -460,7 +772,7 @@ class RelaxationBoundComputer
         if (region.nodes.empty() || region.zero_value)
         {
             region.zero_value = true;
-            regions_.push_back(std::move(region));
+            out.push_back(std::move(region));
             return;
         }
         const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
@@ -476,8 +788,9 @@ class RelaxationBoundComputer
             region.targets.push_back(it->second);
         }
 
-        // Groups whose members all lie in the region; only they may be
-        // charged here, so different regions never count the same class.
+        // Groups whose members all lie in the region (and, for an interval,
+        // run inside its window); only they may be charged here, so different
+        // regions never count the same class.
         std::unordered_map<uint32_t, uint32_t> local_group;
         for (uint32_t i = 0; i < rn; ++i)
         {
@@ -486,8 +799,14 @@ class RelaxationBoundComputer
                 continue;
             bool inside = true;
             for (uint32_t m : rb_.group_members[g])
+            {
                 if (!local.count(m))
                     inside = false;
+                else if (weighted)
+                    for (uint32_t a = 0; a < rb_.classes[m].alternatives.size(); ++a)
+                        if (!rb_.classes[m].alternatives[a].is_copy && !(*weighted)[alt_offset_[m] + a])
+                            inside = false;
+            }
             if (!inside)
                 continue;
             const uint32_t lg = static_cast<uint32_t>(region.group_members.size());
@@ -533,12 +852,15 @@ class RelaxationBoundComputer
                 std::fill(uni.begin(), uni.end(), 0);
                 AltInfo info;
                 info.alt_index = a;
+                info.weighted = weighted ? (*weighted)[alt_offset_[u] + a] != 0 : true;
                 for (uint32_t ch : alts[a].children)
                 {
                     auto it = local.find(ch);
                     if (it == local.end())
                         continue; // below the region: counted by an earlier region
                     const uint32_t li = it->second;
+                    if (std::find(info.all_kids.begin(), info.all_kids.end(), li) == info.all_kids.end())
+                        info.all_kids.push_back(li);
                     const uint64_t *gc = &gloc[static_cast<size_t>(li) * wl];
                     for (size_t w = 0; w < wl; ++w)
                         uni[w] |= gc[w];
@@ -553,8 +875,8 @@ class RelaxationBoundComputer
                 for (uint32_t lg = 0; lg < lgn; ++lg)
                     if (testBit(uni.data(), lg) && group_pos[lg])
                         info.extras.push_back(lg);
-                const bool alt_pos = (alts[a].duration > 0.0 && alts[a].engine_mask) || !info.kids.empty() ||
-                                     !info.extras.empty();
+                const bool alt_pos = (info.weighted && alts[a].duration > 0.0 && alts[a].engine_mask) ||
+                                     !info.kids.empty() || !info.extras.empty();
                 if (!alt_pos)
                     pos = false;
                 if (first)
@@ -597,7 +919,7 @@ class RelaxationBoundComputer
         }
         region.L.assign(rn, 0.0);
         region.mp.assign(lgn, 0.0);
-        regions_.push_back(std::move(region));
+        out.push_back(std::move(region));
     }
 
     double evaluateRegion(Region &region)
@@ -677,7 +999,482 @@ class RelaxationBoundComputer
             value = std::min(value, region.L[t]);
         return std::isfinite(value) ? value : 0.0;
     }
+
+    // Cut-DP window bound (docs/core/relaxation_bound.md, "Cut DP").
+    //
+    // For a threshold T, an alternative whose shortest chain below (head)
+    // plus the shortest chain from its class up to a target (tail) exceeds T
+    // cannot appear in a selection with chain <= T; such alternatives are
+    // removed and heads and tails recomputed until nothing changes. Over the
+    // remaining alternatives, a dynamic program over the window's classes,
+    // parents first, computes exactly the minimum over selections of the
+    // largest engine load: a state is the set of required, not yet processed
+    // classes (each class is processed once, so shared classes count once),
+    // and it keeps the Pareto set of engine-load vectors that reach it. If
+    // that minimum exceeds T, no selection has max(chain, loads) <= T, so the
+    // window is longer than T. A bisection keeps the largest proven T.
+    //
+    // Limits keep it valid: past `state_cap` states the DP gives up (no
+    // proof); a state's Pareto set past `point_cap` points has its two
+    // closest points merged into their componentwise minimum, which only
+    // lowers the computed minimum.
+    double cutDpWindow(const Region &region, double proven, size_t state_cap, size_t point_cap) const
+    {
+        const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        const size_t ne = rb_.engines.size();
+        if (region.zero_value || rn == 0 || ne == 0)
+            return proven;
+        const double inf = std::numeric_limits<double>::infinity();
+        auto ownDuration = [&](uint32_t i, size_t a) {
+            const AltInfo &info = region.alts[i][a];
+            const auto &alt = rb_.classes[region.nodes[i]].alternatives[info.alt_index];
+            return info.weighted && alt.engine_mask ? alt.duration : 0.0;
+        };
+        auto ownMask = [&](uint32_t i, size_t a) {
+            return rb_.classes[region.nodes[i]].alternatives[region.alts[i][a].alt_index].engine_mask;
+        };
+        std::vector<std::vector<uint8_t>> allowed(rn);
+        std::vector<double> head(rn), tail(rn);
+        auto altHead = [&](uint32_t i, size_t a) {
+            double below = 0.0;
+            for (uint32_t k : region.alts[i][a].all_kids)
+                below = std::max(below, head[k]);
+            return ownDuration(i, a) + below;
+        };
+        auto prune = [&](double T) {
+            for (uint32_t i = 0; i < rn; ++i)
+                allowed[i].assign(region.alts[i].size(), 1);
+            for (bool changed = true; changed;)
+            {
+                changed = false;
+                for (uint32_t i = 0; i < rn; ++i) // children first
+                {
+                    head[i] = inf;
+                    for (size_t a = 0; a < region.alts[i].size(); ++a)
+                        if (allowed[i][a])
+                            head[i] = std::min(head[i], altHead(i, a));
+                }
+                std::fill(tail.begin(), tail.end(), inf);
+                for (uint32_t t : region.targets)
+                    tail[t] = 0.0;
+                for (uint32_t i = rn; i-- > 0;) // parents first
+                {
+                    if (!std::isfinite(tail[i]))
+                        continue;
+                    for (size_t a = 0; a < region.alts[i].size(); ++a)
+                    {
+                        if (!allowed[i][a] || !std::isfinite(altHead(i, a)))
+                            continue;
+                        const double through = tail[i] + ownDuration(i, a);
+                        for (uint32_t k : region.alts[i][a].all_kids)
+                            tail[k] = std::min(tail[k], through);
+                    }
+                }
+                for (uint32_t i = 0; i < rn; ++i)
+                {
+                    const double up = std::isfinite(tail[i]) ? tail[i] : 0.0;
+                    for (size_t a = 0; a < region.alts[i].size(); ++a)
+                        if (allowed[i][a] && altHead(i, a) + up > T)
+                        {
+                            allowed[i][a] = 0;
+                            changed = true;
+                        }
+                }
+            }
+        };
+        using Point = std::vector<double>;
+        auto addPoint = [&](std::vector<Point> &set, Point p) {
+            for (const Point &q : set)
+            {
+                bool dominated = true;
+                for (size_t e = 0; e < p.size() && dominated; ++e)
+                    dominated = q[e] <= p[e];
+                if (dominated)
+                    return;
+            }
+            set.erase(std::remove_if(set.begin(), set.end(),
+                                     [&](const Point &q) {
+                                         for (size_t e = 0; e < p.size(); ++e)
+                                             if (p[e] > q[e])
+                                                 return false;
+                                         return true;
+                                     }),
+                      set.end());
+            set.push_back(std::move(p));
+            while (set.size() > point_cap)
+            {
+                // Merge the closest pair into its componentwise minimum.
+                size_t bx = 0, by = 1;
+                double bd = inf;
+                for (size_t x = 0; x < set.size(); ++x)
+                    for (size_t y = x + 1; y < set.size(); ++y)
+                    {
+                        double d = 0.0;
+                        for (size_t e = 0; e < set[x].size(); ++e)
+                            d += std::abs(set[x][e] - set[y][e]);
+                        if (d < bd)
+                        {
+                            bd = d;
+                            bx = x;
+                            by = y;
+                        }
+                    }
+                for (size_t e = 0; e < set[bx].size(); ++e)
+                    set[bx][e] = std::min(set[bx][e], set[by][e]);
+                set.erase(set.begin() + static_cast<std::ptrdiff_t>(by));
+            }
+        };
+        struct KeyHash
+        {
+            size_t operator()(const std::vector<uint32_t> &v) const
+            {
+                uint64_t h = 1469598103934665603ull;
+                for (uint32_t x : v)
+                    h = (h ^ x) * 1099511628211ull;
+                return static_cast<size_t>(h);
+            }
+        };
+        // Exact minimum over selections of the largest engine load, or -1
+        // when the state cap is exceeded.
+        // Exact minimum over selections with chain <= T of the largest engine
+        // load, or -1 when the state cap is exceeded. A point holds the
+        // engine loads and, for each required class (in key order), the
+        // longest chain from the target down to that class in the partial
+        // selection; a class may take an alternative only if that chain plus
+        // the alternative's duration and its children's shortest heads fits.
+        auto minMaxLoad = [&](double T) -> double {
+            std::unordered_map<std::vector<uint32_t>, std::vector<Point>, KeyHash> states, next;
+            for (uint32_t t : region.targets)
+                if (std::isfinite(head[t]))
+                    addPoint(states[std::vector<uint32_t>{t}], Point(ne + 1, 0.0));
+            std::vector<double> kid_tail;
+            for (uint32_t i = rn; i-- > 0;)
+            {
+                next.clear();
+                for (auto &[req, points] : states)
+                {
+                    if (req.empty() || req.back() != i) // sorted ascending: the largest index is processed first
+                    {
+                        auto &dst = next[req];
+                        for (const Point &p : points)
+                            addPoint(dst, p);
+                        continue;
+                    }
+                    std::vector<uint32_t> base(req.begin(), req.end() - 1);
+                    for (size_t a = 0; a < region.alts[i].size(); ++a)
+                    {
+                        if (!allowed[i][a])
+                            continue;
+                        const double d = ownDuration(i, a);
+                        const uint32_t mask = ownMask(i, a);
+                        const double alt_head = altHead(i, a);
+                        const auto &kids = region.alts[i][a].all_kids;
+                        std::vector<uint32_t> key = base;
+                        for (uint32_t k : kids)
+                            key.push_back(k);
+                        std::sort(key.begin(), key.end());
+                        key.erase(std::unique(key.begin(), key.end()), key.end());
+                        auto &dst = next[key];
+                        for (const Point &p : points)
+                        {
+                            const double tail_i = p[ne + base.size()]; // i is the last key entry
+                            if (tail_i + alt_head > T)
+                                continue;
+                            Point q(ne + key.size());
+                            for (size_t e = 0; e < ne; ++e)
+                                q[e] = p[e] + ((d > 0.0 && (mask & (1u << e))) ? d : 0.0);
+                            size_t bi = 0;
+                            for (size_t x = 0; x < key.size(); ++x)
+                            {
+                                double tail = 0.0;
+                                while (bi < base.size() && base[bi] < key[x])
+                                    ++bi;
+                                if (bi < base.size() && base[bi] == key[x])
+                                    tail = p[ne + bi];
+                                if (std::find(kids.begin(), kids.end(), key[x]) != kids.end())
+                                    tail = std::max(tail, tail_i + d);
+                                q[ne + x] = tail;
+                            }
+                            addPoint(dst, std::move(q));
+                        }
+                    }
+                }
+                for (auto it = next.begin(); it != next.end();)
+                    it = it->second.empty() ? next.erase(it) : std::next(it);
+                states.swap(next);
+                if (states.size() > state_cap)
+                    return -1.0;
+            }
+            double best = inf;
+            auto it = states.find(std::vector<uint32_t>{});
+            if (it != states.end())
+                for (const Point &p : it->second)
+                    best = std::min(best, *std::max_element(p.begin(), p.begin() + static_cast<std::ptrdiff_t>(ne)));
+            return best;
+        };
+        bool gave_up = false;
+        auto longer = [&](double T) {
+            if (gave_up)
+                return false;
+            prune(T);
+            bool any_target = false;
+            for (uint32_t t : region.targets)
+                any_target |= std::isfinite(head[t]);
+            if (!any_target)
+                return true;
+            const double v = minMaxLoad(T);
+            gave_up = v < 0.0; // past the state cap: stop this window
+            return v > T;
+        };
+        double lo = proven, hi = std::max(proven, 1e-9) * 1.25;
+        for (int grow = 0; grow < 4 && longer(hi); ++grow)
+        {
+            lo = hi;
+            hi *= 1.25;
+        }
+        for (int it = 0; it < 14; ++it)
+        {
+            const double mid = 0.5 * (lo + hi);
+            if (longer(mid))
+                lo = mid;
+            else
+                hi = mid;
+        }
+        return lo;
+    }
+
+    // Enumeration budget (search nodes) for the exact window value.
+    uint64_t exact_window_nodes_ = 20000;
+    // Cut DP limits: states per class step and Pareto points per state.
+    static constexpr size_t kCutDpStates = 5000;
+    static constexpr size_t kCutDpPoints = 16;
+    static constexpr size_t kCutDpMaxClasses = 512; // larger windows: DP not attempted
+
+    // Exact window value when the window's selections can be enumerated
+    // within `budget` search nodes: the minimum over the selections below a
+    // member of the closing link of max(critical path, load on each engine),
+    // each class counted once. Every plan's window is at least this long (the
+    // chain and each engine's load fit inside it). Returns 0 when the budget
+    // runs out, which is always valid.
+    double exactWindow(const Region &region, uint64_t budget) const
+    {
+        if (region.zero_value)
+            return 0.0;
+        const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        const size_t ne = rb_.engines.size();
+        std::vector<int32_t> choice(rn, -1);
+        std::vector<double> loads(ne, 0.0), finish(rn, 0.0);
+        double best = std::numeric_limits<double>::infinity();
+        uint64_t visited = 0;
+        bool exhausted = false;
+        auto ownDuration = [&](uint32_t i, int32_t a) {
+            const AltInfo &info = region.alts[i][static_cast<size_t>(a)];
+            const auto &alt = rb_.classes[region.nodes[i]].alternatives[info.alt_index];
+            return info.weighted && alt.engine_mask ? alt.duration : 0.0;
+        };
+        auto chainOf = [&](uint32_t target) {
+            for (uint32_t i = 0; i < rn; ++i) // children first
+            {
+                if (choice[i] < 0)
+                    continue;
+                double below = 0.0;
+                for (uint32_t k : region.alts[i][static_cast<size_t>(choice[i])].all_kids)
+                    below = std::max(below, finish[k]);
+                finish[i] = below + ownDuration(i, choice[i]);
+            }
+            return finish[target];
+        };
+        // Depth-first over pending classes; loads only grow, so a partial
+        // selection whose maximum load reaches the best value is pruned.
+        auto dfs = [&](auto &&self, uint32_t target, std::vector<uint32_t> pending) -> void {
+            if (exhausted)
+                return;
+            if (++visited > budget)
+            {
+                exhausted = true;
+                return;
+            }
+            double max_load = 0.0;
+            for (double l : loads)
+                max_load = std::max(max_load, l);
+            if (max_load >= best)
+                return;
+            while (!pending.empty() && choice[pending.back()] >= 0)
+                pending.pop_back();
+            if (pending.empty())
+            {
+                best = std::min(best, std::max(max_load, chainOf(target)));
+                return;
+            }
+            const uint32_t i = pending.back();
+            pending.pop_back();
+            for (size_t a = 0; a < region.alts[i].size() && !exhausted; ++a)
+            {
+                const AltInfo &info = region.alts[i][a];
+                const auto &alt = rb_.classes[region.nodes[i]].alternatives[info.alt_index];
+                const double d = ownDuration(i, static_cast<int32_t>(a));
+                choice[i] = static_cast<int32_t>(a);
+                for (size_t e = 0; e < ne; ++e)
+                    if (alt.engine_mask & (1u << e))
+                        loads[e] += d;
+                std::vector<uint32_t> next = pending;
+                for (uint32_t k : info.all_kids)
+                    if (choice[k] < 0)
+                        next.push_back(k);
+                self(self, target, std::move(next));
+                for (size_t e = 0; e < ne; ++e)
+                    if (alt.engine_mask & (1u << e))
+                        loads[e] -= d;
+                choice[i] = -1;
+            }
+        };
+        for (uint32_t t : region.targets)
+        {
+            dfs(dfs, t, std::vector<uint32_t>{t});
+            if (exhausted)
+                return 0.0;
+        }
+        return std::isfinite(best) ? best : 0.0;
+    }
+
+
+    // Path-weighted window value (after evaluateRegion filled region.L for
+    // the same weights). Any chain of window classes runs sequentially inside
+    // the window, and the window's load is at most its length on every
+    // engine, so for mu in [0, 1]:
+    //   window >= mu * (chain duration) + (1 - mu) * (lambda-weighted load).
+    // P(c) bounds mu * (some chain below c) + (1 - mu) * (weighted cost of the
+    // plan's classes in S(c) ∩ T(c)): the load part follows L (anchors with
+    // disjoint supports, charged groups); the chain continues either through
+    // one anchor (its P replaces its (1 - mu) L) or through any child (mu
+    // times its critical path, no load).
+    double evaluateRegionPath(const Region &region, double mu, const std::vector<double> &cp,
+                              std::vector<double> &P) const
+    {
+        using namespace relaxation_detail;
+        if (region.zero_value)
+            return 0.0;
+        const size_t ws = region.support_words;
+        std::vector<uint64_t> cover(ws);
+        std::vector<uint32_t> order, chosen;
+        const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        P.assign(rn, 0.0);
+        const double nu = 1.0 - mu;
+        for (uint32_t i = 0; i < rn; ++i)
+        {
+            const uint32_t u = region.nodes[i];
+            const auto &alts = rb_.classes[u].alternatives;
+            double best = std::numeric_limits<double>::infinity();
+            for (const AltInfo &info : region.alts[i])
+            {
+                double path_any = 0.0;
+                for (uint32_t k : info.all_kids)
+                    path_any = std::max(path_any, mu * cp[k]);
+                double cand = path_any;
+                if (!info.kids.empty() || !info.extras.empty())
+                {
+                    order = info.kids;
+                    std::sort(order.begin(), order.end(),
+                              [&](uint32_t x, uint32_t y) { return region.L[x] > region.L[y]; });
+                    const size_t tries = std::max<size_t>(1, order.size());
+                    cand = -1.0;
+                    for (size_t first = 0; first < tries; ++first)
+                    {
+                        std::fill(cover.begin(), cover.end(), 0);
+                        double sum = 0.0, bonus = path_any;
+                        for (size_t step = 0; step < order.size(); ++step)
+                        {
+                            const uint32_t k = order[step == 0 ? first : (step <= first ? step - 1 : step)];
+                            const uint64_t *sk = &region.support[static_cast<size_t>(k) * ws];
+                            bool overlap = false;
+                            for (size_t w = 0; w < ws && !overlap; ++w)
+                                overlap = (cover[w] & sk[w]) != 0;
+                            if (overlap)
+                                continue;
+                            sum += region.L[k];
+                            bonus = std::max(bonus, P[k] - nu * region.L[k]);
+                            for (size_t w = 0; w < ws; ++w)
+                                cover[w] |= sk[w];
+                        }
+                        for (uint32_t lg : info.extras)
+                        {
+                            bool overlap = false;
+                            for (uint32_t m : region.group_members[lg])
+                                if (testBit(cover.data(), m))
+                                {
+                                    overlap = true;
+                                    break;
+                                }
+                            if (!overlap)
+                                sum += region.mp[lg];
+                        }
+                        cand = std::max(cand, nu * sum + bonus);
+                    }
+                }
+                const double own_d =
+                    info.weighted && alts[info.alt_index].engine_mask ? alts[info.alt_index].duration : 0.0;
+                best = std::min(best, nu * weight(u, info.alt_index) + mu * own_d + cand);
+            }
+            P[i] = std::isfinite(best) ? best : 0.0;
+        }
+        double value = std::numeric_limits<double>::infinity();
+        for (uint32_t t : region.targets)
+            value = std::min(value, P[t]);
+        return std::isfinite(value) ? value : 0.0;
+    }
 };
+
+// One evaluation of the interval bound: the closing chain link of every
+// window but the last, and the value of every window (the last one ends at
+// the root and is the same for every run).
+struct IntervalRun
+{
+    std::vector<size_t> last_links;
+    std::vector<double> values;
+};
+
+// Best partition of the interval chain into windows taken from any of the
+// runs. A window spans the chain links after one closing link up to the next,
+// and its value bounds the time between those links, so any sequence of
+// consecutive windows covering the chain (followed by the final window to the
+// root) is a chain of disjoint, ordered time windows: its sum is a valid
+// lower bound. best[j] is the largest sum over windows covering links 0..j-1.
+inline double bestWindowPartition(size_t chain, const std::vector<IntervalRun> &runs)
+{
+    if (runs.empty() || runs[0].values.empty())
+        return 0.0;
+    struct Window
+    {
+        size_t first, last;
+        double value;
+    };
+    std::vector<Window> windows;
+    for (const IntervalRun &run : runs)
+    {
+        if (run.values.size() != run.last_links.size() + 1)
+            Error::throw_err("Relaxation bound: interval run has mismatched windows");
+        size_t first = 0;
+        for (size_t l = 0; l < run.last_links.size(); ++l)
+        {
+            if (run.last_links[l] < first || run.last_links[l] >= chain)
+                Error::throw_err("Relaxation bound: interval window outside the chain");
+            windows.push_back({first, run.last_links[l], run.values[l]});
+            first = run.last_links[l] + 1;
+        }
+        if (first != chain)
+            Error::throw_err("Relaxation bound: interval run does not cover the chain");
+    }
+    std::sort(windows.begin(), windows.end(), [](const Window &a, const Window &b) { return a.last < b.last; });
+    const double none = -std::numeric_limits<double>::infinity();
+    std::vector<double> best(chain + 1, none);
+    best[0] = 0.0;
+    for (const Window &w : windows)
+        if (best[w.first] != none)
+            best[w.last + 1] = std::max(best[w.last + 1], best[w.first] + w.value);
+    if (best[chain] == none)
+        Error::throw_err("Relaxation bound: no window partition covers the chain");
+    return best[chain] + runs[0].values.back();
+}
 
 // Best lower bound over a small set of engine weightings. Any probability
 // vector gives a valid bound; the search over lambda only tightens it.

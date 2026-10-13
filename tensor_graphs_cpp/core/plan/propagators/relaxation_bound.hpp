@@ -5,6 +5,7 @@
 #include <sstream>
 #include <thread>
 
+#include "core/common/thread_pool.hpp"
 #include "core/plan/propagators/base.hpp"
 #include "core/plan/relaxation_bound.hpp"
 
@@ -43,65 +44,117 @@ class RelaxationBoundPropagator : public Propagator
         std::vector<double> bounds(nb, 0.0);
         std::vector<std::string> notes(nb);
         std::vector<char> infeasible(nb, 0);
-        auto work = [&](uint32_t b) {
+        auto &pool = ThreadPool::get();
+
+        // 1. Relaxations of the weighted buckets.
+        std::vector<RelaxationBucket> rbs(nb);
+        std::vector<char> active(nb, 0);
+        pool.parallel_for(nb, [&](uint32_t b) {
             const float weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
             if (!(weight > 0.0f))
             {
                 notes[b] = "skipped (zero weight)";
                 return;
             }
-            RelaxationBucket rb = buildRelaxationBucket(state, b);
-            if (!rb.acyclic)
+            rbs[b] = buildRelaxationBucket(state, b);
+            if (!rbs[b].acyclic)
             {
                 notes[b] = "skipped (cyclic bucket graph)";
                 return;
             }
-            if (!rb.root_feasible)
+            if (!rbs[b].root_feasible)
             {
                 infeasible[b] = 1;
                 return;
             }
-            RelaxationBoundComputer computer(rb);
-            std::vector<double> lambda;
-            const double value = maximizeRelaxationBound(computer, rb.engines.size(), &lambda);
+            active[b] = 1;
+        });
+
+        // 2. Buckets with identical relaxations (decode buckets often are)
+        // have identical bounds; compute each distinct relaxation once.
+        std::vector<std::vector<uint64_t>> signature(nb);
+        pool.parallel_for(nb, [&](uint32_t b) {
+            if (active[b])
+                signature[b] = relaxationSignature(rbs[b]);
+        });
+        std::vector<uint32_t> rep(nb, UINT32_MAX), reps;
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            if (!active[b])
+                continue;
+            for (uint32_t r : reps)
+                if (signature[r] == signature[b])
+                {
+                    rep[b] = r;
+                    break;
+                }
+            if (rep[b] == UINT32_MAX)
+            {
+                rep[b] = b;
+                reps.push_back(b);
+            }
+        }
+
+        // 3. Per distinct relaxation (in parallel): load bound, and interval
+        // bound over a geometric family of window strides, from every link
+        // upwards, doubling, until a stride falls clearly below the best
+        // value (coarser windows then only lose) or the windows cover a
+        // quarter of the chain. Every stride gives a valid bound.
+        std::vector<size_t> chain(nb, 0), best_stride(nb, 0);
+        std::vector<double> load_value(nb, 0.0), interval_value(nb, 0.0);
+        std::vector<std::vector<double>> load_lambda(nb);
+        pool.parallel_for(static_cast<uint32_t>(reps.size()), [&](uint32_t k) {
+            const uint32_t r = reps[k];
+            RelaxationBoundComputer computer(rbs[r]);
+            load_value[r] = maximizeRelaxationBound(computer, rbs[r].engines.size(), &load_lambda[r]);
+            chain[r] = computer.intervalChainLength();
+            // Strides 1, 2, 4, ... (stopping once a stride falls clearly below
+            // the best), each also with windows shifted by half a stride; the
+            // best partition into windows from any of these runs is kept.
+            std::vector<IntervalRun> runs;
+            for (size_t stride = 1; stride <= std::max<size_t>(1, chain[r] / 4); stride *= 2)
+            {
+                const double v = computer.intervalBound(stride);
+                runs.push_back({computer.windowLastLinks(), computer.windowValues()});
+                if (stride >= 2)
+                {
+                    computer.intervalBound(stride, stride / 2);
+                    runs.push_back({computer.windowLastLinks(), computer.windowValues()});
+                }
+                if (v > interval_value[r])
+                {
+                    interval_value[r] = v;
+                    best_stride[r] = stride;
+                }
+                else if (v < 0.99 * interval_value[r])
+                    break;
+            }
+            const double combined = bestWindowPartition(chain[r], runs);
+            if (combined > interval_value[r])
+            {
+                interval_value[r] = combined;
+                best_stride[r] = 0; // mixed strides
+            }
+        });
+
+        // 4. Every bucket takes its representative's bound.
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            if (!active[b])
+                continue;
+            const uint32_t r = rep[b];
+            const double value = std::max(load_value[r], interval_value[r]);
             // Float simulation of n operations can undershoot the exact
             // engine load by a relative n * 2^-24; keep the bound below it.
-            const double n = static_cast<double>(rb.classes.size()) + 64.0;
+            const double n = static_cast<double>(rbs[r].classes.size()) + 64.0;
             bounds[b] = std::max(0.0, value * (1.0 - n * 1.2e-7) - 1e-7);
             std::ostringstream os;
-            os << "regions=" << computer.numRegions() << " lambda=[";
-            for (size_t e = 0; e < lambda.size(); ++e)
-                os << (e ? "," : "") << lambda[e];
+            os << "load=" << load_value[r] << " interval=" << interval_value[r] << " stride=" << best_stride[r]
+               << " chain=" << chain[r] << " same-as=" << r << " lambda=[";
+            for (size_t e = 0; e < load_lambda[r].size(); ++e)
+                os << (e ? "," : "") << load_lambda[r][e];
             os << "]";
             notes[b] = os.str();
-        };
-        const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 16u));
-        if (hw > 1 && nb > 1)
-        {
-            std::vector<std::thread> threads;
-            std::vector<std::exception_ptr> errors(hw);
-            for (unsigned t = 0; t < hw; ++t)
-                threads.emplace_back([&, t]() {
-                    try
-                    {
-                        for (uint32_t b = t; b < nb; b += hw)
-                            work(b);
-                    }
-                    catch (...)
-                    {
-                        errors[t] = std::current_exception();
-                    }
-                });
-            for (auto &thread : threads)
-                thread.join();
-            for (auto &error : errors)
-                if (error)
-                    std::rethrow_exception(error);
-        }
-        else
-        {
-            for (uint32_t b = 0; b < nb; ++b)
-                work(b);
         }
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         state.bucket_relaxation_lower_bounds.assign(nb, 0.0f);
