@@ -19,6 +19,7 @@
 #include "core/logging.hpp"
 #include "core/plan/brancher.hpp"
 #include "core/plan/domain.hpp"
+#include "core/plan/primal_heuristic.hpp"
 #include "core/plan/propagator.hpp"
 #include "core/plan/search_node.hpp"
 #include "core/plan/search_state.hpp"
@@ -817,7 +818,16 @@ class SearchEngine
 
         std::string initial_conflict;
         state.recordStartDomainShapeAtEntry();
-        if (!runPropagators(kInvalidVarId, &initial_conflict))
+        const auto root_propagation_start = std::chrono::steady_clock::now();
+        const bool root_consistent = runPropagators(kInvalidVarId, &initial_conflict);
+        LOG(INFO) << "[SearchEngine] root propagation took "
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - root_propagation_start).count()
+                  << "s";
+#ifdef TG_PROFILE
+        LOG(INFO) << "[SearchEngine profile] after root propagation";
+        reportProfile();
+#endif
+        if (!root_consistent)
         {
             LOG(WARNING) << "[SearchEngine] Root state contradicted during initial propagation: "
                          << initial_conflict;
@@ -855,6 +865,11 @@ class SearchEngine
 #endif
         root_lower_bound = root_node->lower_bound;
         sampleSearchGap(0, "root", true);
+        runRootPrimalHeuristic(program_deadline);
+        // With an incumbent from the root heuristic, the remaining search is
+        // proof work: refresh and split the largest open regions first.
+        if (incumbent_best_cost < TGConstants::INF)
+            selector->setLargestBoxFirst();
 
         uint32_t iterations = 0;
 #ifdef TG_PROFILE
@@ -984,28 +999,7 @@ class SearchEngine
                            << ", evaluated total cost=" << total_cost;
 
                 if (total_cost < incumbent_best_cost)
-                {
-                    incumbent_best_cost = total_cost;
-                    selector->setIncumbent(incumbent_best_cost);
-                    incumbent_extractions = extractSolution(state);
-
-                    incumbent_cached_nodes.clear();
-                    for (const auto &pair : state.cached_vars)
-                    {
-                        if (state.domains[pair.second].isFixed() && state.domains[pair.second].fixedValue() == 1)
-                        {
-                            incumbent_cached_nodes.insert(pair.first);
-                        }
-                    }
-
-                    LOG(INFO) << "[SearchEngine] New best cost: " << incumbent_best_cost
-                              << " at iteration " << iterations
-                              << " event-epoch=" << std::setprecision(17)
-                              << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
-                              << " program-deadline=" << program_deadline;
-                    state.best_cost = incumbent_best_cost;
-                    sampleSearchGap(iterations, "incumbent", true);
-                }
+                    recordIncumbent(total_cost, iterations, program_deadline, "search");
                 continue;
             }
 
@@ -1176,6 +1170,192 @@ class SearchEngine
 
   private:
     double last_gap_sample_ = -1.0;
+
+    // Leaf evaluation shared by the search and the primal heuristic: every
+    // variable is fixed and propagation succeeded.
+    float evaluateLeafCost() const
+    {
+        float total_cost = 0.0f;
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            float w = (b < state.bucket_weights.size()) ? state.bucket_weights[b] : 1.0f;
+            total_cost += w * evaluateMakespan(state, b);
+        }
+        return total_cost;
+    }
+
+    void recordIncumbent(float total_cost, uint32_t iterations, double program_deadline, const char *source)
+    {
+        incumbent_best_cost = total_cost;
+        selector->setIncumbent(incumbent_best_cost);
+        incumbent_extractions = extractSolution(state);
+
+        incumbent_cached_nodes.clear();
+        for (const auto &pair : state.cached_vars)
+        {
+            if (state.domains[pair.second].isFixed() && state.domains[pair.second].fixedValue() == 1)
+            {
+                incumbent_cached_nodes.insert(pair.first);
+            }
+        }
+
+        LOG(INFO) << "[SearchEngine] New best cost: " << incumbent_best_cost
+                  << " at iteration " << iterations << " source=" << source
+                  << " event-epoch=" << std::setprecision(17)
+                  << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+                  << " program-deadline=" << program_deadline;
+        state.best_cost = incumbent_best_cost;
+        sampleSearchGap(iterations, "incumbent", true);
+    }
+
+    static bool fixDomain(SearchState &st, VarId var, int32_t value)
+    {
+        const Domain &domain = st.domains[var];
+        if (!domain.contains(value))
+            return false;
+        if (domain.isFixed())
+            return true;
+        st.setDomain(var, domain.is_mask ? Domain::makeFixed(value, true, domain.min_val)
+                                         : Domain::makeRange(value, value));
+        return true;
+    }
+
+    // Applies a complete plan below the current node, propagates it with every
+    // propagator and evaluates it as a normal leaf. The state is restored to
+    // the current node afterwards. Returns the leaf cost, or INF with a reason.
+    float tryPlan(const PrimalPlan &plan, const std::vector<PrimalBucketContext> &contexts, uint32_t iterations,
+                  double program_deadline, std::string &failure)
+    {
+        const size_t marker = state.getTrailMarker();
+        float cost = TGConstants::INF;
+        auto finish = [&]() {
+            state.backtrackTo(marker);
+            brancher->onRestore();
+            return cost;
+        };
+        for (const auto &[base, var] : state.cached_vars)
+            if (!fixDomain(state, var, plan.cached.count(base) ? 1 : 0))
+            {
+                failure = "cache decision outside domain: " + state.var_infos[var].name;
+                return finish();
+            }
+        for (uint32_t b = 0; b < contexts.size(); ++b)
+        {
+            const RelaxationBucket &rb = contexts[b].rb;
+            const PrimalBucketPlan &bp = plan.buckets[b];
+            for (uint32_t u = 0; u < rb.classes.size(); ++u)
+                if (!fixDomain(state, rb.classes[u].selected_var, bp.value[u]))
+                {
+                    failure = "selection outside domain: " + state.var_infos[rb.classes[u].selected_var].name +
+                              " value " + std::to_string(bp.value[u]);
+                    return finish();
+                }
+            // Ranks: keep fixed starts, give the others increasing ranks in
+            // dispatch order inside their windows.
+            std::unordered_set<int32_t> pinned;
+            for (uint32_t u : bp.order)
+            {
+                const Domain &d = state.domains[state.start_vars[b].at(rb.classes[u].cid)];
+                if (d.isFixed())
+                    pinned.insert(d.fixedValue());
+            }
+            int32_t previous = -1;
+            for (uint32_t u : bp.order)
+            {
+                const VarId sv = state.start_vars[b].at(rb.classes[u].cid);
+                const Domain d = state.domains[sv];
+                if (d.isFixed())
+                    continue;
+                int32_t rank = std::max(previous + 1, d.getMin());
+                while (rank <= d.getMax() && (pinned.count(rank) || !d.contains(rank)))
+                    ++rank;
+                if (!fixDomain(state, sv, rank))
+                {
+                    failure = "no rank for " + state.var_infos[sv].name + " in " + d.toString() + " after " +
+                              std::to_string(previous);
+                    return finish();
+                }
+                previous = rank;
+            }
+        }
+        std::string conflict;
+        if (!runPropagators(kInvalidVarId, &conflict))
+        {
+            failure = "propagation conflict: " + conflict;
+            return finish();
+        }
+        for (VarId v = 0; v < state.numVars(); ++v)
+            if (!state.domains[v].isFixed())
+            {
+                failure = "unfixed variable after propagation: " + state.var_infos[v].name + "=" +
+                          state.domains[v].toString();
+                return finish();
+            }
+        cost = evaluateLeafCost();
+        if (cost < incumbent_best_cost)
+            recordIncumbent(cost, iterations, program_deadline, "root-heuristic");
+        return finish();
+    }
+
+    void runRootPrimalHeuristic(double program_deadline)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        std::vector<PrimalBucketContext> contexts;
+        std::vector<PrimalPlan> plans = buildRootPrimalPlans(state, contexts);
+        const double build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (plans.empty())
+        {
+            LOG(INFO) << "[PrimalHeuristic] no consistent plan (build " << build_seconds << "s)";
+            return;
+        }
+        auto describe = [](const PrimalPlan &plan) {
+            std::ostringstream os;
+            for (size_t e = 0; e < plan.lambda.size(); ++e)
+                os << (e ? "," : "") << plan.lambda[e];
+            return os.str();
+        };
+        std::string failure;
+        const float cost = tryPlan(plans.front(), contexts, 0, program_deadline, failure);
+        const double total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        LOG(INFO) << "[PrimalHeuristic] predicted=" << plans.front().cost << " evaluated="
+                  << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
+                  << " lambda=[" << describe(plans.front()) << "] cached=" << plans.front().cached.size()
+                  << " build=" << build_seconds << "s total=" << total_seconds << "s"
+                  << (failure.empty() ? "" : " failure=" + failure);
+        if (!std::isfinite(cost))
+            return;
+        // Local search from every initial plan until no move improves,
+        // bounded by the program deadline; validate the best result.
+        const auto ls_start = std::chrono::steady_clock::now();
+        auto ls_deadline = std::chrono::steady_clock::time_point::max();
+        if (program_deadline > 0.0)
+        {
+            const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+            ls_deadline = ls_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                         std::chrono::duration<double>(std::max(0.0, program_deadline - now)));
+        }
+        uint64_t evaluations = 0;
+        for (size_t i = 0; i < plans.size(); ++i)
+        {
+            const double initial = plans[i].cost;
+            improvePrimalPlan(state, contexts, plans[i], ls_deadline, evaluations);
+            const double ls_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ls_start).count();
+            if (!(plans[i].cost < incumbent_best_cost - 1e-6))
+            {
+                LOG(INFO) << "[PrimalHeuristic] local search lambda=[" << describe(plans[i]) << "] " << initial
+                          << " -> " << plans[i].cost << " (no improvement; " << evaluations << " schedules, "
+                          << ls_seconds << "s)";
+                continue;
+            }
+            failure.clear();
+            const float improved_cost = tryPlan(plans[i], contexts, 0, program_deadline, failure);
+            LOG(INFO) << "[PrimalHeuristic] local search lambda=[" << describe(plans[i]) << "] " << initial << " -> "
+                      << plans[i].cost << " evaluated="
+                      << (std::isfinite(improved_cost) ? std::to_string(improved_cost) : std::string("rejected"))
+                      << " schedules=" << evaluations << " search=" << ls_seconds << "s"
+                      << (failure.empty() ? "" : " failure=" + failure);
+        }
+    }
 
     // Logs (epoch, incumbent, certified bound). The supervisor integrates the
     // gap as a step function holding each sample until the next one; bounds

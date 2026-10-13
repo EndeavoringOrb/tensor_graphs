@@ -1,0 +1,14 @@
+{
+  "name": "relaxation bound must not add children whose supports overlap",
+  "description": "a and b can both reuse s or use private children. L(a)=L(b)=5 but the cheapest plan shares s (7). Summing both children's bounds would claim 11.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a", "b"], "cost": 1}]},
+    "a": {"alternatives": [{"children": ["s"], "cost": 1}, {"children": ["t"], "cost": 5}]},
+    "b": {"alternatives": [{"children": ["s"], "cost": 1}, {"children": ["u"], "cost": 5}]},
+    "s": {"alternatives": [{"cost": 4}]},
+    "t": {"alternatives": [{"cost": 1}]},
+    "u": {"alternatives": [{"cost": 1}]}
+  },
+  "expected_optimum": 7
+}

@@ -22,6 +22,8 @@ class Selector
     virtual void clear() = 0;
     virtual void setIncumbent(float cost) {}
     virtual bool hasIncumbent() const { return false; }
+    // Switch to largest-box-first node selection (see SearchNodeCompare).
+    virtual void setLargestBoxFirst() {}
     virtual void appendRemainingBoxBits(float incumbent_cost, std::vector<double> &box_bits) const
     {
         Error::throw_err("Selector does not support search volume evaluation");
@@ -82,6 +84,12 @@ class PriorityQueueSelector : public Selector
     bool hasIncumbent() const override
     {
         return comp.has_incumbent;
+    }
+
+    void setLargestBoxFirst() override
+    {
+        comp.largest_box_first = true;
+        std::make_heap(queue.begin(), queue.end(), comp);
     }
 
     void push(const std::shared_ptr<SearchNode> &node) override

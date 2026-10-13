@@ -22,12 +22,14 @@
 #include "tests/write_after_read_cache.hpp"
 #include "tests/private_layout_regression.hpp"
 #include "tests/start_rank_window_regression.hpp"
+#include "tests/relaxation_bound.hpp"
 
 int main(int argc, char *argv[])
 {
     ArgParser parser("test", "Run tests.");
     parser.add_flag({"--private-layout"}, "Run private-layout storage-span regression tests.");
     parser.add_flag({"--start-rank-window"}, "Run start rank window group regression tests.");
+    parser.add_flag({"--relaxation-bound"}, "Run randomized relaxation lower-bound tests against brute force.");
     parser.add_flag({"--no-records"}, "Disable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
@@ -65,6 +67,12 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--start-rank-window"))
     {
         try { StartRankWindowRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    if (parser.get_flag("--relaxation-bound"))
+    {
+        try { RelaxationBoundRegression::run(); }
         catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
         return 0;
     }

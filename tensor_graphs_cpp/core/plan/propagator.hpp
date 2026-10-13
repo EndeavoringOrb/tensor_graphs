@@ -34,6 +34,7 @@
 #include "core/plan/propagators/engine_workload.hpp"
 #include "core/plan/propagators/write_after_read_start.hpp"
 #include "core/plan/propagators/start_run_makespan.hpp"
+#include "core/plan/propagators/relaxation_bound.hpp"
 
 namespace plan
 {
@@ -110,6 +111,7 @@ inline void addExtraPropagators(EngineT &engine)
     engine.addPropagator(std::make_unique<CachedOffsetAllocationPropagator>());
     engine.addPropagator(std::make_unique<RequiredReachabilityPropagator>());
     engine.addPropagator(std::make_unique<StartRunMakespanPropagator>());
+    engine.addPropagator(std::make_unique<RelaxationBoundPropagator>());
 }
 
 template <typename EngineT>

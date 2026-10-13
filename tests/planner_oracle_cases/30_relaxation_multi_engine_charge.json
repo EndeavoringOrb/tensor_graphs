@@ -1,0 +1,14 @@
+{
+  "name": "relaxation bound charges a multi-engine operation once per engine weight",
+  "description": "The two-engine kernel takes 3.5. Charging its cost once per occupied engine without the lambda weights would claim 6 (the split alternative).",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [
+      {"cost": 3.5, "engines": [0, 1]},
+      {"children": ["p", "q"], "cost": 1, "engines": [0]}
+    ]},
+    "p": {"alternatives": [{"cost": 5, "engines": [0]}]},
+    "q": {"alternatives": [{"cost": 5, "engines": [1]}]}
+  },
+  "expected_optimum": 3.5
+}

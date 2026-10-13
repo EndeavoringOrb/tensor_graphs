@@ -1,6 +1,7 @@
 // tensor_graphs_cpp/core/plan/search_node.hpp
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <limits>
@@ -38,12 +39,26 @@ struct SearchNode
 struct SearchNodeCompare
 {
     bool has_incumbent = false;
+    // Proof phase: the open node with the largest box comes first (its
+    // stored log2 volume, or the shallowest node when volumes are not
+    // measured), so the regions that dominate the frontier are refreshed and
+    // split first.
+    bool largest_box_first = false;
 
     SearchNodeCompare() = default;
     explicit SearchNodeCompare(bool has_incumbent) : has_incumbent(has_incumbent) {}
 
     bool operator()(const std::shared_ptr<SearchNode> &a, const std::shared_ptr<SearchNode> &b) const
     {
+        if (largest_box_first)
+        {
+            const bool measured = !std::isnan(a->log2_volume) && !std::isnan(b->log2_volume);
+            if (measured && a->log2_volume != b->log2_volume)
+                return a->log2_volume < b->log2_volume;
+            if (a->depth != b->depth)
+                return a->depth > b->depth;
+            return a->priority > b->priority;
+        }
         if (!has_incumbent)
         {
             // Dive phase: deepest first. If priorities match, break tie by lower priority (e.g. Left over Right).
