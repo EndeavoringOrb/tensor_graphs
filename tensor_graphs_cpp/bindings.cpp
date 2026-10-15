@@ -271,6 +271,22 @@ struct InstallCrashHandler
 #include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
 
+// Inference steps are short bursts separated by Python work: opt this
+// process out of Windows execution-speed throttling (EcoQoS) so the cores are
+// not clocked down between steps. Fails loud if the OS rejects it.
+inline void optOutOfPowerThrottling()
+{
+#ifdef _WIN32
+    PROCESS_POWER_THROTTLING_STATE state{};
+    state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    state.StateMask = 0;
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state)))
+        throw std::runtime_error("SetProcessInformation(ProcessPowerThrottling) failed: " +
+                                 std::to_string(GetLastError()));
+#endif
+}
+
 namespace py = pybind11;
 
 static std::string pythonCallsite()
@@ -310,6 +326,10 @@ class LLMSession
     bool runFullGraph = false;
     bool compileNoWeightsBucket = false;
     bool has_run = false;
+    // Aligned block buckets (see addBlockBuckets): sizes ascending, and the
+    // compiled graph index of the block [start, start + size) per size.
+    std::vector<uint32_t> blockSizes;
+    std::vector<std::unordered_map<uint32_t, uint32_t>> blockGraphIdx;
 
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
@@ -320,8 +340,12 @@ class LLMSession
                double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
                const std::string &write_refs = "", const std::string &compare_refs = "",
                 bool disable_compilation_caching = false, bool ref_only = false,
-               bool compile_no_weights_bucket = false, bool saturate_only = false)
+               bool compile_no_weights_bucket = false, bool saturate_only = false,
+               const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, float>> &token_buckets = {},
+               const std::vector<uint32_t> &block_sizes = {}, const std::string &repo_path = "",
+               bool fold_weights = false, bool resident_weights = false)
     {
+        optOutOfPowerThrottling();
         compileNoWeightsBucket = compile_no_weights_bucket;
         referenceFile = write_refs;
         compareReferenceFile = compare_refs;
@@ -367,8 +391,12 @@ class LLMSession
         }
 
         std::string gHash = computeGraphHash(*g, {logitsId});
-        repo = std::make_unique<TGStore>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
-                                      gHash, true);
+        // Folded tensors live next to the plan when a repo path is given, so a
+        // compile and the runs using its plan share a self-contained directory.
+        repo = std::make_unique<TGStore>(repo_path.empty()
+                                             ? "benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len)
+                                             : repo_path,
+                                         gHash, true);
 
         std::string actual_cache = cache_file;
         if (actual_cache.empty())
@@ -386,6 +414,7 @@ class LLMSession
         else if (!compareReferenceFile.empty())
             actual_cache += ".reference-compare";
         actual_cache += disable_caching ? ".no-dirty-cache" : ".dirty-cache";
+        actual_cache += ".padded";
 
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(),
                                             disable_caching,
@@ -397,7 +426,14 @@ class LLMSession
         session->settings.max_time_seconds = max_time_seconds;
         session->settings.disable_fusion = disable_fusion;
         session->settings.saturate_only = saturate_only;
-        KernelRegistry::get().setReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
+        // Weight-only values (copies, casts, transposes) are computed while
+        // compiling and kept as constants instead of per-run work.
+        session->settings.fold_weights = fold_weights;
+        session->settings.resident_weights = resident_weights;
+        // Token ids past a request are padding (zeros) that the next longer
+        // request marks dirty.
+        session->settings.padded_inputs[inputIdsId] = 1;
+        setKernelReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
 
         if ((!referenceFile.empty() || !compareReferenceFile.empty()) &&
             !referenceVerifier.init(referenceFile, compareReferenceFile))
@@ -419,6 +455,24 @@ class LLMSession
                 session->addBucket(inputDirty, {outputNeeded});
             }
         }
+
+        // Explicit token buckets: tokens [dirty_start, dirty_end) are dirty and
+        // the logits row `output_row` is needed.
+        for (const auto &[dirty_start, dirty_end, output_row, weight] : token_buckets)
+        {
+            if (dirty_start >= dirty_end || dirty_end > max_seq_len || output_row >= max_seq_len)
+                throw std::runtime_error("token bucket outside the sequence: [" + std::to_string(dirty_start) + ", " +
+                                         std::to_string(dirty_end) + ") output " + std::to_string(output_row));
+            Region inputRegion;
+            inputRegion.region = {{0, 1}, {dirty_start, dirty_end}};
+            Region outputNeeded;
+            outputNeeded.region = {{0, 1}, {output_row, output_row + 1}, {0, vocab_size}};
+            session->addBucket({{inputIdsId, {inputRegion}}}, {outputNeeded}, weight);
+        }
+
+        const size_t blockBucketsBegin = session->manualBuckets.size();
+        if (!block_sizes.empty())
+            addBlockBuckets(block_sizes);
 
         if (compile_no_weights_bucket)
         {
@@ -444,6 +498,110 @@ class LLMSession
         }
 
         session->compile();
+
+        if (!blockSizes.empty())
+        {
+            mapBlockGraphs(blockBucketsBegin);
+            // Populate every cached value once (untimed) so block buckets may
+            // treat clean regions as cached; the next step after reset marks
+            // every position of its tokens dirty.
+            std::vector<int32_t> zeros(max_seq_len, 0);
+            session->writeInput(inputIdsId, zeros.data(), zeros.size() * sizeof(int32_t));
+            session->runGraph(session->fullBucketIdx);
+            has_run = true;
+        }
+    }
+
+    // Buckets for aligned power-of-two token blocks: for each size n, every
+    // block [c, c + n) with c a multiple of n. A block needs its last logits
+    // row; blocks of the smallest size need all their rows so a request may
+    // end inside one. Any dirty range is covered by consecutive blocks
+    // (largest aligned block that fits first). Larger sizes mean fewer
+    // buckets; a larger smallest size means fewer buckets but more wasted
+    // rows per step.
+    void addBlockBuckets(std::vector<uint32_t> sizes)
+    {
+        std::sort(sizes.begin(), sizes.end());
+        sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+        for (uint32_t n : sizes)
+        {
+            if (n == 0 || (n & (n - 1)) != 0 || max_seq_len % n != 0)
+                throw std::runtime_error("block sizes must be powers of two dividing max_sequence_length; got " +
+                                         std::to_string(n));
+        }
+        blockSizes = sizes;
+        // With single-token blocks every request ends at a block end, so each
+        // block needs only its last logits row; the blocks of one size are
+        // then one bucket shifted along the sequence and are planned as a
+        // shift family.
+        const bool singleTokenBlocks = blockSizes.front() == 1;
+        for (uint32_t n : blockSizes)
+        {
+            const bool allRows = !singleTokenBlocks && n == blockSizes.front();
+            BucketFamilySpec family;
+            for (uint32_t c = 0; c < max_seq_len; c += n)
+            {
+                Region inputRegion;
+                inputRegion.region = {{0, 1}, {c, c + n}};
+                Region outputNeeded;
+                outputNeeded.region = {{0, 1}, {allRows ? c : c + n - 1, c + n}, {0, vocab_size}};
+                family.members.push_back(static_cast<uint32_t>(session->manualBuckets.size()));
+                family.shifts.push_back(c);
+                session->addBucket({{inputIdsId, {inputRegion}}}, {outputNeeded}, 1.0f);
+            }
+            if (singleTokenBlocks)
+                session->settings.bucket_families.push_back(std::move(family));
+        }
+    }
+
+    void mapBlockGraphs(size_t begin)
+    {
+        const auto &graphs = session->getCachedGraphs();
+        blockGraphIdx.assign(blockSizes.size(), {});
+        size_t idx = begin;
+        for (size_t s = 0; s < blockSizes.size(); ++s)
+        {
+            const uint32_t n = blockSizes[s];
+            for (uint32_t c = 0; c < max_seq_len; c += n, ++idx)
+            {
+                if (idx >= graphs.size())
+                    throw std::runtime_error("missing compiled graph for block bucket");
+                const auto &regions = graphs[idx].bucket.inputDirtyRegions;
+                auto it = regions.find(inputIdsId);
+                if (it == regions.end() || it->second.size() != 1 || it->second[0].region[1].start != c ||
+                    it->second[0].region[1].stop != c + n)
+                    throw std::runtime_error("compiled graph order does not match the block buckets");
+                blockGraphIdx[s][c] = static_cast<uint32_t>(idx);
+            }
+        }
+    }
+
+    // Runs blocks covering [start, end) in order; returns the root pointer of
+    // the last block run (it holds logits row end - 1).
+    const float *runBlocks(uint32_t start, uint32_t end)
+    {
+        const uint32_t smallest = blockSizes.front();
+        uint32_t pos = start - start % smallest;
+        const float *out = nullptr;
+        while (pos < end)
+        {
+            size_t chosen = 0;
+            for (size_t s = blockSizes.size(); s-- > 0;)
+            {
+                const uint32_t n = blockSizes[s];
+                if (pos % n == 0 && (pos + n <= end || s == 0))
+                {
+                    chosen = s;
+                    break;
+                }
+            }
+            const uint32_t n = blockSizes[chosen];
+            if (pos + n > max_seq_len)
+                throw std::runtime_error("block outside the sequence");
+            out = static_cast<const float *>(session->runGraph(blockGraphIdx[chosen].at(pos)));
+            pos += n;
+        }
+        return out;
     }
 
     Session &nativeSession() { return *session; }
@@ -506,6 +664,18 @@ class LLMSession
                                  const void *data) {
             referenceVerifier.verify(logicalId, kernel_name, ctx, data, g.get());
         };
+        if (!blockSizes.empty())
+        {
+            uint32_t first = dirty_regions.front().region[1].start;
+            for (const Region &r : dirty_regions)
+                first = std::min(first, r.region[1].start);
+            const float *blockOutput = runBlocks(first, static_cast<uint32_t>(tokens.size()));
+            std::vector<float> row(blockOutput + static_cast<uint64_t>(tokIdx) * vocab_size,
+                                   blockOutput + static_cast<uint64_t>(tokIdx + 1) * vocab_size);
+            prev_tokens = tokens;
+            return row;
+        }
+
         const bool verifyTensors = !referenceFile.empty() || !compareReferenceFile.empty();
         const bool use_full_bucket = runFullGraph || (compileNoWeightsBucket && !has_run);
         const float *device_output = static_cast<const float *>(session->run(
@@ -554,10 +724,6 @@ class LLMSession
             }
         }
 
-        std::cout << "[DEBUG_LOGITS] max_val=" << max_val << " argmax_idx=" << argmax_idx
-                  << " host_output[0]=" << host_output[0] << " host_output[1]=" << host_output[1]
-                  << " host_output[563]=" << (563 < host_output.size() ? host_output[563] : -999.0f)
-                  << " tokIdx=" << tokIdx << std::endl;
         return argmax_idx;
     }
 };
@@ -1308,7 +1474,9 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
                       const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
-                      bool, const std::string &, const std::string &, bool, bool, bool, bool>(),
+                      bool, const std::string &, const std::string &, bool, bool, bool, bool,
+                      const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, float>> &,
+                      const std::vector<uint32_t> &, const std::string &, bool, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
              py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
@@ -1317,7 +1485,10 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
              py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
              py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false,
-             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false)
+             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false,
+             py::arg("token_buckets") = std::vector<std::tuple<uint32_t, uint32_t, uint32_t, float>>{},
+             py::arg("block_sizes") = std::vector<uint32_t>{}, py::arg("repo_path") = "",
+             py::arg("fold_weights") = false, py::arg("resident_weights") = false)
         .def_property_readonly("native_session", &LLMSession::nativeSession, py::return_value_policy::reference_internal)
         .def_property_readonly("root_id", &LLMSession::rootId)
         .def_property_readonly("input_id", &LLMSession::inputId)

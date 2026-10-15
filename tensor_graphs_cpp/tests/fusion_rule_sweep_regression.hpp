@@ -37,6 +37,11 @@ struct FusionRuleWithVisitedSet : public Rule
         return "FusionRuleWithVisitedSet";
     }
 
+    std::unique_ptr<Rule> clone() const override
+    {
+        return std::make_unique<FusionRuleWithVisitedSet>(*this);
+    }
+
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         if (visited_enodes.count(eNodeIdx))

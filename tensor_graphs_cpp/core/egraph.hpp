@@ -261,6 +261,24 @@ struct EGraph
         return id;
     }
 
+    // Class already holding an enode equal to `node` (children compared
+    // canonically), or an invalid id.
+    EClassId lookupENode(ENode node) const
+    {
+        std::vector<EClassId> children = node.getChildren();
+        for (EClassId &child : children)
+            child = findConst(child);
+        node.setChildren(std::move(children));
+        node.setSig(computeSignature(node));
+        auto it = hashcons.find(node.getSig());
+        if (it == hashcons.end())
+            return EClassId{};
+        for (ENodeId other : it->second)
+            if (node == enodes[other.value])
+                return findConst(nodeToEClass[other.value]);
+        return EClassId{};
+    }
+
     EClassId addENode(EClassId e_class_id, ENode node)
     {
         EClassId canonical = find(e_class_id);

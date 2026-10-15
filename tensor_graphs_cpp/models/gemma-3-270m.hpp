@@ -15,6 +15,14 @@ struct Gemma3ModelConfig
     uint32_t head_dim = 256;
     uint32_t n_kv_groups = 1;
     uint32_t query_pre_attn_scalar = 256;
+    // Every `sliding_window_pattern`-th layer attends globally; the others
+    // see only the last `sliding_window` positions.
+    uint32_t sliding_window_pattern = 6;
+    uint32_t sliding_window = 512;
+    float rope_theta_global = 1000000.0f;
+    float rope_theta_local = 10000.0f;
+
+    bool isGlobalLayer(uint32_t layer) const { return (layer + 1) % sliding_window_pattern == 0; }
 };
 
 class Gemma3Model
@@ -122,7 +130,7 @@ class Gemma3Model
         return g.mul(term5, term4);
     }
 
-    std::tuple<LogicalId, LogicalId> compute_rope()
+    std::tuple<LogicalId, LogicalId> compute_rope(float theta_val)
     {
         int32_t start_val = 0, stop_val = cfg.head_dim, step_val = 2;
         LogicalId start = g.constant({1}, &start_val, DType::INT32);
@@ -136,7 +144,6 @@ class Gemma3Model
         LogicalId h_dim_fp_1d =
             g.repeat(h_dim_fp, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
         LogicalId exponent = g.div(indices, h_dim_fp_1d);
-        float theta_val = 10000.0f;
         LogicalId theta = g.constant({1}, &theta_val, DType::FLOAT32);
         LogicalId theta_1d =
             g.repeat(theta, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
@@ -192,21 +199,32 @@ class Gemma3Model
         return g.add(term1, term2);
     }
 
-    LogicalId compute_causal_mask()
+    // Additive attention mask [1, seq, seq]: -1e9 where key j may not be seen
+    // from query i. Causal (j > i) always; with a window w also j <= i - w.
+    LogicalId compute_attention_mask(uint32_t window)
     {
         int32_t mask_shape[] = {(int32_t)seq_len, (int32_t)seq_len};
         LogicalId mask_shape_node = g.constant({2}, mask_shape, DType::INT32);
         float one_val = 1.0f;
         LogicalId ones_matrix = g.fill(g.constant({1}, &one_val, DType::FLOAT32), mask_shape_node);
         int32_t k_val = 1;
-        LogicalId triu_mask = g.triu(ones_matrix, g.constant({1}, &k_val, DType::INT32));
+        LogicalId blocked = g.triu(ones_matrix, g.constant({1}, &k_val, DType::INT32));
+        if (window > 0 && window < seq_len)
+        {
+            // triu(ones, 1 - w) keeps j >= i - w + 1; its complement is the
+            // part of the past outside the window.
+            int32_t window_k = 1 - (int32_t)window;
+            LogicalId in_window = g.triu(ones_matrix, g.constant({1}, &window_k, DType::INT32));
+            LogicalId too_old = g.add(ones_matrix, g.neg(in_window));
+            blocked = g.add(blocked, too_old);
+        }
         float neg_inf_val = -1e9f;
         LogicalId neg_inf_node = g.constant({1}, &neg_inf_val, DType::FLOAT32);
         int32_t neg_inf_shape[] = {1, 1};
         LogicalId neg_inf_reshaped = g.reshape(neg_inf_node, g.constant({2}, neg_inf_shape, DType::INT32));
         LogicalId neg_inf_expanded = g.repeat(neg_inf_reshaped, seq_len, 0);
         neg_inf_expanded = g.repeat(neg_inf_expanded, seq_len, 1);
-        LogicalId scaled_mask = g.mul(triu_mask, neg_inf_expanded);
+        LogicalId scaled_mask = g.mul(blocked, neg_inf_expanded);
         int32_t final_shape[] = {1, (int32_t)seq_len, (int32_t)seq_len};
         return g.reshape(scaled_mask, g.constant({3}, final_shape, DType::INT32));
     }
@@ -359,10 +377,10 @@ class Gemma3Model
         LogicalId scale_node = g.fill(g.constant({1}, &scale_val, DType::FLOAT32), {1, seq_len, cfg.emb_dim});
         x = g.mul(x, scale_node);
 
-        auto rope = compute_rope();
-        LogicalId rope_cos = std::get<0>(rope);
-        LogicalId rope_sin = std::get<1>(rope);
-        LogicalId mask_id = compute_causal_mask();
+        auto [rope_cos_global, rope_sin_global] = compute_rope(cfg.rope_theta_global);
+        auto [rope_cos_local, rope_sin_local] = compute_rope(cfg.rope_theta_local);
+        LogicalId mask_global = compute_attention_mask(0);
+        LogicalId mask_local = compute_attention_mask(cfg.sliding_window);
 
         for (uint32_t i = 0; i < cfg.n_layers; ++i)
         {
@@ -370,8 +388,10 @@ class Gemma3Model
             LogicalId residual = x;
             LogicalId w_ln1 = weight(w_path, prefix + ".input_layernorm.weight");
             x = rms_norm_gemma_atomic(x, w_ln1, 1, cfg.emb_dim);
-            auto qkv = attention_qkv_atomic(x, prefix, rope_cos, rope_sin);
-            x = attention_output_atomic(qkv, prefix, mask_id);
+            const bool global = cfg.isGlobalLayer(i);
+            auto qkv = attention_qkv_atomic(x, prefix, global ? rope_cos_global : rope_cos_local,
+                                            global ? rope_sin_global : rope_sin_local);
+            x = attention_output_atomic(qkv, prefix, global ? mask_global : mask_local);
             LogicalId w_post_attn = weight(w_path, prefix + ".post_attention_layernorm.weight");
             x = rms_norm_gemma_atomic(x, w_post_attn, 1, cfg.emb_dim);
             x = g.add(residual, x);

@@ -67,7 +67,7 @@ class WriteAfterReadPropagator : public Propagator
         else
         {
             int32_t single_val = -1;
-            for (int32_t v = 1; v <= 31; ++v)
+            for (int32_t v = 1; v <= 63; ++v)
             {
                 if (sel_dom.contains(v))
                 {
@@ -200,7 +200,7 @@ class WriteAfterReadPropagator : public Propagator
             else
             {
                 int32_t single_val = -1;
-                for (int32_t v = 1; v <= 31; ++v)
+                for (int32_t v = 1; v <= 63; ++v)
                 {
                     if (sel_dom.contains(v))
                     {
@@ -1231,7 +1231,7 @@ class WriteAfterReadPropagator : public Propagator
                         return false;
                 }
             }
-            else
+            else if (!state.completing_plan)
             {
                 bool pushed = true;
                 while (pushed)
@@ -1302,12 +1302,17 @@ class WriteAfterReadPropagator : public Propagator
             {
                 buildBucketInfo(state, b);
                 buildFixedOffsetIndex(state, b, kInvalidVarId);
+                // Fixed offsets only: like the incremental path, an unfixed
+                // offset is checked against the fixed allocations when it
+                // becomes fixed. Forward-pruning every unfixed offset here
+                // queries its whole domain against every allocation that may
+                // overlap in time, which is quadratic in a bucket's size.
                 std::vector<FixedAlloc> all_allocs;
                 for (const auto &[cid, sel_v] : state.selected_vars[b])
                 {
                     FixedAlloc alloc;
                     if (!inPrivateLayoutSpace(state, b, cid) &&
-                        getAlloc(state, b, cid, alloc, /*require_fixed_offset=*/false))
+                        getAlloc(state, b, cid, alloc, /*require_fixed_offset=*/true))
                         all_allocs.push_back(alloc);
                 }
                 for (auto &target : all_allocs)
@@ -1388,8 +1393,17 @@ class FixedOffsetStartPropagator : public Propagator
     bool resolvePair(SearchState &state, uint32_t b, FixedAlloc A, FixedAlloc B,
                      std::vector<VarId> &worklist)
     {
-        conflict_pair_context_ = " (overlapping allocations A cid=" + std::to_string(A.cid.value) +
-                                 ", B cid=" + std::to_string(B.cid.value) + ")";
+        auto describeClass = [&](const FixedAlloc &x) {
+            const EClass &cls = state.bucket_egraphs[b].getEClass(x.cid);
+            std::string ops;
+            for (ENodeId e : cls.enodes)
+                ops += toString(state.bucket_egraphs[b].getENode(e).getOpType()) + "/";
+            return std::to_string(x.cid.value) + " " + toString(cls.shape) + " " + ops + " offset=" +
+                   std::to_string(x.offset) + " size=" + std::to_string(x.size) + " start=" + std::to_string(x.start) +
+                   (x.is_input_or_cache ? " input-or-cache" : "") + (x.is_root ? " root" : "");
+        };
+        conflict_pair_context_ = " (overlapping allocations A cid=" + describeClass(A) + ", B cid=" + describeClass(B) +
+                                 " bucket=" + std::to_string(b) + ")";
         // 1. Views check: if both are views, or either is view of the other, they can safely share
         if ((A.is_view && B.is_view) ||
             WriteAfterReadPropagator::isViewOf(state, b, A.cid, B.cid) ||

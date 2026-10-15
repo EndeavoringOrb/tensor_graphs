@@ -73,6 +73,8 @@ struct Session
     std::unordered_set<BaseEClassId> selectedCachedNodes;
     std::vector<float> cachedBucketWeights;
 
+    std::vector<const void *> rootPtrs;
+    mutable std::vector<float> graphCosts;
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
     std::string recordsPath = "benchmarks/records.bin";
@@ -456,6 +458,39 @@ struct Session
         std::cout << "Wrote " << total_written << " constants to memory across " << cachedGraphs.size()
                   << " graph(s). Graph has " << graph.constantStaging.size() << " constants." << std::endl;
 
+        if (settings.resident_weights)
+        {
+            // Resident weights: write each weight at the offsets of the
+            // classes holding it that no instruction computes (the
+            // preallocated resident input; a bucket may instead read a
+            // cached copy, which gets the same data).
+            std::unordered_map<LogicalId, std::unordered_set<uint64_t>> weight_offsets;
+            uint64_t weight_bytes = 0;
+            for (const CompiledGraph &g : cachedGraphs)
+            {
+                std::unordered_set<EClassId> computed;
+                for (const OpInstruction &inst : g.instructions)
+                    computed.insert(inst.eclass_id);
+                for (const auto &[eclass_id, logical_id] : g.eclass_to_logical)
+                {
+                    if (!Planner::isResidentWeightCopy(graph, logical_id) || !g.nodeViews.count(eclass_id) ||
+                        computed.count(eclass_id))
+                        continue;
+                    const uint64_t offset = g.nodeViews.at(eclass_id).offset;
+                    if (!weight_offsets[logical_id].insert(offset).second)
+                        continue;
+                    const std::vector<uint8_t> data =
+                        TensorResolver::get().readNode(graph.getNode(logical_id).child_ids[0]);
+                    if (data.size() != graph.getNode(logical_id).getLogicalSizeBytes())
+                        Error::throw_err("[Session] resident weight size mismatch");
+                    memManager.write(MemSpace{1, HandleType::CPP}, offset, data.data(), data.size());
+                    weight_bytes += data.size();
+                }
+            }
+            std::cout << "Wrote " << weight_offsets.size() << " resident weights (" << weight_bytes / (1024.0 * 1024.0)
+                      << " MB)." << std::endl;
+        }
+
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
     }
@@ -537,54 +572,57 @@ struct Session
         const uint32_t graphIdx = getBestGraphIdx(bucket);
         const CompiledGraph &cg = cachedGraphs[graphIdx];
         executor->run(cg, debugCallback);
+        return rootOutputPtr(graphIdx);
+    }
 
-        // Find the root node in CPU RAM or GPU RAM
+    // Runs compiled graph `graphIdx` (compile() must have run) and returns the
+    // host pointer of its root tensor.
+    const void *runGraph(uint32_t graphIdx)
+    {
+        if (!isCompiled || graphIdx >= cachedGraphs.size())
+            Error::throw_err("[Session.runGraph] invalid graph index " + std::to_string(graphIdx));
+        executor->run(cachedGraphs[graphIdx]);
+        return rootOutputPtr(graphIdx);
+    }
+
+    // Host pointer of the root tensor written by compiled graph `graphIdx`.
+    // Resolved once per graph; the arenas do not move after compile().
+    const void *rootOutputPtr(uint32_t graphIdx)
+    {
+        if (rootPtrs.size() != cachedGraphs.size())
+            rootPtrs.assign(cachedGraphs.size(), nullptr);
+        if (rootPtrs[graphIdx])
+            return rootPtrs[graphIdx];
+        const CompiledGraph &cg = cachedGraphs[graphIdx];
         for (const auto &pair : cg.eclass_to_logical)
         {
-            if (pair.second == rootId)
+            if (pair.second != rootId)
+                continue;
+            EClassId eclass_id = pair.first;
+            for (const auto &inst : cg.instructions)
             {
-                EClassId eclass_id = pair.first;
-                for (const auto &inst : cg.instructions)
+                if (inst.eclass_id == eclass_id || inst.logical_id == rootId)
                 {
-                    if (inst.eclass_id == eclass_id || inst.logical_id == rootId)
-                    {
-                        DeviceBuffer *buf = memManager.getBuffer(inst.outBuffer.mem_space);
-                        if (buf && buf->getBasePtr())
-                        {
-                            std::cout << "[DEBUG_RUN] found root in instruction eclass=" << eclass_id.value
-                                      << " mem_space=" << inst.outBuffer.mem_space.idx
-                                      << " type=" << static_cast<int>(inst.outBuffer.mem_space.type)
-                                      << " offset=" << inst.outBuffer.offset << std::endl;
-                            return buf->getBasePtr() + inst.outBuffer.offset;
-                        }
-                    }
-                }
-                if (cg.nodeViews.count(eclass_id))
-                {
-                    const TensorView &rootView = cg.nodeViews.at(eclass_id);
-                    DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+                    DeviceBuffer *buf = memManager.getBuffer(inst.outBuffer.mem_space);
                     if (buf && buf->getBasePtr())
-                    {
-                        std::cout << "[DEBUG_RUN] fallback to nodeView MemSpace{1, CPP} offset=" << rootView.offset << std::endl;
-                        return buf->getBasePtr() + rootView.offset;
-                    }
+                        return rootPtrs[graphIdx] = buf->getBasePtr() + inst.outBuffer.offset;
                 }
             }
+            if (cg.nodeViews.count(eclass_id))
+            {
+                const TensorView &rootView = cg.nodeViews.at(eclass_id);
+                DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+                if (buf && buf->getBasePtr())
+                    return rootPtrs[graphIdx] = buf->getBasePtr() + rootView.offset;
+            }
         }
-
         if (!cg.instructions.empty())
         {
             const OpInstruction &lastInst = cg.instructions.back();
             DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
             if (buf && buf->getBasePtr())
-            {
-                std::cout << "[DEBUG_RUN] fallback to lastInst mem_space=" << lastInst.outBuffer.mem_space.idx
-                          << " type=" << static_cast<int>(lastInst.outBuffer.mem_space.type)
-                          << " offset=" << lastInst.outBuffer.offset << std::endl;
-                return buf->getBasePtr() + lastInst.outBuffer.offset;
-            }
+                return rootPtrs[graphIdx] = buf->getBasePtr() + lastInst.outBuffer.offset;
         }
-
         Error::throw_err("Failed to retrieve valid host output pointer for root node during Session::run");
     }
 
@@ -1024,7 +1062,13 @@ struct Session
             }
             if (!valid)
                 continue;
-            const float gCost = g.cost();
+            if (graphCosts.size() != cachedGraphs.size())
+            {
+                graphCosts.clear();
+                for (const CompiledGraph &cached : cachedGraphs)
+                    graphCosts.push_back(cached.cost());
+            }
+            const float gCost = graphCosts[i];
             if (gCost < bestCost)
             {
                 bestIdx = i;

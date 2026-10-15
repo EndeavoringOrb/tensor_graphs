@@ -627,7 +627,48 @@ struct CostModel
     };
 
     std::unordered_map<KernelId, std::vector<Record>> records;
+    // Exact configuration -> measured time (first record of each), so exact
+    // lookups do not scan every record of a kernel.
+    std::unordered_map<std::string, float> exactRecordTimes;
     std::unordered_map<ModelKey, LinearModel, ModelKeyHash> models;
+
+    static std::string exactRecordKey(KernelId kernelId, const std::vector<uint32_t> &outShape,
+                                      const std::vector<uint64_t> &outStrides, DType outDType,
+                                      const std::vector<std::vector<uint32_t>> &inShapes,
+                                      const std::vector<std::vector<uint64_t>> &inStrides,
+                                      const std::vector<DType> &inDTypes,
+                                      const std::vector<std::vector<uint8_t>> &inConstants,
+                                      const std::vector<size_t> &order)
+    {
+        std::string key;
+        auto put = [&key](const void *data, size_t bytes) {
+            key.append(reinterpret_cast<const char *>(&bytes), sizeof(bytes));
+            key.append(static_cast<const char *>(data), bytes);
+        };
+        put(&kernelId.value, sizeof(kernelId.value));
+        put(outShape.data(), outShape.size() * sizeof(uint32_t));
+        put(outStrides.data(), outStrides.size() * sizeof(uint64_t));
+        put(&outDType, sizeof(outDType));
+        for (size_t i : order)
+        {
+            put(inShapes[i].data(), inShapes[i].size() * sizeof(uint32_t));
+            put(inStrides[i].data(), inStrides[i].size() * sizeof(uint64_t));
+            put(&inDTypes[i], sizeof(inDTypes[i]));
+            if (i < inConstants.size())
+                put(inConstants[i].data(), inConstants[i].size());
+            else
+                put(nullptr, 0);
+        }
+        return key;
+    }
+
+    static std::vector<size_t> identityOrder(size_t n)
+    {
+        std::vector<size_t> order(n);
+        for (size_t i = 0; i < n; ++i)
+            order[i] = i;
+        return order;
+    }
     std::unordered_set<uint64_t> loggedCalls;
     std::ofstream callFile;
     std::mutex logMtx;
@@ -841,6 +882,11 @@ struct CostModel
                 !KernelRegistry::get().hasKernel(r.kernelId))
                 continue;
             valid++;
+            if (r.inputShapes.size() == r.inputStrides.size() && r.inputShapes.size() == r.inputDTypes.size())
+                exactRecordTimes.emplace(exactRecordKey(r.kernelId, r.outputShape, r.outputStrides, r.outputDType,
+                                                        r.inputShapes, r.inputStrides, r.inputDTypes,
+                                                        r.inputConstants, identityOrder(r.inputShapes.size())),
+                                         std::max(1e-6f, std::isnan(r.runTime) ? 1e-6f : r.runTime));
             records[r.kernelId].push_back(r);
 
             ModelKey mk = {r.kernelId, r.inputShapes.size()};
@@ -896,50 +942,20 @@ struct CostModel
         }
 
         bool is_comm = isCommutativeOp(opType, opName);
-        auto areInputConstantsMatching = [](const std::vector<std::vector<uint8_t>> &a,
-                                            const std::vector<std::vector<uint8_t>> &b,
-                                            size_t a_idx, size_t b_idx) -> bool {
-            const auto &ca = (a_idx < a.size()) ? a[a_idx] : std::vector<uint8_t>{};
-            const auto &cb = (b_idx < b.size()) ? b[b_idx] : std::vector<uint8_t>{};
-            return ca == cb;
-        };
-
-        for (const auto &r : it->second)
+        if (inShapes.size() != inStrides.size() || inShapes.size() != inDTypes.size())
+            Error::throw_err("[CostModel.estimateCost] input shape/stride/dtype counts differ");
         {
-            if (r.outputShape != outShape || r.outputStrides != outStrides || r.outputDType != outDType)
-                continue;
-
-            bool match = false;
-            if (r.inputShapes == inShapes && r.inputStrides == inStrides &&
-                r.inputDTypes == inDTypes)
+            auto exact = exactRecordTimes.find(exactRecordKey(kernelId, outShape, outStrides, outDType, inShapes,
+                                                              inStrides, inDTypes, inConstants,
+                                                              identityOrder(inShapes.size())));
+            if (exact != exactRecordTimes.end())
+                return exact->second;
+            if (is_comm && inShapes.size() == 2)
             {
-                bool const_match = true;
-                for (size_t i = 0; i < inShapes.size(); ++i)
-                {
-                    if (!areInputConstantsMatching(r.inputConstants, inConstants, i, i))
-                    {
-                        const_match = false;
-                        break;
-                    }
-                }
-                if (const_match)
-                    match = true;
-            }
-            if (!match && is_comm && inShapes.size() == 2 && r.inputShapes.size() == 2)
-            {
-                if (r.inputShapes[0] == inShapes[1] && r.inputShapes[1] == inShapes[0] &&
-                    r.inputStrides[0] == inStrides[1] && r.inputStrides[1] == inStrides[0] &&
-                    r.inputDTypes[0] == inDTypes[1] && r.inputDTypes[1] == inDTypes[0] &&
-                    areInputConstantsMatching(r.inputConstants, inConstants, 0, 1) &&
-                    areInputConstantsMatching(r.inputConstants, inConstants, 1, 0))
-                {
-                    match = true;
-                }
-            }
-
-            if (match)
-            {
-                return std::max(1e-6f, std::isnan(r.runTime) ? 1e-6f : r.runTime);
+                exact = exactRecordTimes.find(exactRecordKey(kernelId, outShape, outStrides, outDType, inShapes,
+                                                             inStrides, inDTypes, inConstants, {1, 0}));
+                if (exact != exactRecordTimes.end())
+                    return exact->second;
             }
         }
 

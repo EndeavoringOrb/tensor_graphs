@@ -80,7 +80,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
                             bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
                             Graph **activeGraphOut = nullptr)
 {
-    KernelRegistry::get().setReferenceOnly(refOnly);
+    setKernelReferenceOnly(refOnly);
     std::vector<uint32_t> tokens = initial_tokens;
     MemoryManager mem;
     Graph g;

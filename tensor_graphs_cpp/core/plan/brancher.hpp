@@ -252,6 +252,21 @@ class HeuristicBrancher : public Brancher
     mutable std::vector<EClassId> path_frontier;
 
     mutable std::vector<Obstacle> offset_obstacles;
+    // Per offset variable of the bucket whose lifetimes are cached: what
+    // preferredOffset needs about its class, so walking the fixed offsets
+    // reads one record per entry. Valid while the lifetime cache is.
+    struct OffsetRecord
+    {
+        EClassId cid;
+        EClassId base;
+        int32_t start = 0;
+        int32_t end = 0;
+        uint32_t pages = 0;
+        MemSpace mem_space;
+        bool active = false; // selected (not fixed to 0) in this bucket
+        bool input_or_cache = false;
+    };
+    mutable std::vector<OffsetRecord> offset_records_;
     mutable std::vector<int32_t> offset_eclass_start;
     mutable std::vector<int32_t> offset_eclass_end;
     mutable std::vector<EClassId> offset_base_cids;
@@ -428,6 +443,9 @@ class HeuristicBrancher : public Brancher
 
 #endif
 
+  public:
+    // First-fit offset for (b, cid) inside offset_domain avoiding buffers
+    // whose lifetimes overlap; used by branching and primal completion.
     int32_t preferredOffset(const SearchState &state, uint32_t b, EClassId cid,
                             const Domain &offset_domain) const
     {
@@ -467,11 +485,6 @@ class HeuristicBrancher : public Brancher
             offset_eclass_end.resize(num_classes, 0);
         }
 
-        auto obs_it = preallocated_obstacles_by_space_.find(mem_space);
-        if (obs_it != preallocated_obstacles_by_space_.end())
-            offset_obstacles = obs_it->second;
-        else
-            offset_obstacles.clear();
 
         const bool refresh_lifetimes = cached_preferred_offset_bucket != b ||
                                        cached_preferred_offset_selection_revision != state.getSelectionRevision() ||
@@ -553,6 +566,26 @@ class HeuristicBrancher : public Brancher
                 }
             }
 
+            if (offset_records_.size() < state.numVars())
+                offset_records_.resize(state.numVars());
+            for (const auto &pair : state.selected_vars[b])
+            {
+                const EClassId c = pair.first;
+                const VarId off_v = c.value < eclass_offset_vars_[b].size() ? eclass_offset_vars_[b][c.value] : kInvalidVarId;
+                if (off_v == kInvalidVarId)
+                    continue;
+                const Domain &sel_dom = state.domains[pair.second];
+                OffsetRecord &rec = offset_records_[off_v];
+                rec.cid = c;
+                rec.base = offset_base_cids[c.value];
+                rec.start = offset_eclass_start[c.value];
+                rec.end = offset_eclass_end[c.value];
+                rec.pages = eclass_page_sizes_[b][c.value];
+                rec.mem_space = eclass_mem_spaces_[b][c.value];
+                rec.active = !(sel_dom.isFixed() && sel_dom.fixedValue() == 0);
+                rec.input_or_cache = offset_is_input_or_cache[c.value] != 0;
+            }
+
             cached_preferred_offset_bucket = b;
             cached_preferred_offset_selection_revision = state.getSelectionRevision();
             cached_preferred_offset_schedule_revision = state.getScheduleRevision();
@@ -563,75 +596,56 @@ class HeuristicBrancher : public Brancher
         const EClassId canon_base_cid = offset_base_cids[cid.value];
         const int32_t curr_end = offset_eclass_end[canon_base_cid.value];
 
-        // Pass 3: collect obstacles from fixed offset variables
+        // Pass 3: first fit. Obstacles are the preallocated buffers of this
+        // memory space (sorted) and the fixed allocations that may overlap
+        // in time (the fixed-offset set is ordered by offset). Both streams
+        // are walked in offset order and the walk stops at the first gap that
+        // fits, which gives the same offset as merging all obstacles first.
+        static const std::vector<Obstacle> no_obstacles;
+        auto obs_it = preallocated_obstacles_by_space_.find(mem_space);
+        const std::vector<Obstacle> &preallocated =
+            obs_it != preallocated_obstacles_by_space_.end() ? obs_it->second : no_obstacles;
         const auto &fixed_offset_vars = state.getFixedOffsetVars(b);
-        if (!fixed_offset_vars.empty())
-        {
-            const auto &sel_vars = eclass_selected_vars_[b];
-            const auto &mem_spaces = eclass_mem_spaces_[b];
-            const auto &page_sizes = eclass_page_sizes_[b];
-
-            for (const auto &[fixed_offset, other_offset_var] : fixed_offset_vars)
+        // Next fixed allocation that is an obstacle for `cid`, or false.
+        auto fixed_it = fixed_offset_vars.begin();
+        auto nextFixed = [&](Obstacle &out) {
+            for (; fixed_it != fixed_offset_vars.end(); ++fixed_it)
             {
-                const VarInfo &other_info = state.var_infos[other_offset_var];
-                EClassId other_cid = other_info.eclass_id;
-                if (other_cid == cid || other_cid.value >= sel_vars.size())
+                const auto &[fixed_offset, other_offset_var] = *fixed_it;
+                if (other_offset_var >= offset_records_.size())
+                    Error::throw_err("[HeuristicBrancher.preferredOffset] fixed offset var outside the record cache");
+                const OffsetRecord &rec = offset_records_[other_offset_var];
+                if (rec.cid == cid || !rec.active || !(rec.mem_space == mem_space) || rec.base == canon_base_cid)
                     continue;
-
-                VarId sel_v = sel_vars[other_cid.value];
-                if (sel_v == kInvalidVarId)
-                    continue;
-                const Domain &other_sel_dom = state.domains[sel_v];
-                if (other_sel_dom.isFixed() && other_sel_dom.fixedValue() == 0)
-                    continue;
-
-                if (mem_spaces[other_cid.value] != mem_space)
-                    continue;
-
-                if (canon_base_cid == offset_base_cids[other_cid.value])
-                    continue;
-
-                bool is_other_input_or_cache = offset_is_input_or_cache[other_cid.value];
-                int32_t other_start = offset_eclass_start[other_cid.value];
-                int32_t other_end = offset_eclass_end[other_cid.value];
-
-                bool overlap = (is_curr_input_or_cache || is_other_input_or_cache ||
-                                std::max(curr_start, other_start) < std::min(curr_end, other_end));
+                const bool overlap = is_curr_input_or_cache || rec.input_or_cache ||
+                                     std::max(curr_start, rec.start) < std::min(curr_end, rec.end);
                 if (!overlap)
                     continue;
-
-                uint32_t other_size = page_sizes[other_cid.value];
-                uint32_t o_offset = static_cast<uint32_t>(fixed_offset);
-                offset_obstacles.push_back({o_offset, o_offset + other_size});
+                const uint32_t o_offset = static_cast<uint32_t>(fixed_offset);
+                out = {o_offset, o_offset + rec.pages};
+                ++fixed_it;
+                return true;
             }
-        }
-
-        std::sort(offset_obstacles.begin(), offset_obstacles.end(), [](const Obstacle &a, const Obstacle &b) {
-            return a.start < b.start;
-        });
-
-        // Merge into disjoint intervals
-        size_t write_idx = 0;
-        for (size_t read_idx = 0; read_idx < offset_obstacles.size(); ++read_idx)
+            return false;
+        };
+        uint32_t p = static_cast<uint32_t>(offset_domain.getMin());
+        size_t pre_idx = 0;
+        Obstacle fixed_obs{};
+        bool have_fixed = nextFixed(fixed_obs);
+        while (have_fixed || pre_idx < preallocated.size())
         {
-            if (write_idx > 0 && offset_obstacles[read_idx].start <= offset_obstacles[write_idx - 1].end)
+            Obstacle obs;
+            if (have_fixed && (pre_idx >= preallocated.size() || fixed_obs.start <= preallocated[pre_idx].start))
             {
-                offset_obstacles[write_idx - 1].end = std::max(offset_obstacles[write_idx - 1].end, offset_obstacles[read_idx].end);
+                obs = fixed_obs;
+                have_fixed = nextFixed(fixed_obs);
             }
             else
-            {
-                offset_obstacles[write_idx++] = offset_obstacles[read_idx];
-            }
-        }
-        offset_obstacles.resize(write_idx);
-
-        uint32_t p = static_cast<uint32_t>(offset_domain.getMin());
-        for (const auto &obs : offset_obstacles)
-        {
-            if (p < obs.end && p + curr_size > obs.start)
-            {
+                obs = preallocated[pre_idx++];
+            if (static_cast<uint64_t>(p) + curr_size <= obs.start)
+                break; // gap before this obstacle, and every later one starts after it
+            if (p < obs.end)
                 p = obs.end;
-            }
         }
 
         int32_t result = (p <= static_cast<uint32_t>(offset_domain.getMax()))
@@ -644,6 +658,8 @@ class HeuristicBrancher : public Brancher
 #endif
         return result;
     }
+
+  private:
 
     static bool setOffsetDecision(const Domain &domain, int32_t preferred,
                                   BranchDecision &out_decision, VarId var_id)

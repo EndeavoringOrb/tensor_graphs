@@ -19,11 +19,11 @@ namespace plan
 struct Domain
 {
     bool is_mask = false;
-    uint32_t mask = 0;
+    uint64_t mask = 0;
     int32_t min_val = 0; // Represents lower bound for ranges, or base offset for masks
     int32_t max_val = 0; // Represents upper bound for ranges (unused when is_mask)
 
-    static Domain makeMask(uint32_t m, int32_t base = 0)
+    static Domain makeMask(uint64_t m, int32_t base = 0)
     {
         Domain d;
         d.is_mask = true;
@@ -46,9 +46,9 @@ struct Domain
     {
         if (use_mask)
         {
-            if (val >= base && val - base < 32)
+            if (val >= base && val - base < 64)
             {
-                return makeMask(1u << (val - base), base);
+                return makeMask(uint64_t{1} << (val - base), base);
             }
             return makeMask(1u, val);
         }
@@ -85,10 +85,10 @@ struct Domain
         {
 #if defined(_MSC_VER) && !defined(__clang__)
             unsigned long idx = 0;
-            _BitScanForward(&idx, mask);
+            _BitScanForward64(&idx, mask);
             return min_val + static_cast<int32_t>(idx);
 #else
-            return min_val + __builtin_ctz(mask);
+            return min_val + __builtin_ctzll(mask);
 #endif
         }
         return min_val;
@@ -99,9 +99,9 @@ struct Domain
         if (is_mask)
         {
             uint32_t offset = static_cast<uint32_t>(val - min_val);
-            if (offset >= 32u)
+            if (offset >= 64u)
                 return false;
-            return (mask & (1u << offset)) != 0;
+            return (mask & (uint64_t{1} << offset)) != 0;
         }
         return val >= min_val && val <= max_val;
     }
@@ -111,9 +111,9 @@ struct Domain
         if (is_mask)
         {
 #if defined(_MSC_VER) && !defined(__clang__)
-            return static_cast<int32_t>(__popcnt(mask));
+            return static_cast<int32_t>(__popcnt64(mask));
 #else
-            return __builtin_popcount(mask);
+            return __builtin_popcountll(mask);
 #endif
         }
         return (min_val <= max_val) ? (max_val - min_val + 1) : 0;
@@ -124,13 +124,13 @@ struct Domain
         if (is_mask)
         {
             if (mask == 0)
-                return min_val + 32;
+                return min_val + 64;
 #if defined(_MSC_VER) && !defined(__clang__)
             unsigned long idx = 0;
-            _BitScanForward(&idx, mask);
+            _BitScanForward64(&idx, mask);
             return min_val + static_cast<int32_t>(idx);
 #else
-            return min_val + __builtin_ctz(mask);
+            return min_val + __builtin_ctzll(mask);
 #endif
         }
         return min_val;
@@ -144,10 +144,10 @@ struct Domain
                 return min_val - 1;
 #if defined(_MSC_VER) && !defined(__clang__)
             unsigned long idx = 0;
-            _BitScanReverse(&idx, mask);
+            _BitScanReverse64(&idx, mask);
             return min_val + static_cast<int32_t>(idx);
 #else
-            return min_val + (31 - __builtin_clz(mask));
+            return min_val + (63 - __builtin_clzll(mask));
 #endif
         }
         return max_val;
@@ -158,9 +158,9 @@ struct Domain
         if (is_mask)
         {
             uint32_t offset = static_cast<uint32_t>(val - min_val);
-            if (offset < 32u && (mask & (1u << offset)))
+            if (offset < 64u && (mask & (uint64_t{1} << offset)))
             {
-                mask &= ~(1u << offset);
+                mask &= ~(uint64_t{1} << offset);
                 return true;
             }
             return false;
@@ -177,12 +177,12 @@ struct Domain
                 max_val--;
                 return true;
             }
-            if (val > min_val && val < max_val && (max_val - min_val < 32))
+            if (val > min_val && val < max_val && (max_val - min_val < 64))
             {
                 int32_t span = max_val - min_val + 1;
-                uint32_t m = (span == 32) ? ~0u : ((1u << span) - 1u);
+                uint64_t m = (span == 64) ? ~uint64_t{0} : ((uint64_t{1} << span) - 1u);
                 is_mask = true;
-                mask = m & ~(1u << (val - min_val));
+                mask = m & ~(uint64_t{1} << (val - min_val));
                 max_val = 0;
                 return true;
             }
@@ -196,7 +196,7 @@ struct Domain
         {
             if (lo <= min_val)
                 return false;
-            if (lo - min_val >= 32)
+            if (lo - min_val >= 64)
             {
                 if (mask == 0)
                     return false;
@@ -204,7 +204,7 @@ struct Domain
                 return true;
             }
             uint32_t shift = static_cast<uint32_t>(lo - min_val);
-            uint32_t allowed_mask = ~((1u << shift) - 1u);
+            uint64_t allowed_mask = ~((uint64_t{1} << shift) - 1u);
             if ((mask & allowed_mask) != mask)
             {
                 mask &= allowed_mask;
@@ -234,10 +234,10 @@ struct Domain
                 mask = 0;
                 return true;
             }
-            if (hi - min_val >= 31)
+            if (hi - min_val >= 63)
                 return false;
             uint32_t shift = static_cast<uint32_t>(hi - min_val);
-            uint32_t allowed_mask = (1u << (shift + 1u)) - 1u;
+            uint64_t allowed_mask = (uint64_t{1} << (shift + 1u)) - 1u;
             if ((mask & allowed_mask) != mask)
             {
                 mask &= allowed_mask;
@@ -265,7 +265,7 @@ struct Domain
 
     bool canConvertToMask() const
     {
-        return !is_mask && !isEmpty() && (max_val - min_val < 32);
+        return !is_mask && !isEmpty() && (max_val - min_val < 64);
     }
 
     bool convertToMask()
@@ -279,10 +279,10 @@ struct Domain
             return true;
         }
         int32_t span = max_val - min_val + 1;
-        if (span > 32)
+        if (span > 64)
             return false;
         is_mask = true;
-        mask = (span == 32) ? ~0u : ((1u << span) - 1u);
+        mask = (span == 64) ? ~uint64_t{0} : ((uint64_t{1} << span) - 1u);
         max_val = 0;
         return true;
     }
@@ -315,7 +315,7 @@ struct Domain
         {
             if (min_val == other.min_val)
             {
-                uint32_t new_mask = mask & other.mask;
+                uint64_t new_mask = mask & other.mask;
                 if (new_mask != mask)
                 {
                     mask = new_mask;
@@ -323,17 +323,17 @@ struct Domain
                 }
                 return false;
             }
-            uint32_t new_mask = 0;
+            uint64_t new_mask = 0;
             if (min_val < other.min_val)
             {
                 int32_t diff = other.min_val - min_val;
-                uint32_t other_aligned = (diff < 32) ? (other.mask << diff) : 0u;
+                uint64_t other_aligned = (diff < 64) ? (other.mask << diff) : uint64_t{0};
                 new_mask = mask & other_aligned;
             }
             else
             {
                 int32_t diff = min_val - other.min_val;
-                uint32_t other_aligned = (diff < 32) ? (other.mask >> diff) : 0u;
+                uint64_t other_aligned = (diff < 64) ? (other.mask >> diff) : uint64_t{0};
                 new_mask = mask & other_aligned;
             }
             if (new_mask != mask)
@@ -370,16 +370,16 @@ struct Domain
             if (min_val < other.min_val)
             {
                 int32_t diff = other.min_val - min_val;
-                if (diff >= 32)
+                if (diff >= 64)
                     return false;
-                return (mask >> diff) == other.mask && (mask & ((1u << diff) - 1u)) == 0;
+                return (mask >> diff) == other.mask && (mask & ((uint64_t{1} << diff) - 1u)) == 0;
             }
             else
             {
                 int32_t diff = min_val - other.min_val;
-                if (diff >= 32)
+                if (diff >= 64)
                     return false;
-                return (other.mask >> diff) == mask && (other.mask & ((1u << diff) - 1u)) == 0;
+                return (other.mask >> diff) == mask && (other.mask & ((uint64_t{1} << diff) - 1u)) == 0;
             }
         }
         return min_val == other.min_val && max_val == other.max_val;
@@ -398,9 +398,9 @@ struct Domain
         {
             std::string s = "{";
             bool first = true;
-            for (int i = 0; i < 32; ++i)
+            for (int i = 0; i < 64; ++i)
             {
-                if (mask & (1u << i))
+                if (mask & (uint64_t{1} << i))
                 {
                     if (!first)
                         s += ",";

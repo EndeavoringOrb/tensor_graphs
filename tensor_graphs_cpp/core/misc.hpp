@@ -283,16 +283,20 @@ inline bool intervalsOverlapOrAdjacent(const Dim &a, const Dim &b)
     return a.stop >= b.start && b.stop >= a.start;
 }
 
+// Binary key (no streams: MSVC streams take a process-wide locale lock, which
+// serializes parallel bucket saturation).
 inline std::string regionGroupKeyExcludingDim(const Region &region, uint64_t excludeDim)
 {
-    std::stringstream ss;
+    std::string key;
+    key.reserve(region.region.size() * sizeof(Dim));
     for (uint64_t i = 0; i < region.region.size(); ++i)
     {
         if (i == excludeDim)
             continue;
-        ss << region.region[i].start << "-" << region.region[i].stop << "|";
+        key.append(reinterpret_cast<const char *>(&region.region[i].start), sizeof(uint32_t));
+        key.append(reinterpret_cast<const char *>(&region.region[i].stop), sizeof(uint32_t));
     }
-    return ss.str();
+    return key;
 }
 
 inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regions, uint64_t mergeDim)
@@ -370,8 +374,12 @@ inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
                                               // optimizations in InfinityDomination if we merge different
                                               // ways?
     {
+        // Both lists are normalized.
         std::vector<Region> next = mergeRegionsAlongDim(result, dim);
-        if (encodeRegionList(next) != encodeRegionList(result))
+        const bool same = next.size() == result.size() &&
+                          std::equal(next.begin(), next.end(), result.begin(),
+                                     [](const Region &a, const Region &b) { return regionsMatch(a, b); });
+        if (!same)
         {
             result = std::move(next);
         }
@@ -399,13 +407,33 @@ inline std::vector<Region> intersectRegionLists(const std::vector<Region> &list1
     if (list1.empty() || list2.empty())
         return {};
 
+    // Only overlapping pairs contribute. With list2 ordered by its first
+    // dimension's start, each box of list1 scans the boxes of list2 that
+    // start before it ends (staircase lists have one box per row).
+    std::vector<const Region *> sorted;
+    sorted.reserve(list2.size());
+    for (const auto &r2 : list2)
+        if (!r2.region.empty())
+            sorted.push_back(&r2);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Region *a, const Region *b) { return a->region[0].start < b->region[0].start; });
     std::vector<Region> intersections;
     for (const auto &r1 : list1)
     {
-        for (const auto &r2 : list2)
+        if (r1.region.empty())
+            continue;
+        for (const Region *r2 : sorted)
         {
-            Region inter = intersectRegions(r1, r2);
-            intersections.push_back(inter);
+            if (r2->region[0].start >= r1.region[0].stop)
+                break;
+            if (r2->region[0].stop <= r1.region[0].start)
+                continue;
+            Region inter = intersectRegions(r1, *r2);
+            bool empty = inter.region.empty();
+            for (const Dim &d : inter.region)
+                empty = empty || d.start >= d.stop;
+            if (!empty)
+                intersections.push_back(std::move(inter));
         }
     }
     // Clean up overlapping results

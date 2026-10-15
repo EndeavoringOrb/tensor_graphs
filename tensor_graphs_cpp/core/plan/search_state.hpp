@@ -911,6 +911,10 @@ class SearchState
     std::unordered_map<MemSpace, uint64_t> mem_caps;
     std::unordered_map<MemSpace, uint32_t> page_alignments;
     std::unordered_map<MemSpace, uint32_t> preallocated_pages;
+    // Set while the root primal heuristic completes a plan: every offset is
+    // fixed explicitly and checked once fixed, so propagators may skip
+    // forward pruning of unfixed offsets.
+    bool completing_plan = false;
     // Spaces whose root offsets StaticPrivateLayoutPropagator fixed to
     // pairwise-disjoint private ranges: distinct non-alias allocations there
     // can never overlap, so memory reuse checks are vacuous for the search.
@@ -1058,10 +1062,10 @@ class SearchState
         {
             const EClass &cls = egraph.getEClass(cid);
             uint32_t n_enodes = static_cast<uint32_t>(cls.enodes.size());
-            if (n_enodes > 31)
+            if (n_enodes > 63)
             {
                 Error::throw_err("EClass " + std::to_string(cid.value) + " has " + std::to_string(n_enodes) +
-                                 " enodes, exceeding domain bitmask capacity (max 31).");
+                                 " enodes, exceeding domain bitmask capacity (max 63).");
             }
 
             // selected_<bucket_id>_<eclass_id> in {0, 1, ..., n_enodes}
@@ -1071,10 +1075,10 @@ class SearchState
             sel_info.eclass_id = cid;
             sel_info.name = "selected_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
-            uint32_t mask = UINT32_MAX >> (31 - n_enodes);
+            uint64_t mask = UINT64_MAX >> (63 - n_enodes);
             if (cid == root_cid)
             {
-                mask &= ~1u; // Root must be selected
+                mask &= ~uint64_t{1}; // Root must be selected
             }
 
             VarId sel_vid = addVar(sel_info, Domain::makeMask(mask));

@@ -17,6 +17,15 @@
 #include "core/logging.hpp"
 #include "core/types.hpp"
 
+// Buckets (indices into the session's buckets) that are one bucket shifted
+// by `shifts` (same order): planned as one representative (see
+// core/plan/bucket_families.hpp).
+struct BucketFamilySpec
+{
+    std::vector<uint32_t> members;
+    std::vector<int64_t> shifts;
+};
+
 struct Settings
 {
     std::unordered_map<MemSpace, uint64_t> mem_caps;
@@ -34,12 +43,28 @@ struct Settings
     float min_compile_seconds = 0.0f;
     uint32_t num_threads = 0;
     bool do_saturate = true;
+    // Saturate partial (dirty-region) buckets too, so slice push-down finds
+    // computations restricted to their dirty and needed regions.
+    bool saturate_partial_buckets = true;
+    // The optimistic DAG cost (branch ordering only; the brancher falls back to
+    // dp_cost) costs time quadratic in a bucket's class count. Buckets with
+    // more canonical classes skip it.
+    uint32_t optimistic_dag_max_classes = 8000;
     bool disable_fusion = false;
     bool reference_only = false;
     bool only_plan = false;
     bool saturate_only = false;
     bool compile_decode_buckets = false;
     bool fold_weights = false;
+    // Keep the in-memory copies of storage weights resident: each
+    // copy_to(weight) is a preallocated input written once when the session
+    // loads, instead of a copy (or a cache decision) in every run.
+    bool resident_weights = false;
+    // Inputs padded past each bucket's dirty region along an axis (input ->
+    // axis), e.g. token ids past the request: values that depend on the
+    // padding need not be kept valid by a bucket (see computeBucketRegions).
+    std::unordered_map<LogicalId, uint32_t> padded_inputs;
+    std::vector<BucketFamilySpec> bucket_families;
     bool use_ortools = false;
     bool use_ortools_full = false;
     bool use_ortools_lns = false;

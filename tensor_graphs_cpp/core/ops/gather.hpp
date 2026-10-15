@@ -108,7 +108,10 @@ struct GatherOp
         std::vector<Region> dataBoxes;
         std::vector<Region> idxBoxes;
 
-        std::vector<int32_t> idxValues = graph.getConstantInt32(node.child_ids[1]);
+        // Runtime indices: any table row may be read.
+        std::vector<int32_t> idxValues;
+        if (graph.constantStaging.count(node.child_ids[1]))
+            idxValues = graph.getConstantInt32(node.child_ids[1]);
         bool exactIdxValues = countElements(idxShape) == idxValues.size();
 
         for (const auto &outReg : outputRegions)

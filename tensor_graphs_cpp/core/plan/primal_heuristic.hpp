@@ -354,8 +354,17 @@ inline void extractCovering(const RelaxationBucket &rb, const std::vector<double
         const RelaxationAlternative *chosen = nullptr;
         int64_t best_reach = -1;
         double best_cost = std::numeric_limits<double>::infinity();
+        // Reading the class's own cached value keeps it selected at no cost.
+        // Cached bases below it that nothing else reaches then become
+        // violations and leave the cache set, instead of this class being
+        // recomputed just to keep them selected.
+        for (const auto &alt : rc.alternatives)
+            if (alt.requires_cache && alt.is_source && allowed_cache.count(rc.base))
+                chosen = &alt;
         for (const auto &alt : rc.alternatives)
         {
+            if (chosen)
+                break;
             if (alt.requires_cache && !allowed_cache.count(rc.base))
                 continue;
             std::fill(alt_reach.begin(), alt_reach.end(), 0);
@@ -395,6 +404,23 @@ inline void extractCovering(const RelaxationBucket &rb, const std::vector<double
                 covered[target_index[ch] >> 6] |= 1ull << (target_index[ch] & 63);
         }
     }
+}
+
+// Summed weighted work of a selection's chosen alternatives.
+inline double selectionWork(const RelaxationBucket &rb, const std::vector<double> &lambda, const PrimalBucketPlan &plan)
+{
+    double work = 0.0;
+    for (uint32_t u = 0; u < rb.classes.size(); ++u)
+        for (const auto &alt : rb.classes[u].alternatives)
+            if (alt.value == plan.value[u])
+            {
+                double scale = 0.0;
+                for (uint32_t e = 0; e < lambda.size(); ++e)
+                    if (alt.engine_mask & (1u << e))
+                        scale += lambda[e];
+                work += alt.duration * scale;
+            }
+    return work;
 }
 
 struct PrimalBucketContext
@@ -487,8 +513,23 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
             cache_possible.insert(base);
     }
 
-    for (const auto &global_lambda : weightings)
+    // Two covering policies per weighting (see below): a weighted bucket that
+    // leaves a cached base unselected takes the covering selection only when
+    // it costs at most 3x its own selection, or always. Local search starts
+    // from both; the better result is validated.
+    struct Start
     {
+        std::vector<double> global_lambda;
+        double cover_limit;
+    };
+    std::vector<Start> starts;
+    for (const auto &global_lambda : weightings)
+        for (double cover_limit : {3.0, std::numeric_limits<double>::infinity()})
+            starts.push_back({global_lambda, cover_limit});
+    for (const Start &start_policy : starts)
+    {
+        const auto &global_lambda = start_policy.global_lambda;
+        const double cover_limit = start_policy.cover_limit;
         std::vector<std::vector<double>> lambda(nb), estimates(nb);
         for (uint32_t b = 0; b < nb; ++b)
         {
@@ -537,9 +578,27 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
             for (const auto &[base, var] : cache_var)
                 if (state.domains[var].isFixed() && state.domains[var].fixedValue() == 1)
                     used.insert(base);
+            // Every bucket must select the cached bases. Unweighted buckets
+            // cover them. A weighted bucket whose own selection left one out
+            // takes the covering selection unless it costs over 3x as much
+            // (caching pays off in every bucket; covering costs this one);
+            // otherwise the base leaves the cache set below.
             parallel([&](uint32_t b) {
+                const auto &rb = contexts[b].rb;
                 if (!weighted(b))
-                    extractCovering(contexts[b].rb, lambda[b], estimates[b], used, used, plan.buckets[b]);
+                {
+                    extractCovering(rb, lambda[b], estimates[b], used, used, plan.buckets[b]);
+                    return;
+                }
+                bool missing = false;
+                for (uint32_t u = 0; u < rb.classes.size() && !missing; ++u)
+                    missing = plan.buckets[b].value[u] <= 0 && used.count(rb.classes[u].base) > 0;
+                if (!missing)
+                    return;
+                PrimalBucketPlan covering;
+                extractCovering(rb, lambda[b], estimates[b], used, used, covering);
+                if (selectionWork(rb, lambda[b], covering) <= cover_limit * selectionWork(rb, lambda[b], plan.buckets[b]))
+                    plan.buckets[b] = std::move(covering);
             });
             // A cached base must be selected in every bucket.
             std::unordered_set<BaseEClassId> violations;
@@ -588,6 +647,54 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
         {
             LOG(INFO) << "[PrimalHeuristic] weighting " << global_lambda[0] << ": no consistent cache set";
             continue;
+        }
+        if (std::getenv("TG_DEBUG_PRIMAL_TOP"))
+        {
+            // Diagnostics: the most expensive selected alternatives of bucket 0.
+            const auto &rb = contexts[0].rb;
+            const EGraph &eg = state.bucket_egraphs[0];
+            std::vector<std::pair<double, std::string>> rows;
+            for (uint32_t u = 0; u < rb.classes.size(); ++u)
+                for (const auto &alt : rb.classes[u].alternatives)
+                    if (alt.value == plan.buckets[0].value[u] && alt.duration > 0.0)
+                    {
+                        const EClass &cls = eg.getEClass(rb.classes[u].cid);
+                        const ENode &en = eg.getENode(cls.enodes[alt.value - 1]);
+                        rows.push_back({alt.duration, toString(en.getOpType()) + ":" + en.getOpName() + " " +
+                                                          toString(cls.shape) + " base=" +
+                                                          std::to_string(rb.classes[u].base.value) + " allowed_cache=" +
+                                                          std::to_string(allowed.count(rb.classes[u].base))});
+                    }
+            std::sort(rows.rbegin(), rows.rend());
+            for (size_t i = 0; i < rows.size() && i < 15; ++i)
+                LOG(INFO) << "[debug primal top] " << rows[i].first << " " << rows[i].second;
+        }
+        if (const char *dbg_shape = std::getenv("TG_DEBUG_PRIMAL_SHAPE"))
+        {
+            // Diagnostics: alternatives and choice for classes of one shape in bucket 1.
+            const uint32_t b = nb > 1 ? 1 : 0;
+            const auto &rb = contexts[b].rb;
+            const EGraph &eg = state.bucket_egraphs[b];
+            for (uint32_t u = 0; u < rb.classes.size(); ++u)
+            {
+                const EClass &cls = eg.getEClass(rb.classes[u].cid);
+                std::string shape;
+                for (uint32_t d : cls.shape)
+                    shape += (shape.empty() ? "" : ",") + std::to_string(d);
+                if (shape != dbg_shape)
+                    continue;
+                std::ostringstream os;
+                os << "[debug primal] bucket=" << b << " cid=" << rb.classes[u].cid.value << " dtype="
+                   << toString(cls.dtype) << " chosen=" << plan.buckets[b].value[u] << " allowed_cache="
+                   << allowed.count(rb.classes[u].base) << " alts:";
+                for (const auto &alt : rb.classes[u].alternatives)
+                {
+                    const ENode &en = eg.getENode(cls.enodes[alt.value - 1]);
+                    os << " [" << alt.value << " " << toString(en.getOpType()) << ":" << en.getOpName()
+                       << " d=" << alt.duration << (alt.requires_cache ? " cache" : "") << "]";
+                }
+                LOG(INFO) << os.str();
+            }
         }
         parallel([&](uint32_t b) { listSchedule(contexts[b].rb, plan.buckets[b]); });
         double total = 0.0;
@@ -895,6 +1002,156 @@ inline bool improvePrimalPlan(const SearchState &state, const std::vector<Primal
 // re-run local search with the base releasable, require that no weighted
 // bucket still uses its cache-only alternatives, and keep the change if the
 // weighted makespan decreases. Repeats until no candidate helps.
+// Selects class u of a bucket plan (and, recursively, whatever its chosen
+// alternatives need that is not selected yet): the usable alternative with
+// the lowest weighted duration plus estimates of unselected children.
+inline bool activateClass(const RelaxationBucket &rb, const std::vector<double> &lambda,
+                          const std::vector<double> &estimates, const std::unordered_set<BaseEClassId> &cached,
+                          PrimalBucketPlan &bp, uint32_t u)
+{
+    if (bp.value[u] > 0)
+        return true;
+    const auto &alts = rb.classes[u].alternatives;
+    int32_t best = -1;
+    double best_cost = std::numeric_limits<double>::infinity();
+    for (uint32_t a = 0; a < alts.size(); ++a)
+    {
+        if (alts[a].requires_cache && !cached.count(rb.classes[u].base))
+            continue;
+        double scale = 0.0;
+        for (size_t e = 0; e < lambda.size(); ++e)
+            if (alts[a].engine_mask & (1u << e))
+                scale += lambda[e];
+        double cost = alts[a].duration * scale;
+        for (uint32_t ch : alts[a].children)
+            if (bp.value[ch] <= 0)
+                cost += estimates[ch];
+        if (cost < best_cost - 1e-12)
+        {
+            best_cost = cost;
+            best = static_cast<int32_t>(a);
+        }
+    }
+    if (best < 0)
+        return false;
+    bp.value[u] = alts[static_cast<size_t>(best)].value;
+    for (uint32_t ch : alts[static_cast<size_t>(best)].children)
+        if (!activateClass(rb, lambda, estimates, cached, bp, ch))
+            return false;
+    return true;
+}
+
+// Cache-set additions: a base whose cache-only alternative (an in-place
+// update or a cached read) is cheaper than what a weighted bucket selects now.
+// Adding it to the cache set makes every bucket keep it selected (classes not
+// selected yet are activated), then local search re-optimizes; the change is
+// kept if the weighted makespan decreases and the cache fits its memory cap.
+inline bool addCacheBases(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
+                          PrimalPlan &plan, std::chrono::steady_clock::time_point deadline, uint64_t &evaluations,
+                          uint32_t &added)
+{
+    std::unordered_map<BaseEClassId, double> saving;
+    for (uint32_t b = 0; b < contexts.size(); ++b)
+    {
+        const double w = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
+        if (!(w > 0.0))
+            continue;
+        const RelaxationBucket &rb = contexts[b].rb;
+        for (uint32_t u = 0; u < rb.classes.size(); ++u)
+        {
+            const int32_t v = plan.buckets[b].value[u];
+            const BaseEClassId base = rb.classes[u].base;
+            if (v <= 0 || base == BaseEClassId{} || plan.cached.count(base))
+                continue;
+            auto var = state.cached_vars.find(base);
+            if (var == state.cached_vars.end() || !state.domains[var->second].contains(1))
+                continue;
+            double current = 0.0;
+            for (const auto &alt : rb.classes[u].alternatives)
+                if (alt.value == v)
+                    current = alt.duration;
+            for (const auto &alt : rb.classes[u].alternatives)
+                if (alt.requires_cache && alt.duration < current - 1e-9)
+                {
+                    saving[base] = std::max(saving[base], w * (current - alt.duration));
+                    break;
+                }
+        }
+    }
+    std::vector<std::pair<double, BaseEClassId>> candidates;
+    for (const auto &[base, s] : saving)
+        candidates.push_back({s, base});
+    std::sort(candidates.begin(), candidates.end(), [](const auto &x, const auto &y) {
+        return x.first > y.first || (x.first == y.first && x.second.value < y.second.value);
+    });
+    // All candidates at once first, then one at a time (best first).
+    std::vector<std::vector<BaseEClassId>> sets;
+    if (candidates.size() > 1)
+    {
+        sets.emplace_back();
+        for (const auto &[s, base] : candidates)
+            sets.back().push_back(base);
+    }
+    for (const auto &[s, base] : candidates)
+        sets.push_back({base});
+    bool any = false;
+    for (const auto &set : sets)
+    {
+        if (std::chrono::steady_clock::now() >= deadline)
+            break;
+        bool fresh = false;
+        for (BaseEClassId base : set)
+            fresh |= !plan.cached.count(base);
+        if (!fresh)
+            continue;
+        PrimalPlan trial = plan;
+        for (BaseEClassId base : set)
+            trial.cached.insert(base);
+        // Memory caps.
+        std::unordered_map<MemSpace, uint64_t> bytes;
+        bool fits = true;
+        for (BaseEClassId base : trial.cached)
+        {
+            auto var = state.cached_vars.find(base);
+            if (var == state.cached_vars.end())
+                continue;
+            const VarInfo &info = state.var_infos[var->second];
+            bytes[info.mem_space] += info.size_bytes;
+            fits = fits && bytes[info.mem_space] <= state.getMemoryCap(info.mem_space);
+        }
+        if (!fits)
+            continue;
+        // Every bucket must select the newly cached bases.
+        bool ok = true;
+        for (uint32_t b = 0; b < contexts.size() && ok; ++b)
+        {
+            const RelaxationBucket &rb = contexts[b].rb;
+            bool changed = false;
+            for (uint32_t u = 0; u < rb.classes.size() && ok; ++u)
+                if (trial.buckets[b].value[u] <= 0 && std::find(set.begin(), set.end(), rb.classes[u].base) != set.end())
+                {
+                    ok = activateClass(rb, trial.bucket_lambda[b], trial.estimates[b], trial.cached, trial.buckets[b], u);
+                    changed = true;
+                }
+            if (ok && changed)
+                listSchedule(rb, trial.buckets[b]);
+        }
+        if (!ok)
+            continue;
+        improvePrimalPlan(state, contexts, trial, deadline, evaluations, nullptr, nullptr);
+        if (trial.cost < plan.cost - 1e-9)
+        {
+            uint32_t count = 0;
+            for (BaseEClassId base : set)
+                count += !plan.cached.count(base);
+            plan = std::move(trial);
+            added += count;
+            any = true;
+        }
+    }
+    return any;
+}
+
 inline bool improveCacheSet(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
                             PrimalPlan &plan, std::chrono::steady_clock::time_point deadline, uint64_t &evaluations,
                             uint32_t &dropped)

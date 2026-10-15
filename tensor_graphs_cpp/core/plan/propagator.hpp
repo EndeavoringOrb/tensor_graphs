@@ -111,7 +111,13 @@ inline void addExtraPropagators(EngineT &engine)
     engine.addPropagator(std::make_unique<CachedOffsetAllocationPropagator>());
     engine.addPropagator(std::make_unique<RequiredReachabilityPropagator>());
     engine.addPropagator(std::make_unique<StartRunMakespanPropagator>());
-    engine.addPropagator(std::make_unique<RelaxationBoundPropagator>());
+    // The relaxation lower bound changes no domain; it prunes tree search
+    // against the incumbent and feeds the search-gap measurement. Compiles
+    // that rely on the root primal heuristic can skip it
+    // (TG_SKIP_RELAXATION_BOUND=1) to spend its time on local search.
+    const char *skip_bound = std::getenv("TG_SKIP_RELAXATION_BOUND");
+    if (!(skip_bound && std::string(skip_bound) == "1"))
+        engine.addPropagator(std::make_unique<RelaxationBoundPropagator>());
 }
 
 template <typename EngineT>

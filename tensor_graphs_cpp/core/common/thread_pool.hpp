@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <exception>
@@ -46,6 +47,7 @@ class ThreadPool
         threads.clear();
         while (!tasks.empty())
             tasks.pop();
+        pending.store(0, std::memory_order_release);
         stop = false;
         num_threads_ = n;
 
@@ -56,6 +58,17 @@ class ThreadPool
                 threads.emplace_back([this] {
                     while (true)
                     {
+                        // Kernel launches come in quick succession: spin
+                        // briefly for new work before sleeping, since a
+                        // condition-variable wake costs microseconds each.
+                        const auto spin_start = std::chrono::steady_clock::now();
+                        for (uint32_t spin = 0; this->pending.load(std::memory_order_acquire) == 0; ++spin)
+                        {
+                            cpuRelax();
+                            if ((spin & 63) == 63 &&
+                                std::chrono::steady_clock::now() - spin_start > std::chrono::microseconds(50))
+                                break;
+                        }
                         std::function<void()> task;
                         {
                             std::unique_lock<std::mutex> lock(this->queue_mutex);
@@ -64,6 +77,7 @@ class ThreadPool
                                 return;
                             task = std::move(this->tasks.front());
                             this->tasks.pop();
+                            this->pending.fetch_sub(1, std::memory_order_release);
                         }
                         task();
                     }
@@ -136,6 +150,7 @@ class ThreadPool
             {
                 tasks.push(worker_task);
             }
+            pending.fetch_add(num_to_push, std::memory_order_release);
         }
         condition.notify_all();
 
@@ -183,6 +198,17 @@ class ThreadPool
     std::condition_variable condition;
     bool stop;
     uint32_t num_threads_;
+    // Number of queued tasks (lets workers spin without taking the lock).
+    std::atomic<uint32_t> pending{0};
+
+    static void cpuRelax()
+    {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        __asm__ __volatile__("yield");
+#elif defined(_M_X64) || defined(__x86_64__)
+        __builtin_ia32_pause();
+#endif
+    }
 };
 
 inline void set_num_threads(uint32_t n)

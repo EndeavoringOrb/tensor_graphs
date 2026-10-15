@@ -1,5 +1,10 @@
 #pragma once
 #include <cmath>
+#include <map>
+#include <fstream>
+#include <chrono>
+#include <cstring>
+#include <unordered_map>
 #include "core/debug.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
@@ -13,13 +18,170 @@ class Executor
   private:
     MemoryManager &memManager;
 
+    // Host-only fast path: for a compiled graph whose buffers all live in host
+    // memory or storage and whose kernels all run on the CPU, kernels run
+    // synchronously in order, so each instruction's KernelContext (pointers
+    // into the fixed arenas) is built once and reused.
+    struct PreparedInstruction
+    {
+        KernelFunc run;
+        KernelContext ctx;
+        // Diagnostics (TG_EXEC_PROFILE): label and accumulated run time.
+        std::string label;
+        double seconds = 0.0;
+        uint64_t calls = 0;
+    };
+    struct PreparedConstant
+    {
+        uint8_t *dst;
+        const std::vector<uint8_t> *data;
+    };
+    struct PreparedGraph
+    {
+        bool hostOnly = false;
+        std::vector<PreparedInstruction> instructions;
+        std::vector<PreparedConstant> constants;
+    };
+    std::unordered_map<const CompiledGraph *, PreparedGraph> prepared;
+    bool debugEnvironment = false;
+    // TG_EXEC_PROFILE=<file>: time every fast-path kernel; the totals per
+    // kernel and output shape are written when the executor is destroyed.
+    const char *profilePath = std::getenv("TG_EXEC_PROFILE");
+
+    PreparedGraph &prepare(const CompiledGraph &compiled)
+    {
+        auto it = prepared.find(&compiled);
+        if (it != prepared.end())
+            return it->second;
+        PreparedGraph pg;
+        pg.hostOnly = true;
+        auto hostSpace = [](const MemSpace &ms) {
+            return ms.type == HandleType::CPP || ms.type == HandleType::STORAGE;
+        };
+        for (const OpInstruction &inst : compiled.instructions)
+        {
+            bool host = hostSpace(inst.outBuffer.mem_space);
+            for (const ParallelBuffer &b : inst.inBuffers)
+                host = host && hostSpace(b.mem_space);
+            for (const Engine &e : inst.engines)
+                host = host && e.type == EngineType::CPU;
+            if (!host)
+            {
+                pg.hostOnly = false;
+                break;
+            }
+        }
+        if (pg.hostOnly)
+        {
+            DeviceBuffer *hostBuffer = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+            for (const auto &pair : compiled.constantStaging)
+            {
+                if (compiled.nodeViews.count(pair.first) == 0)
+                    continue;
+                const TensorView &view = compiled.nodeViews.at(pair.first);
+                if (!hostBuffer || !hostBuffer->getBasePtr())
+                    Error::throw_err("[Executor.prepare] host arena not initialized");
+                pg.constants.push_back({hostBuffer->getBasePtr() + view.offset, pair.second.get()});
+            }
+            for (const OpInstruction &inst : compiled.instructions)
+            {
+                const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+                if (kernel.is_view || !kernel.run)
+                    continue;
+                PreparedInstruction pi;
+                pi.run = kernel.run;
+                if (profilePath)
+                    pi.label = kernel.opName + " " + toString(compiled.nodeViews.at(inst.eclass_id).getShape());
+                for (uint64_t i = 0; i < inst.children.size(); ++i)
+                {
+                    LogicalId logical_id;
+                    if (compiled.has_logical_id(inst.children[i]))
+                        logical_id = compiled.get_logical_id(inst.children[i]);
+                    memManager.getBuffer(inst.inBuffers[i].mem_space)
+                        ->setupInput(pi.ctx, compiled.nodeViews.at(inst.children[i]), logical_id);
+                }
+                LogicalId logical_id;
+                if (compiled.has_logical_id(inst.eclass_id))
+                    logical_id = compiled.get_logical_id(inst.eclass_id);
+                memManager.getBuffer(inst.outBuffer.mem_space)
+                    ->setupOutput(pi.ctx, compiled.nodeViews.at(inst.eclass_id), logical_id);
+                pg.instructions.push_back(std::move(pi));
+            }
+        }
+        return prepared.emplace(&compiled, std::move(pg)).first->second;
+    }
+
   public:
+    ~Executor()
+    {
+        if (!profilePath)
+            return;
+        std::ofstream out(profilePath, std::ios::app);
+        if (!out)
+            return; // destructor: nowhere to report
+        for (const auto &[graph, pg] : prepared)
+        {
+            std::map<std::string, std::pair<double, uint64_t>> totals;
+            uint64_t runs = 0;
+            for (const PreparedInstruction &pi : pg.instructions)
+            {
+                totals[pi.label].first += pi.seconds;
+                totals[pi.label].second += pi.calls;
+                runs = std::max(runs, pi.calls);
+            }
+            if (runs == 0)
+                continue;
+            double total = 0.0;
+            for (const auto &[label, t] : totals)
+                total += t.first;
+            uint64_t constant_bytes = 0;
+            for (const PreparedConstant &c : pg.constants)
+                constant_bytes += c.data->size();
+            out << "== graph " << graph << " runs=" << runs << " ms/run=" << 1000.0 * total / runs
+                << " constants=" << pg.constants.size() << " constant_bytes=" << constant_bytes << '\n';
+            std::vector<std::pair<double, std::string>> sorted;
+            for (const auto &[label, t] : totals)
+                sorted.push_back({t.first, label + " x" + std::to_string(t.second / runs)});
+            std::sort(sorted.rbegin(), sorted.rend());
+            for (const auto &[seconds, label] : sorted)
+                out << 1000.0 * seconds / runs << '\t' << label << '\n';
+        }
+    }
+
     Executor(MemoryManager &mm) : memManager(mm)
     {
+        for (const char *name : {"TG_DUMP_BASE_REFS", "TG_COMPARE_BASE_REFS", "TG_CHECK_NAN", "TG_BASE_REF_STEP"})
+        {
+            const char *value = std::getenv(name);
+            debugEnvironment = debugEnvironment || (value && *value);
+        }
     }
 
     void run(const CompiledGraph &compiled, const Debug::Callback &debugCallback = nullptr)
     {
+        if (!debugCallback && !debugEnvironment)
+        {
+            PreparedGraph &pg = prepare(compiled);
+            if (pg.hostOnly)
+            {
+                for (const PreparedConstant &c : pg.constants)
+                    std::memcpy(c.dst, c.data->data(), c.data->size());
+                if (profilePath)
+                {
+                    for (PreparedInstruction &pi : pg.instructions)
+                    {
+                        const auto start = std::chrono::steady_clock::now();
+                        pi.run(pi.ctx);
+                        pi.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                        ++pi.calls;
+                    }
+                    return;
+                }
+                for (const PreparedInstruction &pi : pg.instructions)
+                    pi.run(pi.ctx);
+                return;
+            }
+        }
         uint32_t nInst = compiled.instructions.size();
         bool disableTimer = false;
 #ifdef TG_DEBUG

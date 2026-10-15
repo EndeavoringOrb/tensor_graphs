@@ -425,7 +425,8 @@ struct System
 
         // 4. OpenCL Detection
 #ifdef TG_USE_OPENCL
-        if (caps.has_opencl)
+        // TG_DISABLE_OPENCL keeps the planner from considering the GPU at all.
+        if (caps.has_opencl && std::getenv("TG_DISABLE_OPENCL") == nullptr)
         {
             MemSpace cl_ms{1, HandleType::OPENCL};
             uint64_t opencl_mem = caps.opencl_max_alloc > 0 ? caps.opencl_max_alloc : (1ULL * 1024 * 1024 * 1024);

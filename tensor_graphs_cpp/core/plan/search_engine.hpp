@@ -781,6 +781,13 @@ class SearchEngine
         const double program_deadline = deadline_text ? std::stod(deadline_text) : 0.0;
         if (deadline_text && (!std::isfinite(program_deadline) || program_deadline <= 0 || !measure_search_volume))
             throw std::runtime_error("Invalid program evaluation deadline or disabled volume tracking");
+        // Unlike TG_PROGRAM_DEADLINE (which ends an evaluation worker), the
+        // search deadline stops the search and keeps the incumbent so the
+        // caller can finish compiling.
+        const char *search_deadline_text = std::getenv("TG_SEARCH_DEADLINE");
+        const double search_deadline = search_deadline_text ? std::stod(search_deadline_text) : 0.0;
+        if (search_deadline_text && (!std::isfinite(search_deadline) || search_deadline <= 0))
+            throw std::runtime_error("Invalid TG_SEARCH_DEADLINE");
 
         LOG(DEBUG) << "[SearchEngine] Starting solve: num_vars=" << state.numVars()
                    << ", candidates=" << state.candidates.size()
@@ -865,7 +872,7 @@ class SearchEngine
 #endif
         root_lower_bound = root_node->lower_bound;
         sampleSearchGap(0, "root", true);
-        runRootPrimalHeuristic(program_deadline);
+        runRootPrimalHeuristic(program_deadline > 0.0 ? program_deadline : search_deadline);
         // With an incumbent from the root heuristic, the remaining search is
         // proof work: refresh and split the largest open regions first.
         if (incumbent_best_cost < TGConstants::INF)
@@ -903,6 +910,19 @@ class SearchEngine
                 last_profile_iteration = iterations;
             }
 #endif
+            if (search_deadline_text && incumbent_best_cost >= TGConstants::INF &&
+                std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() >=
+                    search_deadline)
+                Error::throw_err("[SearchEngine] search deadline reached without a feasible plan after " +
+                                 std::to_string(iterations) + " iterations");
+            if (search_deadline_text && incumbent_best_cost < TGConstants::INF &&
+                std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() >=
+                    search_deadline)
+            {
+                LOG(INFO) << "[SearchEngine] Search deadline reached with incumbent best cost: "
+                          << incumbent_best_cost << " at iteration " << iterations;
+                break;
+            }
             if (timer.is_expired() && incumbent_best_cost < TGConstants::INF)
             {
                 LOG(INFO) << "[SearchEngine] Timeout reached with feasible incumbent best cost: "
@@ -1228,7 +1248,15 @@ class SearchEngine
     {
         const size_t marker = state.getTrailMarker();
         float cost = TGConstants::INF;
+        const auto try_start = std::chrono::steady_clock::now();
+        double fixed_seconds = 0.0, propagated_seconds = 0.0;
+        uint64_t completed = 0, fallbacks = 0;
+        state.completing_plan = true;
         auto finish = [&]() {
+            state.completing_plan = false;
+            const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - try_start).count();
+            LOG(INFO) << "[PrimalHeuristic tryPlan] fixed=" << fixed_seconds << "s propagated=" << propagated_seconds
+                      << "s total=" << total << "s completed=" << completed << " fallbacks=" << fallbacks;
             state.backtrackTo(marker);
             brancher->onRestore();
             return cost;
@@ -1279,18 +1307,60 @@ class SearchEngine
             }
         }
         std::string conflict;
+        fixed_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - try_start).count();
         if (!runPropagators(kInvalidVarId, &conflict))
         {
             failure = "propagation conflict: " + conflict;
             return finish();
         }
+        propagated_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - try_start).count();
+        // Complete what propagation left open (typically memory offsets when no
+        // static layout applies), propagating after each choice. Offsets try
+        // the brancher's preferred placement, then the end of the domain (space
+        // past every other buffer), then its start; other variables take the
+        // smallest value.
+        HeuristicBrancher placement;
         for (VarId v = 0; v < state.numVars(); ++v)
-            if (!state.domains[v].isFixed())
+        {
+            if (state.domains[v].isFixed())
+                continue;
+            const Domain d = state.domains[v];
+            const VarInfo &info = state.var_infos[v];
+            if (d.isEmpty())
             {
-                failure = "unfixed variable after propagation: " + state.var_infos[v].name + "=" +
-                          state.domains[v].toString();
+                failure = "could not complete " + info.name + "=" + d.toString();
                 return finish();
             }
+            std::vector<int32_t> values;
+            if (info.type == VarType::OFFSET)
+            {
+                for (int32_t candidate :
+                     {placement.preferredOffset(state, info.bucket_idx, info.eclass_id, d), d.getMax(), d.getMin()})
+                    if (std::find(values.begin(), values.end(), candidate) == values.end())
+                        values.push_back(candidate);
+            }
+            else
+                values.push_back(d.getMin());
+            bool placed = false;
+            ++completed;
+            for (int32_t value : values)
+            {
+                const size_t choice_marker = state.getTrailMarker();
+                if (fixDomain(state, v, value) && runPropagators(v, &conflict))
+                {
+                    placed = true;
+                    break;
+                }
+                ++fallbacks;
+                state.backtrackTo(choice_marker);
+                brancher->onRestore();
+            }
+            if (!placed)
+            {
+                failure = "propagation conflict completing " + info.name + ": " + conflict;
+                return finish();
+            }
+        }
         cost = evaluateLeafCost();
         if (cost < incumbent_best_cost)
             recordIncumbent(cost, iterations, program_deadline, "root-heuristic");
@@ -1315,24 +1385,23 @@ class SearchEngine
             return os.str();
         };
         std::string failure;
-        const float cost = tryPlan(plans.front(), contexts, 0, program_deadline, failure);
-        const double total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        LOG(INFO) << "[PrimalHeuristic] predicted=" << plans.front().cost << " evaluated="
-                  << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
+        LOG(INFO) << "[PrimalHeuristic] " << plans.size() << " initial plan(s), best predicted=" << plans.front().cost
                   << " lambda=[" << describe(plans.front()) << "] cached=" << plans.front().cached.size()
-                  << " build=" << build_seconds << "s total=" << total_seconds << "s"
-                  << (failure.empty() ? "" : " failure=" + failure);
-        if (!std::isfinite(cost))
-            return;
-        // Local search from every initial plan until no move improves,
-        // bounded by the program deadline; validate the best result.
+                  << " build=" << build_seconds << "s";
+        const std::vector<PrimalPlan> initial_plans = plans;
+        // Local search from every initial plan until no move improves (cheap),
+        // bounded by the program deadline; then validate the best results in
+        // order until one is accepted (validation is the expensive step).
         const auto ls_start = std::chrono::steady_clock::now();
         auto ls_deadline = std::chrono::steady_clock::time_point::max();
         if (program_deadline > 0.0)
         {
             const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+            // Leave time to validate the result afterwards (tryPlan takes
+            // about 3.5x the plan build in practice).
+            const double reserve = 4.0 * build_seconds + 10.0;
             ls_deadline = ls_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                         std::chrono::duration<double>(std::max(0.0, program_deadline - now)));
+                                         std::chrono::duration<double>(std::max(0.0, program_deadline - reserve - now)));
         }
         uint64_t evaluations = 0;
         for (size_t i = 0; i < plans.size(); ++i)
@@ -1340,20 +1409,8 @@ class SearchEngine
             const double initial = plans[i].cost;
             improvePrimalPlan(state, contexts, plans[i], ls_deadline, evaluations);
             const double ls_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ls_start).count();
-            if (!(plans[i].cost < incumbent_best_cost - 1e-6))
-            {
-                LOG(INFO) << "[PrimalHeuristic] local search lambda=[" << describe(plans[i]) << "] " << initial
-                          << " -> " << plans[i].cost << " (no improvement; " << evaluations << " schedules, "
-                          << ls_seconds << "s)";
-                continue;
-            }
-            failure.clear();
-            const float improved_cost = tryPlan(plans[i], contexts, 0, program_deadline, failure);
             LOG(INFO) << "[PrimalHeuristic] local search lambda=[" << describe(plans[i]) << "] " << initial << " -> "
-                      << plans[i].cost << " evaluated="
-                      << (std::isfinite(improved_cost) ? std::to_string(improved_cost) : std::string("rejected"))
-                      << " schedules=" << evaluations << " search=" << ls_seconds << "s"
-                      << (failure.empty() ? "" : " failure=" + failure);
+                      << plans[i].cost << " (" << evaluations << " schedules, " << ls_seconds << "s)";
         }
         // Cache-set moves on the best local optimum.
         {
@@ -1364,21 +1421,37 @@ class SearchEngine
             const double initial = plans[best].cost;
             uint32_t dropped = 0;
             const auto cs_start = std::chrono::steady_clock::now();
-            improveCacheSet(state, contexts, plans[best], ls_deadline, evaluations, dropped);
+            // Cache-set moves rarely pay much; cap them at 30 s.
+            const auto cs_deadline = std::min(ls_deadline, cs_start + std::chrono::seconds(30));
+            uint32_t added = 0;
+            addCacheBases(state, contexts, plans[best], cs_deadline, evaluations, added);
+            improveCacheSet(state, contexts, plans[best], cs_deadline, evaluations, dropped);
             const double cs_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - cs_start).count();
-            if (dropped > 0 && plans[best].cost < incumbent_best_cost - 1e-6)
-            {
-                failure.clear();
-                const float cs_cost = tryPlan(plans[best], contexts, 0, program_deadline, failure);
-                LOG(INFO) << "[PrimalHeuristic] cache-set moves " << initial << " -> " << plans[best].cost
-                          << " dropped=" << dropped << " evaluated="
-                          << (std::isfinite(cs_cost) ? std::to_string(cs_cost) : std::string("rejected"))
-                          << " search=" << cs_seconds << "s" << (failure.empty() ? "" : " failure=" + failure);
-            }
-            else
-                LOG(INFO) << "[PrimalHeuristic] cache-set moves " << initial << " -> " << plans[best].cost
-                          << " (no improvement; dropped=" << dropped << ", " << cs_seconds << "s)";
+            LOG(INFO) << "[PrimalHeuristic] cache-set moves " << initial << " -> " << plans[best].cost
+                      << " added=" << added << " dropped=" << dropped << " (" << cs_seconds << "s)";
         }
+        // Validate in cost order (improved plans first, then the initial ones).
+        std::vector<const PrimalPlan *> order;
+        for (const PrimalPlan &plan : plans)
+            order.push_back(&plan);
+        std::stable_sort(order.begin(), order.end(),
+                         [](const PrimalPlan *a, const PrimalPlan *b) { return a->cost < b->cost; });
+        for (const PrimalPlan &plan : initial_plans)
+            order.push_back(&plan);
+        for (const PrimalPlan *plan : order)
+        {
+            if (!(plan->cost < incumbent_best_cost - 1e-6))
+                continue;
+            failure.clear();
+            const float cost = tryPlan(*plan, contexts, 0, program_deadline, failure);
+            LOG(INFO) << "[PrimalHeuristic] validate predicted=" << plan->cost << " evaluated="
+                      << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
+                      << " lambda=[" << describe(*plan) << "]" << (failure.empty() ? "" : " failure=" + failure);
+            if (std::isfinite(cost))
+                break;
+        }
+        LOG(INFO) << "[PrimalHeuristic] total "
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "s";
     }
 
     // Logs (epoch, incumbent, certified bound). The supervisor integrates the

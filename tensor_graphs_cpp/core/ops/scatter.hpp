@@ -71,7 +71,13 @@ struct ScatterOp
                                            const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
                                            DType outDType, const std::string &)
     {
-        return op_common::defaultWorkload(inShapes, inDTypes, outShape, outDType, 0.0);
+        // Scatter writes only its updates (input 0) into the existing output
+        // buffer; the rest of the output is untouched.
+        if (inShapes.empty())
+            Error::throw_err("[ScatterOp.computeWorkload] missing updates input");
+        WorkloadMetrics m = op_common::defaultWorkload(inShapes, inDTypes, outShape, outDType, 0.0);
+        m.bytesWritten = static_cast<double>(countElements(inShapes[0]) * getDTypeSize(outDType));
+        return m;
     }
 
     static bool isConstant(uint64_t inputIdx, uint64_t)

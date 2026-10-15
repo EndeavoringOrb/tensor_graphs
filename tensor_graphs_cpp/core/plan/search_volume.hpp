@@ -39,16 +39,16 @@ inline uint64_t domainIntersectionCardinality(const Domain &a, const Domain &b)
     const Domain &mask_domain = a.is_mask ? a : b;
     const Domain &other = a.is_mask ? b : a;
     uint64_t count = 0;
-    for (uint32_t bit = 0; bit < 32; ++bit)
+    for (uint32_t bit = 0; bit < 64; ++bit)
     {
-        if ((mask_domain.mask & (uint32_t{1} << bit)) == 0)
+        if ((mask_domain.mask & (uint64_t{1} << bit)) == 0)
             continue;
         const int64_t value = static_cast<int64_t>(mask_domain.min_val) + bit;
         if (value < std::numeric_limits<int32_t>::min() || value > std::numeric_limits<int32_t>::max())
             Error::throw_err("Mask domain exceeds signed integer bounds in search volume");
         const int64_t offset = value - other.min_val;
         const bool contained = other.is_mask
-                                   ? offset >= 0 && offset < 32 && (other.mask & (uint32_t{1} << offset)) != 0
+                                   ? offset >= 0 && offset < 64 && (other.mask & (uint64_t{1} << offset)) != 0
                                    : value >= other.min_val && value <= other.max_val;
         if (contained)
             ++count;

@@ -356,7 +356,7 @@ class StaticPrivateLayoutPropagator : public Propagator
     // their supports (parent P, alternative a) of cond(P) + {P: a}, masks of
     // common classes unioned, plus the class itself. Classes without support
     // cannot be active (empty optional). Returns false for cyclic graphs.
-    using Conditions = std::vector<std::pair<uint32_t, uint32_t>>;
+    using Conditions = std::vector<std::pair<uint32_t, uint64_t>>;
     struct BucketConditions
     {
         std::unordered_map<uint32_t, uint32_t> index_of;
@@ -373,19 +373,19 @@ class StaticPrivateLayoutPropagator : public Propagator
             out.index_of[cids[i].value] = i;
         std::vector<std::vector<std::pair<uint32_t, uint32_t>>> supports(n);
         std::vector<std::vector<uint32_t>> children(n);
-        std::vector<uint32_t> nonzero(n, 0);
+        std::vector<uint64_t> nonzero(n, 0);
         for (uint32_t i = 0; i < n; ++i)
         {
             const Domain &sel = state.domains[state.selected_vars[b].at(cids[i])];
             const EClass &cls = egraph.getEClass(cids[i]);
-            if (cls.enodes.size() > 31)
-                Error::throw_err("StaticPrivateLayout condition masks support at most 31 alternatives");
+            if (cls.enodes.size() > 63)
+                Error::throw_err("StaticPrivateLayout condition masks support at most 63 alternatives");
             for (size_t a = 0; a < cls.enodes.size(); ++a)
             {
                 const uint32_t value = static_cast<uint32_t>(a + 1);
                 if (!sel.contains(static_cast<int32_t>(value)))
                     continue;
-                nonzero[i] |= 1u << value;
+                nonzero[i] |= uint64_t{1} << value;
                 for (EClassId child : egraph.getENode(cls.enodes[a]).getChildren())
                 {
                     const uint32_t ch = out.index_of.at(egraph.findConst(child).value);
@@ -426,11 +426,11 @@ class StaticPrivateLayoutPropagator : public Propagator
                 if (x == root || !out.conditions[parent])
                     continue;
                 Conditions with = *out.conditions[parent];
-                auto it = std::lower_bound(with.begin(), with.end(), std::make_pair(parent, 0u));
+                auto it = std::lower_bound(with.begin(), with.end(), std::make_pair(parent, uint64_t{0}));
                 if (it != with.end() && it->first == parent)
-                    it->second &= 1u << value;
+                    it->second &= uint64_t{1} << value;
                 else
-                    with.insert(it, {parent, 1u << value});
+                    with.insert(it, {parent, uint64_t{1} << value});
                 if (!acc)
                 {
                     acc = std::move(with);
@@ -455,7 +455,7 @@ class StaticPrivateLayoutPropagator : public Propagator
             }
             if (!acc)
                 continue; // no active support: cannot be active
-            auto it = std::lower_bound(acc->begin(), acc->end(), std::make_pair(x, 0u));
+            auto it = std::lower_bound(acc->begin(), acc->end(), std::make_pair(x, uint64_t{0}));
             if (it != acc->end() && it->first == x)
                 it->second &= nonzero[x];
             else

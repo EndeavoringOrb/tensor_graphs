@@ -23,6 +23,9 @@
 #include "tests/private_layout_regression.hpp"
 #include "tests/start_rank_window_regression.hpp"
 #include "tests/relaxation_bound.hpp"
+#include "tests/scatter_rows.hpp"
+#include "tests/bf16_transposed_wstream.hpp"
+#include "tests/reduce_last_axis.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -133,6 +136,9 @@ int main(int argc, char *argv[])
     {
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
+        runScatterRowsTests();
+        runBF16TransposedWStreamTests();
+        runReduceLastAxisTests();
         runPlannerStructureTests();
         FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         runSelectionReachabilityTests();
