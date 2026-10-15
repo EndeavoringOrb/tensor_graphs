@@ -296,7 +296,26 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
             kernel.matches(inNodes, outNode, mem_space, input_mem_spaces, {}, false, false, true, true,
                            &actual_engines);
 
-            ENode n(uid, op, kernel.opName, children, shape, kernel.is_view ? strides : calcContiguousStrides(shape),
+            std::vector<EClassId> adapted_children = children;
+            for (size_t input_idx = 0; input_idx < adapted_children.size(); ++input_idx)
+            {
+                if (kernel.requiresContiguous.empty())
+                    continue;
+
+                const size_t rule_idx = std::min(input_idx, kernel.requiresContiguous.size() - 1);
+                if (!kernel.requiresContiguous[rule_idx] || isContiguous(inNodes[input_idx]))
+                    continue;
+
+                const EClassId source_class = egraph.findConst(adapted_children[input_idx]);
+                const auto source = egraph.getEClass(source_class);
+                EClassId contiguous_class = addOpToEGraph(
+                    egraph, OpType::CONTIGUOUS, {source_class}, source.shape,
+                    calcContiguousStrides(source.shape), source.dtype, source.mem_space, EClassId(), loc,
+                    origin.empty() ? "addOpToEGraph.make_contiguous" : (origin + " -> make_contiguous"));
+                adapted_children[input_idx] = contiguous_class;
+            }
+
+            ENode n(uid, op, kernel.opName, adapted_children, shape, kernel.is_view ? strides : calcContiguousStrides(shape),
                     dtype, mem_space, actual_engines, "", 0, origin);
 
             cls = egraph.addENode(cls, n);
@@ -309,9 +328,18 @@ inline EClassId copyTo(EGraph &egraph, EClassId class_id, MemSpace target_mem_sp
                        const std::string &debugOrigin = "")
 {
     EClassId canon = egraph.find(class_id);
-    const EClass cls = egraph.getEClass(canon);
+    EClass cls = egraph.getEClass(canon);
     if (cls.mem_space == target_mem_space)
         return canon;
+
+    if (!isContiguous(cls))
+    {
+        canon = addOpToEGraph(egraph, OpType::CONTIGUOUS, {canon}, cls.shape,
+                              calcContiguousStrides(cls.shape), cls.dtype, cls.mem_space,
+                              EClassId(), SourceLocation::current(),
+                              debugOrigin.empty() ? "copyTo.make_contiguous" : (debugOrigin + " -> make_contiguous"));
+        cls = egraph.getEClass(canon);
+    }
 
     return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.dtype, target_mem_space,
                          EClassId(), SourceLocation::current(), debugOrigin);
@@ -889,6 +917,13 @@ struct FusionRule : public Rule
                         for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
                         {
                             MemSpace next_ms = path[p_idx];
+                            if (!isContiguous(pathClass))
+                            {
+                                pathPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {pathPid}, pathClass.shape,
+                                                        calcContiguousStrides(pathClass.shape), pathClass.dtype,
+                                                        pathClass.mem_space);
+                                pathClass = egraph.getEClass(egraph.findConst(pathPid));
+                            }
                             pathPid = addOpToEGraph(egraph, OpType::COPY_TO, {pathPid}, pathClass.shape,
                                                     pathClass.strides, pathClass.dtype, next_ms,
                                                     (p_idx == path.size() - 1) ? finalTargetClass : EClassId());
@@ -912,10 +947,14 @@ struct FusionRule : public Rule
                         oldENode.getShape(), strides, oldENode.getDType(), cand.target_mem_space, cand.mapped_engines,
                         "", 0, oldENode.getDebugOrigin());
 
-            MemSpace originalMemSpace = egraph.getEClass(egraph.findConst(e_class_id)).mem_space;
+            const EClass origCls = egraph.getEClass(egraph.findConst(e_class_id));
+            MemSpace originalMemSpace = origCls.mem_space;
             if (cand.target_mem_space == originalMemSpace)
             {
-                egraph.addENode(e_class_id, enode);
+                if (enode.getStrides() == origCls.strides)
+                {
+                    egraph.addENode(e_class_id, enode);
+                }
             }
             else
             {
@@ -933,8 +972,16 @@ struct FusionRule : public Rule
                 }
 
                 const EClass copySrcCls = egraph.getEClass(egraph.findConst(srcForCopy));
-                addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides,
-                              copySrcCls.dtype, originalMemSpace, e_class_id);
+                if (isContiguous(origCls))
+                {
+                    addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides,
+                                  copySrcCls.dtype, originalMemSpace, e_class_id);
+                }
+                else
+                {
+                    addOpToEGraph(egraph, OpType::COPY_TO, {srcForCopy}, copySrcCls.shape, copySrcCls.strides,
+                                  copySrcCls.dtype, originalMemSpace);
+                }
             }
         }
     }
@@ -2145,44 +2192,38 @@ struct RemoveCopyChains : public Rule
         return "RemoveCopyChains";
     }
 
-    static EClassId findCopyChainOrigin(EClassId startClassId, const EGraph &egraph)
+    static std::vector<EClassId> findAllCopyChainOrigins(EClassId startClassId, const EGraph &egraph)
     {
         EClassId startCanon = egraph.findConst(startClassId);
         MemSpace targetMemSpace = egraph.getEClass(startCanon).mem_space;
 
-        EClassId currClass = startCanon;
-        EClassId bestOrigin = startCanon;
-        std::unordered_set<EClassId> visitedClasses = {currClass};
+        std::vector<EClassId> origins;
+        std::unordered_set<EClassId> visited = {startCanon};
+        std::vector<EClassId> queue = {startCanon};
 
-        while (true)
+        for (size_t qi = 0; qi < queue.size(); ++qi)
         {
+            EClassId currClass = queue[qi];
             const EClass &cls = egraph.getEClass(currClass);
-            EClassId nextClass = EClassId{UINT32_MAX};
 
             for (ENodeId enodeId : cls.enodes)
             {
                 const ENode &enode = egraph.getENode(enodeId);
                 if (enode.getOpType() == OpType::COPY_TO && !enode.getChildren().empty())
                 {
-                    nextClass = egraph.findConst(enode.getChildren()[0]);
-                    break;
+                    EClassId nextClass = egraph.findConst(enode.getChildren()[0]);
+                    if (visited.insert(nextClass).second)
+                    {
+                        if (egraph.getEClass(nextClass).mem_space == targetMemSpace)
+                        {
+                            origins.push_back(nextClass);
+                        }
+                        queue.push_back(nextClass);
+                    }
                 }
             }
-
-            if (nextClass == EClassId{UINT32_MAX} || visitedClasses.count(nextClass))
-            {
-                break;
-            }
-
-            visitedClasses.insert(nextClass);
-            if (egraph.getEClass(nextClass).mem_space == targetMemSpace)
-            {
-                bestOrigin = nextClass;
-            }
-            currClass = nextClass;
         }
-
-        return bestOrigin;
+        return origins;
     }
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
@@ -2203,8 +2244,8 @@ struct RemoveCopyChains : public Rule
         for (uint64_t i = 0; i < children.size(); ++i)
         {
             EClassId childCanon = egraph.findConst(children[i]);
-            EClassId origin = findCopyChainOrigin(childCanon, egraph);
-            if (origin != childCanon)
+            std::vector<EClassId> origins = findAllCopyChainOrigins(childCanon, egraph);
+            if (!origins.empty())
             {
                 return true;
             }
@@ -2221,27 +2262,74 @@ struct RemoveCopyChains : public Rule
         const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId eClassId = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
-        std::vector<EClassId> newChildren;
-        newChildren.reserve(enode.getChildren().size());
-        bool changed = false;
+        std::vector<std::vector<EClassId>> child_origin_options;
+        child_origin_options.reserve(enode.getChildren().size());
+        bool any_has_origin = false;
 
         for (uint64_t i = 0; i < enode.getChildren().size(); ++i)
         {
             EClassId childCanon = egraph.findConst(enode.getChildren()[i]);
-            EClassId origin = findCopyChainOrigin(childCanon, egraph);
-            if (origin != childCanon)
+            std::vector<EClassId> origins = findAllCopyChainOrigins(childCanon, egraph);
+            if (!origins.empty())
             {
-                newChildren.push_back(origin);
-                changed = true;
+                any_has_origin = true;
+                child_origin_options.push_back(std::move(origins));
             }
             else
             {
-                newChildren.push_back(childCanon);
+                child_origin_options.push_back({childCanon});
             }
         }
 
-        if (changed)
+        if (!any_has_origin)
+            return;
+
+        std::vector<std::vector<EClassId>> combos = {{}};
+        for (const auto &options : child_origin_options)
         {
+            std::vector<std::vector<EClassId>> next_combos;
+            for (const auto &combo : combos)
+            {
+                for (EClassId opt : options)
+                {
+                    auto new_combo = combo;
+                    new_combo.push_back(opt);
+                    next_combos.push_back(std::move(new_combo));
+                    if (next_combos.size() >= 16)
+                        break;
+                }
+                if (next_combos.size() >= 16)
+                    break;
+            }
+            combos = std::move(next_combos);
+        }
+
+        for (const auto &newChildren : combos)
+        {
+            if (newChildren == enode.getChildren())
+                continue;
+
+            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+            {
+                const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
+                bool contig_ok = true;
+                if (!kernel.requiresContiguous.empty())
+                {
+                    for (size_t c_idx = 0; c_idx < newChildren.size(); ++c_idx)
+                    {
+                        size_t rule_idx = std::min(c_idx, kernel.requiresContiguous.size() - 1);
+                        if (kernel.requiresContiguous[rule_idx] &&
+                            !isContiguous(egraph.getEClass(egraph.findConst(newChildren[c_idx]))))
+                        {
+                            contig_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if (!contig_ok)
+                    continue;
+            }
+
             ENode newENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
                            enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
                            enode.getContentHash(), 0, enode.getDebugOrigin());
@@ -2483,7 +2571,7 @@ struct RemoveRedundantReshape : public Rule
             const EClass srcCls = egraph.getEClass(srcClassId);
 
             if (srcCls.shape == enode.getShape() && srcCls.dtype == enode.getDType() &&
-                srcCls.mem_space == enode.getMemSpace())
+                srcCls.mem_space == enode.getMemSpace() && srcCls.strides == enode.getStrides())
             {
                 egraph.merge(e_class_id, srcClassId);
                 return;
@@ -2528,7 +2616,24 @@ struct RemoveRedundantReshape : public Rule
                         const EClass &unwrappedCls = egraph.getEClass(unwrappedChildId);
                         if (unwrappedCls.shape == childCls.shape && unwrappedChildId != childClsId)
                         {
-                            candidateChildrenPerPos[i].push_back(unwrappedChildId);
+                            bool contig_ok = true;
+                            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+                            {
+                                const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
+                                if (!kernel.requiresContiguous.empty())
+                                {
+                                    size_t rule_idx =
+                                        std::min(static_cast<size_t>(i), kernel.requiresContiguous.size() - 1);
+                                    if (kernel.requiresContiguous[rule_idx] && !isContiguous(unwrappedCls))
+                                    {
+                                        contig_ok = false;
+                                    }
+                                }
+                            }
+                            if (contig_ok)
+                            {
+                                candidateChildrenPerPos[i].push_back(unwrappedChildId);
+                            }
                         }
                     }
                 }

@@ -24,7 +24,7 @@ CONFIGS = {
 }
 
 
-def run_gemma_output(config_name, cache_file="", min_compile_time=0.0):
+def run_gemma_output(config_name, cache_file="", min_compile_time=0.0, saturate_only=False):
     import tensor_graphs
     from main import decode_tokens, encode_text
     from utils.decode import load_tokenizer
@@ -34,11 +34,8 @@ def run_gemma_output(config_name, cache_file="", min_compile_time=0.0):
 
     project_root = Path(__file__).resolve().parents[1]
     model_path = project_root / "models" / "google" / "gemma-3-270m"
-    tokenizer = load_tokenizer([str(model_path), "gemma-3-270m"])
-    conversation_tokens = encode_text(tokenizer, "Hi, my name", is_first=True)
-    expected_string = " is <strong>Jasmine"
 
-    disable_compilation_caching = not bool(cache_file)
+    disable_compilation_caching = saturate_only or not bool(cache_file)
     session = tensor_graphs.LLMSession(
         "gemma-3-270m",
         str(model_path),
@@ -49,7 +46,15 @@ def run_gemma_output(config_name, cache_file="", min_compile_time=0.0):
         cache_file=cache_file,
         disable_node_caching=False,
         disable_compilation_caching=disable_compilation_caching,
+        saturate_only=saturate_only,
     )
+
+    if saturate_only:
+        return
+
+    tokenizer = load_tokenizer([str(model_path), "gemma-3-270m"])
+    conversation_tokens = encode_text(tokenizer, "Hi, my name", is_first=True)
+    expected_string = " is <strong>Jasmine"
 
     generated_string = ""
     while len(generated_string) <= len(expected_string):
@@ -68,12 +73,13 @@ def run_gemma_output(config_name, cache_file="", min_compile_time=0.0):
         )
 
 
-def test_gemma_output(cache_file="", min_compile_time=0.0):
+def test_gemma_output(cache_file="", min_compile_time=0.0, saturate_only=False):
     for config_name in CONFIGS:
         run_gemma_output(
             config_name,
             cache_file=cache_file,
             min_compile_time=min_compile_time,
+            saturate_only=saturate_only,
         )
 
 
@@ -105,6 +111,11 @@ def main():
         help="Search until the planner exhausts its search space",
     )
     parser.add_argument(
+        "--saturate-only",
+        action="store_true",
+        help="Run saturation/planning only to log cost model calls without running the model",
+    )
+    parser.add_argument(
         "--search-volume",
         action="store_true",
         help="Report remaining frontier hyperbox volume relative to initial domains, in bits",
@@ -115,7 +126,7 @@ def main():
     if args.timeout is not None:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             parser.error("--timeout must be finite and positive")
-        if args.config == "all" or not args.optimal or args.cache_file:
+        if args.config == "all" or not args.optimal or args.cache_file or args.saturate_only:
             parser.error("--timeout requires one --config, --optimal, and no compiled cache")
         if "TG_PROGRAM_DEADLINE" not in os.environ:
             start_time = time.monotonic()
@@ -160,7 +171,11 @@ def main():
             config_name,
             cache_file=args.cache_file,
             min_compile_time=-1.0 if args.optimal else args.min_compile_time,
+            saturate_only=args.saturate_only,
         )
+
+    if args.saturate_only:
+        print("[Main] Saturate-only complete. Cost model calls logged.")
 
 
 if __name__ == "__main__":

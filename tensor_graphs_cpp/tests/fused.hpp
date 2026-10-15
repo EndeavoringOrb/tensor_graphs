@@ -521,6 +521,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool req
             rawInputData[inputIds[i]] = contiguousData;
         }
 
+
         LogicalId rootId = kernel.refFactory(inputIds, graph);
 
         // Reference graph will handle the continuous mapping identically internally
@@ -546,7 +547,26 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec, bool req
             return false;
         }
 
-        return compareOutputs(refOutput.data(), tgtOutput.data(), refOutput.size(), 1e-4f, diagnostic);
+
+
+        bool ok = compareOutputs(refOutput.data(), tgtOutput.data(), refOutput.size(), 1e-4f, diagnostic);
+        if (!ok)
+        {
+            std::cout << "Failed rec details for " << kernel.opName << ":" << std::endl;
+            for (size_t i = 0; i < rec.inputShapes.size(); ++i) {
+                std::cout << "  in[" << i << "] shape=";
+                for (auto d : rec.inputShapes[i]) std::cout << d << ",";
+                std::cout << " strides=";
+                for (auto s : rec.inputStrides[i]) std::cout << s << ",";
+                std::cout << std::endl;
+            }
+            std::cout << "  out shape=";
+            for (auto d : outShape) std::cout << d << ",";
+            std::cout << " strides=";
+            for (auto s : outStrides) std::cout << s << ",";
+
+        }
+        return ok;
     }
     catch (const std::exception &e)
     {

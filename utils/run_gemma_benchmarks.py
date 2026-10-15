@@ -28,7 +28,17 @@ def runCommand(command_list, log_file, env=None):
             raise RuntimeError(f"Command {' '.join(command_list)} failed with exit code {process.returncode}")
 
 
-def runTensorGraphs(model_path="models/google/gemma-3-270m", log_file="logs/tensor_graphs.log"):
+def runTensorGraphs(
+    model_path="models/google/gemma-3-270m",
+    log_file="logs/tensor_graphs.log",
+    cache="dirty_region_caches/gemma-decode",
+):
+    target_cache = Path(f"{cache}.dirty-cache")
+    if target_cache.exists():
+        raise FileExistsError(f"Cache file already exists: {target_cache}")
+    if Path(cache).exists():
+        raise FileExistsError(f"Cache file already exists: {cache}")
+
     print("=" * 60)
     print("Running tensor_graphs benchmark (--config decode)...")
     print(f"Log output: {log_file}")
@@ -40,6 +50,12 @@ from main import encode_text, decode_tokens
 from utils.decode import load_tokenizer
 from pathlib import Path
 import time
+
+cache_path = Path({repr(cache)} + '.dirty-cache')
+if cache_path.exists():
+    raise FileExistsError('Cache file already exists: ' + str(cache_path))
+if Path({repr(cache)}).exists():
+    raise FileExistsError('Cache file already exists: ' + {repr(cache)})
 
 model_path = Path({repr(model_path)})
 tokenizer = load_tokenizer([str(model_path), 'gemma-3-270m'])
@@ -54,9 +70,9 @@ session = tensor_graphs.LLMSession(
     max_sequence_length=16,
     compile_decode_buckets=True,
     compile_no_weights_bucket=False,
-    cache_file='',
+    cache_file={repr(cache)},
     disable_node_caching=False,
-    disable_compilation_caching=True,
+    disable_compilation_caching=False,
 )
 
 step_times = []
@@ -224,6 +240,12 @@ def main():
         default="logs",
         help="Directory to save log files (default: logs)",
     )
+    parser.add_argument(
+        "--cache",
+        type=str,
+        default="dirty_region_caches/gemma-decode",
+        help="Path to cache file (default: dirty_region_caches/gemma-decode)",
+    )
     args = parser.parse_args()
 
     logs_dir = Path(args.logs_dir)
@@ -233,6 +255,7 @@ def main():
         runTensorGraphs(
             model_path=args.model_path,
             log_file=str(logs_dir / "tensor_graphs.log"),
+            cache=args.cache,
         )
 
     if args.target in ("all", "llama_cpp"):

@@ -2,19 +2,14 @@
 
 #include "core/kernels.hpp"
 
-inline LogicalId refFactoryGemmaRMSNorm(const std::vector<LogicalId> &inputs, Graph &g)
+inline LogicalId refFactoryGemmaRMSNormEx(LogicalId x_id, LogicalId weight_id, uint32_t B, uint32_t S, uint32_t D, Graph &g)
 {
-    LogicalId x_id = inputs[0];
-    LogicalId weight_id = inputs[1];
-    auto shape = g.getNode(x_id).getShape();
-    uint32_t B = shape[0], S = shape[1], D = shape[2];
-
     LogicalId x_sq = g.mul(x_id, x_id);
     int32_t axis_val = -1;
     LogicalId axis_node = g.constant({1}, &axis_val, DType::INT32);
     LogicalId sum_sq = g.sum(x_sq, axis_node);
 
-    float n_val = (float)D, eps_val = 1e-6f, half_val = 0.5f, one_val = 1.0f;
+    float n_val = (float)D, eps_val = 1e-6f, half_val = 0.5f;
 
     auto expand = [&](float val, uint32_t last_d) {
         int32_t sh[] = {1, 1, 1};
@@ -58,4 +53,12 @@ inline LogicalId refFactoryGemmaRMSNorm(const std::vector<LogicalId> &inputs, Gr
     }
 
     return g.mul(x_norm, g.add(w_exp, expand(1.0f, D)));
+}
+
+inline LogicalId refFactoryGemmaRMSNorm(const std::vector<LogicalId> &inputs, Graph &g)
+{
+    LogicalId x_id = inputs[0];
+    LogicalId weight_id = inputs[1];
+    auto shape = g.getNode(x_id).getShape();
+    return refFactoryGemmaRMSNormEx(x_id, weight_id, shape[0], shape[1], shape[2], g);
 }

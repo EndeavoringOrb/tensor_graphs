@@ -539,6 +539,7 @@ struct Session
         executor->run(cg, debugCallback);
 
         // Find the root node in CPU RAM or GPU RAM
+
         for (const auto &pair : cg.eclass_to_logical)
         {
             if (pair.second == rootId)
