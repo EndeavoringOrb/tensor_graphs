@@ -66,7 +66,8 @@ Goal not met. No official evaluation has completed. All work is uncommitted; bui
   LLMSession opts out of Windows power throttling; thread-pool workers spin up to 50 us before sleeping.
 - Kernels: GemmaRMSNormFill_{Rows,Heads}_F32_3D(_Threaded), Sum/Max_F32_LastAxis_NEON(_Threaded),
   BF16_Transposed_GEMM_NEON_WStream_Threaded / _v2 / _v3, Scatter_F32_Rows(_Threaded) (all calibrated; see below).
-- tests/inference_session.py: SEARCH_MARGIN_SECONDS=75, BLOCK_SIZES=[16,64,512], resident_weights=True,
+- tests/inference_session.py: SEARCH_MARGIN_SECONDS=75, Python-built token buckets from inference_cases.py,
+  resident_weights=True,
   TG_DISABLE_OPENCL, TG_SKIP_RELAXATION_BOUND, log_cost_calls=False, repo_path=<run dir>/repo.
 
 ### Key findings for the family scheme (seq 1024)
@@ -90,7 +91,7 @@ Goal not met. No official evaluation has completed. All work is uncommitted; bui
    "never both" in the rewrite.hpp slice pushdowns.
 2. Consider dropping the 512-blocks and using {1,8,64}.
 3. pp8: get the 8-row step to <= ~10 ms (threaded attention dot kernel, fewer copies, faster small-row GEMMs).
-4. Switch tests/inference_session.py BLOCK_SIZES to [1,8,64(,512)] and keep the compile < 600 s.
+4. Keep the Python-built prefill/decode token buckets aligned with inference_cases.py and keep compile under 600 s.
 5. Official evaluation: delete `benchmarks/repo_gemma-3-270m-seq1024.reftensors` first (the supervisor refuses
    otherwise), run the evaluation command above, record it in the table.
 6. Afterwards: remove debug instrumentation; run `test.exe --start-rank-window`, `--relaxation-bound`,

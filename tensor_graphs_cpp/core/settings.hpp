@@ -45,7 +45,6 @@ struct Settings
     bool reference_only = false;
     bool only_plan = false;
     bool saturate_only = false;
-    bool compile_decode_buckets = false;
     bool fold_weights = false;
     // Keep the in-memory copies of storage weights resident: each
     // copy_to(weight) is a preallocated input written once when the session

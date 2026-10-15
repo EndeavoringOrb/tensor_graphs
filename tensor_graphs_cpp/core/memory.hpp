@@ -460,12 +460,21 @@ struct MemoryManager
 
     void init(const std::unordered_map<MemSpace, uint64_t> &peakSizes = {})
     {
-        for (const auto &pair : peakSizes)
+        if (!peakSizes.empty())
         {
-            auto it = buffers.find(pair.first);
-            if (it != buffers.end() && it->second)
+            for (auto &pair : buffers)
             {
-                it->second->resize(pair.second);
+                if (!pair.second)
+                    continue;
+                auto it = peakSizes.find(pair.first);
+                if (it != peakSizes.end())
+                {
+                    pair.second->resize(it->second);
+                }
+                else
+                {
+                    pair.second->resize(0);
+                }
             }
         }
         for (auto &pair : buffers)

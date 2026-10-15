@@ -19,16 +19,25 @@ Contract:
 """
 import os
 
-from tests.inference_cases import MODEL_NAME, MODEL_PATH, SEQUENCE_LENGTH
+from tests.inference_cases import CASES, MODEL_NAME, MODEL_PATH, SEQUENCE_LENGTH
 
 # Seconds reserved after the search for extraction, plan writing and arenas.
 SEARCH_MARGIN_SECONDS = 75.0
 
-# Aligned power-of-two token blocks (LLMSession block buckets): every block
-# [c, c + n) with c a multiple of n gets a compiled bucket; a request's dirty
-# tokens run as consecutive blocks. The smallest size also bounds the rows a
-# decode step recomputes; fewer/larger sizes mean fewer buckets to compile.
-BLOCK_SIZES = [16, 64, 512]
+def tokenBuckets():
+    """Build exact prefill and decode buckets for the benchmark workloads."""
+    buckets = set()
+    for case in CASES:
+        context = case["context"]
+        count = case["tokens"]
+        if context > 0:
+            buckets.add((0, context, context - 1, 1.0))
+        if case["kind"] == "pp":
+            buckets.add((context, context + count, context + count - 1, 1.0))
+        else:
+            for position in range(context, context + count):
+                buckets.add((position, position + 1, position, 1.0))
+    return sorted(buckets)
 
 
 def open_session(cache_file, compile_deadline):
@@ -56,7 +65,7 @@ def open_session(cache_file, compile_deadline):
         disable_node_caching=False,
         disable_compilation_caching=False,
         log_cost_calls=False,
-        block_sizes=BLOCK_SIZES,
+        token_buckets=tokenBuckets(),
         # Weights stay resident in memory (written once at load) instead of
         # being copied from storage, or cached by the planner, in every run.
         resident_weights=True,

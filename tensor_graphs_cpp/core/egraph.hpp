@@ -375,14 +375,20 @@ struct EGraph
             std::swap(ra, rb);
 
         if (classes[ra.value].shape != classes[rb.value].shape ||
-            classes[ra.value].dtype != classes[rb.value].dtype)
+            classes[ra.value].dtype != classes[rb.value].dtype ||
+            classes[ra.value].mem_space != classes[rb.value].mem_space ||
+            classes[ra.value].strides != classes[rb.value].strides)
         {
-            std::cerr << "[ILLEGAL EClass MERGE] ra=" << ra.value << " (shape=" << toString(classes[ra.value].shape)
-                      << ", strides=" << toString(classes[ra.value].strides)
-                      << ", dtype=" << static_cast<int>(classes[ra.value].dtype) << ") vs rb=" << rb.value
-                      << " (shape=" << toString(classes[rb.value].shape)
-                      << ", strides=" << toString(classes[rb.value].strides)
-                      << ", dtype=" << static_cast<int>(classes[rb.value].dtype) << ")\n";
+            std::stringstream ss;
+            ss << "[ILLEGAL EClass MERGE] ra=" << ra.value << " (shape=" << toString(classes[ra.value].shape)
+               << ", strides=" << toString(classes[ra.value].strides)
+               << ", dtype=" << static_cast<int>(classes[ra.value].dtype)
+               << ", mem_space=" << toString(classes[ra.value].mem_space) << ") vs rb=" << rb.value
+               << " (shape=" << toString(classes[rb.value].shape)
+               << ", strides=" << toString(classes[rb.value].strides)
+               << ", dtype=" << static_cast<int>(classes[rb.value].dtype)
+               << ", mem_space=" << toString(classes[rb.value].mem_space) << ")";
+            Error::throw_err(ss.str());
         }
 
         auto itConstA = constantStaging.find(ra);

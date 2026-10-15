@@ -1,5 +1,6 @@
 # main.py
 import argparse
+import json
 from pathlib import Path
 
 import tensor_graphs
@@ -66,7 +67,7 @@ def main():
         "--seq-len",
         type=int,
         default=128,
-        help="Maximum model sequence length (also determines the decode buckets)",
+        help="Maximum model sequence length",
     )
     parser.add_argument(
         "--min-compile-time",
@@ -80,9 +81,10 @@ def main():
         help="Search until the planner exhausts its search space",
     )
     parser.add_argument(
-        "--compile-decode-buckets",
-        action="store_true",
-        help="Compile decode buckets in addition to the single full bucket",
+        "--token-buckets",
+        type=json.loads,
+        default=[],
+        help="JSON list of [dirty_start, dirty_end, output_row, weight] buckets",
     )
     parser.add_argument(
         "--compile-no-weights-bucket",
@@ -210,7 +212,7 @@ def main():
         args.model_path,
         delegate,
         min_compile_time=-1.0 if args.optimal else args.min_compile_time,
-        compile_decode_buckets=args.compile_decode_buckets,
+        token_buckets=[tuple(bucket) for bucket in args.token_buckets],
         compile_no_weights_bucket=args.compile_no_weights_bucket,
         cache_file=args.cache_file,
         disable_node_caching=args.disable_node_caching,

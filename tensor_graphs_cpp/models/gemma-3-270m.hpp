@@ -1,9 +1,15 @@
 #pragma once
+#include <cmath>
 #include <string>
+#include <vector>
 
 #include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "core/types.hpp"
+#include "kernels/fused/gemma_rms_norm/ref.hpp"
+#include "kernels/fused/gemma_rope/ref.hpp"
+#include "kernels/fused/gemma_attention/ref.hpp"
+#include "kernels/fused/gelu_tanh_fill/ref.hpp"
 
 struct Gemma3ModelConfig
 {
@@ -70,28 +76,7 @@ class Gemma3Model
 
     LogicalId rms_norm_gemma_atomic(LogicalId x_id, LogicalId weight_id, uint32_t dim0, uint32_t dim_size)
     {
-        LogicalId x_sq = g.mul(x_id, x_id);
-        int32_t axis_val = -1;
-        LogicalId axis_node = g.constant({1}, &axis_val, DType::INT32);
-        LogicalId sum_sq = g.sum(x_sq, axis_node);
-        float n_val = (float)dim_size;
-        LogicalId n_node = g.constant({1}, &n_val, DType::FLOAT32);
-        n_node = g.fill(n_node, {dim0, seq_len, 1});
-        LogicalId mean_sq = g.div(sum_sq, n_node);
-        LogicalId eps_expanded = g.fill(eps_fp32, {dim0, seq_len, 1});
-        LogicalId mean_sq_plus_eps = g.add(mean_sq, eps_expanded);
-        float half_val = 0.5f;
-        LogicalId sqrt_node = g.constant({1}, &half_val, DType::FLOAT32);
-        sqrt_node = g.fill(sqrt_node, {dim0, seq_len, 1});
-        LogicalId std = g.pow(mean_sq_plus_eps, sqrt_node);
-        LogicalId one_node = g.fill(one_fp32, {dim0, seq_len, 1});
-        LogicalId inv_std = g.div(one_node, std);
-        LogicalId inv_std_expanded = g.repeat(inv_std, dim_size, 2);
-        LogicalId x_norm = g.mul(x_id, inv_std_expanded);
-        LogicalId weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
-        LogicalId one_node_full = g.fill(one_fp32, {dim0, seq_len, dim_size});
-        LogicalId scale = g.add(weight_expanded, one_node_full);
-        return g.mul(x_norm, scale);
+        return refFactoryGemmaRMSNormEx(x_id, weight_id, dim0, seq_len, dim_size, g);
     }
 
     LogicalId tanh_atomic(LogicalId x_id, uint32_t last_dim)
@@ -113,21 +98,7 @@ class Gemma3Model
 
     LogicalId gelu_atomic(LogicalId x_id, uint32_t last_dim)
     {
-        float c1_val = 0.044715f;
-        LogicalId c1_node = g.fill(g.constant({1}, &c1_val, DType::FLOAT32), {1, seq_len, last_dim});
-        float c2_val = 0.79788456f;
-        LogicalId c2_node = g.fill(g.constant({1}, &c2_val, DType::FLOAT32), {1, seq_len, last_dim});
-        LogicalId x_sq = g.mul(x_id, x_id);
-        LogicalId x_cube = g.mul(x_sq, x_id);
-        LogicalId term1 = g.mul(x_cube, c1_node);
-        LogicalId term2 = g.add(x_id, term1);
-        LogicalId term3 = g.mul(term2, c2_node);
-        LogicalId tanh_result = tanh_atomic(term3, last_dim);
-        LogicalId one_node = g.fill(one_fp32, {1, seq_len, last_dim});
-        LogicalId term4 = g.add(one_node, tanh_result);
-        LogicalId half_node = g.fill(half_fp32, {1, seq_len, last_dim});
-        LogicalId term5 = g.mul(x_id, half_node);
-        return g.mul(term5, term4);
+        return refFactoryGeluTanhFillEx(x_id, {1, seq_len, last_dim}, g);
     }
 
     std::tuple<LogicalId, LogicalId> compute_rope(float theta_val)
@@ -284,10 +255,10 @@ class Gemma3Model
             LogicalId rep_node = g.constant({1}, rep, DType::INT32);
             int32_t ax[] = {0};
             LogicalId ax_node = g.constant({1}, ax, DType::INT32);
-            k = g.repeat(k, rep_node, ax_node);
-            v = g.repeat(v, rep_node, ax_node);
+            k = g.contiguous(g.repeat(k, rep_node, ax_node));
+            v = g.contiguous(g.repeat(v, rep_node, ax_node));
         }
-        return std::make_tuple(g.contiguous(q), g.contiguous(k), g.contiguous(v));
+        return std::make_tuple(g.contiguous(q), k, v);
     }
 
     LogicalId attention_output_atomic(std::tuple<LogicalId, LogicalId, LogicalId> qkv, const std::string &prefix,
@@ -297,43 +268,7 @@ class Gemma3Model
         LogicalId k = std::get<1>(qkv);
         LogicalId v = std::get<2>(qkv);
 
-        float scale_val = 1.0f / std::sqrt((float)cfg.query_pre_attn_scalar);
-        LogicalId scale_node =
-            g.fill(g.constant({1}, &scale_val, DType::FLOAT32), {cfg.n_heads, seq_len, cfg.head_dim});
-        LogicalId scaled_q = g.mul(q, scale_node);
-
-        int32_t perm_k[] = {0, 2, 1};
-        LogicalId k_t = g.permute(k, g.constant({3}, perm_k, DType::INT32));
-        k_t = g.contiguous(k_t);
-
-        LogicalId scores = g.dot(scaled_q, k_t);
-        LogicalId mask_expanded = g.repeat(mask_id, cfg.n_heads, 0);
-        scores = g.add(scores, mask_expanded);
-
-        int32_t axis_val = -1;
-        LogicalId max_scores = g.max(scores, g.constant({1}, &axis_val, DType::INT32));
-        max_scores = g.repeat(max_scores, seq_len, 2);
-        LogicalId shifted_scores = g.add(scores, g.neg(max_scores));
-
-        float e_val = 2.718281828459045f;
-        LogicalId e_node = g.fill(g.constant({1}, &e_val, DType::FLOAT32), {cfg.n_heads, seq_len, seq_len});
-        LogicalId exp_scores = g.pow(e_node, shifted_scores);
-
-        LogicalId sum_exp = g.sum(exp_scores, g.constant({1}, &axis_val, DType::INT32));
-        sum_exp = g.repeat(sum_exp, seq_len, 2);
-
-        LogicalId probs = g.div(exp_scores, sum_exp);
-        LogicalId context = g.dot(probs, v);
-
-        int32_t ctx_shape4[] = {1, (int32_t)cfg.n_heads, (int32_t)seq_len, (int32_t)cfg.head_dim};
-        LogicalId ctx_4d = g.reshape(context, g.constant({4}, ctx_shape4, DType::INT32));
-
-        int32_t perm_ctx[] = {0, 2, 1, 3};
-        LogicalId ctx_perm = g.permute(ctx_4d, g.constant({4}, perm_ctx, DType::INT32));
-        ctx_perm = g.contiguous(ctx_perm);
-
-        int32_t ctx_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.n_heads * cfg.head_dim)};
-        LogicalId ctx_flat = g.reshape(ctx_perm, g.constant({3}, ctx_shape3, DType::INT32));
+        LogicalId ctx_flat = refFactoryGemmaAttentionEx(q, k, v, mask_id, cfg.n_heads, seq_len, cfg.head_dim, g);
 
         LogicalId w_o = weight(w_path, prefix + ".self_attn.o_proj.weight");
         int32_t perm_dims[] = {1, 0};
@@ -374,7 +309,8 @@ class Gemma3Model
         LogicalId w_emb = weight(w_path, "model.embed_tokens.weight");
         LogicalId x = g.gather(w_emb, input_ids_id);
         float scale_val = std::sqrt((float)cfg.emb_dim);
-        LogicalId scale_node = g.fill(g.constant({1}, &scale_val, DType::FLOAT32), {1, seq_len, cfg.emb_dim});
+        std::vector<float> scale_data(seq_len * cfg.emb_dim, scale_val);
+        LogicalId scale_node = g.constant({1, seq_len, cfg.emb_dim}, scale_data.data(), DType::FLOAT32);
         x = g.mul(x, scale_node);
 
         auto [rope_cos_global, rope_sin_global] = compute_rope(cfg.rope_theta_global);

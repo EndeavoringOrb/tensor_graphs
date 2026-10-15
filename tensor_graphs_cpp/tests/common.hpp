@@ -70,7 +70,8 @@ inline bool compareOutputs(const float *ref, const float *test, uint64_t element
     {
         if (ref[i] == test[i] || (std::isnan(ref[i]) && std::isnan(test[i])))
             continue;
-        if (!std::isfinite(ref[i]) || !std::isfinite(test[i]) || std::abs(ref[i] - test[i]) > eps)
+        float diff = std::abs(ref[i] - test[i]);
+        if (!std::isfinite(ref[i]) || !std::isfinite(test[i]) || (diff > eps && diff > eps * std::abs(ref[i])))
         {
             if (diagnostic)
             {

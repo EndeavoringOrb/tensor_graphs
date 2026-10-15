@@ -36,7 +36,7 @@ inline std::vector<float> extractFloatTensor(LogicalId node_id, const Graph &gra
     const TensorNode &node = graph.getNode(node_id);
     uint64_t num_elems = countElements(node);
     std::vector<float> final_out(num_elems, 0.0f);
-    const uint8_t *src_bytes = static_cast<const uint8_t *>(data);
+    const uint8_t *src_bytes = static_cast<const uint8_t *>(data) + view.offset;
 
     for (uint64_t i = 0; i < num_elems; ++i)
     {

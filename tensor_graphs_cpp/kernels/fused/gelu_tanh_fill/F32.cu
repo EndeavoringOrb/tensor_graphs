@@ -61,8 +61,6 @@ inline bool matchGeluTanhFill_CUDA(const std::vector<TensorNode> &inputs, const 
         return false;
     if (output.dtype != DType::FLOAT32)
         return false;
-    if (!isContiguous(output))
-        return false;
     return true;
 }
 

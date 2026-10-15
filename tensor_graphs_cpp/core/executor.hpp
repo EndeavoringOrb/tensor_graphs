@@ -284,6 +284,26 @@ class Executor
             const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             outBufObj->setupOutput(ctx, outView, logical_id);
 
+            if (!kernel.is_view && !kernel.requiresContiguous.empty())
+            {
+                for (size_t c_idx = 0; c_idx < inst.children.size(); ++c_idx)
+                {
+                    size_t rule_idx = std::min(c_idx, kernel.requiresContiguous.size() - 1);
+                    if (kernel.requiresContiguous[rule_idx])
+                    {
+                        const TensorView &in_view = compiled.nodeViews.at(inst.children[c_idx]);
+                        if (!isContiguous(in_view))
+                        {
+                            std::stringstream ss;
+                            ss << "[Executor] Instruction " << idx << " (" << kernel_name << ") input #" << c_idx
+                               << " (eclass " << inst.children[c_idx].value << ") is non-contiguous, but kernel requires contiguous input."
+                               << " Shape=" << toString(in_view.getShape()) << " Strides=" << toString(in_view.strides);
+                            Error::throw_err(ss.str());
+                        }
+                    }
+                }
+            }
+
             bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
@@ -308,6 +328,8 @@ class Executor
 
             sync.markExecuted(inst, inst_engines, issued_work);
 
+
+
             if (check_nan_env && *check_nan_env && issued_work && outView.dtype == DType::FLOAT32 && nan_report_count < 10)
             {
                 sync.syncEngines(inst_engines);
@@ -331,32 +353,44 @@ class Executor
                 {
                     const float *fvals = static_cast<const float *>(nan_check_ptr);
                     uint64_t n_elems = countElements(outView);
-                    bool has_nan = false;
+                    bool has_bad = false;
                     for (uint64_t k = 0; k < n_elems; ++k)
                     {
-                        if (std::isnan(fvals[k]))
+                        if (std::isnan(fvals[k]) || std::isinf(fvals[k]))
                         {
-                            has_nan = true;
+                            has_bad = true;
                             nan_report_count++;
-                            std::cerr << "[NAN DETECTED] inst=" << idx << "/" << nInst
-                                      << " kernel=" << kernel_name << " eclass=" << inst.eclass_id.value
+                            std::cerr << "[BAD_VAL DETECTED] inst=" << idx << "/" << nInst
+                                      << " kernel=" << kernel_name << " (id=0x" << std::hex << inst.kernel_id.value << std::dec << ")"
+                                      << " reqContig=" << (kernel.requiresContiguous.empty() ? -1 : (int)kernel.requiresContiguous[0])
+                                      << " eclass=" << inst.eclass_id.value
                                       << " logical=" << inst.logical_id.value
                                       << " origin=" << inst.debugOrigin
-                                      << " first_nan_idx=" << k << "/" << n_elems
+                                      << " first_bad_idx=" << k << "/" << n_elems
+                                      << " val=" << fvals[k]
                                       << " out_offset=" << inst.outBuffer.offset
                                       << " out_size=" << inst.outBuffer.size << std::endl;
                             break;
                         }
                     }
-                    if (has_nan)
+                    if (has_bad)
                     {
+                        uint64_t target_k = 0;
+                        for (uint64_t k = 0; k < n_elems; ++k) {
+                            if (std::isnan(fvals[k]) || std::isinf(fvals[k])) { target_k = k; break; }
+                        }
                         for (size_t c = 0; c < inst.children.size(); ++c)
                         {
                             const TensorView &cView = compiled.nodeViews.at(inst.children[c]);
                             std::cerr << "  child[" << c << "] eclass=" << inst.children[c].value
                                       << " buf_offset=" << inst.inBuffers[c].offset
                                       << " buf_size=" << inst.inBuffers[c].size
-                                      << " dtype=" << static_cast<int>(cView.dtype);
+                                      << " dtype=" << static_cast<int>(cView.dtype)
+                                      << " shape=[";
+                            for (auto d : cView.getShape()) std::cerr << d << ",";
+                            std::cerr << "] strides=[";
+                            for (auto s : cView.strides) std::cerr << s << ",";
+                            std::cerr << "]";
                             if (cView.dtype == DType::FLOAT32 && ctx.inputs[c])
                             {
                                 const float *in_f = nullptr;
@@ -378,16 +412,14 @@ class Executor
                                 if (in_f)
                                 {
                                     uint64_t in_n = countElements(cView);
-                                    bool in_has_nan = false;
+                                    uint64_t nan_cnt = 0, inf_cnt = 0;
                                     for (uint64_t ik = 0; ik < in_n; ++ik)
                                     {
-                                        if (std::isnan(in_f[ik]))
-                                        {
-                                            in_has_nan = true;
-                                            break;
-                                        }
+                                        if (std::isnan(in_f[ik])) nan_cnt++;
+                                        if (std::isinf(in_f[ik])) inf_cnt++;
                                     }
-                                    std::cerr << " has_nan=" << (in_has_nan ? "YES" : "NO")
+                                    std::cerr << " nan_cnt=" << nan_cnt << " inf_cnt=" << inf_cnt
+                                              << " val_at_k=" << (target_k < in_n ? in_f[target_k] : -999999.0f)
                                               << " sample[0]=" << in_f[0];
                                 }
                             }

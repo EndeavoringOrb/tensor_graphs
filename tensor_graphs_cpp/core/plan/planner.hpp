@@ -2311,6 +2311,28 @@ struct Planner
 
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE && !is_view)
             {
+                if (kernel_ptr && !kernel_ptr->requiresContiguous.empty())
+                {
+                    for (size_t c_idx = 0; c_idx < inst.children.size(); ++c_idx)
+                    {
+                        size_t rule_idx = std::min(c_idx, kernel_ptr->requiresContiguous.size() - 1);
+                        if (kernel_ptr->requiresContiguous[rule_idx])
+                        {
+                            const auto &child_view = compiled.nodeViews.at(inst.children[c_idx]);
+                            if (!isContiguous(child_view))
+                            {
+                                std::stringstream ss;
+                                ss << "[Planner] Instruction assembly contiguity violation: kernel "
+                                   << kernel_ptr->getName() << " (eclass " << eclass_id.value
+                                   << ") input #" << c_idx << " (eclass " << inst.children[c_idx].value
+                                   << ") is not contiguous, but kernel requires contiguous input!"
+                                   << " shape=" << toString(child_view.getShape())
+                                   << " strides=" << toString(child_view.strides);
+                                Error::throw_err(ss.str());
+                            }
+                        }
+                    }
+                }
                 compiled.instructions.push_back(inst);
             }
         }
@@ -2345,6 +2367,7 @@ struct Planner
 
             if (!compiled.nodeViews.count(cls.id))
             {
+                uint64_t offset = 0;
                 auto out_buf_it = extraction.eclass_to_buf.find(cls.id);
                 if (out_buf_it != extraction.eclass_to_buf.end())
                 {
@@ -2353,12 +2376,13 @@ struct Planner
                     {
                         if (buf.id == buf_id)
                         {
-                            compiled.nodeViews[cls.id] =
-                                TensorView(cls.shape, buf.offset >= 0 ? buf.offset : 0, cls.strides, cls.dtype);
+                            offset = buf.offset >= 0 ? static_cast<uint64_t>(buf.offset) : 0ULL;
                             break;
                         }
                     }
                 }
+                compiled.nodeViews[cls.id] =
+                    TensorView(cls.shape, offset, cls.strides, cls.dtype);
             }
         }
 
