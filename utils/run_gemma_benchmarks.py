@@ -62,13 +62,15 @@ tokenizer = load_tokenizer([str(model_path), 'gemma-3-270m'])
 tokens = encode_text(tokenizer, 'Hi, my name', is_first=True)
 print('Initial tokens:', tokens, 'count:', len(tokens), flush=True)
 
+prompt_len = len(tokens)
 session = tensor_graphs.LLMSession(
     'gemma-3-270m',
     str(model_path),
     tensor_graphs.HeuristicSearchDelegate(),
     min_compile_time=0.0,
     max_sequence_length=16,
-    compile_decode_buckets=True,
+    compile_prefill_buckets=[prompt_len],
+    compile_decode_buckets=list(range(prompt_len, 15)),
     compile_no_weights_bucket=False,
     cache_file={repr(cache)},
     disable_node_caching=False,

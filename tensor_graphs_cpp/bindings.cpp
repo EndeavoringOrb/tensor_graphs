@@ -313,13 +313,14 @@ class LLMSession
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
-               bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
+               py::object compile_decode_buckets = py::object(), const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
                 uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
                double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
                const std::string &write_refs = "", const std::string &compare_refs = "",
                 bool disable_compilation_caching = false, bool ref_only = false,
-               bool compile_no_weights_bucket = false, bool saturate_only = false)
+               bool compile_no_weights_bucket = false, bool saturate_only = false,
+               py::object compile_prefill_buckets = py::object())
     {
         compileNoWeightsBucket = compile_no_weights_bucket;
         referenceFile = write_refs;
@@ -404,10 +405,75 @@ class LLMSession
             throw std::runtime_error("Failed to initialize reference tensor verifier");
         }
 
-        if (compile_decode_buckets)
+        // Add prefill buckets if requested
+        std::vector<uint32_t> prefill_lens;
+        if (compile_prefill_buckets && !compile_prefill_buckets.is_none())
         {
-            for (uint32_t i = 0; i < max_seq_len; ++i)
+            if (py::isinstance<py::bool_>(compile_prefill_buckets))
             {
+                // bool with no length given: no-op
+            }
+            else if (py::isinstance<py::int_>(compile_prefill_buckets))
+            {
+                uint32_t pfl = compile_prefill_buckets.cast<uint32_t>();
+                if (pfl > max_seq_len)
+                    Error::throw_err("prefill length (" + std::to_string(pfl) + ") exceeds max_sequence_length (" +
+                                     std::to_string(max_seq_len) + ")");
+                if (pfl > 0)
+                    prefill_lens.push_back(pfl);
+            }
+            else if (py::isinstance<py::sequence>(compile_prefill_buckets))
+            {
+                for (auto item : compile_prefill_buckets.cast<py::sequence>())
+                {
+                    uint32_t pfl = item.cast<uint32_t>();
+                    if (pfl > max_seq_len)
+                        Error::throw_err("prefill length (" + std::to_string(pfl) + ") exceeds max_sequence_length (" +
+                                         std::to_string(max_seq_len) + ")");
+                    if (pfl > 0)
+                        prefill_lens.push_back(pfl);
+                }
+            }
+        }
+
+        for (uint32_t pfl : prefill_lens)
+        {
+            std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
+            Region inputRegion;
+            inputRegion.region = {{0, 1}, {0, pfl}};
+            inputDirty[inputIdsId] = {inputRegion};
+
+            Region outputNeeded;
+            outputNeeded.region = {{0, 1}, {pfl - 1, pfl}, {0, vocab_size}};
+            session->addBucket(inputDirty, {outputNeeded});
+        }
+
+        // Add decode buckets if requested
+        if (compile_decode_buckets && !compile_decode_buckets.is_none())
+        {
+            if (py::isinstance<py::bool_>(compile_decode_buckets))
+            {
+                if (compile_decode_buckets.cast<bool>())
+                {
+                    for (uint32_t i = 0; i < max_seq_len; ++i)
+                    {
+                        std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
+                        Region inputRegion;
+                        inputRegion.region = {{0, 1}, {i, i + 1}};
+                        inputDirty[inputIdsId] = {inputRegion};
+
+                        Region outputNeeded;
+                        outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
+                        session->addBucket(inputDirty, {outputNeeded});
+                    }
+                }
+            }
+            else if (py::isinstance<py::int_>(compile_decode_buckets))
+            {
+                uint32_t i = compile_decode_buckets.cast<uint32_t>();
+                if (i >= max_seq_len)
+                    Error::throw_err("decode bucket index (" + std::to_string(i) + ") exceeds max_sequence_length (" +
+                                     std::to_string(max_seq_len) + ")");
                 std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
                 Region inputRegion;
                 inputRegion.region = {{0, 1}, {i, i + 1}};
@@ -416,6 +482,24 @@ class LLMSession
                 Region outputNeeded;
                 outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
                 session->addBucket(inputDirty, {outputNeeded});
+            }
+            else if (py::isinstance<py::sequence>(compile_decode_buckets))
+            {
+                for (auto item : compile_decode_buckets.cast<py::sequence>())
+                {
+                    uint32_t i = item.cast<uint32_t>();
+                    if (i >= max_seq_len)
+                        Error::throw_err("decode bucket index (" + std::to_string(i) + ") exceeds max_sequence_length (" +
+                                         std::to_string(max_seq_len) + ")");
+                    std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
+                    Region inputRegion;
+                    inputRegion.region = {{0, 1}, {i, i + 1}};
+                    inputDirty[inputIdsId] = {inputRegion};
+
+                    Region outputNeeded;
+                    outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
+                    session->addBucket(inputDirty, {outputNeeded});
+                }
             }
         }
 
@@ -1289,18 +1373,19 @@ PYBIND11_MODULE(tensor_graphs, m)
     m.def("make_full_regions", [](const std::vector<uint32_t> &shape) { return makeFull(shape); });
 
     py::class_<LLMSession>(m, "LLMSession")
-        .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
+        .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, py::object,
                       const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
-                      bool, const std::string &, const std::string &, bool, bool, bool, bool>(),
+                      bool, const std::string &, const std::string &, bool, bool, bool, bool, py::object>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
-             py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
+             py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = py::cast(false), py::arg("cache_file") = "",
              py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
              py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
              py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
              py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
              py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
              py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false,
-             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false)
+             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false,
+             py::arg("compile_prefill_buckets") = py::none())
         .def_property_readonly("native_session", &LLMSession::nativeSession, py::return_value_policy::reference_internal)
         .def_property_readonly("root_id", &LLMSession::rootId)
         .def_property_readonly("input_id", &LLMSession::inputId)
