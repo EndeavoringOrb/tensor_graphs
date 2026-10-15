@@ -21,6 +21,11 @@ CONFIGS = {
         "compile_decode_buckets": True,
         "compile_no_weights_bucket": False,
     },
+    "prefill+decode": {
+        "compile_prefill_buckets": [5],
+        "compile_decode_buckets": list(range(5, 15)),
+        "compile_no_weights_bucket": False,
+    },
 }
 
 

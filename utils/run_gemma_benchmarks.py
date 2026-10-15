@@ -89,11 +89,19 @@ while len(tokens) < 16:
     tokens.append(nxt)
 
 print(f'Done 16 tokens! Total tg steps: {{len(step_times)}}', flush=True)
-print(f'Initial PP step time (seq_len 5): {{step_times[0]*1000:.2f}} ms ({{5.0/step_times[0]:.2f}} t/s)', flush=True)
+# Output formatting matches the regex patterns in utils/eval_gemma_kernel.py:
+#   r"Prompt Processing:\s*([\d\.]+)\s*ms"
+#   r"Text Generation:\s*([\d\.]+)\s*ms\s*/\s*tok"
+#   r"Overall Generation:\s*([\d\.]+)\s*ms\s*/\s*tok"
+# Do not modify these formats without updating both run_gemma_benchmarks.py and eval_gemma_kernel.py.
+pp_ms = step_times[0] * 1000
+print(f'Prompt Processing: {{pp_ms:.2f}} ms ({{5.0/step_times[0]:.2f}} t/s)', flush=True)
 if len(step_times) > 1:
     decode_times = step_times[1:]
-    print(f'Steady-state decode avg (seq_len 6..16): {{sum(decode_times)/len(decode_times)*1000:.2f}} ms/tok ({{len(decode_times)/sum(decode_times):.2f}} t/s)', flush=True)
-print(f'Full sequence average: {{sum(step_times)/len(step_times)*1000:.2f}} ms/tok ({{len(step_times)/sum(step_times):.2f}} t/s)', flush=True)
+    tg_ms = sum(decode_times) / len(decode_times) * 1000
+    print(f'Text Generation: {{tg_ms:.2f}} ms / tok ({{len(decode_times)/sum(decode_times):.2f}} t/s)', flush=True)
+og_ms = sum(step_times) / len(step_times) * 1000
+print(f'Overall Generation: {{og_ms:.2f}} ms / tok ({{len(step_times)/sum(step_times):.2f}} t/s)', flush=True)
 """
     python_bin = sys.executable
     runCommand([python_bin, "-c", code], log_file)

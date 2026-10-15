@@ -7,12 +7,12 @@ Automates the 11-step evaluation loop for a target kernel on Gemma 3 270M:
 2. Write kernel (manual)
 3. build.py --t test bench bindings --opencl 0
 4. test <targetKernel> (registered shape)
-5. python -m tests.test_gemma_output --config decode --saturate-only
+5. python -m tests.test_gemma_output --config prefill+decode --saturate-only
 6. test <targetKernel> (all matched shapes)
 7. bench <targetKernel>
 8. compare against existing records (utils/read_benchmarks.py)
 9. utils/run_gemma_benchmarks.py --target tensor_graphs
-10. python -m tests.test_gemma_output --config decode --cache dirty_region_caches/gemma-decode
+10. python -m tests.test_gemma_output --config prefill+decode --cache dirty_region_caches/gemma-decode
 11. Repeat / Summary
 """
 
@@ -71,10 +71,10 @@ def main():
         res = run_command(["./tensor_graphs_cpp/test", "--no-records", target], f"test {target}")
         print(res.stdout[-1000:] if len(res.stdout) > 1000 else res.stdout)
 
-    # Step 5: Saturate decode graph
+    # Step 5: Saturate prefill+decode graph
     if not args.skip_saturate:
-        log_header(5, "Saturate Gemma decode graph (--saturate-only)")
-        run_command([PYTHON_BIN, "-m", "tests.test_gemma_output", "--config", "decode", "--saturate-only"], "saturate-only")
+        log_header(5, "Saturate Gemma graph (--saturate-only, prefill+decode)")
+        run_command([PYTHON_BIN, "-m", "tests.test_gemma_output", "--config", "prefill+decode", "--saturate-only"], "saturate-only")
 
     # Step 6: Test matched shapes
     if target and not args.is_view:
@@ -134,9 +134,9 @@ def main():
     # Step 10: Verify Gemma output correctness
     verified = False
     if not args.skip_e2e:
-        log_header(10, "Verify Gemma output correctness from cached decode")
+        log_header(10, "Verify Gemma output correctness from cached prefill+decode")
         res = run_command(
-            [PYTHON_BIN, "-m", "tests.test_gemma_output", "--config", "decode", "--cache", "dirty_region_caches/gemma-decode"],
+            [PYTHON_BIN, "-m", "tests.test_gemma_output", "--config", "prefill+decode", "--cache", "dirty_region_caches/gemma-decode"],
             "verify decode output"
         )
         print(res.stdout)
