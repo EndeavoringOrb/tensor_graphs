@@ -4,7 +4,6 @@ import os
 import re
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from rich.console import Console
 from rich.panel import Panel
 from tqdm import tqdm
@@ -426,10 +425,7 @@ class KernelLinter:
                         )
                         sys.exit(1)
 
-    def lint(self, config):
-        if config.no_lint:
-            return
-
+    def lint(self):
         self.validateFusedRefLayout()
 
         validators = [
@@ -467,7 +463,7 @@ def main():
     if args.repository == bool(args.candidate):
         parser.error("Provide a candidate path or --repository")
     if args.repository:
-        KernelLinter().lint(SimpleNamespace(no_lint=False))
+        KernelLinter().lint()
     else:
         lintCandidate(args.candidate)
     print("Lint passed")

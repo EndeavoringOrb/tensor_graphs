@@ -11,6 +11,7 @@
 #include "tests/input_hashcons.hpp"
 #include "tests/incremental_propagators.hpp"
 #include "tests/planner_structure.hpp"
+#include "tests/bucket_independence.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/selection_reachability.hpp"
@@ -30,10 +31,11 @@
 int main(int argc, char *argv[])
 {
     ArgParser parser("test", "Run tests.");
+    parser.add_flag({"--bucket-independence"}, "Run independent bucket and masked update regressions.");
     parser.add_flag({"--private-layout"}, "Run private-layout storage-span regression tests.");
     parser.add_flag({"--start-rank-window"}, "Run start rank window group regression tests.");
     parser.add_flag({"--relaxation-bound"}, "Run randomized relaxation lower-bound tests against brute force.");
-    parser.add_flag({"--no-records"}, "Disable record-based testing.");
+    parser.add_flag({"--all-records"}, "Enable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
@@ -58,9 +60,15 @@ int main(int argc, char *argv[])
     settings.load(remaining_args);
 
     std::string targetKernel = parser.get_positional("targetKernel");
-    bool useRecords = !parser.get_flag("--no-records");
+    bool useRecords = parser.get_flag("--all-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--bucket-independence"))
+    {
+        try { BucketIndependence::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
     if (parser.get_flag("--private-layout"))
     {
         try { PrivateLayoutRegression::run(); }

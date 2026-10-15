@@ -96,6 +96,11 @@ struct ENode
     {
         sig = newSig;
     }
+    void setContentHash(std::string value)
+    {
+        contentHash = std::move(value);
+        sig = 0;
+    }
     void setDebugOrigin(std::string origin)
     {
         debugOrigin = std::move(origin);
@@ -151,6 +156,21 @@ struct EGraph
     // Base eclass ID -> current canonical eclass ID.
     mutable std::unordered_map<BaseEClassId, EClassId> baseEClassToEClass;
     mutable bool baseEClassIndexInitialized = false;
+    // Bucket saturation may prove additional equalities after full saturation
+    // assigned base IDs. The joint planner reconciles these before search.
+    bool allow_base_equalities = false;
+    std::unordered_map<BaseEClassId, BaseEClassId> base_equalities;
+
+    BaseEClassId resolveBaseId(BaseEClassId id) const
+    {
+        auto it = base_equalities.find(id);
+        while (it != base_equalities.end())
+        {
+            id = it->second;
+            it = base_equalities.find(id);
+        }
+        return id;
+    }
 
     // Logical node ID -> current canonical eclass ID.
     mutable std::unordered_map<LogicalId, EClassId> logicalToEClass;
@@ -381,7 +401,7 @@ struct EGraph
 
         const BaseEClassId baseA = classes[ra.value].base_eclass_id;
         const BaseEClassId baseB = classes[rb.value].base_eclass_id;
-        if (baseA != BaseEClassId{} && baseB != BaseEClassId{})
+        if (baseA != BaseEClassId{} && baseB != BaseEClassId{} && !allow_base_equalities)
         {
             auto describeEClass = [this](EClassId id) {
                 const EClass &e_class = classes[id.value];
@@ -402,6 +422,16 @@ struct EGraph
             };
             Error::throw_err("EClass merge would merge two base eclasses:\n  " + describeEClass(ra) +
                              "\n  " + describeEClass(rb));
+        }
+        if (baseA != BaseEClassId{} && baseB != BaseEClassId{} && allow_base_equalities)
+        {
+            const BaseEClassId left = resolveBaseId(baseA), right = resolveBaseId(baseB);
+            const BaseEClassId canonical = left.value < right.value ? left : right;
+            const BaseEClassId alias = left.value < right.value ? right : left;
+            if (alias != canonical)
+                base_equalities[alias] = canonical;
+            classes[ra.value].base_eclass_id = canonical;
+            baseEClassIndexInitialized = false;
         }
         if (baseA == BaseEClassId{})
         {
@@ -745,6 +775,7 @@ struct EGraph
 
     EClassId findEClassByBaseId(BaseEClassId base_id) const
     {
+        base_id = resolveBaseId(base_id);
         if (base_id == BaseEClassId{})
             return EClassId{};
         // Some callers construct an EGraph and assign base_eclass_id directly

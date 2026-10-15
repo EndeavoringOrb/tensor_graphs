@@ -11,13 +11,12 @@
 inline bool matchScatterF32Rows(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     const uint64_t rank = output.getShape().size();
-    if (rank == 0 || inputs[0].getShape().size() != rank || output.dtype != DType::FLOAT32 ||
-        inputs[0].dtype != DType::FLOAT32)
+    if (rank == 0 || inputs[0].getShape().size() != rank || output.dtype != DType::FLOAT32)
         return false;
     for (uint32_t i = 1; i < 5; ++i)
         if (inputs[i].getShape().size() != 1 || inputs[i].getShape()[0] != rank)
             return false;
-    return isContiguous(inputs[0]) && isContiguous(output);
+    return isContiguous(output);
 }
 
 // Copies update rows [row_begin, row_end) into the output.

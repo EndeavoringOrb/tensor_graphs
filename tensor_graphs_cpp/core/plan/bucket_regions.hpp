@@ -34,8 +34,9 @@ inline bool debugEnvTgDebugMissing()
 // `dirty` keep their previous (cached) value.
 //
 // Additive masks: in add(x, m) where m is a known float constant, elements
-// with m <= kMaskedValue are masked. Their sum stays far below every
-// unmasked value of a softmax row, so exp() of it is exactly 0 whatever x is.
+// with m == TGConstants::NEG_INF are masked by the explicit sentinel convention. Their sum stays far below every
+// unmasked value of a softmax row under the mask-sentinel approximation.
+// This is not an identity for arbitrary input values (NEG_INF is finite).
 // Masked elements therefore neither carry dirtiness forward nor make x
 // needed.
 // Bucket-independent facts used by computeBucketRegions: masks of add nodes
@@ -59,7 +60,7 @@ struct RegionFacts
 
 struct BucketRegions
 {
-    static constexpr float kMaskedValue = -1e8f;
+    static constexpr float kMaskedValue = TGConstants::NEG_INF;
 
     // Bucket-independent value facts (masks, finite and support regions) of
     // the graph; null when region analysis did not run.
@@ -84,12 +85,6 @@ struct BucketRegions
     const std::vector<Region> &liveOf(LogicalId id) const;
     // True if `box` contains every live element of `id`.
     bool coversLive(LogicalId id, const Region &box) const;
-
-    // After editing dirty/needed (family normalization).
-    void invalidateLive()
-    {
-        live_.clear();
-    }
 
   private:
     std::vector<Region> empty_;
@@ -215,10 +210,10 @@ inline std::vector<Region> unmaskedRegions(const std::vector<uint8_t> &bytes, co
         uint32_t c = 0;
         while (c < cols)
         {
-            while (c < cols && data[row * cols + c] <= BucketRegions::kMaskedValue)
+            while (c < cols && data[row * cols + c] == BucketRegions::kMaskedValue)
                 ++c;
             const uint32_t start = c;
-            while (c < cols && data[row * cols + c] > BucketRegions::kMaskedValue)
+            while (c < cols && data[row * cols + c] != BucketRegions::kMaskedValue)
                 ++c;
             if (c > start)
             {
@@ -855,210 +850,3 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
     }
     return out;
 }
-
-
-// Shift families: buckets whose inputs are one bucket shifted by a per-member
-// amount (e.g. the same token block at different positions). The normalizer
-// rewrites their regions so that every box bound either moves with the shift
-// (bound = bound_first + c * (shift - shift_first), one integer c per box
-// dimension for start and stop alike) or is the same in every member: other
-// dimensions are widened to their hull over the family (more elements dirty
-// or needed: recomputed or kept, always sound). Members then differ only by
-// moving bounds, so one plan serves them all after relocating the constants
-// derived from those bounds.
-//
-// Members are added one at a time (regions of a whole family need not be
-// held at once); add() returns false when a member's region lists do not
-// line up with the first one's (different nodes or box counts), and the
-// caller splits the family.
-class FamilyRegionNormalizer
-{
-    struct DimState
-    {
-        int64_t s0 = 0, e0 = 0;
-        int64_t coef = 0;
-        bool coefKnown = false;
-        bool moving = true;
-        uint32_t lo = UINT32_MAX, hi = 0;
-    };
-    // Per node: per-box states while every member has the same box count;
-    // otherwise (or when the node has no region in some member) the node
-    // is described by its bounding box (a superset).
-    struct NodeState
-    {
-        std::vector<std::vector<DimState>> boxes;
-        std::vector<DimState> bbox;
-        bool bboxMode = false;
-        size_t present = 0;
-    };
-    std::unordered_map<LogicalId, NodeState> dirty_, needed_;
-    int64_t shift0_ = 0;
-    size_t count_ = 0;
-
-    static void initDims(std::vector<DimState> &dims, const Region &box)
-    {
-        dims.assign(box.region.size(), DimState{});
-        for (size_t d = 0; d < dims.size(); ++d)
-        {
-            dims[d].s0 = dims[d].lo = box.region[d].start;
-            dims[d].e0 = dims[d].hi = box.region[d].stop;
-        }
-    }
-
-    static void updateDims(std::vector<DimState> &dims, const Region &box, int64_t dt)
-    {
-        for (size_t d = 0; d < dims.size(); ++d)
-        {
-            DimState &st = dims[d];
-            const int64_t s = box.region[d].start, e = box.region[d].stop;
-            st.lo = std::min<uint32_t>(st.lo, static_cast<uint32_t>(s));
-            st.hi = std::max<uint32_t>(st.hi, static_cast<uint32_t>(e));
-            if (!st.moving)
-                continue;
-            const int64_t ds = s - st.s0, de = e - st.e0;
-            if (ds != de || (dt == 0 && ds != 0) || (dt != 0 && ds % dt != 0))
-            {
-                st.moving = false;
-                continue;
-            }
-            if (dt == 0)
-                continue;
-            if (!st.coefKnown)
-            {
-                st.coef = ds / dt;
-                st.coefKnown = true;
-            }
-            else if (ds / dt != st.coef)
-                st.moving = false;
-        }
-    }
-
-    void addMap(std::unordered_map<LogicalId, NodeState> &states,
-                const std::unordered_map<LogicalId, std::vector<Region>> &regions, int64_t shift)
-    {
-        const int64_t dt = shift - shift0_;
-        for (const auto &[id, boxes] : regions)
-        {
-            if (boxes.empty())
-                continue;
-            NodeState &ns = states[id];
-            const Region box = bucket_regions::boundingBox(boxes);
-            if (ns.present == 0)
-            {
-                initDims(ns.bbox, box);
-                // A node first seen after the first member cannot move.
-                if (count_ > 0)
-                {
-                    ns.bboxMode = true;
-                    for (DimState &st : ns.bbox)
-                        st.moving = false;
-                }
-                else
-                    for (const Region &r : boxes)
-                    {
-                        ns.boxes.emplace_back();
-                        initDims(ns.boxes.back(), r);
-                    }
-            }
-            else
-            {
-                if (ns.bbox.size() != box.region.size())
-                    Error::throw_err("[FamilyRegionNormalizer] region rank changes across members");
-                updateDims(ns.bbox, box, dt);
-                if (!ns.bboxMode && ns.boxes.size() != boxes.size())
-                    ns.bboxMode = true;
-                if (!ns.bboxMode)
-                    for (size_t j = 0; j < boxes.size(); ++j)
-                        updateDims(ns.boxes[j], boxes[j], dt);
-            }
-            ++ns.present;
-        }
-    }
-
-    void finishMember(std::unordered_map<LogicalId, NodeState> &states)
-    {
-        // Nodes without regions in this member: bounding box, not moving.
-        for (auto &[id, ns] : states)
-            if (ns.present != count_ + 1)
-            {
-                ns.bboxMode = true;
-                for (DimState &st : ns.bbox)
-                    st.moving = false;
-                ns.present = count_ + 1;
-            }
-    }
-
-    static void applyMap(const std::unordered_map<LogicalId, NodeState> &states,
-                         std::unordered_map<LogicalId, std::vector<Region>> &regions)
-    {
-        std::unordered_map<LogicalId, std::vector<Region>> out;
-        for (const auto &[id, ns] : states)
-        {
-            auto it = regions.find(id);
-            const std::vector<Region> own = it == regions.end() ? std::vector<Region>{} : it->second;
-            if (ns.bboxMode)
-            {
-                Region box;
-                box.region.resize(ns.bbox.size());
-                const Region ownBox = own.empty() ? Region{} : bucket_regions::boundingBox(own);
-                for (size_t d = 0; d < ns.bbox.size(); ++d)
-                {
-                    const DimState &st = ns.bbox[d];
-                    box.region[d] = st.moving ? ownBox.region[d] : Dim{st.lo, st.hi};
-                }
-                out[id] = {box};
-                continue;
-            }
-            if (own.size() != ns.boxes.size())
-                Error::throw_err("[FamilyRegionNormalizer] member box count differs from its family's");
-            std::vector<Region> boxes = own;
-            for (size_t j = 0; j < boxes.size(); ++j)
-                for (size_t d = 0; d < boxes[j].region.size(); ++d)
-                {
-                    const DimState &st = ns.boxes[j][d];
-                    if (!st.moving)
-                        boxes[j].region[d] = {st.lo, st.hi};
-                }
-            out[id] = std::move(boxes);
-        }
-        for (const auto &[id, boxes] : regions)
-            if (!boxes.empty() && !states.count(id))
-                Error::throw_err("[FamilyRegionNormalizer] member has regions on a node its family has none on");
-        regions = std::move(out);
-    }
-
-  public:
-    bool add(const BucketRegions &regions, int64_t shift)
-    {
-        if (count_ == 0)
-            shift0_ = shift;
-        addMap(dirty_, regions.dirty, shift);
-        addMap(needed_, regions.needed, shift);
-        finishMember(dirty_);
-        finishMember(needed_);
-        ++count_;
-        return true;
-    }
-
-    // Rewrites one member's own regions to the family form.
-    bool apply(BucketRegions &regions) const
-    {
-        if (count_ == 0)
-            Error::throw_err("[FamilyRegionNormalizer] apply before any member was added");
-        applyMap(dirty_, regions.dirty);
-        applyMap(needed_, regions.needed);
-        regions.invalidateLive();
-        return true;
-    }
-
-    size_t size() const
-    {
-        return count_;
-    }
-
-    const std::string &why() const
-    {
-        static const std::string none = "regions always line up (bounding boxes)";
-        return none;
-    }
-};

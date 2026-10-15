@@ -29,7 +29,7 @@ def displayCost(cost):
 def nativeCall(problem, mode, cutoff=None):
     import tensor_graphs
     require(hasattr(tensor_graphs, "_run_planner_oracle_case"),
-            "Rebuild bindings: .venv/Scripts/python.exe build.py --targets bindings --no-lint --log-level INFO")
+            "Rebuild bindings: .venv/Scripts/python.exe build.py --targets bindings --log-level INFO")
     args = [json.dumps(problem), mode]
     if cutoff is not None:
         args.append(float(cutoff))

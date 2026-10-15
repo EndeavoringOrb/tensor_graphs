@@ -26,8 +26,8 @@
 #include "core/cost_model.hpp"
 #include "core/debug.hpp"
 #include "core/egraph.hpp"
+#include "core/plan/base_equalities.hpp"
 #include "core/plan/bucket_regions.hpp"
-#include "core/plan/bucket_families.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/logging.hpp"
@@ -258,37 +258,6 @@ struct Planner
     // Bucket-independent region facts of the graph planAll is planning.
     const RegionFacts *regionFacts_ = nullptr;
 
-    // Shift families of one planFamilies call (see bucket_families.hpp).
-    struct FamilyPlan
-    {
-        uint32_t planned = 0; // index of the representative among the planned buckets
-        int64_t repShift = 0;
-        std::vector<uint32_t> members; // original bucket indices
-        std::vector<int64_t> shifts;
-        // Members compiled with the representative's extraction to derive and
-        // check the relocation: roles witness, then verifier. Each role lists
-        // candidates in preference order; the first whose egraph lines up
-        // with the representative's is used (a member can hash-cons a
-        // constant with another one and get a differently shaped egraph,
-        // which says nothing about its relocated plan).
-        struct Candidate
-        {
-            Bucket bucket;
-            int64_t shift;
-            BucketRegions regions;
-        };
-        std::vector<std::vector<Candidate>> roles;
-        std::vector<Bucket> probes;
-        std::vector<int64_t> probeShifts;
-        std::vector<CompiledGraph> probeGraphs;
-    };
-    std::vector<FamilyPlan> familyPlans_;
-    // Family-normalized regions of planned buckets (by planned index).
-    std::unordered_map<uint32_t, BucketRegions> plannedRegionOverrides_;
-    // Region facts computed by planFamilies, reused by planAll.
-    const RegionFacts *precomputedFacts_ = nullptr;
-    bool planningFamilies_ = false;
-
     struct CostMemo
     {
         std::shared_mutex mutex;
@@ -426,15 +395,13 @@ struct Planner
             rules.emplace_back(makeProfiledRewriteRule<ConsumerWeightReuseRule>());
             rules.emplace_back(makeProfiledRewriteRule<RemoveRedundantReshape>());
         }
-        if (injected)
+        if (!seed || regions)
+            rules.emplace_back(makeProfiledRewriteRule<InfinityDomination>());
+        // Full saturation must also close standalone slice equalities before
+        // assigning persistent identities. Partial saturation may otherwise
+        // discover equality between two already distinct base classes.
+        if (!seed || injected)
         {
-            // InfinityDomination writes its boxes into the add's buffer and
-            // assumes the rest already holds the mask values; with partial
-            // updates that buffer is a cached tensor whose other cells were
-            // never written that way, so the rewrite is unsound here. Bucket
-            // regions already drop masked elements from needed regions.
-            if (!regions)
-                rules.emplace_back(makeProfiledRewriteRule<InfinityDomination>());
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownElementwise>(allowPushDownOnProtected));
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownDot>(allowPushDownOnProtected));
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownStructural>());
@@ -1712,93 +1679,26 @@ struct Planner
             return false;
 
         const EClass lClass = egraph.getEClass(E_L);
-        const TensorNode &sourceNode = graph.getNode(logicalId);
-
-        std::vector<Region> canonRegions = normalizeRegions(dirtyRegions);
-        MemSpace target_mem_space = lClass.mem_space;
-        Engine cpu = Engine{0, EngineType::CPU};
-        MemSpace ram = MemSpace{1, HandleType::CPP};
-
-        // Hash-consed by value: distinct starts/ends must stay distinct classes.
-        auto addConst = [&](const std::vector<int32_t> &data) -> EClassId { return egraph.addIntConst(data); };
-
-        EClassId current_E = E_L;
-        for (const Region &reg : canonRegions)
+        // Runtime inputs already contain current values after writeInput.
+        // Expose real views of them; a fabricated partial INPUT would have
+        // no binding and could scatter uninitialized memory into that input.
+        for (const Region &reg : normalizeRegions(dirtyRegions))
         {
-            std::vector<uint32_t> partialShape;
+            std::vector<uint32_t> shape;
             std::vector<int32_t> starts, ends, steps;
-            for (const Dim &d : reg.region)
+            for (const Dim &dim : reg.region)
             {
-                starts.push_back(static_cast<int32_t>(d.start));
-                ends.push_back(static_cast<int32_t>(d.stop));
+                starts.push_back(static_cast<int32_t>(dim.start));
+                ends.push_back(static_cast<int32_t>(dim.stop));
                 steps.push_back(1);
-                partialShape.push_back(d.stop - d.start);
+                shape.push_back(dim.stop - dim.start);
             }
-
-            EClassId startsId = addConst(starts);
-            EClassId endsId = addConst(ends);
-            EClassId stepsId = addConst(steps);
-
-            if (sourceNode.opType != OpType::INPUT)
-            {
-                // Only this region of a computed node is needed. Expose it as
-                // contiguous(slice(node)); the slice push-down rules rewrite
-                // the node as a scatter of the region's own computation.
-                std::vector<uint64_t> sliceStrides = lClass.strides;
-                EClassId sliceClass = addOpToEGraph(egraph, OpType::SLICE, {E_L, startsId, endsId, stepsId},
-                                                    partialShape, sliceStrides, lClass.dtype, lClass.mem_space);
-                addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceClass}, partialShape,
-                              calcContiguousStrides(partialShape), lClass.dtype, lClass.mem_space);
-                continue;
-            }
-
-            EClassId slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape),
-                                                    sourceNode.dtype, target_mem_space);
-
-            if (sourceNode.opType == OpType::INPUT)
-            {
-                std::string contentHash = sourceNode.contentHash + "_slice";
-                ENode inputNode(KernelId{0}, OpType::INPUT, "", {}, partialShape, calcContiguousStrides(partialShape),
-                                sourceNode.dtype, target_mem_space, {cpu}, contentHash);
-                egraph.addENode(slicedEClass, inputNode);
-            }
-
-            EClassId scatterEClass = egraph.addEClass(lClass.shape, lClass.strides, lClass.dtype, target_mem_space);
-            EClassId shapeId = addConst(std::vector<int32_t>(lClass.shape.begin(), lClass.shape.end()));
-
-            std::vector<TensorNode> sIns(5);
-            sIns[0].setShape(partialShape);
-            sIns[0].dtype = lClass.dtype;
-            sIns[1].setShape({(uint32_t)starts.size()});
-            sIns[1].dtype = DType::INT32;
-            sIns[2].setShape({(uint32_t)ends.size()});
-            sIns[2].dtype = DType::INT32;
-            sIns[3].setShape({(uint32_t)steps.size()});
-            sIns[3].dtype = DType::INT32;
-            sIns[4].setShape({(uint32_t)lClass.shape.size()});
-            sIns[4].dtype = DType::INT32;
-
-            TensorNode sOut;
-            sOut.setShape(lClass.shape);
-            sOut.dtype = lClass.dtype;
-
-            std::vector<MemSpace> scatterInputSpaces = {target_mem_space, ram, ram, ram, ram};
-            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", sIns, sOut, true,
-                                                                         target_mem_space, scatterInputSpaces, {cpu});
-            for (KernelId uid : scatterRefs)
-            {
-                const auto &kernel = KernelRegistry::get().getKernel(uid);
-                std::vector<uint64_t> strides = (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape);
-                ENode sn(uid, OpType::SCATTER, "", {slicedEClass, startsId, endsId, stepsId, shapeId}, lClass.shape,
-                         strides, lClass.dtype, target_mem_space, {cpu});
-                egraph.addENode(scatterEClass, sn);
-            }
-
-            current_E = scatterEClass;
+            const EClassId slice = addOpToEGraph(egraph, OpType::SLICE,
+                {E_L, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps)},
+                shape, lClass.strides, lClass.dtype, lClass.mem_space);
+            addOpToEGraph(egraph, OpType::CONTIGUOUS, {slice}, shape,
+                calcContiguousStrides(shape), lClass.dtype, lClass.mem_space);
         }
-
-        if (current_E != E_L)
-            egraph.merge(E_L, current_E);
         return true;
     }
 
@@ -1838,8 +1738,7 @@ struct Planner
 
     EGraph saturateBucket(const LogicalId rootId, const Graph &graph, const Bucket &bucket,
                           bool doSaturate = true,
-                          TGStore *repo = nullptr, const EGraph *startingState = nullptr,
-                          const BucketRegions *regionsOverride = nullptr)
+                          TGStore *repo = nullptr, const EGraph *startingState = nullptr)
     {
         using BucketClock = std::chrono::steady_clock;
         const auto bucket_start = BucketClock::now();
@@ -1865,6 +1764,7 @@ struct Planner
         if (startingState)
         {
             egraph = *startingState;
+            egraph.allow_base_equalities = true;
         }
         else
         {
@@ -1978,13 +1878,7 @@ struct Planner
             // from the full saturation's rules when this planner ran it.
             const bool seeded = startingState && startingState == fullSaturationState_ && !fullSaturationRules_.empty();
             BucketRegions regions;
-            if (regionsOverride)
-            {
-                if (!dirtyInjected && !neededInjected)
-                    Error::throw_err("[Planner.saturateBucket] region override for a bucket without partial regions");
-                regions = *regionsOverride;
-            }
-            else if (dirtyInjected || neededInjected)
+            if (dirtyInjected || neededInjected)
                 regions = computeBucketRegions(graph, rootId, bucket, topo, repo, regionFacts_,
                                                &settings.padded_inputs);
             if (std::getenv("TG_DEBUG_ROOTS"))
@@ -2218,6 +2112,7 @@ struct Planner
                                                                      std::to_string(
                                                                          std::chrono::duration<double, std::milli>(BucketClock::now() - collect_clean_start).count()) +
                                                                      " ms");
+        egraph.allow_base_equalities = false;
         return egraph;
     }
 
@@ -2478,9 +2373,6 @@ struct Planner
             const std::vector<float> &bucket_weights, bool doSaturate = true, TGStore *repo = nullptr,
             float minCompileSeconds = 0.0f, std::shared_ptr<plan::Brancher> brancher = nullptr)
     {
-        if (!settings.bucket_families.empty() && !planningFamilies_)
-            return planFamilies(rootId, graph, buckets, bucket_weights, doSaturate, repo, minCompileSeconds,
-                                brancher);
         struct CostMemoScope
         {
             Planner &planner;
@@ -2524,11 +2416,10 @@ struct Planner
             }
         }
 
-        const EGraph full_state = saturateBucket(rootId, graph, buckets[full_idx], doSaturate, repo);
+        EGraph full_state = saturateBucket(rootId, graph, buckets[full_idx], doSaturate, repo);
         fullSaturationState_ = &full_state;
-        const RegionFacts region_facts =
-            precomputedFacts_ ? RegionFacts{} : computeRegionFacts(graph, topo, repo);
-        regionFacts_ = precomputedFacts_ ? precomputedFacts_ : &region_facts;
+        const RegionFacts region_facts = computeRegionFacts(graph, topo, repo);
+        regionFacts_ = &region_facts;
         struct FullStateScope
         {
             Planner &planner;
@@ -2567,10 +2458,8 @@ struct Planner
                         {
                             if (b == full_idx)
                                 continue;
-                            auto override_it = plannedRegionOverrides_.find(b);
                             bucket_states[b] = saturateBucket(
-                                rootId, graph, buckets[b], settings.saturate_partial_buckets, repo, &full_state,
-                                override_it == plannedRegionOverrides_.end() ? nullptr : &override_it->second);
+                                rootId, graph, buckets[b], settings.saturate_partial_buckets, repo, &full_state);
                         }
                     }
                     catch (...)
@@ -2593,6 +2482,7 @@ struct Planner
                     std::rethrow_exception(error);
         }
 
+        reconcileBaseEqualities(full_state, bucket_states);
         LOG(INFO) << "[Planner.planAll timeline] saturation done at " << planAllSeconds() << "s";
 #ifdef _WIN32
         if (SamplingProfiler::enabled())
@@ -2630,6 +2520,22 @@ struct Planner
                     continue;
 
                 LogicalId log_id = cls.logical_id;
+                if (cls.id == full_state.findConst(full_state.findEClassByLogicalId(rootId)))
+                {
+                    // Root buckets need not maintain unrequested dirty rows.
+                    // Persist the root only if every bucket refreshes them.
+                    bool maintained = true;
+                    for (uint32_t b = 0; b < buckets.size() && maintained; ++b)
+                    {
+                        if (b == full_idx || buckets[b].outputNeededRegion.empty())
+                            continue;
+                        const BucketRegions regions = computeBucketRegions(graph, rootId, buckets[b], topo, repo,
+                            regionFacts_, &settings.padded_inputs);
+                        maintained = coversRegionList(buckets[b].outputNeededRegion, regions.dirtyOf(rootId));
+                    }
+                    if (!maintained)
+                        continue;
+                }
                 if (log_id != LogicalId{} && graph.hasNode(log_id) && graph.getNode(log_id).opType == OpType::INPUT)
                     continue;
 
@@ -3122,439 +3028,7 @@ struct Planner
             compiled_graphs.push_back(std::move(cg));
         }
 
-        // 4. FAMILY PROBES: members saturated and prepared like their
-        // representative, compiled with its extraction.
-        if (!familyPlans_.empty())
-        {
-            struct ProbeTask
-            {
-                uint32_t family, role;
-            };
-            std::vector<ProbeTask> tasks;
-            for (uint32_t f = 0; f < familyPlans_.size(); ++f)
-            {
-                FamilyPlan &fp = familyPlans_[f];
-                fp.probes.assign(fp.roles.size(), Bucket{});
-                fp.probeShifts.assign(fp.roles.size(), 0);
-                fp.probeGraphs.resize(fp.roles.size());
-                for (uint32_t k = 0; k < fp.roles.size(); ++k)
-                    tasks.push_back({f, k});
-            }
-            const size_t base = bucket_states.size();
-            bucket_states.resize(base + tasks.size());
-            all_enode_infos.resize(base + tasks.size());
-            cycle_reports.resize(base + tasks.size());
-            std::atomic<uint32_t> next_task{0};
-            const unsigned workers =
-                std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned>(tasks.size())));
-            std::vector<std::thread> threads;
-            std::vector<std::exception_ptr> errors(workers);
-            for (unsigned t = 0; t < workers; ++t)
-                threads.emplace_back([&, t]() {
-                    try
-                    {
-                        for (uint32_t i = next_task++; i < tasks.size(); i = next_task++)
-                        {
-                            FamilyPlan &fp = familyPlans_[tasks[i].family];
-                            const uint32_t k = tasks[i].role;
-                            const uint32_t slot = static_cast<uint32_t>(base + i);
-                            std::string reasons;
-                            bool found = false;
-                            for (FamilyPlan::Candidate &cand : fp.roles[k])
-                            {
-                                bucket_states[slot] = saturateBucket(rootId, graph, cand.bucket,
-                                                                     settings.saturate_partial_buckets, repo,
-                                                                     &full_state, &cand.regions);
-                                addCacheENodes(bucket_states[slot]);
-                                reduceBucket(slot);
-                                std::string why;
-                                if (bucket_families::alignedEGraphs(engine.state.bucket_egraphs[fp.planned],
-                                                                    bucket_states[slot], why))
-                                {
-                                    fp.probes[k] = cand.bucket;
-                                    fp.probeShifts[k] = cand.shift;
-                                    found = true;
-                                    break;
-                                }
-                                LOG(INFO) << "[Planner.planFamilies] member at shift " << cand.shift
-                                          << " does not line up with the representative at shift " << fp.repShift
-                                          << ": " << why;
-                                reasons += " shift " + std::to_string(cand.shift) + ": " + why + ";";
-                            }
-                            if (!found)
-                                Error::throw_err("[Planner.planFamilies] no member of the family at shift " +
-                                                 std::to_string(fp.repShift) +
-                                                 " lines up with its representative:" + reasons);
-                        }
-                    }
-                    catch (...)
-                    {
-                        errors[t] = std::current_exception();
-                    }
-                });
-            for (auto &thread : threads)
-                thread.join();
-            for (auto &error : errors)
-                if (error)
-                    std::rethrow_exception(error);
-            for (uint32_t i = 0; i < tasks.size(); ++i)
-            {
-                FamilyPlan &fp = familyPlans_[tasks[i].family];
-                const uint32_t k = tasks[i].role;
-                const size_t slot = base + i;
-                CompiledGraph cg = buildCompiledGraph(rootId, graph, bucket_states[slot],
-                                                      engine.incumbent_extractions[fp.planned], all_enode_infos[slot]);
-                cg.bucket = fp.probes[k];
-                fp.probeGraphs[k] = std::move(cg);
-                bucket_states[slot] = EGraph{};
-                all_enode_infos[slot].clear();
-            }
-        }
-
         return {std::move(compiled_graphs), std::move(engine.incumbent_cached_nodes)};
-    }
-
-    // Plans shift families (Settings::bucket_families): normalizes each
-    // family's regions (splitting families whose regions do not line up),
-    // plans one representative per family with the other buckets, then gives
-    // every member the representative's compiled graph relocated to its
-    // shift.
-    std::pair<std::vector<CompiledGraph>, std::unordered_set<BaseEClassId>>
-    planFamilies(LogicalId rootId, const Graph &graph, const std::vector<Bucket> &buckets,
-                 const std::vector<float> &bucket_weights, bool doSaturate, TGStore *repo, float minCompileSeconds,
-                 std::shared_ptr<plan::Brancher> brancher)
-    {
-        const auto start = std::chrono::steady_clock::now();
-        auto seconds = [&]() {
-            return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        };
-        if (bucket_weights.size() != buckets.size())
-            Error::throw_err("[Planner.planFamilies] one weight per bucket expected");
-        std::vector<int32_t> familyOf(buckets.size(), -1);
-        for (uint32_t f = 0; f < settings.bucket_families.size(); ++f)
-        {
-            const BucketFamilySpec &spec = settings.bucket_families[f];
-            if (spec.members.size() != spec.shifts.size())
-                Error::throw_err("[Planner.planFamilies] family needs one shift per member");
-            for (uint32_t m : spec.members)
-            {
-                if (m >= buckets.size() || familyOf[m] != -1)
-                    Error::throw_err("[Planner.planFamilies] family member out of range or in two families");
-                if (bucket_weights[m] <= 0.0f)
-                    Error::throw_err("[Planner.planFamilies] family members must have positive weight");
-                familyOf[m] = static_cast<int32_t>(f);
-            }
-        }
-
-        const std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-        const RegionFacts facts = computeRegionFacts(graph, topo, repo);
-        auto regionsOf = [&](const Bucket &bucket) {
-            return computeBucketRegions(graph, rootId, bucket, topo, repo, &facts, &settings.padded_inputs);
-        };
-        LOG(INFO) << "[Planner.planFamilies] region facts at " << seconds() << "s";
-        // Family members share one plan: rules must not narrow reductions to
-        // a member's own unmasked extent (which moves differently from the
-        // member's boxes). Without support/finite facts they reduce over
-        // the whole extent, which gives the same values.
-        RegionFacts familyFacts;
-        familyFacts.masks = facts.masks;
-        // Integers the graph's constants and shapes use (see probe choice).
-        std::unordered_set<int64_t> graphIntegers;
-        for (const auto &[id, node] : graph.nodes)
-        {
-            for (uint32_t d : node.getShape())
-                graphIntegers.insert(d);
-            auto data = graph.constantStaging.find(id);
-            if (data != graph.constantStaging.end() && (node.dtype == DType::INT32 || node.dtype == DType::INT64))
-            {
-                const size_t width = node.dtype == DType::INT64 ? 8 : 4;
-                for (size_t i = 0; i + width <= data->second->size(); i += width)
-                {
-                    int64_t v = 0;
-                    if (width == 8)
-                        std::memcpy(&v, data->second->data() + i, 8);
-                    else
-                    {
-                        int32_t w;
-                        std::memcpy(&w, data->second->data() + i, 4);
-                        v = w;
-                    }
-                    graphIntegers.insert(v);
-                }
-            }
-        }
-        auto toFamilyFacts = [&](BucketRegions &r) {
-            r.facts = &familyFacts;
-            r.ownedFacts.reset();
-        };
-
-        // Normalize (and split) families. Regions of a block of members are
-        // computed in parallel and added in member order.
-        struct Group
-        {
-            std::vector<uint32_t> members;
-            std::vector<int64_t> shifts;
-        };
-        std::vector<Group> pending, groups;
-        for (const BucketFamilySpec &spec : settings.bucket_families)
-            pending.push_back({spec.members, spec.shifts});
-        std::vector<std::shared_ptr<FamilyRegionNormalizer>> normalizers;
-        double add_seconds = 0.0;
-        while (!pending.empty())
-        {
-            Group g = std::move(pending.back());
-            pending.pop_back();
-            if (g.members.size() < 3)
-                continue; // planned as plain buckets
-            auto normalizer = std::make_shared<FamilyRegionNormalizer>();
-            bool ok = true;
-            const size_t block = 4 * std::max(1u, std::thread::hardware_concurrency());
-            for (size_t first = 0; first < g.members.size() && ok; first += block)
-            {
-                const size_t count = std::min(block, g.members.size() - first);
-                std::vector<BucketRegions> regions(count);
-                std::atomic<size_t> next{0};
-                std::vector<std::thread> threads;
-                std::vector<std::exception_ptr> errors(std::thread::hardware_concurrency());
-                for (unsigned t = 0; t < std::thread::hardware_concurrency(); ++t)
-                    threads.emplace_back([&, t]() {
-                        try
-                        {
-                            for (size_t i = next++; i < count; i = next++)
-                                regions[i] = regionsOf(buckets[g.members[first + i]]);
-                        }
-                        catch (...)
-                        {
-                            errors[t] = std::current_exception();
-                        }
-                    });
-                for (auto &thread : threads)
-                    thread.join();
-                for (auto &error : errors)
-                    if (error)
-                        std::rethrow_exception(error);
-                const auto add_start = std::chrono::steady_clock::now();
-                for (size_t i = 0; i < count && ok; ++i)
-                    ok = normalizer->add(regions[i], g.shifts[first + i]);
-                add_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - add_start).count();
-            }
-            if (ok)
-            {
-                groups.push_back(std::move(g));
-                normalizers.push_back(normalizer);
-                continue;
-            }
-            const size_t half = g.members.size() / 2;
-            LOG(INFO) << "[Planner.planFamilies] splitting a family of " << g.members.size()
-                      << " members at shift " << g.shifts[half] << ": " << normalizer->why();
-            pending.push_back({std::vector<uint32_t>(g.members.begin(), g.members.begin() + half),
-                               std::vector<int64_t>(g.shifts.begin(), g.shifts.begin() + half)});
-            pending.push_back({std::vector<uint32_t>(g.members.begin() + half, g.members.end()),
-                               std::vector<int64_t>(g.shifts.begin() + half, g.shifts.end())});
-        }
-        LOG(INFO) << "[Planner.planFamilies] " << groups.size() << " famil(ies) normalized at " << seconds()
-                  << "s (normalizer adds " << add_seconds << "s)";
-
-        // Planned buckets: buckets outside families, then one representative
-        // per family.
-        std::vector<int32_t> groupOf(buckets.size(), -1);
-        for (uint32_t gi = 0; gi < groups.size(); ++gi)
-            for (uint32_t m : groups[gi].members)
-                groupOf[m] = static_cast<int32_t>(gi);
-        std::vector<Bucket> planned;
-        std::vector<float> plannedWeights;
-        std::vector<int32_t> plannedOf(buckets.size(), -1);
-        for (uint32_t b = 0; b < buckets.size(); ++b)
-        {
-            if (groupOf[b] != -1)
-                continue;
-            plannedOf[b] = static_cast<int32_t>(planned.size());
-            planned.push_back(buckets[b]);
-            plannedWeights.push_back(bucket_weights[b]);
-        }
-        familyPlans_.clear();
-        plannedRegionOverrides_.clear();
-        for (uint32_t gi = 0; gi < groups.size(); ++gi)
-        {
-            const Group &g = groups[gi];
-            FamilyPlan fp;
-            fp.members = g.members;
-            fp.shifts = g.shifts;
-            // Representative near the middle, witness after it, verifier near
-            // a quarter of the way along. Members whose block bounds equal an
-            // integer the graph already uses would share constant classes
-            // with it (a differently shaped egraph, not a different plan), so
-            // those are skipped as probes.
-            const int64_t step = g.members.size() > 1 ? g.shifts[1] - g.shifts[0] : 1;
-            auto clean = [&](size_t k) {
-                const int64_t s0 = g.shifts[k];
-                for (int64_t v : {s0, s0 + 1, s0 + step - 1, s0 + step, s0 - 1})
-                    if (graphIntegers.count(v))
-                        return false;
-                return true;
-            };
-            auto nearest = [&](size_t target, size_t exclude1, size_t exclude2) {
-                for (size_t d = 0; d < g.members.size(); ++d)
-                    for (size_t k : {target + d, target - d})
-                        if (k < g.members.size() && k != exclude1 && k != exclude2 && clean(k))
-                            return k;
-                Error::throw_err("[Planner.planFamilies] no family member avoids the graph's integer constants");
-            };
-            const size_t none = SIZE_MAX;
-            const size_t r = nearest(g.members.size() / 2, none, none);
-            // Up to four candidates per role, in preference order.
-            auto candidates = [&](size_t target, const std::vector<size_t> &exclude) {
-                std::vector<size_t> out;
-                for (size_t d = 0; d < g.members.size() && out.size() < 4; ++d)
-                    for (size_t k : {target + d, target - d})
-                    {
-                        if (k >= g.members.size() || !clean(k) || out.size() >= 4 ||
-                            std::find(out.begin(), out.end(), k) != out.end() ||
-                            std::find(exclude.begin(), exclude.end(), k) != exclude.end())
-                            continue;
-                        out.push_back(k);
-                    }
-                if (out.empty())
-                    Error::throw_err("[Planner.planFamilies] no family member avoids the graph's integer constants");
-                return out;
-            };
-            const std::vector<size_t> witnesses = candidates(r + 1, {r});
-            std::vector<size_t> excluded = witnesses;
-            excluded.push_back(r);
-            const std::vector<size_t> verifiers = candidates(g.members.size() / 4, excluded);
-            fp.repShift = g.shifts[r];
-            fp.planned = static_cast<uint32_t>(planned.size());
-            // A family counts like one of its members (mean weight): weighting
-            // by member count would let the family with the most positions
-            // (single-token decode) drown out the others in the objective.
-            float weight = 0.0f;
-            for (uint32_t m : g.members)
-                weight += bucket_weights[m];
-            weight /= static_cast<float>(g.members.size());
-            planned.push_back(buckets[g.members[r]]);
-            plannedWeights.push_back(weight);
-            BucketRegions repRegions = regionsOf(buckets[g.members[r]]);
-            const BucketRegions exactRep = std::getenv("TG_DEBUG_FAMILY_REGIONS") ? repRegions : BucketRegions{};
-            if (!normalizers[gi]->apply(repRegions))
-                Error::throw_err("[Planner.planFamilies] representative regions do not fit their family");
-            if (std::getenv("TG_DEBUG_FAMILY_REGIONS"))
-            {
-                auto volume = [](const std::vector<Region> &rs) {
-                    uint64_t v = 0;
-                    for (const Region &r : rs)
-                    {
-                        uint64_t p = 1;
-                        for (const Dim &d : r.region)
-                            p *= d.stop - d.start;
-                        v += p;
-                    }
-                    return v;
-                };
-                std::vector<std::tuple<int64_t, LogicalId>> growth;
-                for (LogicalId id : topo)
-                {
-                    const int64_t before = volume(exactRep.liveOf(id)), after = volume(repRegions.liveOf(id));
-                    if (after > before)
-                        growth.push_back({after - before, id});
-                }
-                std::sort(growth.rbegin(), growth.rend());
-                if (const char *nodes = std::getenv("TG_DEBUG_FAMILY_NODES"))
-                {
-                    std::stringstream list(nodes);
-                    std::string item;
-                    while (std::getline(list, item, ','))
-                    {
-                        const LogicalId id{static_cast<uint32_t>(std::stoul(item))};
-                        LOG(INFO) << "[debug family node] shift " << g.shifts[r] << " node " << id.value << " "
-                                  << toString(graph.getNode(id).opType) << " exact dirty "
-                                  << encodeRegionList(exactRep.dirtyOf(id)).substr(0, 200) << " needed "
-                                  << encodeRegionList(exactRep.neededOf(id)).substr(0, 200) << " | family dirty "
-                                  << encodeRegionList(repRegions.dirtyOf(id)).substr(0, 200) << " needed "
-                                  << encodeRegionList(repRegions.neededOf(id)).substr(0, 200);
-                    }
-                }
-                for (size_t i = 0; i < growth.size() && i < 400; ++i)
-                {
-                    const LogicalId id = std::get<1>(growth[i]);
-                    LOG(INFO) << "[debug family] shift " << g.shifts[r] << " node " << id.value << " "
-                              << toString(graph.getNode(id).opType) << " " << toString(graph.getNode(id).getShape())
-                              << " live " << encodeRegionList(exactRep.liveOf(id)).substr(0, 120) << " -> "
-                              << encodeRegionList(repRegions.liveOf(id)).substr(0, 120) << " | dirty "
-                              << encodeRegionList(repRegions.dirtyOf(id)).substr(0, 100) << " needed "
-                              << encodeRegionList(repRegions.neededOf(id)).substr(0, 100);
-                }
-            }
-            toFamilyFacts(repRegions);
-            plannedRegionOverrides_.emplace(fp.planned, std::move(repRegions));
-            for (const std::vector<size_t> *role : {&witnesses, &verifiers})
-            {
-                std::vector<FamilyPlan::Candidate> list;
-                for (size_t k : *role)
-                {
-                    BucketRegions probe = regionsOf(buckets[g.members[k]]);
-                    if (!normalizers[gi]->apply(probe))
-                        Error::throw_err("[Planner.planFamilies] member regions do not fit their family");
-                    toFamilyFacts(probe);
-                    list.push_back({buckets[g.members[k]], g.shifts[k], std::move(probe)});
-                }
-                fp.roles.push_back(std::move(list));
-            }
-            for (uint32_t m : g.members)
-                plannedOf[m] = static_cast<int32_t>(fp.planned);
-            LOG(INFO) << "[Planner.planFamilies] family of " << g.members.size() << " members, shifts "
-                      << g.shifts.front() << ".." << g.shifts.back() << ", representative at " << fp.repShift;
-            familyPlans_.push_back(std::move(fp));
-        }
-
-        struct Scope
-        {
-            Planner &planner;
-            ~Scope()
-            {
-                planner.planningFamilies_ = false;
-                planner.precomputedFacts_ = nullptr;
-                planner.plannedRegionOverrides_.clear();
-            }
-        } scope{*this};
-        planningFamilies_ = true;
-        precomputedFacts_ = &facts;
-        auto [plannedGraphs, cached] =
-            planAll(rootId, graph, planned, normalizedBucketWeights(plannedWeights), doSaturate, repo,
-                    minCompileSeconds, brancher);
-        if (settings.saturate_only)
-            return {{}, {}};
-        LOG(INFO) << "[Planner.planFamilies] planned " << planned.size() << " bucket(s) at " << seconds() << "s";
-
-        // Relocate each representative to its members.
-        std::vector<CompiledGraph> result(buckets.size());
-        for (uint32_t b = 0; b < buckets.size(); ++b)
-            if (groupOf[b] == -1)
-                result[b] = plannedGraphs[plannedOf[b]];
-        for (FamilyPlan &fp : familyPlans_)
-        {
-            const CompiledGraph &rep = plannedGraphs[fp.planned];
-            bucket_families::GraphRelocation rel;
-            std::string why;
-            if (!bucket_families::deriveRelocation(rep, fp.repShift, fp.probeGraphs[0], fp.probeShifts[0], rel, why))
-                Error::throw_err("[Planner.planFamilies] no relocation from the representative at shift " +
-                                 std::to_string(fp.repShift) + " to the member at shift " +
-                                 std::to_string(fp.probeShifts[0]) + ": " + why);
-            const CompiledGraph predicted = bucket_families::applyRelocation(rep, rel, fp.probeShifts[1] - fp.repShift);
-            if (!bucket_families::sameCompiledGraph(predicted, fp.probeGraphs[1], why))
-                Error::throw_err("[Planner.planFamilies] relocation does not reproduce the member at shift " +
-                                 std::to_string(fp.probeShifts[1]) + ": " + why);
-            LOG(INFO) << "[Planner.planFamilies] family at " << fp.repShift << ": " << rel.views.size()
-                      << " moving view(s), " << rel.constants.size() << " moving constant(s)";
-            for (size_t i = 0; i < fp.members.size(); ++i)
-            {
-                CompiledGraph cg = bucket_families::applyRelocation(rep, rel, fp.shifts[i] - fp.repShift);
-                cg.bucket = buckets[fp.members[i]];
-                result[fp.members[i]] = std::move(cg);
-            }
-        }
-        familyPlans_.clear();
-        LOG(INFO) << "[Planner.planFamilies] relocated all members at " << seconds() << "s";
-        return {std::move(result), std::move(cached)};
     }
 
     ExtractionResult extractBest(const LogicalId rootId, const Graph &graph, const EGraph &egraph,

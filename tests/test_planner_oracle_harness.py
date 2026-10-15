@@ -46,6 +46,7 @@ class PlannerOracleHarnessTest(unittest.TestCase):
     def testFakeIncumbentIsRejected(self):
         with patch("tests.test_planner_oracle.nativeCall", return_value={
             "solved": True, "exhausted": True, "cost": 2,
+            "root_lower_bound": 2, "max_certified_bound": 2,
             "witness": {"cached": [], "buckets": [{"selected": [1], "order": [0], "offset": [999]}]},
         }):
             with self.assertRaisesRegex(ValueError, "Native incumbent is infeasible"):

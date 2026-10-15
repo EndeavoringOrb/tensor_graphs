@@ -11,7 +11,7 @@ Work toward a lower `normalized` primal-dual integral. There is no fixed target:
 ## Fixed evaluation contract
 
 ```powershell
-.venv/Scripts/python.exe build.py --targets bindings test --no-lint --log-level INFO
+.venv/Scripts/python.exe build.py --targets bindings test --log-level INFO
 .venv/Scripts/python.exe -m tests.test_gemma_output --config decode --optimal --timeout 600
 .venv/Scripts/python.exe -m tests.test_planner_oracle
 .venv/Scripts/python.exe -m tests.test_search_gap

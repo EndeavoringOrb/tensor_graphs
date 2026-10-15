@@ -20,7 +20,8 @@ class CacheRequirementPropagator : public Propagator
         if (isOpRootScatterOrCache(enode))
         {
             auto it = state.cached_vars.find(cls.base_eclass_id);
-            if (it != state.cached_vars.end())
+            if (it == state.cached_vars.end())
+                return false;
             {
                 VarId cv = it->second;
                 Domain c_dom = state.domains[cv];

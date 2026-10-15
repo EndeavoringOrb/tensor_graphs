@@ -43,11 +43,6 @@ inline LogicalId refFactoryGemmaRmsNormFillRows(const std::vector<LogicalId> &in
     return gemmaRmsNormFillPattern(inputs, g, false);
 }
 
-inline LogicalId refFactoryGemmaRmsNormFillHeads(const std::vector<LogicalId> &inputs, Graph &g)
-{
-    return gemmaRmsNormFillPattern(inputs, g, true);
-}
-
 inline bool matchGemmaRmsNormFill(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 6)

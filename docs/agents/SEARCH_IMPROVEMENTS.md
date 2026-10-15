@@ -5,7 +5,7 @@ Task: follow `docs/agents/improve_search.md`; goal `remaining-domain-bits <= tot
 
 ## Fixed evaluation contract
 - Command (cwd `C:\Users\aaron\CODING\tensor_graphs`): `.venv/Scripts/python.exe -m tests.test_gemma_output --config decode --optimal --timeout 600`
-- Build: `.venv/Scripts/python.exe build.py --targets bindings --no-lint --log-level INFO`
+- Build: `.venv/Scripts/python.exe build.py --targets bindings --log-level INFO`
 - Hardware: Snapdragon X Elite X1E78100 (Windows arm64), 31.5 GB RAM. Repeats: 1 baseline + 2 confirmations for promising candidates.
 - Base revision: `d6397868` (branch `faster-search`).
 - Correctness gates: `tests.test_planner_oracle` (full suite) after every native change.

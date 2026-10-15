@@ -3,7 +3,7 @@
 Usage (from the repository root):
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> -m tests.test_gemma_output --config decode --optimal --timeout 600
   .venv/Scripts/python.exe tests/search_experiment.py --record inference <run_id> -m tests.inference_benchmark --run-dir logs/inference_runs/<run_id>
-  .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> build.py --targets bindings test --no-lint --log-level INFO
+  .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> build.py --targets bindings test --log-level INFO
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> --native-command tensor_graphs_cpp/test.exe --start-rank-window
 
 Every run writes logs/<record>_improvements/<run_id>.{log,json,patch} (refusing to

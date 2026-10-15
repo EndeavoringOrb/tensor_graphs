@@ -122,8 +122,8 @@ struct RuleCtx
 // (no partial bucket) the slice push-down rules keep their original form.
 inline bool scatterFormValid(const RuleCtx &ctx, const EClass &cls, const Region &box)
 {
-    if (!ctx.regions)
-        return true;
+    if (!ctx.regions || cls.base_eclass_id == BaseEClassId{})
+        return false;
     if (cls.logical_id == LogicalId{})
         return false;
     return ctx.regions->coversLive(cls.logical_id, box);
@@ -165,17 +165,14 @@ inline void mergeRestricted(EGraph &egraph, EClassId contigClass, EClassId restr
     egraph.merge(contigClass, restricted);
 }
 
-// A slice pushdown's scatter form of class `owner` writes the restricted
-// rows into owner's previous value: the rest of the result is that class's
-// own cached data, which the SCATTER enode's children do not name. Tagging
-// the enode with its owner keeps two classes whose restricted rows coincide
-// (e.g. x and contiguous(x)) from sharing one scatter enode, which would
-// merge them.
+// A stateful update's identity includes the persistent value whose untouched
+// cells it retains. This prevents hash-consing updates to different owners.
 inline std::string scatterFormTag(const EGraph &egraph, EClassId owner)
 {
     const EClass &cls = egraph.getEClass(egraph.findConst(owner));
-    return cls.base_eclass_id != BaseEClassId{} ? "scatter-into:b" + std::to_string(cls.base_eclass_id.value)
-                                                : "scatter-into:c" + std::to_string(cls.id.value);
+    if (cls.base_eclass_id == BaseEClassId{})
+        Error::throw_err("[scatterFormTag] cached update has no persistent identity");
+    return "scatter-into:b" + std::to_string(cls.base_eclass_id.value);
 }
 
 struct Rule
@@ -1219,7 +1216,7 @@ struct FusionRule : public Rule
 
             ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, adapted_children,
                         oldENode.getShape(), strides, oldENode.getDType(), cand.target_mem_space, cand.mapped_engines,
-                        "", 0, oldENode.getDebugOrigin());
+                        oldENode.getContentHash(), 0, oldENode.getDebugOrigin());
 
             MemSpace originalMemSpace = egraph.getEClass(egraph.findConst(e_class_id)).mem_space;
             if (cand.target_mem_space == originalMemSpace)
@@ -1392,6 +1389,47 @@ struct FusionRule : public Rule
     }
 };
 
+// Pure functional replacement: every cell comes from the explicit base or
+// the update. Unlike a cached scatter this result is valid on its first use.
+inline EClassId replaceRegion(EGraph &egraph, EClassId base, EClassId update, const Region &box)
+{
+    const EClass initial = egraph.getEClass(egraph.findConst(base));
+    if (box.region.size() != initial.shape.size())
+        Error::throw_err("[replaceRegion] rank mismatch");
+    std::function<EClassId(EClassId, size_t)> build = [&](EClassId source, size_t axis) -> EClassId {
+        if (axis == initial.shape.size())
+            return update;
+        const EClass cls = egraph.getEClass(egraph.findConst(source));
+        const Dim interval = box.region[axis];
+        if (interval.start >= interval.stop || interval.stop > cls.shape[axis])
+            Error::throw_err("[replaceRegion] invalid update bounds");
+        auto slice = [&](uint32_t start, uint32_t stop) {
+            std::vector<int32_t> starts(cls.shape.size(), 0), ends(cls.shape.begin(), cls.shape.end());
+            std::vector<int32_t> steps(cls.shape.size(), 1);
+            starts[axis] = start;
+            ends[axis] = stop;
+            std::vector<uint32_t> shape = cls.shape;
+            shape[axis] = stop - start;
+            const EClassId sliced = addOpToEGraph(egraph, OpType::SLICE,
+                {source, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps)},
+                shape, cls.strides, cls.dtype, cls.mem_space);
+            return addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliced}, shape,
+                calcContiguousStrides(shape), cls.dtype, cls.mem_space);
+        };
+        std::vector<EClassId> pieces{egraph.addIntConst({static_cast<int32_t>(axis)})};
+        if (interval.start > 0)
+            pieces.push_back(slice(0, interval.start));
+        pieces.push_back(build(slice(interval.start, interval.stop), axis + 1));
+        if (interval.stop < cls.shape[axis])
+            pieces.push_back(slice(interval.stop, cls.shape[axis]));
+        if (pieces.size() == 2)
+            return pieces[1];
+        return addOpToEGraph(egraph, OpType::CONCAT, pieces, cls.shape,
+            calcContiguousStrides(cls.shape), cls.dtype, cls.mem_space);
+    };
+    return build(base, 0);
+}
+
 struct InfinityDomination : public Rule
 {
     std::unique_ptr<Rule> clone() const override
@@ -1498,11 +1536,16 @@ struct InfinityDomination : public Rule
         EClassId constClass = egraph.findConst(addNode.getChildren()[constIdx]);
         EClassId varClass = egraph.findConst(addNode.getChildren()[varIdx]);
 
+        const EClass variable = egraph.getEClass(varClass);
         const auto &constData = *egraph.constantStaging.at(constClass);
         const float *data = reinterpret_cast<const float *>(constData.data());
 
         const EClass cClass = egraph.getEClass(constClass);
         uint64_t numElements = countElements(cClass.shape);
+        if (constData.size() != numElements * sizeof(float))
+            Error::throw_err("[InfinityDomination] constant data size mismatch");
+        if (cClass.shape != variable.shape)
+            return;
 
         // Unmasked boxes of this constant (memoized: one mask feeds every
         // layer). Runs along the last axis, merged, equal to merging the
@@ -1523,13 +1566,13 @@ struct InfinityDomination : public Rule
                 uint32_t c = 0;
                 while (c < cols)
                 {
-                    while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] <= -1e8f)
+                    while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] == TGConstants::NEG_INF)
                     {
                         anyMasked = true;
                         ++c;
                     }
                     const uint32_t start = c;
-                    while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] > -1e8f)
+                    while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] != TGConstants::NEG_INF)
                         ++c;
                     if (c > start)
                     {
@@ -1557,6 +1600,8 @@ struct InfinityDomination : public Rule
         const EClass outClass = egraph.getEClass(e_class_id);
 
         std::vector<uint64_t> contigStrides = calcContiguousStrides(outClass.shape);
+        if (outClass.strides != contigStrides)
+            return;
 
         if (nonInfRegions.empty())
         {
@@ -1573,6 +1618,23 @@ struct InfinityDomination : public Rule
             }
             egraph.merge(e_class_id, currentTarget);
             return;
+        }
+
+        // A cached update writes one box covering this bucket's entire live
+        // domain. The full computation initializes all other cells first.
+        bool cached_update = false;
+        if (ctx.regions && outClass.logical_id != LogicalId{} && outClass.base_eclass_id != BaseEClassId{})
+        {
+            const auto &live = ctx.regions->liveOf(outClass.logical_id);
+            if (!live.empty())
+            {
+                const Region box = bucket_regions::boundingBox(live);
+                if (scatterFormValid(ctx, outClass, box))
+                {
+                    nonInfRegions = {box};
+                    cached_update = true;
+                }
+            }
         }
 
         if (nonInfRegions.size() == 1)
@@ -1636,7 +1698,7 @@ struct InfinityDomination : public Rule
             {
                 sliceStridesC[d] *= steps[d];
             }
-            EClassId sliceC = addOpToEGraph(egraph, OpType::SLICE, {currentTarget, startsId, endsId, stepsId},
+            EClassId sliceC = addOpToEGraph(egraph, OpType::SLICE, {constClass, startsId, endsId, stepsId},
                                             sliceShape, sliceStridesC, cClass.dtype, cClass.mem_space);
 
             std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
@@ -1653,9 +1715,18 @@ struct InfinityDomination : public Rule
             EClassId addId = addOpToEGraph(egraph, OpType::ADD, {child0, child1}, sliceShape, sliceContigStrides,
                                            outClass.dtype, outClass.mem_space);
 
-            EClassId shapeId = egraph.addIntConst(std::vector<int32_t>(outClass.shape.begin(), outClass.shape.end()));
-            currentTarget = addOpToEGraph(egraph, OpType::SCATTER, {addId, startsId, endsId, stepsId, shapeId},
-                                          outClass.shape, outClass.strides, outClass.dtype, outClass.mem_space);
+            if (cached_update)
+            {
+                const EClassId shape_id = egraph.addIntConst(
+                    std::vector<int32_t>(outClass.shape.begin(), outClass.shape.end()));
+                const EClassId scatter = addOpToEGraph(egraph, OpType::SCATTER,
+                    {addId, startsId, endsId, stepsId, shape_id}, outClass.shape, outClass.strides,
+                    outClass.dtype, outClass.mem_space, EClassId(), SourceLocation::current(), "",
+                    scatterFormTag(egraph, e_class_id));
+                egraph.merge(e_class_id, scatter);
+                return;
+            }
+            currentTarget = replaceRegion(egraph, currentTarget, addId, reg);
         }
 
         egraph.merge(e_class_id, currentTarget);
@@ -2032,24 +2103,21 @@ struct SlicePushDownElementwise : public Rule
 
                 EClassId opEClass = addOpToEGraph(egraph, op, newChildren, sliceShape, sliceContigStrides,
                                                   sliceNode.getDType(), sliceNode.getMemSpace());
-                // Either src is updated in place (scatter of the box), or, when
-                // that is not valid, the slice is computed on its own. Never
-                // both: the slice of src would feed src's own update (cycle).
+                // Keep the standalone result even when a cached update is valid.
+                // Extraction must choose an acyclic implementation of either form.
+                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), opEClass);
                 srcClass = egraph.findConst(srcClass);
                 if (!scatterFormValid(ctx, egraph.getEClass(srcClass),
                                       regionFromBounds(starts, ends, egraph.getEClass(srcClass).shape)))
-                {
-                    mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), opEClass);
                     continue;
-                }
 
                 const EClass srcEClass = egraph.getEClass(srcClass);
                 EClassId shapeId =
                     egraph.addIntConst(std::vector<int32_t>(srcEClass.shape.begin(), srcEClass.shape.end()));
                 EClassId scatterClass =
                     addOpToEGraph(egraph, OpType::SCATTER, {opEClass, startsId, endsId, stepsId, shapeId},
-                                  srcEClass.shape, srcEClass.strides, opNode.getDType(), opNode.getMemSpace(),
-                                  EClassId(), SourceLocation::current(), "", scatterFormTag(egraph, srcClass));
+                        srcEClass.shape, srcEClass.strides, srcEClass.dtype, srcEClass.mem_space,
+                        EClassId(), SourceLocation::current(), "", scatterFormTag(egraph, srcClass));
 
                 egraph.merge(srcClass, scatterClass);
             }
@@ -2371,19 +2439,17 @@ struct SlicePushDownDot : public Rule
                 EClassId dotEClass = addOpToEGraph(egraph, OpType::DOT, {aSliced, bSliced}, sliceShape,
                                                    sliceContigStrides, sliceNode.getDType(), sliceNode.getMemSpace());
                 srcClass = egraph.findConst(srcClass);
+                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), dotEClass);
                 if (!scatterFormValid(ctx, egraph.getEClass(srcClass), regionFromBounds(starts, ends, outClassShape)))
-                {
-                    mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), dotEClass);
                     continue;
-                }
 
                 const EClass srcEClass = egraph.getEClass(srcClass);
                 EClassId shapeId =
                     egraph.addIntConst(std::vector<int32_t>(srcEClass.shape.begin(), srcEClass.shape.end()));
                 EClassId scatterClass =
                     addOpToEGraph(egraph, OpType::SCATTER, {dotEClass, startsId, endsId, stepsId, shapeId},
-                                  srcEClass.shape, srcEClass.strides, dotNode.getDType(), dotNode.getMemSpace(),
-                                  EClassId(), SourceLocation::current(), "", scatterFormTag(egraph, srcClass));
+                        srcEClass.shape, srcEClass.strides, srcEClass.dtype, srcEClass.mem_space,
+                        EClassId(), SourceLocation::current(), "", scatterFormTag(egraph, srcClass));
 
                 egraph.merge(srcClass, scatterClass);
             }
@@ -2748,19 +2814,15 @@ struct SlicePushDownStructural : public Rule
                 const EClassId restricted = buildRestricted(egraph, op, src, box);
                 if (restricted == EClassId{})
                     continue;
-                // Update src in place (scatter of the box) when that is valid;
-                // otherwise compute the slice on its own. Never both (cycle).
+                EClassId restrictedContig = egraph.findConst(restricted);
+                const EClass rc = egraph.getEClass(restrictedContig);
+                if (!isContiguous(rc))
+                    restrictedContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {restrictedContig}, rc.shape,
+                                                     calcContiguousStrides(rc.shape), rc.dtype, rc.mem_space);
+                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), restrictedContig);
                 srcClass = egraph.findConst(srcClass);
                 if (!isContiguous(src) || !scatterFormValid(ctx, src, box))
-                {
-                    EClassId restrictedContig = egraph.findConst(restricted);
-                    const EClass rc = egraph.getEClass(restrictedContig);
-                    if (!isContiguous(rc))
-                        restrictedContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {restrictedContig}, rc.shape,
-                                                         calcContiguousStrides(rc.shape), rc.dtype, rc.mem_space);
-                    mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), restrictedContig);
                     continue;
-                }
                 std::vector<int32_t> starts, ends, steps;
                 for (const Dim &d : box.region)
                 {
@@ -2770,12 +2832,10 @@ struct SlicePushDownStructural : public Rule
                 }
                 const EClassId shapeId =
                     egraph.addIntConst(std::vector<int32_t>(src.shape.begin(), src.shape.end()));
-                const EClassId scatterClass = addOpToEGraph(
-                    egraph, OpType::SCATTER,
-                    {restricted, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps),
-                     shapeId},
-                    src.shape, src.strides, src.dtype, src.mem_space, EClassId(), SourceLocation::current(), "",
-                    scatterFormTag(egraph, srcClass));
+                const EClassId scatterClass = addOpToEGraph(egraph, OpType::SCATTER,
+                    {restricted, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps), shapeId},
+                    src.shape, src.strides, src.dtype, src.mem_space, EClassId(), SourceLocation::current(),
+                    "", scatterFormTag(egraph, srcClass));
                 egraph.merge(srcClass, scatterClass);
                 srcClass = egraph.findConst(srcClass);
             }
@@ -3023,11 +3083,9 @@ struct SlicePushDownFused : public Rule
                                                   outShape, outNode.strides, src.dtype, op.getMemSpace(),
                                                   op.getEngines(), "", 0, op.getDebugOrigin()));
                 srcClass = egraph.findConst(srcClass);
+                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), restricted);
                 if (!isContiguous(src) || !scatterFormValid(ctx, src, box))
-                {
-                    mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), restricted);
                     continue;
-                }
                 std::vector<int32_t> starts, ends, steps;
                 for (const Dim &d : box.region)
                 {
@@ -3036,11 +3094,10 @@ struct SlicePushDownFused : public Rule
                     steps.push_back(1);
                 }
                 const EClassId shapeId = egraph.addIntConst(std::vector<int32_t>(src.shape.begin(), src.shape.end()));
-                const EClassId scatterClass = addOpToEGraph(
-                    egraph, OpType::SCATTER,
+                const EClassId scatterClass = addOpToEGraph(egraph, OpType::SCATTER,
                     {restricted, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps), shapeId},
-                    src.shape, src.strides, src.dtype, src.mem_space, EClassId(), SourceLocation::current(), "",
-                    scatterFormTag(egraph, srcClass));
+                    src.shape, src.strides, src.dtype, src.mem_space, EClassId(), SourceLocation::current(),
+                    "", scatterFormTag(egraph, srcClass));
                 egraph.merge(srcClass, scatterClass);
                 srcClass = egraph.findConst(srcClass);
             }
@@ -3409,7 +3466,7 @@ struct RemoveContiguous : public Rule
             if (kernel.matches(inNodes, outNode, outCls.mem_space, inMemSpaces, enode.getEngines()))
             {
                 ENode newENode(kernel.uid, enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
-                               enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(), "", 0,
+                               enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(), enode.getContentHash(), 0,
                                enode.getDebugOrigin());
                 egraph.addENode(e_class_id, newENode);
             }

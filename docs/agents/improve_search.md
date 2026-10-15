@@ -41,7 +41,7 @@ and the defaults above. Record a baseline first.
 Use one configuration per process and disable compiled-plan caching.
 
 ```powershell
-.venv/Scripts/python.exe build.py --targets bindings --no-lint --log-level INFO
+.venv/Scripts/python.exe build.py --targets bindings --log-level INFO
 .venv/Scripts/python.exe -m tests.test_gemma_output --config full --optimal --timeout 60
 .venv/Scripts/python.exe -m tests.test_gemma_output --config decode --optimal --timeout 60
 .venv/Scripts/python.exe -m tests.test_planner_oracle

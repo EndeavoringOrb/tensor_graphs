@@ -531,26 +531,19 @@ class LLMSession
         }
         blockSizes = sizes;
         // With single-token blocks every request ends at a block end, so each
-        // block needs only its last logits row; the blocks of one size are
-        // then one bucket shifted along the sequence and are planned as a
-        // shift family.
+        // block needs only its last logits row.
         const bool singleTokenBlocks = blockSizes.front() == 1;
         for (uint32_t n : blockSizes)
         {
             const bool allRows = !singleTokenBlocks && n == blockSizes.front();
-            BucketFamilySpec family;
             for (uint32_t c = 0; c < max_seq_len; c += n)
             {
                 Region inputRegion;
                 inputRegion.region = {{0, 1}, {c, c + n}};
                 Region outputNeeded;
                 outputNeeded.region = {{0, 1}, {allRows ? c : c + n - 1, c + n}, {0, vocab_size}};
-                family.members.push_back(static_cast<uint32_t>(session->manualBuckets.size()));
-                family.shifts.push_back(c);
                 session->addBucket({{inputIdsId, {inputRegion}}}, {outputNeeded}, 1.0f);
             }
-            if (singleTokenBlocks)
-                session->settings.bucket_families.push_back(std::move(family));
         }
     }
 
@@ -578,7 +571,7 @@ class LLMSession
 
     // Runs blocks covering [start, end) in order; returns the root pointer of
     // the last block run (it holds logits row end - 1).
-    const float *runBlocks(uint32_t start, uint32_t end)
+    const float *runBlocks(uint32_t start, uint32_t end, Debug::Callback debugCallback = {})
     {
         const uint32_t smallest = blockSizes.front();
         uint32_t pos = start - start % smallest;
@@ -598,7 +591,7 @@ class LLMSession
             const uint32_t n = blockSizes[chosen];
             if (pos + n > max_seq_len)
                 throw std::runtime_error("block outside the sequence");
-            out = static_cast<const float *>(session->runGraph(blockGraphIdx[chosen].at(pos)));
+            out = static_cast<const float *>(session->runGraph(blockGraphIdx[chosen].at(pos), debugCallback));
             pos += n;
         }
         return out;
@@ -664,19 +657,20 @@ class LLMSession
                                  const void *data) {
             referenceVerifier.verify(logicalId, kernel_name, ctx, data, g.get());
         };
+        const bool verifyTensors = !referenceFile.empty() || !compareReferenceFile.empty();
         if (!blockSizes.empty())
         {
             uint32_t first = dirty_regions.front().region[1].start;
             for (const Region &r : dirty_regions)
                 first = std::min(first, r.region[1].start);
-            const float *blockOutput = runBlocks(first, static_cast<uint32_t>(tokens.size()));
+            const float *blockOutput = runBlocks(first, static_cast<uint32_t>(tokens.size()),
+                                                verifyTensors ? Debug::Callback(debugCallback) : Debug::Callback{});
             std::vector<float> row(blockOutput + static_cast<uint64_t>(tokIdx) * vocab_size,
                                    blockOutput + static_cast<uint64_t>(tokIdx + 1) * vocab_size);
             prev_tokens = tokens;
             return row;
         }
 
-        const bool verifyTensors = !referenceFile.empty() || !compareReferenceFile.empty();
         const bool use_full_bucket = runFullGraph || (compileNoWeightsBucket && !has_run);
         const float *device_output = static_cast<const float *>(session->run(
             use_full_bucket ? Bucket{} : b, verifyTensors ? Debug::Callback(debugCallback) : Debug::Callback{},
@@ -702,7 +696,12 @@ class LLMSession
     }
 
     // Forget the previous tokens so the next step marks every position dirty.
-    void reset() { prev_tokens.clear(); }
+    void reset()
+    {
+        prev_tokens.clear();
+        has_run = false;
+        session->invalidateCaches();
+    }
 
     uint32_t maxSequenceLength() const { return max_seq_len; }
     uint32_t vocabSize() const { return vocab_size; }

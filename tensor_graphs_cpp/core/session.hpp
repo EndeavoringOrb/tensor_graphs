@@ -56,7 +56,7 @@ static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector
 
 struct Session
 {
-    static constexpr uint32_t kCacheFileVersion = 7;
+    static constexpr uint32_t kCacheFileVersion = 8;
 
     Graph &graph;
     MemoryManager &memManager;
@@ -65,6 +65,7 @@ struct Session
     LogicalId rootId;
     bool isPlanned;
     bool isCompiled;
+    bool persistent_initialized = false;
     uint32_t nBucketSizes = 0;
     std::vector<Bucket> manualBuckets;
 
@@ -491,6 +492,7 @@ struct Session
                       << " MB)." << std::endl;
         }
 
+        persistent_initialized = false;
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
     }
@@ -570,20 +572,29 @@ struct Session
         }
 
         const uint32_t graphIdx = getBestGraphIdx(bucket);
-        const CompiledGraph &cg = cachedGraphs[graphIdx];
-        executor->run(cg, debugCallback);
-        return rootOutputPtr(graphIdx);
+        return runGraph(graphIdx, debugCallback);
     }
 
     // Runs compiled graph `graphIdx` (compile() must have run) and returns the
     // host pointer of its root tensor.
-    const void *runGraph(uint32_t graphIdx)
+    const void *runGraph(uint32_t graphIdx, Debug::Callback debugCallback = {})
     {
         if (!isCompiled || graphIdx >= cachedGraphs.size())
             Error::throw_err("[Session.runGraph] invalid graph index " + std::to_string(graphIdx));
-        executor->run(cachedGraphs[graphIdx]);
+        if (!persistent_initialized && !selectedCachedNodes.empty() && graphIdx != fullBucketIdx)
+        {
+            if (fullBucketIdx >= cachedGraphs.size())
+                Error::throw_err("[Session.runGraph] persistent state has no initialization graph");
+            executor->run(cachedGraphs[fullBucketIdx], debugCallback);
+            persistent_initialized = true;
+        }
+        executor->run(cachedGraphs[graphIdx], debugCallback);
+        if (graphIdx == fullBucketIdx)
+            persistent_initialized = true;
         return rootOutputPtr(graphIdx);
     }
+
+    void invalidateCaches() { persistent_initialized = false; }
 
     // Host pointer of the root tensor written by compiled graph `graphIdx`.
     // Resolved once per graph; the arenas do not move after compile().

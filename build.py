@@ -488,7 +488,6 @@ class BuildConfig:
     use_opencl: bool = False
     debug: bool = False
     profile: bool = False
-    no_lint: bool = False
     force: bool = False
     clean: bool = False
     log_level_str: str = "INFO"
@@ -1007,7 +1006,7 @@ class BuildOrchestrator:
             f"(Compiler: {self.platform.compiler.path} [{self.platform.compiler.kind}], Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda}, OpenCL: {self.config.use_opencl})...[/bold cyan]\n"
         )
 
-        self.linter.lint(self.config)
+        self.linter.lint()
 
         core_seed = self.code_gen.generate_core_seed()
         self.code_gen.generate_opencl_strings()
@@ -1299,9 +1298,6 @@ def main() -> None:
         help="Build with profiling symbols while keeping optimizations",
     )
     parser.add_argument(
-        "--no-lint", action="store_true", help="Skip kernel validation checks"
-    )
-    parser.add_argument(
         "--lint", action="store_true", help="Run kernel validation checks and exit"
     )
     parser.add_argument(
@@ -1350,7 +1346,7 @@ def main() -> None:
         return
 
     if args.lint:
-        KernelLinter().lint(BuildConfig())
+        KernelLinter().lint()
         return
 
     config = BuildConfig(
@@ -1358,7 +1354,6 @@ def main() -> None:
         opencl_override=args.opencl,
         debug=args.debug,
         profile=args.profile,
-        no_lint=args.no_lint,
         force=args.force,
         clean=args.clean,
         log_level_str=args.log_level,

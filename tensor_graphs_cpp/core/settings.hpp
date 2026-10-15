@@ -17,15 +17,6 @@
 #include "core/logging.hpp"
 #include "core/types.hpp"
 
-// Buckets (indices into the session's buckets) that are one bucket shifted
-// by `shifts` (same order): planned as one representative (see
-// core/plan/bucket_families.hpp).
-struct BucketFamilySpec
-{
-    std::vector<uint32_t> members;
-    std::vector<int64_t> shifts;
-};
-
 struct Settings
 {
     std::unordered_map<MemSpace, uint64_t> mem_caps;
@@ -64,7 +55,6 @@ struct Settings
     // axis), e.g. token ids past the request: values that depend on the
     // padding need not be kept valid by a bucket (see computeBucketRegions).
     std::unordered_map<LogicalId, uint32_t> padded_inputs;
-    std::vector<BucketFamilySpec> bucket_families;
     bool use_ortools = false;
     bool use_ortools_full = false;
     bool use_ortools_lns = false;

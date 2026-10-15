@@ -4,7 +4,7 @@ Task: follow `docs/agents/improve_gap_integral.md`. Runs are appended by `tests/
 
 ## Fixed evaluation contract
 - Command (cwd repository root): `.venv/Scripts/python.exe -m tests.test_gemma_output --config decode --optimal --timeout 600`
-- Build: `.venv/Scripts/python.exe build.py --targets bindings test --no-lint --log-level INFO`
+- Build: `.venv/Scripts/python.exe build.py --targets bindings test --log-level INFO`
 - Hardware: Snapdragon X Elite X1E78100 (Windows arm64), 31.5 GB RAM.
 - Base revision: `20bda2dd` plus the gap-measurement infrastructure (G0).
 

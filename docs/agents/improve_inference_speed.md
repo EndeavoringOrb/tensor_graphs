@@ -10,7 +10,7 @@ When invoked, treat the evaluation contract below as fixed and run an autonomous
 
 ```powershell
 # Build (after native changes)
-.venv/Scripts/python.exe build.py --targets bindings test --no-lint --log-level INFO
+.venv/Scripts/python.exe build.py --targets bindings test --log-level INFO
 # One-time setup: the HF reference (already generated; regenerate only if tests/inference_cases.py changes)
 .venv/Scripts/python.exe -m tests.inference_reference
 # Evaluation (one run; always through the runner)
