@@ -7,7 +7,8 @@ Workflow:
   1. Generate baseline reference dump:
      .venv/Scripts/python.exe tests/verify_saturation.py --generate-gold
   2. Modify planner.hpp / rewrite.hpp for section 3.
-  3. Run verification and get score:
+  3. Run verification and get score. Graph equivalence is checked after
+     pruneEGraph and EGraph.rebuild(true) compaction:
      .venv/Scripts/python.exe tests/verify_saturation.py
 """
 
@@ -333,7 +334,7 @@ def main():
     print(f"\n[verify_saturation] Running candidate saturation test (seq_len={args.seq_len})...")
     cand_total, cand_full, cand_partial, cand_enodes, cand_classes = run_benchmark(args.seq_len, CAND_PREFIX)
 
-    print("\n[verify_saturation] Verifying e-graph equivalence against baseline...")
+    print("\n[verify_saturation] Verifying pruned, compacted e-graph equivalence against baseline...")
     try:
         equivalent = comparePrefixes(GOLD_PREFIX, CAND_PREFIX, args.seq_len)
     except Exception as e:
