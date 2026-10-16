@@ -8,6 +8,7 @@
 #include "tests/cuda_sync_regression.hpp"
 #include "tests/fused.hpp"
 #include "tests/fusion_rule_sweep_regression.hpp"
+#include "tests/shared_visited_set.hpp"
 #include "tests/input_hashcons.hpp"
 #include "tests/incremental_propagators.hpp"
 #include "tests/planner_structure.hpp"
@@ -48,6 +49,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--start-run-makespan"}, "Run only start-run makespan propagator tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
+    parser.add_flag({"--shared-visited-set"}, "Run shared saturation visit history regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -57,6 +59,11 @@ int main(int argc, char *argv[])
     }
 
     Settings settings;
+    if (parser.get_flag("--shared-visited-set"))
+    {
+        SharedVisitedSetRegression::run();
+        return 0;
+    }
     settings.load(remaining_args);
 
     std::string targetKernel = parser.get_positional("targetKernel");

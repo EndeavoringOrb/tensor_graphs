@@ -525,6 +525,12 @@ struct Planner
                        << egraph.getENodes().size() << " classes=" << egraph.getClasses().size();
                     for (auto const &[name, count] : ruleMatchCounts)
                         ss << " " << name << "=" << count;
+                    for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
+                        ss << " " << rules[rule_idx]->name() << "(match=" << rule_match_seconds[rule_idx]
+                           << "s,apply=" << rule_apply_seconds[rule_idx] << "s)";
+                    if (fusion)
+                        ss << " FusionPatternVisitHits=" << fusion->match_visit_hits
+                           << " FusionAliasReplayHits=" << fusion->replay_hits;
                     LOG(INFO) << ss.str();
                 }
                 for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
@@ -2440,7 +2446,16 @@ struct Planner
             }
         }
 
+        const auto all_saturation_start = std::chrono::steady_clock::now();
         EGraph full_state = saturateBucket(rootId, graph, buckets[full_idx], doSaturate, repo);
+        {
+            const size_t before = full_state.getClasses().size();
+            const auto root_map = full_state.compactClasses();
+            for (auto &rule : fullSaturationRules_)
+                rule->remapEClassIds(root_map);
+            LOG(INFO) << "[Planner.planAll] Compacted full-state classes " << before << " -> "
+                      << full_state.getClasses().size() << " while preserving enode IDs and union weights";
+        }
         fullSaturationState_ = &full_state;
         const RegionFacts region_facts = computeRegionFacts(graph, topo, repo);
         regionFacts_ = &region_facts;
@@ -2506,6 +2521,9 @@ struct Planner
                     std::rethrow_exception(error);
         }
 
+        LOG(INFO) << "[Planner.planAll] All " << buckets.size() << " buckets saturated in "
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - all_saturation_start).count()
+                  << "s including class compaction and bucket copies";
         reconcileBaseEqualities(full_state, bucket_states);
         LOG(INFO) << "[Planner.planAll timeline] saturation done at " << planAllSeconds() << "s";
 #ifdef _WIN32

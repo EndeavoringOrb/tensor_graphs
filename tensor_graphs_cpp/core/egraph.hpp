@@ -10,6 +10,7 @@
 
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/shared_memo.hpp"
 #include "core/types.hpp"
 
 struct ENode
@@ -132,6 +133,23 @@ struct EClass
     MemSpace mem_space;
     LogicalId logical_id;
     bool is_clean = false;
+
+    // Own the metadata across graph mutations without copying the (potentially
+    // very large) list of equivalent expressions. Use a full copy when the
+    // caller needs to iterate a stable snapshot of enodes.
+    EClass metadataSnapshot() const
+    {
+        EClass snapshot;
+        snapshot.id = id;
+        snapshot.base_eclass_id = base_eclass_id;
+        snapshot.shape = shape;
+        snapshot.strides = strides;
+        snapshot.dtype = dtype;
+        snapshot.mem_space = mem_space;
+        snapshot.logical_id = logical_id;
+        snapshot.is_clean = is_clean;
+        return snapshot;
+    }
 };
 
 struct EGraph
@@ -140,6 +158,16 @@ struct EGraph
     std::vector<ENode> enodes;
     std::vector<EClassId> parent;
     std::vector<uint32_t> ufSize;
+    struct OpMaterialization
+    {
+        EClassId result;
+        std::vector<EClassId> dependencies;
+    };
+    SharedMemo<std::string, OpMaterialization> op_materializations;
+    uint64_t congruence_generation = 0;
+    // A fusion application can record the only effects of duplicate aliases.
+    bool trace_aliases = false;
+    std::vector<EClassId> alias_trace;
 
     // signature -> candidate enode ids
     std::unordered_map<uint64_t, std::vector<ENodeId>> hashcons;
@@ -336,6 +364,41 @@ struct EGraph
         return canonical;
     }
 
+    // Preserve the expressions and union decisions of addEClass + addENode.
+    // An immediately losing empty class contributes its weight without storage.
+    EClassId addENodeInNewClass(ENode node)
+    {
+        auto children = node.getChildren();
+        for (EClassId &child : children)
+            child = find(child);
+        node.setChildren(std::move(children));
+        node.setSig(computeSignature(node));
+        EClassId existing;
+        auto bucket = hashcons.find(node.getSig());
+        if (bucket != hashcons.end())
+            for (ENodeId candidate : bucket->second)
+                if (node == enodes[candidate.value])
+                {
+                    existing = find(nodeToEClass[candidate.value]);
+                    break;
+                }
+        if (existing == EClassId{} || ufSize[existing.value] == 1 ||
+            classes[existing.value].shape != node.getShape() ||
+            classes[existing.value].strides != node.getStrides() ||
+            classes[existing.value].dtype != node.getDType() ||
+            classes[existing.value].mem_space != node.getMemSpace())
+        {
+            const EClassId created = addEClass(node.getShape(), node.getStrides(), node.getDType(), node.getMemSpace());
+            return addENode(created, std::move(node));
+        }
+        // The fresh class would lose immediately and is never exposed. Keep
+        // its union weight so subsequent merges choose the same winners.
+        ++ufSize[existing.value];
+        if (trace_aliases)
+            alias_trace.push_back(existing);
+        return existing;
+    }
+
     EClassId find(EClassId id)
     {
         EClassId root = id;
@@ -459,6 +522,7 @@ struct EGraph
         }
         classes[ra.value].is_clean = classes[ra.value].is_clean || classes[rb.value].is_clean;
 
+        ++congruence_generation;
         parent[rb.value] = ra;
         ufSize[ra.value] += ufSize[rb.value];
 
@@ -473,7 +537,8 @@ struct EGraph
             constantStaging.erase(itB);
         }
 
-        classes[ra.value].enodes.reserve(classes[ra.value].enodes.size() + classes[rb.value].enodes.size());
+        // Let push_back grow geometrically. Reserving the exact combined size
+        // on every merge repeatedly copies a growing class's entire node list.
         for (ENodeId enodeId : classes[rb.value].enodes)
         {
             classes[ra.value].enodes.push_back(enodeId);
@@ -493,8 +558,77 @@ struct EGraph
         return count;
     }
 
+    // Compact only class IDs. Keep every enode ID, each class's expression
+    // order, and the original union weights: seeded rewrite matching depends
+    // on them. The returned map contains entries only for former roots.
+    std::vector<EClassId> compactClasses()
+    {
+        const size_t old_count = classes.size();
+        std::vector<EClassId> root_map(old_count);
+        uint32_t root_count = 0;
+        for (uint32_t old_id = 0; old_id < old_count; ++old_id)
+            if (parent[old_id] == EClassId{old_id})
+                root_map[old_id] = EClassId{root_count++};
+        auto remap = [&](EClassId old_id) {
+            return root_map[find(old_id).value];
+        };
+        for (ENode &node : enodes)
+        {
+            auto children = node.getChildren();
+            for (EClassId &child : children)
+                child = remap(child);
+            node.setChildren(std::move(children));
+            node.setSig(computeSignature(node));
+        }
+        for (EClassId &owner : nodeToEClass)
+            owner = remap(owner);
+        for (auto &[hash, ids] : constantHashIndex)
+            for (EClassId &id : ids)
+                id = remap(id);
+        for (auto &[base, id] : baseEClassToEClass)
+            id = remap(id);
+        for (auto &[logical, id] : logicalToEClass)
+            id = remap(id);
+
+        decltype(constantStaging) staging;
+        for (auto &[id, data] : constantStaging)
+            staging.emplace(remap(id), std::move(data));
+        constantStaging = std::move(staging);
+        decltype(hashcons) new_hashcons;
+        new_hashcons.reserve(hashcons.size());
+        for (const auto &[hash, ids] : hashcons)
+            for (ENodeId id : ids)
+                new_hashcons[enodes[id.value].getSig()].push_back(id);
+        hashcons = std::move(new_hashcons);
+
+        std::vector<EClass> new_classes;
+        std::vector<EClassId> new_parent;
+        std::vector<uint32_t> new_sizes;
+        new_classes.reserve(root_count);
+        new_parent.reserve(root_count);
+        new_sizes.reserve(root_count);
+        for (uint32_t old_id = 0; old_id < old_count; ++old_id)
+        {
+            if (root_map[old_id] == EClassId{})
+                continue;
+            EClass cls = std::move(classes[old_id]);
+            cls.id = root_map[old_id];
+            new_parent.push_back(cls.id);
+            new_sizes.push_back(ufSize[old_id]);
+            new_classes.push_back(std::move(cls));
+        }
+        classes = std::move(new_classes);
+        parent = std::move(new_parent);
+        ufSize = std::move(new_sizes);
+        op_materializations.clear();
+        ++congruence_generation;
+        return root_map;
+    }
+
     void rebuild(bool compact = false)
     {
+        if (compact)
+            op_materializations.clear();
         uint32_t total_merges = 0;
         while (true)
         {
