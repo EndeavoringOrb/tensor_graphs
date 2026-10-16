@@ -79,6 +79,16 @@ inline void dumpSaturationGraph(const EGraph &egraph, const Graph &graph, const 
         out << "N " << expression << '\n';
 }
 
+inline void dumpPrunedSaturationGraph(Planner &planner, const EGraph &egraph,
+                                      const Graph &graph, const std::string &path)
+{
+    EGraph pruned = egraph;
+    const auto enode_infos = planner.computeENodeInfos(pruned);
+    planner.pruneEGraph(pruned, enode_infos);
+    pruned.rebuild(true);
+    dumpSaturationGraph(pruned, graph, path);
+}
+
 struct SaturationBenchmarkResult
 {
     double full_ms = 0.0;
@@ -122,7 +132,7 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 7, co
     auto t1 = std::chrono::steady_clock::now();
 
     if (!dump_prefix.empty())
-        dumpSaturationGraph(state, graph, dump_prefix + "-full.txt");
+        dumpPrunedSaturationGraph(planner, state, graph, dump_prefix + "-full.txt");
 
     const auto region_facts = computeRegionFacts(graph, topologicalSort({root}, graph), nullptr);
     planner.fullSaturationState_ = &state;
@@ -143,8 +153,8 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 7, co
         partial_ms += std::chrono::duration<double, std::milli>(prefill_t1 - prefill_t0).count();
 
         if (!dump_prefix.empty())
-            dumpSaturationGraph(prefill_result, graph,
-                                dump_prefix + "-prefill" + std::to_string(bucket_seq_len) + ".txt");
+            dumpPrunedSaturationGraph(planner, prefill_result, graph,
+                                      dump_prefix + "-prefill" + std::to_string(bucket_seq_len) + ".txt");
 
         const uint32_t row = bucket_seq_len - 1;
         Bucket decode;
@@ -158,8 +168,8 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 7, co
         partial_ms += std::chrono::duration<double, std::milli>(decode_t1 - decode_t0).count();
 
         if (!dump_prefix.empty())
-            dumpSaturationGraph(decode_result, graph,
-                                dump_prefix + "-decode" + std::to_string(bucket_seq_len) + ".txt");
+            dumpPrunedSaturationGraph(planner, decode_result, graph,
+                                      dump_prefix + "-decode" + std::to_string(bucket_seq_len) + ".txt");
     }
 
     double full_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
