@@ -37,6 +37,24 @@ inline bool debugEnvTgDebugMissing()
 // with m == TGConstants::NEG_INF are masked by the explicit sentinel convention. Their sum stays far below every
 // unmasked value of a softmax row under the mask-sentinel approximation.
 // This is not an identity for arbitrary input values (NEG_INF is finite).
+// Represents the unmasked coordinate set:
+//   coord[col_axis] < coord[row_axis] + diag_k   (when upper_masked == true, i.e., TRIU(NEG_INF, diag_k))
+struct TriuBound
+{
+    uint32_t row_axis = 0;
+    uint32_t col_axis = 0;
+    int32_t diag_k = 1;
+
+    bool operator==(const TriuBound &other) const
+    {
+        return row_axis == other.row_axis && col_axis == other.col_axis && diag_k == other.diag_k;
+    }
+    bool operator!=(const TriuBound &other) const
+    {
+        return !(*this == other);
+    }
+};
+
 // Masked elements therefore neither carry dirtiness forward nor make x
 // needed.
 // Bucket-independent facts used by computeBucketRegions: masks of add nodes
@@ -47,6 +65,8 @@ struct RegionFacts
 {
     std::unordered_map<LogicalId, std::pair<uint32_t, std::vector<Region>>> masks;
     std::unordered_map<LogicalId, std::vector<Region>> finite, support;
+    std::unordered_map<LogicalId, TriuBound> triuMasks;
+    std::unordered_map<LogicalId, TriuBound> triuFinite, triuSupport;
     // Elements the full output needs (bucket-independent), computed by the
     // first computeBucketRegions call that needs them.
     struct LiveCache
@@ -303,6 +323,310 @@ inline std::optional<Dim> axisRange(const std::vector<Region> &valid, const Regi
         return std::nullopt;
     return range;
 }
+
+inline std::optional<Region> intersectBoxWithTriuBound(const Region &box, const TriuBound &b)
+{
+    if (b.row_axis >= box.region.size() || b.col_axis >= box.region.size())
+        Error::throw_err("[intersectBoxWithTriuBound] triu bound axis out of range for box");
+    const uint32_t r0 = box.region[b.row_axis].start;
+    const uint32_t r1 = box.region[b.row_axis].stop;
+    const uint32_t c0 = box.region[b.col_axis].start;
+    const uint32_t c1 = box.region[b.col_axis].stop;
+    if (r0 >= r1 || c0 >= c1)
+        return std::nullopt;
+
+    const int64_t r_min = std::max<int64_t>(static_cast<int64_t>(r0), static_cast<int64_t>(c0) - b.diag_k + 1);
+    if (r_min >= static_cast<int64_t>(r1))
+        return std::nullopt;
+    const uint32_t restricted_r0 = static_cast<uint32_t>(std::max<int64_t>(0, r_min));
+
+    const int64_t c_limit = static_cast<int64_t>(r1 - 1) + b.diag_k;
+    if (c_limit <= static_cast<int64_t>(c0))
+        return std::nullopt;
+    const uint32_t restricted_stop = std::min<uint32_t>(c1, static_cast<uint32_t>(std::max<int64_t>(0, c_limit)));
+    if (c0 >= restricted_stop)
+        return std::nullopt;
+
+    Region res = box;
+    res.region[b.row_axis].start = restricted_r0;
+    res.region[b.col_axis].stop = restricted_stop;
+    return res;
+}
+
+inline std::vector<Region> boundedIntersect(const std::vector<Region> &needed, const TriuBound &b)
+{
+    std::vector<Region> out;
+    for (const Region &box : dropEmpty(needed))
+    {
+        auto hit = intersectBoxWithTriuBound(box, b);
+        if (hit)
+            out.push_back(*hit);
+    }
+    return dropEmpty(mergeRegions(out));
+}
+
+// Per box of `needed`, the bounding box of its part inside `valid` (dropped
+// when empty). A superset of the exact intersection with one box per input
+// box: masks are staircases, and exact intersections would split every box
+// into one per row.
+inline std::vector<Region> boundedIntersect(const std::vector<Region> &needed, const std::vector<Region> &valid)
+{
+    std::vector<Region> out;
+    for (const Region &box : bucket_regions::dropEmpty(needed))
+    {
+        const std::vector<Region> part = bucket_regions::intersect({box}, valid);
+        if (!part.empty())
+            out.push_back(bucket_regions::boundingBox(part));
+    }
+    return bucket_regions::dropEmpty(mergeRegions(out));
+}
+
+inline std::optional<Dim> axisRange(const TriuBound &b, const Region &box, size_t axis, bool everyRow)
+{
+    if (b.row_axis >= box.region.size() || b.col_axis >= box.region.size())
+        Error::throw_err("[axisRange] triu bound axis out of range for box");
+    const uint32_t r0 = box.region[b.row_axis].start;
+    const uint32_t r1 = box.region[b.row_axis].stop;
+    const uint32_t c0 = box.region[b.col_axis].start;
+    const uint32_t c1 = box.region[b.col_axis].stop;
+    if (r0 >= r1 || c0 >= c1)
+        return std::nullopt;
+
+    if (axis == b.col_axis)
+    {
+        const int64_t max_c_stop = std::min<int64_t>(c1, static_cast<int64_t>(r1 - 1) + b.diag_k);
+        if (static_cast<int64_t>(c0) >= max_c_stop)
+            return std::nullopt;
+        if (everyRow)
+        {
+            const int64_t r0_limit = static_cast<int64_t>(r0) + b.diag_k;
+            if (static_cast<int64_t>(c0) >= r0_limit)
+                return std::nullopt;
+        }
+        return Dim{c0, static_cast<uint32_t>(max_c_stop)};
+    }
+    else if (axis == b.row_axis)
+    {
+        const int64_t min_r_start = std::max<int64_t>(static_cast<int64_t>(r0), static_cast<int64_t>(c0) - b.diag_k + 1);
+        if (min_r_start >= static_cast<int64_t>(r1))
+            return std::nullopt;
+        if (everyRow)
+        {
+            const int64_t c1_req_r = static_cast<int64_t>(c1 - 1) - b.diag_k + 1;
+            if (c1_req_r >= static_cast<int64_t>(r1))
+                return std::nullopt;
+        }
+        return Dim{static_cast<uint32_t>(std::max<int64_t>(0, min_r_start)), r1};
+    }
+    return std::nullopt;
+}
+
+inline std::optional<std::vector<int32_t>> getInt32Constant(LogicalId id, const Graph &graph, TGStore *repo)
+{
+    if (graph.constantStaging.count(id))
+        return graph.getConstantInt32(id);
+    if (repo && repo->isValid() && repo->has(id))
+    {
+        auto bytes = repo->read(id);
+        const auto &node = graph.getNode(id);
+        uint64_t numElements = countElements(node.getShape());
+        if (bytes.size() == numElements * sizeof(int32_t))
+        {
+            std::vector<int32_t> res(numElements);
+            std::memcpy(res.data(), bytes.data(), bytes.size());
+            return res;
+        }
+    }
+    return std::nullopt;
+}
+
+inline std::optional<TriuBound> mapTriuBoundForward(const TensorNode &node, const Graph &graph,
+                                                    const TriuBound &bound, TGStore *repo = nullptr)
+{
+    switch (node.opType)
+    {
+    case OpType::CONTIGUOUS:
+        return bound;
+    case OpType::REPEAT: {
+        if (node.child_ids.size() < 3)
+            return std::nullopt;
+        auto repeats_vec = getInt32Constant(node.child_ids[1], graph, repo);
+        auto axis_vec = getInt32Constant(node.child_ids[2], graph, repo);
+        if (!repeats_vec || repeats_vec->empty() || !axis_vec || axis_vec->empty())
+            return std::nullopt;
+        const int32_t repeats = (*repeats_vec)[0];
+        int32_t axis = (*axis_vec)[0];
+        const size_t in_rank = graph.getNode(node.child_ids[0]).getShape().size();
+        if (axis < 0)
+            axis += static_cast<int32_t>(in_rank);
+        if (repeats == 1 || (static_cast<uint32_t>(axis) != bound.row_axis &&
+                             static_cast<uint32_t>(axis) != bound.col_axis))
+        {
+            return bound;
+        }
+        return std::nullopt;
+    }
+    case OpType::PERMUTE: {
+        if (node.child_ids.size() < 2)
+            return std::nullopt;
+        auto dims_vec = getInt32Constant(node.child_ids[1], graph, repo);
+        if (!dims_vec)
+            return std::nullopt;
+        const auto &dims = *dims_vec;
+        uint32_t new_row = UINT32_MAX, new_col = UINT32_MAX;
+        for (uint32_t i = 0; i < dims.size(); ++i)
+        {
+            if (static_cast<uint32_t>(dims[i]) == bound.row_axis)
+                new_row = i;
+            if (static_cast<uint32_t>(dims[i]) == bound.col_axis)
+                new_col = i;
+        }
+        if (new_row != UINT32_MAX && new_col != UINT32_MAX)
+        {
+            return TriuBound{new_row, new_col, bound.diag_k};
+        }
+        return std::nullopt;
+    }
+    case OpType::RESHAPE: {
+        const auto &in_shape = graph.getNode(node.child_ids[0]).getShape();
+        const auto &out_shape = node.getShape();
+        if (in_shape.size() >= 2 && out_shape.size() >= 2)
+        {
+            const size_t in_rank = in_shape.size();
+            const size_t out_rank = out_shape.size();
+            if (bound.row_axis == in_rank - 2 && bound.col_axis == in_rank - 1 &&
+                in_shape[in_rank - 2] == out_shape[out_rank - 2] &&
+                in_shape[in_rank - 1] == out_shape[out_rank - 1])
+            {
+                return TriuBound{static_cast<uint32_t>(out_rank - 2),
+                                 static_cast<uint32_t>(out_rank - 1), bound.diag_k};
+            }
+        }
+        return std::nullopt;
+    }
+    case OpType::SLICE: {
+        if (node.child_ids.size() < 4)
+            return std::nullopt;
+        auto starts_vec = getInt32Constant(node.child_ids[1], graph, repo);
+        auto steps_vec = getInt32Constant(node.child_ids[3], graph, repo);
+        if (!starts_vec || !steps_vec)
+            return std::nullopt;
+        const auto &starts = *starts_vec;
+        const auto &steps = *steps_vec;
+        if (bound.row_axis < steps.size() && bound.col_axis < steps.size() &&
+            steps[bound.row_axis] == 1 && steps[bound.col_axis] == 1 &&
+            bound.row_axis < starts.size() && bound.col_axis < starts.size())
+        {
+            const int32_t new_k = bound.diag_k + starts[bound.row_axis] - starts[bound.col_axis];
+            return TriuBound{bound.row_axis, bound.col_axis, new_k};
+        }
+        return std::nullopt;
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+inline std::optional<TriuBound> matchTriuMask(LogicalId id, const Graph &graph, TGStore *repo = nullptr)
+{
+    if (graph.getNode(id).getShape().empty())
+    {
+        ShapePropagator prop;
+        prop.inferShapeRecursive(id, const_cast<Graph &>(graph));
+    }
+    const TensorNode &node = graph.getNode(id);
+    const auto &shape = node.getShape();
+    if (node.opType == OpType::TRIU && node.child_ids.size() == 2 && shape.size() >= 2)
+    {
+        std::optional<int32_t> diag_k;
+        LogicalId k_id = node.child_ids[1];
+        auto staged_k = graph.constantStaging.find(k_id);
+        if (staged_k != graph.constantStaging.end() && staged_k->second->size() >= sizeof(int32_t))
+        {
+            int32_t k_val;
+            std::memcpy(&k_val, staged_k->second->data(), sizeof(int32_t));
+            diag_k = k_val;
+        }
+        else if (repo && repo->isValid() && repo->has(k_id))
+        {
+            auto bytes = repo->read(k_id);
+            if (bytes.size() >= sizeof(int32_t))
+            {
+                int32_t k_val;
+                std::memcpy(&k_val, bytes.data(), sizeof(int32_t));
+                diag_k = k_val;
+            }
+        }
+        if (diag_k)
+        {
+            auto checkFillScalar = [&](LogicalId data_id) -> bool {
+                LogicalId curr = data_id;
+                for (int depth = 0; depth < 8; ++depth)
+                {
+                    const TensorNode &n = graph.getNode(curr);
+                    if (n.opType == OpType::FILL && n.child_ids.size() >= 2)
+                    {
+                        LogicalId val_id = n.child_ids[0];
+                        const TensorNode &val_node = graph.getNode(val_id);
+                        if (val_node.dtype != DType::FLOAT32)
+                            return false;
+                        auto st = graph.constantStaging.find(val_id);
+                        if (st != graph.constantStaging.end() && st->second->size() >= sizeof(float))
+                        {
+                            float f_val;
+                            std::memcpy(&f_val, st->second->data(), sizeof(float));
+                            return f_val == BucketRegions::kMaskedValue;
+                        }
+                        if (repo && repo->isValid() && repo->has(val_id))
+                        {
+                            auto b = repo->read(val_id);
+                            if (b.size() >= sizeof(float))
+                            {
+                                float f_val;
+                                std::memcpy(&f_val, b.data(), sizeof(float));
+                                return f_val == BucketRegions::kMaskedValue;
+                            }
+                        }
+                        return false;
+                    }
+                    if ((n.opType == OpType::CONTIGUOUS || n.opType == OpType::REPEAT ||
+                         n.opType == OpType::RESHAPE || n.opType == OpType::PERMUTE ||
+                         n.opType == OpType::SLICE) && !n.child_ids.empty())
+                    {
+                        curr = n.child_ids[0];
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                return false;
+            };
+
+            if (checkFillScalar(node.child_ids[0]))
+            {
+                TriuBound bound;
+                bound.row_axis = static_cast<uint32_t>(shape.size() - 2);
+                bound.col_axis = static_cast<uint32_t>(shape.size() - 1);
+                bound.diag_k = *diag_k;
+                return bound;
+            }
+        }
+    }
+
+    const bool isView = (node.opType == OpType::CONTIGUOUS || node.opType == OpType::REPEAT ||
+                         node.opType == OpType::RESHAPE || node.opType == OpType::PERMUTE ||
+                         node.opType == OpType::SLICE);
+    if (isView && !node.child_ids.empty())
+    {
+        auto child_bound = matchTriuMask(node.child_ids[0], graph, repo);
+        if (child_bound)
+        {
+            return mapTriuBoundForward(node, graph, *child_bound, repo);
+        }
+    }
+    return std::nullopt;
+}
 } // namespace bucket_regions
 
 inline RegionFacts computeRegionFacts(const Graph &graph, const std::vector<LogicalId> &topo, TGStore *repo)
@@ -362,6 +686,13 @@ inline RegionFacts computeRegionFacts(const Graph &graph, const std::vector<Logi
             const auto &shape = graph.getNode(node.child_ids[m]).getShape();
             if (shape != node.getShape())
                 continue;
+            auto triu = matchTriuMask(node.child_ids[m], graph, repo);
+            if (triu)
+            {
+                masks[id] = {m, makeFull(shape)};
+                facts.triuMasks[id] = *triu;
+                break;
+            }
             std::optional<std::vector<Region>> unmasked = unmaskedOf(node.child_ids[m], 8);
             if (!unmasked)
                 continue;
@@ -431,47 +762,105 @@ inline RegionFacts computeRegionFacts(const Graph &graph, const std::vector<Logi
         const TensorNode &node = graph.getNode(id);
         std::vector<Region> fin, sup;
         bool hasFin = false, hasSup = false;
+        std::optional<TriuBound> triuFin, triuSup;
         switch (node.opType)
         {
         case OpType::ADD: {
             if (node.child_ids.size() != 2)
                 break;
             auto mask = masks.find(id);
-            fin = mask != masks.end() ? intersect(mask->second.second, finiteOf(node.child_ids[1 - mask->second.first]))
-                                      : intersect(finiteOf(node.child_ids[0]), finiteOf(node.child_ids[1]));
-            hasFin = true;
+            auto triuMaskIt = facts.triuMasks.find(id);
+            if (triuMaskIt != facts.triuMasks.end())
+            {
+                triuFin = triuMaskIt->second;
+                hasFin = true;
+            }
+            else if (mask != masks.end())
+            {
+                fin = intersect(mask->second.second, finiteOf(node.child_ids[1 - mask->second.first]));
+                hasFin = true;
+            }
+            else
+            {
+                auto t0 = facts.triuFinite.find(node.child_ids[0]);
+                auto t1 = facts.triuFinite.find(node.child_ids[1]);
+                if (t0 != facts.triuFinite.end())
+                    triuFin = t0->second;
+                else if (t1 != facts.triuFinite.end())
+                    triuFin = t1->second;
+                fin = intersect(finiteOf(node.child_ids[0]), finiteOf(node.child_ids[1]));
+                hasFin = true;
+            }
             break;
         }
         case OpType::POWER: {
             const auto base = constantMin(node.child_ids[0], 8);
             if (base && *base > 1.0f)
             {
+                auto t = facts.triuFinite.find(node.child_ids[1]);
+                if (t != facts.triuFinite.end())
+                    triuSup = t->second;
                 sup = finiteOf(node.child_ids[1]);
                 hasSup = true;
             }
             break;
         }
-        case OpType::MUL:
+        case OpType::MUL: {
+            auto t0 = facts.triuSupport.find(node.child_ids[0]);
+            auto t1 = facts.triuSupport.find(node.child_ids[1]);
+            if (t0 != facts.triuSupport.end())
+                triuSup = t0->second;
+            else if (t1 != facts.triuSupport.end())
+                triuSup = t1->second;
             sup = intersect(supportOf(node.child_ids[0]), supportOf(node.child_ids[1]));
             hasSup = true;
             break;
-        case OpType::DIVIDE:
+        }
+        case OpType::DIVIDE: {
+            auto t0 = facts.triuSupport.find(node.child_ids[0]);
+            if (t0 != facts.triuSupport.end())
+                triuSup = t0->second;
             sup = supportOf(node.child_ids[0]);
             hasSup = true;
             break;
+        }
         case OpType::REPEAT:
         case OpType::RESHAPE:
         case OpType::PERMUTE:
         case OpType::CONTIGUOUS:
-        case OpType::SLICE:
-        case OpType::CONCAT:
+        case OpType::SLICE: {
+            if (!node.child_ids.empty())
+            {
+                LogicalId c0 = node.child_ids[0];
+                auto tFin = facts.triuFinite.find(c0);
+                if (tFin != facts.triuFinite.end())
+                {
+                    triuFin = mapTriuBoundForward(node, graph, tFin->second, repo);
+                }
+                auto tSup = facts.triuSupport.find(c0);
+                if (tSup != facts.triuSupport.end())
+                {
+                    triuSup = mapTriuBoundForward(node, graph, tSup->second, repo);
+                }
+            }
             fin = mapForward(node, finiteOf);
             sup = mapForward(node, supportOf);
             hasFin = hasSup = true;
             break;
+        }
+        case OpType::CONCAT: {
+            fin = mapForward(node, finiteOf);
+            sup = mapForward(node, supportOf);
+            hasFin = hasSup = true;
+            break;
+        }
         default:
             break;
         }
+        if (triuFin)
+            facts.triuFinite[id] = *triuFin;
+        if (triuSup)
+            facts.triuSupport[id] = *triuSup;
         if (hasFin && !isFullList(id, fin))
             finite[id] = std::move(fin);
         if (hasSup && !isFullList(id, sup))
@@ -480,21 +869,7 @@ inline RegionFacts computeRegionFacts(const Graph &graph, const std::vector<Logi
     return facts;
 }
 
-// Per box of `needed`, the bounding box of its part inside `valid` (dropped
-// when empty). A superset of the exact intersection with one box per input
-// box: masks are staircases, and exact intersections would split every box
-// into one per row.
-inline std::vector<Region> boundedIntersect(const std::vector<Region> &needed, const std::vector<Region> &valid)
-{
-    std::vector<Region> out;
-    for (const Region &box : bucket_regions::dropEmpty(needed))
-    {
-        const std::vector<Region> part = bucket_regions::intersect({box}, valid);
-        if (!part.empty())
-            out.push_back(bucket_regions::boundingBox(part));
-    }
-    return bucket_regions::dropEmpty(mergeRegions(out));
-}
+using bucket_regions::boundedIntersect;
 
 // paddedInputs: input -> axis along which the input is padded past each
 // bucket's dirty region (e.g. token ids past the request). Values depending
@@ -526,6 +901,12 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
         auto it = support.find(node.child_ids[0]);
         return it == support.end() ? nullptr : &it->second;
     };
+    auto dotTriuSupport = [&](const TensorNode &node) -> const TriuBound * {
+        if (node.opType != OpType::DOT || node.child_ids.size() != 2 || node.getShape().size() != 3)
+            return nullptr;
+        auto it = f.triuSupport.find(node.child_ids[0]);
+        return it == f.triuSupport.end() ? nullptr : &it->second;
+    };
     // Output rows made dirty by dirty rows of B.
     auto dotForwardFromB = [&](const std::vector<Region> &suppA, const std::vector<Region> &dirtyB,
                                uint32_t mRows) {
@@ -544,6 +925,24 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
             }
         return dropEmpty(mergeRegions(outBoxes));
     };
+    auto dotForwardFromBTriu = [&](const TriuBound &bound, const std::vector<Region> &dirtyB,
+                                   uint32_t mRows) {
+        std::vector<Region> outBoxes;
+        for (const Region &b : dirtyB)
+        {
+            if (b.region.size() != 3)
+                continue;
+            const uint32_t k0 = b.region[1].start;
+            const int64_t m_min = std::max<int64_t>(0, static_cast<int64_t>(k0) - bound.diag_k + 1);
+            if (m_min < static_cast<int64_t>(mRows))
+            {
+                Region o;
+                o.region = {b.region[0], {static_cast<uint32_t>(m_min), mRows}, b.region[2]};
+                outBoxes.push_back(o);
+            }
+        }
+        return dropEmpty(mergeRegions(outBoxes));
+    };
     // Rows of B needed for the needed output region.
     auto dotNeededB = [&](const std::vector<Region> &suppA, const std::vector<Region> &neededOut, uint32_t kCols) {
         std::vector<Region> boxes;
@@ -559,6 +958,27 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                 bBox.region = {hit.region[0], hit.region[2], o.region[2]};
                 boxes.push_back(bBox);
             }
+        return dropEmpty(mergeRegions(boxes));
+    };
+    auto dotNeededBTriu = [&](const TriuBound &bound, const std::vector<Region> &neededOut,
+                              uint32_t kCols) {
+        std::vector<Region> boxes;
+        for (const Region &o : neededOut)
+        {
+            if (o.region.size() != 3)
+                continue;
+            const uint32_t m1 = o.region[1].stop;
+            if (m1 == 0)
+                continue;
+            const int64_t k_limit = std::max<int64_t>(0, static_cast<int64_t>(m1 - 1) + bound.diag_k);
+            const uint32_t k_stop = std::min<uint32_t>(kCols, static_cast<uint32_t>(k_limit));
+            if (k_stop > 0)
+            {
+                Region bBox;
+                bBox.region = {o.region[0], {0, k_stop}, o.region[2]};
+                boxes.push_back(bBox);
+            }
+        }
         return dropEmpty(mergeRegions(boxes));
     };
 
@@ -595,7 +1015,15 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
             if (!anyReached)
                 continue;
             std::vector<Region> regions;
-            if (const std::vector<Region> *suppA = dotSupport(node))
+            if (const TriuBound *triuSuppA = dotTriuSupport(node))
+            {
+                std::vector<std::vector<Region>> fromA = {childRegions[0], {}};
+                regions = dropEmpty(prop.forward(node, graph, fromA));
+                if (!childRegions[1].empty())
+                    regions = unite(regions, dotForwardFromBTriu(*triuSuppA, childRegions[1],
+                                                                 graph.getNode(node.child_ids[0]).getShape()[1]));
+            }
+            else if (const std::vector<Region> *suppA = dotSupport(node))
             {
                 std::vector<std::vector<Region>> fromA = {childRegions[0], {}};
                 regions = dropEmpty(prop.forward(node, graph, fromA));
@@ -607,7 +1035,24 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                 regions = dropEmpty(prop.forward(node, graph, childRegions));
             auto mask = masks.find(id);
             if (mask != masks.end() && of(node.child_ids[mask->second.first]).empty())
-                regions = intersect(regions, mask->second.second);
+            {
+                auto triuIt = f.triuMasks.find(id);
+                if (triuIt != f.triuMasks.end())
+                {
+                    std::vector<Region> restricted;
+                    for (const auto &r : regions)
+                    {
+                        auto hit = intersectBoxWithTriuBound(r, triuIt->second);
+                        if (hit)
+                            restricted.push_back(*hit);
+                    }
+                    regions = dropEmpty(mergeRegions(restricted));
+                }
+                else
+                {
+                    regions = intersect(regions, mask->second.second);
+                }
+            }
             if (!regions.empty())
                 reach[id] = std::move(regions);
         }
@@ -702,14 +1147,26 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                 // Masked elements (outside the finite facts) only matter through
                 // being far below the unmasked ones, which a stale masked value
                 // still is: they need not be refreshed.
-                auto fin = finite.find(id);
-                if (fin != finite.end())
-                    keep = intersect(keep, fin->second);
+                auto triuFin = f.triuFinite.find(id);
+                if (triuFin != f.triuFinite.end())
+                    keep = boundedIntersect(keep, triuFin->second);
+                else
+                {
+                    auto fin = finite.find(id);
+                    if (fin != finite.end())
+                        keep = intersect(keep, fin->second);
+                }
                 // Elements outside a value's support are exactly zero in every run,
                 // so their cached value stays right.
-                auto supp = support.find(id);
-                if (supp != support.end())
-                    keep = intersect(keep, supp->second);
+                auto triuSupp = f.triuSupport.find(id);
+                if (triuSupp != f.triuSupport.end())
+                    keep = boundedIntersect(keep, triuSupp->second);
+                else
+                {
+                    auto supp = support.find(id);
+                    if (supp != support.end())
+                        keep = intersect(keep, supp->second);
+                }
                 if (!keep.empty())
                     target[id] = unite(neededIn(id), keep);
             }
@@ -719,7 +1176,12 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
             std::vector<std::vector<Region>> childNeeded = prop.backward(node, graph, needed);
             if (childNeeded.size() != node.child_ids.size())
                 Error::throw_err("[computeBucketRegions] backward region count mismatch for " + toString(node.opType));
-            if (const std::vector<Region> *suppA = dotSupport(node))
+            if (const TriuBound *triuSuppA = dotTriuSupport(node))
+            {
+                childNeeded[1] = dotNeededBTriu(*triuSuppA, needed, graph.getNode(node.child_ids[0]).getShape()[2]);
+                childNeeded[0] = boundedIntersect(childNeeded[0], *triuSuppA);
+            }
+            else if (const std::vector<Region> *suppA = dotSupport(node))
             {
                 childNeeded[1] = dotNeededB(*suppA, needed, graph.getNode(node.child_ids[0]).getShape()[2]);
                 // Columns of A outside its support are exactly zero in every run
@@ -731,11 +1193,11 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
             // element (masked ones sit ~1e9 below them).
             if ((node.opType == OpType::SUM || node.opType == OpType::MAX) && node.child_ids.size() == 2)
             {
-                const auto &facts = node.opType == OpType::SUM ? support : finite;
-                auto valid = facts.find(node.child_ids[0]);
+                auto triuFact = node.opType == OpType::SUM ? f.triuSupport.find(node.child_ids[0])
+                                                           : f.triuFinite.find(node.child_ids[0]);
                 auto axisData = graph.constantStaging.find(node.child_ids[1]);
-                if (valid != facts.end() && axisData != graph.constantStaging.end() &&
-                    axisData->second->size() == sizeof(int32_t))
+                if (triuFact != (node.opType == OpType::SUM ? f.triuSupport.end() : f.triuFinite.end()) &&
+                    axisData != graph.constantStaging.end() && axisData->second->size() == sizeof(int32_t))
                 {
                     int32_t axis;
                     std::memcpy(&axis, axisData->second->data(), sizeof(axis));
@@ -745,21 +1207,55 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                     if (axis < 0 || axis >= rank)
                         Error::throw_err("[computeBucketRegions] reduction axis out of range");
                     if (node.opType == OpType::SUM)
-                        childNeeded[0] = boundedIntersect(childNeeded[0], valid->second);
+                        childNeeded[0] = boundedIntersect(childNeeded[0], triuFact->second);
                     else
                     {
                         std::vector<Region> restricted;
                         for (const Region &box : dropEmpty(childNeeded[0]))
                         {
-                            if (bucket_regions::axisRange(valid->second, box, static_cast<size_t>(axis), true))
+                            if (bucket_regions::axisRange(triuFact->second, box, static_cast<size_t>(axis), true))
                             {
-                                for (Region r : boundedIntersect({box}, valid->second))
-                                    restricted.push_back(r);
+                                auto hit = intersectBoxWithTriuBound(box, triuFact->second);
+                                if (hit)
+                                    restricted.push_back(*hit);
                             }
                             else
                                 restricted.push_back(box);
                         }
                         childNeeded[0] = dropEmpty(mergeRegions(restricted));
+                    }
+                }
+                else
+                {
+                    const auto &facts = node.opType == OpType::SUM ? support : finite;
+                    auto valid = facts.find(node.child_ids[0]);
+                    if (valid != facts.end() && axisData != graph.constantStaging.end() &&
+                        axisData->second->size() == sizeof(int32_t))
+                    {
+                        int32_t axis;
+                        std::memcpy(&axis, axisData->second->data(), sizeof(axis));
+                        const int32_t rank = static_cast<int32_t>(graph.getNode(node.child_ids[0]).getShape().size());
+                        if (axis < 0)
+                            axis += rank;
+                        if (axis < 0 || axis >= rank)
+                            Error::throw_err("[computeBucketRegions] reduction axis out of range");
+                        if (node.opType == OpType::SUM)
+                            childNeeded[0] = boundedIntersect(childNeeded[0], valid->second);
+                        else
+                        {
+                            std::vector<Region> restricted;
+                            for (const Region &box : dropEmpty(childNeeded[0]))
+                            {
+                                if (bucket_regions::axisRange(valid->second, box, static_cast<size_t>(axis), true))
+                                {
+                                    for (Region r : boundedIntersect({box}, valid->second))
+                                        restricted.push_back(r);
+                                }
+                                else
+                                    restricted.push_back(box);
+                            }
+                            childNeeded[0] = dropEmpty(mergeRegions(restricted));
+                        }
                     }
                 }
             }

@@ -72,6 +72,32 @@ inline std::vector<float> extractFloatTensor(LogicalId node_id, const Graph &gra
     return final_out;
 }
 
+inline bool isSymbolicCleanMaskOrFill(LogicalId id, const Graph &graph)
+{
+    if (graph.getNode(id).getShape().empty())
+    {
+        ShapePropagator prop;
+        prop.inferShapeRecursive(id, const_cast<Graph &>(graph));
+    }
+    const TensorNode &n = graph.getNode(id);
+    if (countElements(n.getShape()) <= 4096)
+        return false;
+    if (n.opType == OpType::FILL || n.opType == OpType::TRIU)
+        return true;
+    const bool isView = (n.opType == OpType::REPEAT || n.opType == OpType::RESHAPE ||
+                         n.opType == OpType::PERMUTE || n.opType == OpType::SLICE ||
+                         n.opType == OpType::CONTIGUOUS);
+    if (isView && !n.child_ids.empty())
+    {
+        LogicalId child0 = n.child_ids[0];
+        const TensorNode &cn = graph.getNode(child0);
+        if (cn.opType == OpType::FILL || cn.opType == OpType::TRIU)
+            return true;
+        return isSymbolicCleanMaskOrFill(child0, graph);
+    }
+    return false;
+}
+
 inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<LogicalId> &root_ids,
                                                 ITensorStore &store, const RefGraphOptions &options = {})
 {
@@ -86,6 +112,15 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
     std::unordered_map<LogicalId, bool> is_clean;
     if (options.only_clean_nodes)
     {
+        ShapePropagator shape_prop;
+        for (LogicalId node_id : topo)
+        {
+            if (graph.getNode(node_id).opType != OpType::INPUT && graph.getNode(node_id).getShape().empty())
+            {
+                shape_prop.inferShape(node_id, graph);
+            }
+        }
+
         for (LogicalId node_id : topo)
         {
             const TensorNode &node = graph.getNode(node_id);
@@ -123,6 +158,10 @@ inline std::vector<float> executeReferenceGraph(Graph &graph, const std::vector<
                         all_clean = false;
                         break;
                     }
+                }
+                if (all_clean && isSymbolicCleanMaskOrFill(node_id, graph))
+                {
+                    all_clean = false;
                 }
                 is_clean[node_id] = all_clean;
             }

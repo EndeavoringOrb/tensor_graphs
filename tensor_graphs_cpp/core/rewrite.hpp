@@ -1533,6 +1533,234 @@ struct InfinityDomination : public Rule
         return "InfinityDomination";
     }
 
+    bool isFillWithNegInfEClass(EClassId cid, const EGraph &egraph, RuleCtx *ctx = nullptr, int depth = 8) const
+    {
+        if (depth <= 0)
+            return false;
+        cid = egraph.findConst(cid);
+        const EClass &cls = egraph.getEClass(cid);
+        for (ENodeId enode_id : cls.enodes)
+        {
+            const ENode &enode = egraph.getENode(enode_id);
+            if (enode.getOpType() == OpType::FILL && enode.getChildren().size() >= 2)
+            {
+                EClassId val_cid = egraph.findConst(enode.getChildren()[0]);
+                const EClass &val_cls = egraph.getEClass(val_cid);
+                if (val_cls.dtype == DType::FLOAT32)
+                {
+                    if (egraph.constantStaging.count(val_cid))
+                    {
+                        const auto &data = *egraph.constantStaging.at(val_cid);
+                        if (data.size() >= sizeof(float))
+                        {
+                            float val;
+                            std::memcpy(&val, data.data(), sizeof(float));
+                            if (val == TGConstants::NEG_INF)
+                                return true;
+                        }
+                    }
+                    if (ctx && ctx->repo && ctx->repo->isValid())
+                    {
+                        LogicalId lid = val_cls.logical_id;
+                        if (lid != LogicalId() && ctx->repo->has(lid))
+                        {
+                            auto data = ctx->repo->read(lid);
+                            if (data.size() >= sizeof(float))
+                            {
+                                float val;
+                                std::memcpy(&val, data.data(), sizeof(float));
+                                if (val == TGConstants::NEG_INF)
+                                    return true;
+                            }
+                        }
+                    }
+                }
+            }
+            const bool isView = (enode.getOpType() == OpType::REPEAT || enode.getOpType() == OpType::RESHAPE ||
+                                 enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::SLICE ||
+                                 enode.getOpType() == OpType::CONTIGUOUS || enode.getOpType() == OpType::COPY_TO);
+            if (isView && !enode.getChildren().empty())
+            {
+                if (isFillWithNegInfEClass(enode.getChildren()[0], egraph, ctx, depth - 1))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    bool mapTriuBoundForwardENode(const ENode &enode, const EGraph &egraph,
+                                  const TriuBound &in_bound, TriuBound &out_bound) const
+    {
+        switch (enode.getOpType())
+        {
+        case OpType::CONTIGUOUS:
+        case OpType::COPY_TO:
+            out_bound = in_bound;
+            return true;
+        case OpType::REPEAT: {
+            if (enode.getChildren().size() < 3)
+                return false;
+            EClassId r_cid = egraph.findConst(enode.getChildren()[1]);
+            EClassId a_cid = egraph.findConst(enode.getChildren()[2]);
+            if (!egraph.constantStaging.count(r_cid) || !egraph.constantStaging.count(a_cid))
+                return false;
+            auto r_vec = egraph.getConstantInt32(r_cid);
+            auto a_vec = egraph.getConstantInt32(a_cid);
+            if (r_vec.empty() || a_vec.empty())
+                return false;
+            int32_t repeats = r_vec[0];
+            int32_t axis = a_vec[0];
+            EClassId c0 = egraph.findConst(enode.getChildren()[0]);
+            size_t in_rank = egraph.getEClass(c0).shape.size();
+            if (axis < 0)
+                axis += static_cast<int32_t>(in_rank);
+            if (repeats == 1 || (static_cast<uint32_t>(axis) != in_bound.row_axis &&
+                                 static_cast<uint32_t>(axis) != in_bound.col_axis))
+            {
+                out_bound = in_bound;
+                return true;
+            }
+            return false;
+        }
+        case OpType::PERMUTE: {
+            if (enode.getChildren().size() < 2)
+                return false;
+            EClassId d_cid = egraph.findConst(enode.getChildren()[1]);
+            if (!egraph.constantStaging.count(d_cid))
+                return false;
+            auto dims = egraph.getConstantInt32(d_cid);
+            uint32_t new_row = UINT32_MAX, new_col = UINT32_MAX;
+            for (uint32_t i = 0; i < dims.size(); ++i)
+            {
+                if (static_cast<uint32_t>(dims[i]) == in_bound.row_axis)
+                    new_row = i;
+                if (static_cast<uint32_t>(dims[i]) == in_bound.col_axis)
+                    new_col = i;
+            }
+            if (new_row != UINT32_MAX && new_col != UINT32_MAX)
+            {
+                out_bound = TriuBound{new_row, new_col, in_bound.diag_k};
+                return true;
+            }
+            return false;
+        }
+        case OpType::RESHAPE: {
+            EClassId c0 = egraph.findConst(enode.getChildren()[0]);
+            const auto &in_shape = egraph.getEClass(c0).shape;
+            const auto &out_shape = enode.getShape();
+            if (in_shape.size() >= 2 && out_shape.size() >= 2)
+            {
+                size_t in_rank = in_shape.size();
+                size_t out_rank = out_shape.size();
+                if (in_bound.row_axis == in_rank - 2 && in_bound.col_axis == in_rank - 1 &&
+                    in_shape[in_rank - 2] == out_shape[out_rank - 2] &&
+                    in_shape[in_rank - 1] == out_shape[out_rank - 1])
+                {
+                    out_bound = TriuBound{static_cast<uint32_t>(out_rank - 2),
+                                          static_cast<uint32_t>(out_rank - 1), in_bound.diag_k};
+                    return true;
+                }
+            }
+            return false;
+        }
+        case OpType::SLICE: {
+            if (enode.getChildren().size() < 4)
+                return false;
+            EClassId st_cid = egraph.findConst(enode.getChildren()[1]);
+            EClassId sp_cid = egraph.findConst(enode.getChildren()[3]);
+            if (!egraph.constantStaging.count(st_cid) || !egraph.constantStaging.count(sp_cid))
+                return false;
+            auto starts = egraph.getConstantInt32(st_cid);
+            auto steps = egraph.getConstantInt32(sp_cid);
+            if (in_bound.row_axis < steps.size() && in_bound.col_axis < steps.size() &&
+                steps[in_bound.row_axis] == 1 && steps[in_bound.col_axis] == 1 &&
+                in_bound.row_axis < starts.size() && in_bound.col_axis < starts.size())
+            {
+                int32_t new_k = in_bound.diag_k + starts[in_bound.row_axis] - starts[in_bound.col_axis];
+                out_bound = TriuBound{in_bound.row_axis, in_bound.col_axis, new_k};
+                return true;
+            }
+            return false;
+        }
+        default:
+            return false;
+        }
+    }
+
+    bool isTriuMaskEClass(EClassId cid, const EGraph &egraph, TriuBound &out_bound,
+                          std::unordered_set<EClassId> &visited, RuleCtx *ctx = nullptr) const
+    {
+        cid = egraph.findConst(cid);
+        if (visited.count(cid))
+            return false;
+        visited.insert(cid);
+
+        const EClass &cls = egraph.getEClass(cid);
+        for (ENodeId enode_id : cls.enodes)
+        {
+            const ENode &enode = egraph.getENode(enode_id);
+            if (enode.getOpType() == OpType::TRIU && enode.getChildren().size() == 2 && enode.getShape().size() >= 2)
+            {
+                EClassId k_cid = egraph.findConst(enode.getChildren()[1]);
+                std::optional<int32_t> diag_k;
+                if (egraph.constantStaging.count(k_cid))
+                {
+                    const auto &k_data = *egraph.constantStaging.at(k_cid);
+                    if (k_data.size() >= sizeof(int32_t))
+                    {
+                        int32_t k_val;
+                        std::memcpy(&k_val, k_data.data(), sizeof(int32_t));
+                        diag_k = k_val;
+                    }
+                }
+                else if (ctx && ctx->repo && ctx->repo->isValid())
+                {
+                    const EClass &k_cls = egraph.getEClass(k_cid);
+                    if (k_cls.logical_id != LogicalId() && ctx->repo->has(k_cls.logical_id))
+                    {
+                        auto bytes = ctx->repo->read(k_cls.logical_id);
+                        if (bytes.size() >= sizeof(int32_t))
+                        {
+                            int32_t k_val;
+                            std::memcpy(&k_val, bytes.data(), sizeof(int32_t));
+                            diag_k = k_val;
+                        }
+                    }
+                }
+                if (diag_k)
+                {
+                    EClassId fill_cid = egraph.findConst(enode.getChildren()[0]);
+                    if (isFillWithNegInfEClass(fill_cid, egraph, ctx))
+                    {
+                        out_bound.row_axis = static_cast<uint32_t>(enode.getShape().size() - 2);
+                        out_bound.col_axis = static_cast<uint32_t>(enode.getShape().size() - 1);
+                        out_bound.diag_k = *diag_k;
+                        return true;
+                    }
+                }
+            }
+            const bool isView = (enode.getOpType() == OpType::REPEAT || enode.getOpType() == OpType::RESHAPE ||
+                                 enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::SLICE ||
+                                 enode.getOpType() == OpType::CONTIGUOUS || enode.getOpType() == OpType::COPY_TO);
+            if (isView && !enode.getChildren().empty())
+            {
+                TriuBound child_bound;
+                if (isTriuMaskEClass(enode.getChildren()[0], egraph, child_bound, visited, ctx))
+                {
+                    if (mapTriuBoundForwardENode(enode, egraph, child_bound, out_bound))
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool isTriuMaskEClass(EClassId cid, const EGraph &egraph, TriuBound &out_bound, RuleCtx *ctx = nullptr) const
+    {
+        std::unordered_set<EClassId> visited;
+        return isTriuMaskEClass(cid, egraph, out_bound, visited, ctx);
+    }
+
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         if (visited_enodes.count(ENodeId{eNodeIdx}))
@@ -1542,7 +1770,10 @@ struct InfinityDomination : public Rule
         if (enode.getOpType() != OpType::ADD || enode.getChildren().size() != 2)
             return false;
 
-        return isConstantFloat(enode.getChildren()[0], ctx) || isConstantFloat(enode.getChildren()[1], ctx);
+        TriuBound dummy;
+        return isConstantFloat(enode.getChildren()[0], ctx) || isConstantFloat(enode.getChildren()[1], ctx) ||
+               isTriuMaskEClass(enode.getChildren()[0], ctx.egraph, dummy, &ctx) ||
+               isTriuMaskEClass(enode.getChildren()[1], ctx.egraph, dummy, &ctx);
     }
 
     bool isConstantFloat(EClassId e_class_id, RuleCtx &ctx) const
@@ -1577,71 +1808,128 @@ struct InfinityDomination : public Rule
         const ENode addNode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
-        uint32_t constIdx = isConstantFloat(addNode.getChildren()[1], ctx) ? 1 : 0;
+        TriuBound triu_bound_0, triu_bound_1;
+        bool is_triu_1 = isTriuMaskEClass(addNode.getChildren()[1], egraph, triu_bound_1, &ctx);
+        bool is_triu_0 = isTriuMaskEClass(addNode.getChildren()[0], egraph, triu_bound_0, &ctx);
+        bool is_const_1 = isConstantFloat(addNode.getChildren()[1], ctx);
+        bool is_const_0 = isConstantFloat(addNode.getChildren()[0], ctx);
+
+        uint32_t constIdx;
+        bool is_triu = false;
+        TriuBound triu_bound;
+        if (is_triu_1 || is_const_1)
+        {
+            constIdx = 1;
+            if (is_triu_1) { is_triu = true; triu_bound = triu_bound_1; }
+        }
+        else if (is_triu_0 || is_const_0)
+        {
+            constIdx = 0;
+            if (is_triu_0) { is_triu = true; triu_bound = triu_bound_0; }
+        }
+        else
+            return;
+
         uint32_t varIdx = 1 - constIdx;
 
         EClassId constClass = egraph.findConst(addNode.getChildren()[constIdx]);
         EClassId varClass = egraph.findConst(addNode.getChildren()[varIdx]);
 
         const EClass variable = egraph.getEClass(varClass);
-        const auto &constData = *egraph.constantStaging.at(constClass);
-        const float *data = reinterpret_cast<const float *>(constData.data());
-
         const EClass cClass = egraph.getEClass(constClass);
-        uint64_t numElements = countElements(cClass.shape);
-        if (constData.size() != numElements * sizeof(float))
-            Error::throw_err("[InfinityDomination] constant data size mismatch");
         if (cClass.shape != variable.shape)
             return;
 
-        // Unmasked boxes of this constant (memoized: one mask feeds every
-        // layer). Runs along the last axis, merged, equal to merging the
-        // unmasked cells one by one.
-        std::string memoKey(reinterpret_cast<const char *>(&data), sizeof(data));
-        memoKey.append(reinterpret_cast<const char *>(cClass.shape.data()), cClass.shape.size() * sizeof(uint32_t));
-        memoKey.append(reinterpret_cast<const char *>(cClass.strides.data()), cClass.strides.size() * sizeof(uint64_t));
-        auto memo = unmasked_memo.find(memoKey);
-        if (memo == unmasked_memo.end())
+        std::vector<Region> nonInfRegions;
+        if (is_triu)
         {
-            std::vector<Region> runs;
-            bool anyMasked = false;
-            const uint32_t cols = cClass.shape.empty() ? 1 : cClass.shape.back();
-            const uint64_t rows = cols == 0 ? 0 : numElements / cols;
-            for (uint64_t row = 0; row < rows; ++row)
+            const uint32_t R = cClass.shape[triu_bound.row_axis];
+            const uint32_t C = cClass.shape[triu_bound.col_axis];
+            if (R > 0 && C > 0)
             {
-                const std::vector<uint32_t> coords = coordsFromFlatIndex(row * cols, cClass.shape);
-                uint32_t c = 0;
-                while (c < cols)
+                const size_t num_regions = std::min<size_t>(kMaxRegions, R);
+                const size_t group_size = (R + num_regions - 1) / num_regions;
+                std::vector<Region> boxes;
+                for (size_t first = 0; first < R; first += group_size)
                 {
-                    while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] == TGConstants::NEG_INF)
+                    const size_t last = std::min<size_t>(R, first + group_size);
+                    const int64_t max_col = static_cast<int64_t>(last - 1) + triu_bound.diag_k;
+                    if (max_col <= 0)
+                        continue;
+                    const uint32_t col_stop = std::min<uint32_t>(C, static_cast<uint32_t>(max_col));
+                    Region reg;
+                    for (size_t d = 0; d < cClass.shape.size(); ++d)
                     {
-                        anyMasked = true;
-                        ++c;
+                        if (d == triu_bound.row_axis)
+                            reg.region.push_back({static_cast<uint32_t>(first), static_cast<uint32_t>(last)});
+                        else if (d == triu_bound.col_axis)
+                            reg.region.push_back({0, col_stop});
+                        else
+                            reg.region.push_back({0, cClass.shape[d]});
                     }
-                    const uint32_t start = c;
-                    while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] != TGConstants::NEG_INF)
-                        ++c;
-                    if (c > start)
+                    boxes.push_back(std::move(reg));
+                }
+                nonInfRegions = mergeRegions(boxes);
+            }
+        }
+        else
+        {
+            const auto &constData = *egraph.constantStaging.at(constClass);
+            const float *data = reinterpret_cast<const float *>(constData.data());
+
+            uint64_t numElements = countElements(cClass.shape);
+            if (constData.size() != numElements * sizeof(float))
+                Error::throw_err("[InfinityDomination] constant data size mismatch");
+
+            // Unmasked boxes of this constant (memoized: one mask feeds every
+            // layer). Runs along the last axis, merged, equal to merging the
+            // unmasked cells one by one.
+            std::string memoKey(reinterpret_cast<const char *>(&data), sizeof(data));
+            memoKey.append(reinterpret_cast<const char *>(cClass.shape.data()), cClass.shape.size() * sizeof(uint32_t));
+            memoKey.append(reinterpret_cast<const char *>(cClass.strides.data()), cClass.strides.size() * sizeof(uint64_t));
+            auto memo = unmasked_memo.find(memoKey);
+            if (memo == unmasked_memo.end())
+            {
+                std::vector<Region> runs;
+                bool anyMasked = false;
+                const uint32_t cols = cClass.shape.empty() ? 1 : cClass.shape.back();
+                const uint64_t rows = cols == 0 ? 0 : numElements / cols;
+                for (uint64_t row = 0; row < rows; ++row)
+                {
+                    const std::vector<uint32_t> coords = coordsFromFlatIndex(row * cols, cClass.shape);
+                    uint32_t c = 0;
+                    while (c < cols)
                     {
-                        Region r;
-                        for (size_t d = 0; d + 1 < coords.size(); ++d)
-                            r.region.push_back({coords[d], coords[d] + 1});
-                        r.region.push_back({start, c});
-                        runs.push_back(std::move(r));
+                        while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] == TGConstants::NEG_INF)
+                        {
+                            anyMasked = true;
+                            ++c;
+                        }
+                        const uint32_t start = c;
+                        while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] != TGConstants::NEG_INF)
+                            ++c;
+                        if (c > start)
+                        {
+                            Region r;
+                            for (size_t d = 0; d + 1 < coords.size(); ++d)
+                                r.region.push_back({coords[d], coords[d] + 1});
+                            r.region.push_back({start, c});
+                            runs.push_back(std::move(r));
+                        }
                     }
                 }
+                std::vector<Region> boxes;
+                if (anyMasked)
+                    boxes = coverWithFewRegions(mergeRegions(runs), kMaxRegions);
+                memo = unmasked_memo.emplace(memoKey, std::make_pair(!anyMasked, std::move(boxes))).first;
             }
-            std::vector<Region> boxes;
-            if (anyMasked)
-                boxes = coverWithFewRegions(mergeRegions(runs), kMaxRegions);
-            memo = unmasked_memo.emplace(memoKey, std::make_pair(!anyMasked, std::move(boxes))).first;
+            const bool noneInf = memo->second.first;
+            if (noneInf)
+            {
+                return;
+            }
+            nonInfRegions = memo->second.second;
         }
-        const bool noneInf = memo->second.first;
-        if (noneInf)
-        {
-            return;
-        }
-        std::vector<Region> nonInfRegions = memo->second.second;
 
         const EClass vClass = egraph.getEClass(varClass);
         const EClass outClass = egraph.getEClass(e_class_id);
