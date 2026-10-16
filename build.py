@@ -962,6 +962,30 @@ class Toolchain:
         else:
             full_command = cmd_str
 
+        response_path = None
+        # cmd.exe limits command strings to 8191 characters. Large Windows
+        # links can exceed that just from the list of object files, so pass
+        # the compiler arguments through an LLVM response file instead.
+        if self.platform.is_windows and len(full_command) > 7000:
+            import uuid
+
+            GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+            response_path = GENERATED_DIR / f"command-{uuid.uuid4().hex}.rsp"
+            response_args = [argument.replace("\\", "/") for argument in cmd[1:]]
+            response_path.write_text(subprocess.list2cmdline(response_args), encoding="utf-8")
+            compiler_path = cmd[0].strip('"')
+            compiler_cmd = subprocess.list2cmdline([compiler_path, f"@{response_path.as_posix()}"])
+            if (
+                self.platform.compiler.kind in ("clang", "msvc")
+                and self.platform.vcvars_path
+                and Path(self.platform.vcvars_path).exists()
+            ):
+                target_arm64 = self.platform.is_arm64
+                arch = "arm64" if (target_arm64 and not self.config.use_cuda) else "amd64"
+                full_command = f'"{self.platform.vcvars_path}" {arch} && {compiler_cmd}'
+            else:
+                full_command = compiler_cmd
+
         console.print(f"[dim]Running:[/dim] [cyan]{full_command}[/cyan]")
         diagnostic_dir = os.environ.get("KERNEL_BENCH_DIAGNOSTICS_DIR")
         if diagnostic_dir:
@@ -985,6 +1009,9 @@ class Toolchain:
             temporary_path.replace(record_path)
         else:
             result = subprocess.run(full_command, capture_output=True, text=True, shell=True, check=False)
+
+        if response_path is not None:
+            response_path.unlink(missing_ok=True)
 
         if SERVER_JOB:
             sys.stdout.write(result.stdout)
@@ -1151,6 +1178,11 @@ class BuildOrchestrator:
                 stem_obj = str((cpu_objs_dir / f"{p.stem}{obj_ext}").resolve())
                 if stem_obj not in active_objs:
                     p.unlink(missing_ok=True)
+
+            # Persist successful kernel compilations before linking. If a
+            # later link step fails, the next build can still reuse these
+            # objects instead of recompiling the entire kernel set.
+            saveBuildCache(build_cache)
 
             if self.platform.is_windows:
                 cpu_objs = [str(obj) for obj, _ in all_cpu_objs]
