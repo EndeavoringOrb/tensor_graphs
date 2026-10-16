@@ -1402,6 +1402,6 @@ PYBIND11_MODULE(tensor_graphs, m)
         });
 
     m.def("run_saturation_benchmark", &runSaturationBenchmark,
-          py::arg("seq_len") = 7, py::arg("dump_prefix") = "",
+          py::arg("seq_len") = 4, py::arg("dump_prefix") = "",
           "Run full and seeded partial bucket saturation benchmark and optionally dump e-graphs");
 }

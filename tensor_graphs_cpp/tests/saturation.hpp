@@ -98,7 +98,7 @@ struct SaturationBenchmarkResult
     size_t full_classes = 0;
 };
 
-inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 7, const std::string &dump_prefix = "")
+inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, const std::string &dump_prefix = "")
 {
     Graph graph;
     auto input = graph.input({seq_len, seq_len}, DType::FLOAT32);
