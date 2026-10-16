@@ -139,6 +139,11 @@ inline std::vector<Record> discoverCalls(const std::string &cache_path, Discover
         record.outputStrides = output.strides;
         record.outputDType = output.dtype;
         record.inputConstants = constants;
+        if (KernelRegistry::get().getKernel(record.kernelId).opType == OpType::SCATTER)
+        {
+            for (size_t i = 1; i < record.inputConstants.size(); ++i)
+                record.inputConstants[i].clear();
+        }
         std::lock_guard<std::mutex> lock(calls_mutex);
         calls.emplace(serializeToString(record), record);
     };

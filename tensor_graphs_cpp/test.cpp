@@ -25,6 +25,7 @@
 #include "tests/start_rank_window_regression.hpp"
 #include "tests/relaxation_bound.hpp"
 #include "tests/scatter_rows.hpp"
+#include "tests/scatter_canonical_keys.hpp"
 #include "tests/bf16_transposed_wstream.hpp"
 #include "tests/reduce_last_axis.hpp"
 
@@ -48,6 +49,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--start-run-makespan"}, "Run only start-run makespan propagator tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
+    parser.add_flag({"--scatter-canonical"}, "Run scatter canonical keys regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -107,6 +109,11 @@ int main(int argc, char *argv[])
         FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         return 0;
     }
+    if (parser.get_flag("--scatter-canonical"))
+    {
+        runScatterCanonicalKeysTests();
+        return 0;
+    }
     if (parser.get_flag("--incremental-propagators"))
     {
         runIncrementalPropagatorTests();
@@ -145,6 +152,7 @@ int main(int argc, char *argv[])
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
         runScatterRowsTests();
+        runScatterCanonicalKeysTests();
         runBF16TransposedWStreamTests();
         runReduceLastAxisTests();
         runPlannerStructureTests();

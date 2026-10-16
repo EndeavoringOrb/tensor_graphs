@@ -1350,7 +1350,15 @@ struct Planner
             putVec(in_shapes[i]);
             putVec(in_strides[i]);
             put(&in_dtypes[i], sizeof(in_dtypes[i]));
-            putVec(in_constants[i]);
+            if (isScatterKernelControlInput(kernel_id, i) || i >= in_constants.size())
+            {
+                static const std::vector<uint8_t> emptyVec;
+                putVec(emptyVec);
+            }
+            else
+            {
+                putVec(in_constants[i]);
+            }
         }
         {
             std::shared_lock<std::shared_mutex> lock(cost_memo_->mutex);

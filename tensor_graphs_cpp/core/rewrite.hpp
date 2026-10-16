@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/cost_model.hpp"
 #include "core/egraph.hpp"
 #include "core/plan/bucket_regions.hpp"
 #include "core/graph.hpp"
@@ -924,7 +925,7 @@ struct FusionRule : public Rule
                     const MemSpace cms = child.mem_space;
                     appendSignature(signature, &cms, sizeof(cms));
                     auto staged = egraph.constantStaging.find(egraph.findConst(inputs[i]));
-                    if (staged != egraph.constantStaging.end())
+                    if (staged != egraph.constantStaging.end() && !isScatterControlInput(old.getOpType(), i))
                         appendSignature(signature, staged->second->data(), staged->second->size());
                     else
                         appendSignature(signature, nullptr, 0);

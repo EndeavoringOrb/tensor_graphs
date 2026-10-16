@@ -48,6 +48,20 @@
 #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
+inline bool isScatterControlInput(OpType opType, size_t inputIdx)
+{
+    return opType == OpType::SCATTER && inputIdx >= 1 && inputIdx <= 4;
+}
+
+inline bool isScatterKernelControlInput(KernelId kernelId, size_t inputIdx)
+{
+    if (inputIdx < 1 || inputIdx > 4)
+        return false;
+    if (!KernelRegistry::get().hasKernel(kernelId))
+        return false;
+    return KernelRegistry::get().getKernel(kernelId).opType == OpType::SCATTER;
+}
+
 struct Record
 {
     KernelId kernelId = KernelId{0};
@@ -654,7 +668,7 @@ struct CostModel
             put(inShapes[i].data(), inShapes[i].size() * sizeof(uint32_t));
             put(inStrides[i].data(), inStrides[i].size() * sizeof(uint64_t));
             put(&inDTypes[i], sizeof(inDTypes[i]));
-            if (i < inConstants.size())
+            if (i < inConstants.size() && !isScatterKernelControlInput(kernelId, i))
                 put(inConstants[i].data(), inConstants[i].size());
             else
                 put(nullptr, 0);
@@ -747,6 +761,11 @@ struct CostModel
         r.outputDType = outDType;
         r.inputConstants = inConstants;
         const auto &entry = KernelRegistry::get().getKernel(kernelId);
+        if (entry.opType == OpType::SCATTER)
+        {
+            for (size_t i = 1; i < r.inputConstants.size(); ++i)
+                r.inputConstants[i].clear();
+        }
         HardwareBinding binding;
         if (TopologyMapper::resolve(entry.output_mem_space, entry.input_mem_spaces, entry.engines, entry.is_view,
                                     inShapes.size(), {}, {}, {}, true, true, true, binding))
