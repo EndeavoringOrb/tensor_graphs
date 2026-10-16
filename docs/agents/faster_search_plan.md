@@ -388,7 +388,7 @@ In `tensor_graphs_cpp/core/plan/planner.hpp` (lines 2850–2900):
 
 ### Verification Strategy
 1. Run `./tensor_graphs_cpp/test.exe --planner-structure` and `./tensor_graphs_cpp/test.exe --fusion-regression` to verify baseline rule execution and sweep invariants.
-2. Run multi-bucket compilation with timing diagnostics and verify that saturation wall-clock time drops significantly while maintaining identical e-graph topologies and planned makespans.
+2. Run multi-bucket compilation with timing diagnostics and verify that saturation wall-clock time drops significantly while maintaining identical e-graph topologies and planned makespans (run `.venv/Scripts/python.exe tests/verify_saturation.py` after every change to make sure the output is still correct, and that it actually made saturation faster).
 
 ---
 

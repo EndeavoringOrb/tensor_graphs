@@ -270,6 +270,7 @@ struct InstallCrashHandler
 #include "models/qwen-image-vae.hpp"
 #include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
+#include "tests/saturation.hpp"
 
 // Inference steps are short bursts separated by Python work: opt this
 // process out of Windows execution-speed throttling (EcoQoS) so the cores are
@@ -1383,4 +1384,24 @@ PYBIND11_MODULE(tensor_graphs, m)
              py::arg("latent_data"));
 
     m.attr("EmbeddingGemma2") = py::module_::import("embeddinggemma2").attr("EmbeddingGemma2");
+
+    py::class_<SaturationBenchmarkResult>(m, "SaturationBenchmarkResult")
+        .def_readonly("full_ms", &SaturationBenchmarkResult::full_ms)
+        .def_readonly("partial_ms", &SaturationBenchmarkResult::partial_ms)
+        .def_readonly("total_ms", &SaturationBenchmarkResult::total_ms)
+        .def_readonly("full_enodes", &SaturationBenchmarkResult::full_enodes)
+        .def_readonly("full_classes", &SaturationBenchmarkResult::full_classes)
+        .def("__repr__", [](const SaturationBenchmarkResult &r) {
+            std::ostringstream ss;
+            ss << "<SaturationBenchmarkResult total_ms=" << r.total_ms
+               << " full_ms=" << r.full_ms
+               << " partial_ms=" << r.partial_ms
+               << " enodes=" << r.full_enodes
+               << " classes=" << r.full_classes << ">";
+            return ss.str();
+        });
+
+    m.def("run_saturation_benchmark", &runSaturationBenchmark,
+          py::arg("seq_len") = 7, py::arg("dump_prefix") = "",
+          "Run full and seeded partial bucket saturation benchmark and optionally dump e-graphs");
 }

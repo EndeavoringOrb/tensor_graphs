@@ -12,6 +12,7 @@ resources/*.html
 resources/*.json
 *pack.bat
 .vscode
+tests/data
 lns_selectors/gnn/samples
 .*
 flux-klein-4b
