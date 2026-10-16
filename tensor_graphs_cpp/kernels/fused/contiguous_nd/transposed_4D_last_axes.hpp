@@ -1,5 +1,5 @@
 #pragma once
-#include "kernels/fused/contiguous_nd/transposed_4D.hpp"
+#include "kernels/fused/contiguous_nd/ref.hpp"
 
 inline bool matchContiguousTransposed4DLastAxes(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {

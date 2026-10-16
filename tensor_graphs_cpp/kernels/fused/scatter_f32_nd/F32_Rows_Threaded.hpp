@@ -2,7 +2,7 @@
 #pragma once
 
 #include "core/common/thread_pool.hpp"
-#include "kernels/fused/scatter_f32_nd/F32_Rows.hpp"
+#include "kernels/fused/scatter_f32_nd/ref.hpp"
 
 inline void runScatterF32RowsThreaded(const KernelContext &ctx)
 {

@@ -263,7 +263,7 @@ def run_benchmark(seq_len: int, dump_prefix: str):
 def main():
     parser = argparse.ArgumentParser(description="Section 3 Saturation Verifier and Scorer")
     parser.add_argument("--generate-gold", action="store_true", help="Generate gold baseline dump and timing")
-    parser.add_argument("--seq-len", type=int, default=7, help="Sequence length dimension (default: 7)")
+    parser.add_argument("--seq-len", type=int, default=4, help="Sequence length dimension (default: 4)")
     parser.add_argument("--build", action="store_true", help="Rebuild bindings before running")
     args = parser.parse_args()
     if args.seq_len < 1:
