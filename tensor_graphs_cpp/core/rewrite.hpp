@@ -1335,21 +1335,21 @@ struct FusionRule : public Rule
             {
                 cand.cost =
                     ctx.costModel->estimateCost(kernel->uid, outShape, actualOutStrides, outDtype, actualInShapes,
-                                                actualInStrides, actualInDTypes, actualInConstants,
-                                                /*exactRecordOnly=*/true);
+                                                actualInStrides, actualInDTypes, actualInConstants);
             }
 
             candidates.push_back(std::move(cand));
         }
 
         // -------------------------------------------------------------------------
-        // Stage 2: Filter equivalent candidates using exact benchmark costs
+        // Stage 2: Filter equivalent candidates using benchmark costs, exact or
+        // interpolated (e.g. reference kernels too slow for bench to measure)
         // -------------------------------------------------------------------------
         std::vector<bool> keep(candidates.size(), true);
         for (size_t i = 0; i < candidates.size(); ++i)
         {
             if (candidates[i].cost == std::numeric_limits<float>::infinity())
-                continue; // Keep unbenchmarked candidates
+                continue; // Keep candidates whose kernel has no records at all
 
             for (size_t j = 0; j < candidates.size(); ++j)
             {

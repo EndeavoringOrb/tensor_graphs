@@ -33,6 +33,9 @@ int main(int argc, char *argv[])
     parser.add_option({"--cache"}, "Path to cache file. If provided, benchmark only configurations from this cache.",
                       "");
     parser.add_option({"--calls"}, "Calls log to benchmark (written by the cost model).", "benchmarks/calls.bin");
+    parser.add_option({"--max-ref-estimate-ms"},
+                      "Skip reference kernels whose estimated time exceeds this many ms (negative: never skip).",
+                      "10000");
     parser.add_positional("targetKernel", "Bench only kernels whose name contain this string.", "");
 
     if (!parser.parse(argc, argv))
@@ -44,6 +47,7 @@ int main(int argc, char *argv[])
     bool listOnly = parser.get_flag("--list");
     std::string cachePath = parser.get_option("--cache");
     std::string targetKernel = parser.get_positional("targetKernel");
+    const float maxReferenceEstimateMs = std::stof(parser.get_option("--max-ref-estimate-ms"));
 
     std::filesystem::create_directories("benchmarks");
     std::string callsPath = parser.get_option("--calls");
@@ -145,6 +149,21 @@ int main(int argc, char *argv[])
                                             r.inputStrides, r.inputDTypes, r.inputConstants);
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
+
+    // Reference kernels estimated above --max-ref-estimate-ms are too slow to
+    // measure; the planner keeps using their estimate.
+    uint64_t skipped = 0;
+    auto tooSlow = std::remove_if(toBenchmark.begin(), toBenchmark.end(), [&](const Record &r) {
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(r.kernelId);
+        if (maxReferenceEstimateMs < 0.0f || !kernel.isReference || r.runTime <= maxReferenceEstimateMs)
+            return false;
+        std::cout << "Skipping reference kernel " << kernel.getName() << " (0x" << std::hex << r.kernelId.value
+                  << std::dec << "): estimated " << r.runTime << " ms > " << maxReferenceEstimateMs << " ms"
+                  << std::endl;
+        ++skipped;
+        return true;
+    });
+    toBenchmark.erase(tooSlow, toBenchmark.end());
 
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb) {
         float costA = ra.runTime;
@@ -314,6 +333,6 @@ int main(int argc, char *argv[])
 
     std::cout << "Benchmarking complete." << std::endl;
     std::cout << "[Bench summary] pending=" << (toBenchmark.size() - startIdx) << " benchmarked=" << benchmarked
-              << " failed=" << failed << std::endl;
+              << " failed=" << failed << " skipped=" << skipped << std::endl;
     return 0;
 }

@@ -161,8 +161,54 @@ struct TestInputs
     std::vector<std::vector<uint8_t>> rawData;
 };
 
+// Smaller inputs for the dummy-shape test of kernels whose dummyShapes are slow
+// to check against the reference graph. dummyShapes also build each fused
+// kernel's saturation pattern (shape-derived constants must match the model),
+// so they are overridden here instead of in the kernel files.
+inline const std::unordered_map<std::string, std::vector<std::vector<uint32_t>>> &testShapeOverrides()
+{
+    static const std::unordered_map<std::string, std::vector<std::vector<uint32_t>>> overrides = {
+        {"SwiGLU_3D_NEON_F32_Inplace", {{1, 64, 512}, {1, 64, 512}}},
+        {"Flash_Attention_Generic_4D", {{1, 4, 128, 128}, {1, 4, 128, 128}, {1, 4, 128, 128}}},
+        {"Krea_Flash_Attention_4D_NEON", {{1, 4, 256, 128}, {1, 4, 256, 128}, {1, 4, 256, 128}}},
+        {"Krea_Flash_Attention_4D_Fast", {{1, 4, 256, 128}, {1, 4, 256, 128}, {1, 4, 256, 128}}},
+        {"Flash_Attention_Generic_3D",{{1, 256, 384}, {1, 256, 384}, {1, 256, 384}}},
+        {"Gather_StreamingStorage_Sorted_NEON", {{1024, 2048}, {1, 8}}},
+        {"Gather_BF16", {{1024, 640}, {1, 8}}},
+        {"Conv2d_3x3_Im2Col_Dot", {{1, 32, 32, 32}, {1, 32, 288}}},
+        {"Div_ND_NEON_Threaded", {{1, 4, 256, 256}, {1, 4, 256, 256}}},
+        {"Max_F32_4D_Threaded", {{1, 4, 256, 256}, {1}}},
+        {"Krea_RoPE_2D_Pair_NEON", {{1, 4, 256, 128}, {1, 1, 256, 64}, {1, 1, 256, 64}}},
+        {"Fused_Proj_StreamingStorage_NEON", {{1, 8, 256}, {512, 256}}},
+        {"Fused_Proj_StreamingStorage_F8_E4M3", {{1, 8, 256}, {512, 256}}},
+        {"Fused_Proj_Bias_StreamingStorage_F8_E4M3", {{1, 8, 256}, {512, 256}, {1, 8, 512}}},
+        {"Fused_Krea_Gated_Attn_Proj_StreamingStorage_F8_E4M3", {{1, 8, 256}, {1, 8, 256}, {256, 256}, {256, 256}}},
+        {"Fused_Krea_Modulated_RMSNorm_Storage_F8_E4M3", {{1, 64, 512}, {512}, {1, 64, 512}, {1, 64, 512}}},
+        {"Fused_Krea_PerHead_RMSNorm_RoPE_NEON", {{1, 4, 256, 128}, {128}, {1, 1, 256, 64}, {1, 1, 256, 64}}},
+        {"Krea_RMSNorm_Generic", {{1, 64, 512}, {512}}},
+        {"Krea_SwiGLU", {{1, 64, 512}, {1, 64, 512}}},
+        {"Fused_Krea_SwiGLU_MLP_StreamingStorage_F8_E4M3", {{1, 8, 256}, {512, 256}, {512, 256}, {256, 512}}},
+        {"Fused_Krea_SwiGLU_MLP_StreamingStorage_F8_E4M3_v2", {{1, 64, 256}, {512, 256}, {512, 256}, {256, 512}}},
+        {"JinaGeluExact_F32_3D", {{1, 128, 512}}},
+        {"JinaGeluExact_F32_3D_OpenCL", {{1, 128, 512}}},
+    };
+    return overrides;
+}
+
+inline const std::vector<std::vector<uint32_t>> &testShapes(const KernelEntry &kernel)
+{
+    auto it = testShapeOverrides().find(kernel.opName);
+    if (it == testShapeOverrides().end())
+        return kernel.dummyShapes;
+    if (it->second.size() != kernel.dummyShapes.size())
+        Error::throw_err("Test shape override for " + kernel.opName + " has " + std::to_string(it->second.size()) +
+                         " inputs; dummyShapes has " + std::to_string(kernel.dummyShapes.size()));
+    return it->second;
+}
+
 TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 {
+    const auto &shapes = testShapes(kernel);
     TestInputs result;
     result.rawData.resize(kernel.min_num_inputs);
     result.inputIds.resize(kernel.min_num_inputs);
@@ -178,7 +224,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         {
             DType d = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32
                                                                                                    : kernel.dtypes[i];
-            tempInputs.push_back(tempGraph.input(kernel.dummyShapes[i], d));
+            tempInputs.push_back(tempGraph.input(shapes[i], d));
         }
 
         kernel.refFactory(tempInputs, tempGraph);
@@ -233,7 +279,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 int srcIdx = traceToInputIdx(n.child_ids[0]);
                 if (srcIdx >= 0)
                 {
-                    for (auto s : kernel.dummyShapes[srcIdx])
+                    for (auto s : shapes[srcIdx])
                         shapeVals.push_back((int32_t)s);
                 }
                 if (shapeVals.empty())
@@ -246,7 +292,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 int srcIdx = traceToInputIdx(n.child_ids[0]);
                 if (srcIdx >= 0)
                 {
-                    uint64_t rank = kernel.dummyShapes[srcIdx].size();
+                    uint64_t rank = shapes[srcIdx].size();
                     for (uint64_t i = 0; i < rank; ++i)
                     {
                         perm.push_back(rank == 2 ? (int32_t)(1 - i) : (int32_t)i);
@@ -262,7 +308,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 int srcIdx = traceToInputIdx(n.child_ids[0]);
                 if (srcIdx >= 0)
                 {
-                    for (auto s : kernel.dummyShapes[srcIdx])
+                    for (auto s : shapes[srcIdx])
                     {
                         starts.push_back(0);
                         ends.push_back((int32_t)s);
@@ -285,7 +331,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 int srcIdx = traceToInputIdx(n.child_ids[0]); // Updates tensor
                 if (srcIdx >= 0)
                 {
-                    for (auto s : kernel.dummyShapes[srcIdx])
+                    for (auto s : shapes[srcIdx])
                     {
                         starts.push_back(0);
                         ends.push_back((int32_t)s);
@@ -302,9 +348,9 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 checkParam(2, ends);
                 checkParam(3, steps);
                 std::vector<int32_t> outputShape;
-                if (!kernel.dummyShapes.empty())
+                if (!shapes.empty())
                 {
-                    for (auto s : kernel.dummyShapes[0])
+                    for (auto s : shapes[0])
                         outputShape.push_back(static_cast<int32_t>(s));
                 }
                 if (outputShape.empty())
@@ -352,7 +398,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         LogicalId id;
         DType dtype = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32
                                                                                                    : kernel.dtypes[i];
-        uint64_t elements = countElements(kernel.dummyShapes[i]);
+        uint64_t elements = countElements(shapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
 
         if (isConstantParam[i])
@@ -365,13 +411,13 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                     constData[j] = constantValues[i][j % constantValues[i].size()];
                 }
             }
-            id = graph.constant(kernel.dummyShapes[i], constData.data(), dtype);
+            id = graph.constant(shapes[i], constData.data(), dtype);
             result.rawData[i].resize(sizeBytes);
             std::memcpy(result.rawData[i].data(), constData.data(), sizeBytes);
         }
         else
         {
-            id = graph.input(kernel.dummyShapes[i], dtype, {});
+            id = graph.input(shapes[i], dtype, {});
             result.rawData[i].resize(sizeBytes);
             fillRandom(result.rawData[i].data(), elements, dtype);
         }
@@ -700,6 +746,14 @@ bool runNonReferenceKernelTests(const std::string &targetKernel = "", bool useRe
                 !kernel.match({refGraph.getNode(refInputs.inputIds[0])}, refGraph.getNode(rootId)))
             {
                 Error::throw_err("Invalid dummy input layout for " + kernel.opName);
+            }
+            if (testShapeOverrides().count(kernel.opName))
+            {
+                std::vector<TensorNode> inputNodes;
+                for (LogicalId id : refInputs.inputIds)
+                    inputNodes.push_back(refGraph.getNode(id));
+                if (!kernel.match(inputNodes, refGraph.getNode(rootId)))
+                    Error::throw_err("Test shape override for " + kernel.opName + " does not satisfy its match");
             }
             uint64_t elements = refOutput.size();
 
