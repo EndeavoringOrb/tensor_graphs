@@ -562,14 +562,31 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
   - `tests/verify_saturation.py --seq-len 790` passes 100% exact graph equivalence across 1,581 buckets in **29,866.82 ms**.
   - `tests/verify_saturation.py --seq-len 795` passes 100% exact graph equivalence across 1,591 buckets in **29,794.56 ms** (< 30s budget, 279,509 family vertices) — **NEW RECORD UNDER 30 SECONDS!**
 
+---
 
-
-
-
-
-
-
-
-
-
-
+### Step 24: Zero-Allocation Planner Scratch Buffers, In-Place Pruning & Scoped Zero-Copy Rewrite Passes (`seq_len=805`: 29,741.41 ms)
+- **Time Before:** Record was `seq_len = 795` at 29,794.56 ms. At `seq_len = 805`, previous baseline would exceed the 30-second budget.
+- **Time After:**
+  - `seq_len = 800`: **29,547.72 ms** (1,601 buckets, 281,307 family vertices, 100% exact match).
+  - `seq_len = 805`: **29,741.41 ms** (Full: 72.14 ms, Prefill + Decode: 29,669.26 ms, **1,611 buckets** [1 full + 805 prefill + 805 decode], 283,085 family vertices) — **NEW RECORD UNDER 30 SECONDS! (2.01x sequence length increase over Step 19, 12.20x over Step 16)**
+- **What Changed:**
+  - **Zero-Allocation Scratch Buffers in `Planner` (`planner.hpp`):**
+    - Flat linked list scratch buffers for `deathCascade`: `death_cascade_parents_head_`, `death_cascade_parents_next_`, `death_cascade_parents_node_`, `death_cascade_worklist_`, completely eliminating dynamic vector allocations during cascading node deallocation.
+    - Persistent scratch buffers in `saturateBucket`: `saturate_rules_by_op_`, `saturate_active_rules_by_op_`, `saturate_ruleMatchCounts_`, `saturate_sweepFilter_`, `saturate_classSizeAtSweepStart_`, `saturate_stagedAtSweepStart_`, `saturate_parent_head_`, `saturate_parent_next_`, `saturate_parent_node_`, `saturate_seenClass_`, `saturate_frontier_`, `saturate_next_frontier_`, `saturate_filtered_base_enodes_`, `saturate_rule_active_`.
+    - Eliminated dynamic `std::vector` allocations on every bucket invocation (saving over 30,000 vector allocations across 1,600+ buckets).
+  - **In-Place ENode Vector Compaction in `pruneEGraph` (`planner.hpp`):**
+    - Replaced per-class heap allocations of `surviving` vectors with in-place `std::remove_if` compaction directly on `cls.enodes`.
+  - **Zero-Allocation Domination Checks (`planner.hpp`):**
+    - In `isENodeMemCapDominated`: Replaced `std::unordered_set<EClassId> child_set` with stack-based fixed array `std::array<EClassId, 8>` and linear scan for small child counts (<= 8), eliminating hash set heap allocations.
+    - In `isFasterEquivalentENodeDominated`: Replaced dynamic `std::vector<int> a_inplace, b_inplace` allocations with const pointers to `KernelEntry.safe_inplace_idxs`.
+  - **Pointer-Based Zero-Copy References in `buildSweepFilter` (`planner.hpp`):**
+    - Replaced deep copies of `initial_class_sizes` and `initial_staged` vectors with pointer references (`const std::vector<uint32_t> *currClassSize = initial_class_sizes`), eliminating over 10 million integer copies across seeded buckets.
+  - **Scoped Zero-Copy Rewrites (`rewrite.hpp`):**
+    - Scoped inspection blocks `{ const ENode &enode = ...; if (!has_candidate) return; }` in `RemoveContiguous`, `RemoveCopyChains`, and `ConsumerWeightReuseRule`, avoiding copies on early returns while keeping references safely out of scope before any egraph mutations occur (adhering strictly to kernel linter rules).
+    - In `RemoveRedundantReshape`: Replaced `std::function` recursion with generic lambda `auto generateCombos = [&](auto &self, ...)`, eliminating `std::function` call and capture overhead.
+    - In `materializeFusedCandidates`: Eliminated redundant `getEClass` lookups and class copies for contiguous strides.
+- **Verification:**
+  - `kernel_linter.py --repository`: **LINT PASSED** (0 violations).
+  - `tests/verify_saturation.py --seq-len 4` passes 100% exact graph equivalence (`EQUIVALENT (explicit class-order bijection match)`).
+  - `tests/verify_saturation.py --seq-len 800` passes 100% exact graph equivalence across 1,601 buckets in **29,547.72 ms**.
+  - `tests/verify_saturation.py --seq-len 805` passes 100% exact graph equivalence across 1,611 buckets in **29,741.41 ms** (< 30s budget, 283,085 family vertices) — **NEW RECORD UNDER 30 SECONDS!**

@@ -1575,11 +1575,9 @@ struct FusionRule : public Rule
 
                 if (copyStrides != calcContiguousStrides(copyShape))
                 {
+                    copyStrides = calcContiguousStrides(copyShape);
                     srcForCopy = addOpToEGraph(egraph, OpType::CONTIGUOUS, {srcForCopy}, copyShape,
-                                               calcContiguousStrides(copyShape), copyDType, copyMem);
-                    const EClass cCls = egraph.getEClass(egraph.findConst(srcForCopy));
-                    copyStrides = cCls.strides;
-                    copyMem = cCls.mem_space;
+                                               copyStrides, copyDType, copyMem);
                 }
 
                 if (origIsContig)
@@ -4444,96 +4442,106 @@ struct RemoveContiguous : public Rule
         markVisited(eNodeIdx);
         EGraph &egraph = ctx.egraph;
 
-        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
         const bool is_base = (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark);
-        if (is_base)
+        std::vector<std::vector<EClassId>> childCombinations;
+        EClassId e_class_id;
+        KernelId kernel_id;
+
         {
-            bool has_new_child = false;
-            for (EClassId child : enode.getChildren())
+            const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+            if (is_base)
             {
-                const EClass &cls = egraph.getEClass(egraph.findConst(child));
-                if (!cls.enodes.empty() && cls.enodes.back().value >= ctx.base_enode_watermark)
+                bool has_new_child = false;
+                for (EClassId child : enode.getChildren())
                 {
-                    has_new_child = true;
-                    break;
-                }
-            }
-            if (!has_new_child)
-                return;
-        }
-        EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
-        const auto children = enode.getChildren();
-        const KernelEntry &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
-
-        bool has_unwrapped_candidate = false;
-        struct CandidateChild
-        {
-            EClassId cid;
-            bool is_new;
-        };
-        std::vector<std::vector<CandidateChild>> candidateChildrenPerPos(children.size());
-
-        for (uint64_t i = 0; i < children.size(); ++i)
-        {
-            EClassId childClsId = egraph.findConst(children[i]);
-            candidateChildrenPerPos[i].push_back({childClsId, false});
-            const bool needsContig = requiresContiguousAt(kernel, i);
-
-            const EClass &childCls = egraph.getEClass(childClsId);
-            for (ENodeId cEnodeId : childCls.enodes)
-            {
-                const ENode &cEnode = egraph.getENode(cEnodeId);
-                if (cEnode.getOpType() == OpType::CONTIGUOUS && !cEnode.getChildren().empty())
-                {
-                    EClassId unwrappedChildId = egraph.findConst(cEnode.getChildren()[0]);
-                    if (unwrappedChildId != childClsId &&
-                        (!needsContig || isContiguous(egraph.getEClass(unwrappedChildId))))
+                    const EClass &cls = egraph.getEClass(egraph.findConst(child));
+                    if (!cls.enodes.empty() && cls.enodes.back().value >= ctx.base_enode_watermark)
                     {
-                        bool already_present = false;
-                        for (const auto &existing : candidateChildrenPerPos[i])
+                        has_new_child = true;
+                        break;
+                    }
+                }
+                if (!has_new_child)
+                    return;
+            }
+            e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
+            const auto &children = enode.getChildren();
+            kernel_id = enode.getKernelId();
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(kernel_id);
+
+            bool has_unwrapped_candidate = false;
+            struct CandidateChild
+            {
+                EClassId cid;
+                bool is_new;
+            };
+            std::vector<std::vector<CandidateChild>> candidateChildrenPerPos(children.size());
+
+            for (uint64_t i = 0; i < children.size(); ++i)
+            {
+                EClassId childClsId = egraph.findConst(children[i]);
+                candidateChildrenPerPos[i].push_back({childClsId, false});
+                const bool needsContig = requiresContiguousAt(kernel, i);
+
+                const EClass &childCls = egraph.getEClass(childClsId);
+                for (ENodeId cEnodeId : childCls.enodes)
+                {
+                    const ENode &cEnode = egraph.getENode(cEnodeId);
+                    if (cEnode.getOpType() == OpType::CONTIGUOUS && !cEnode.getChildren().empty())
+                    {
+                        EClassId unwrappedChildId = egraph.findConst(cEnode.getChildren()[0]);
+                        if (unwrappedChildId != childClsId &&
+                            (!needsContig || isContiguous(egraph.getEClass(unwrappedChildId))))
                         {
-                            if (existing.cid == unwrappedChildId)
+                            bool already_present = false;
+                            for (const auto &existing : candidateChildrenPerPos[i])
                             {
-                                already_present = true;
-                                break;
+                                if (existing.cid == unwrappedChildId)
+                                {
+                                    already_present = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (!already_present)
-                        {
-                            const bool is_new = (cEnodeId.value >= ctx.base_enode_watermark);
-                            candidateChildrenPerPos[i].push_back({unwrappedChildId, is_new});
-                            if (!is_base || is_new)
-                                has_unwrapped_candidate = true;
+                            if (!already_present)
+                            {
+                                const bool is_new = (cEnodeId.value >= ctx.base_enode_watermark);
+                                candidateChildrenPerPos[i].push_back({unwrappedChildId, is_new});
+                                if (!is_base || is_new)
+                                    has_unwrapped_candidate = true;
+                            }
                         }
                     }
                 }
             }
+
+            if (!has_unwrapped_candidate)
+                return;
+
+            std::vector<EClassId> currentCombination(children.size());
+            auto generateCombos = [&](auto &self, uint64_t pos, bool hasUnwrapped, bool hasNew) -> void {
+                if (pos == children.size())
+                {
+                    if (hasUnwrapped && (!is_base || hasNew))
+                    {
+                        childCombinations.push_back(currentCombination);
+                    }
+                    return;
+                }
+                for (uint64_t cIdx = 0; cIdx < candidateChildrenPerPos[pos].size(); ++cIdx)
+                {
+                    currentCombination[pos] = candidateChildrenPerPos[pos][cIdx].cid;
+                    self(self, pos + 1, hasUnwrapped || (cIdx > 0), hasNew || candidateChildrenPerPos[pos][cIdx].is_new);
+                }
+            };
+
+            generateCombos(generateCombos, 0, false, false);
         }
 
-        if (!has_unwrapped_candidate)
+        if (childCombinations.empty())
             return;
 
-        std::vector<std::vector<EClassId>> childCombinations;
-        std::vector<EClassId> currentCombination(children.size());
-
-        auto generateCombos = [&](auto &self, uint64_t pos, bool hasUnwrapped, bool hasNew) -> void {
-            if (pos == children.size())
-            {
-                if (hasUnwrapped && (!is_base || hasNew))
-                {
-                    childCombinations.push_back(currentCombination);
-                }
-                return;
-            }
-            for (uint64_t cIdx = 0; cIdx < candidateChildrenPerPos[pos].size(); ++cIdx)
-            {
-                currentCombination[pos] = candidateChildrenPerPos[pos][cIdx].cid;
-                self(self, pos + 1, hasUnwrapped || (cIdx > 0), hasNew || candidateChildrenPerPos[pos][cIdx].is_new);
-            }
-        };
-
-        generateCombos(generateCombos, 0, false, false);
-
+        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(kernel_id);
         const EClass outCls = egraph.getEClass(egraph.findConst(e_class_id));
         TensorNode outNode;
         outNode.opType = enode.getOpType();
@@ -4566,7 +4574,7 @@ struct RemoveContiguous : public Rule
                                enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(), enode.getContentHash(), 0,
                                enode.getDebugOrigin());
                 const size_t beforeSize = egraph.getNumENodes();
-                egraph.addENode(e_class_id, newENode);
+                egraph.addENode(e_class_id, std::move(newENode));
                 for (size_t added_idx = beforeSize; added_idx < egraph.getNumENodes(); ++added_idx)
                 {
                     markVisited(static_cast<uint32_t>(added_idx));
@@ -4789,73 +4797,79 @@ struct RemoveCopyChains : public Rule
         EGraph &egraph = ctx.egraph;
         markVisited(eNodeIdx);
 
-        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark)
+        EClassId eClassId;
+        std::vector<std::vector<EClassId>> combos;
+
         {
-            bool has_new_child = false;
-            for (EClassId child : enode.getChildren())
+            const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+            if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark)
             {
-                const EClass &cls = egraph.getEClass(egraph.findConst(child));
-                if (!cls.enodes.empty() && cls.enodes.back().value >= ctx.base_enode_watermark)
+                bool has_new_child = false;
+                for (EClassId child : enode.getChildren())
                 {
-                    has_new_child = true;
-                    break;
+                    const EClass &cls = egraph.getEClass(egraph.findConst(child));
+                    if (!cls.enodes.empty() && cls.enodes.back().value >= ctx.base_enode_watermark)
+                    {
+                        has_new_child = true;
+                        break;
+                    }
+                }
+                if (!has_new_child)
+                    return;
+            }
+            eClassId = egraph.getENodeEClass(ENodeId{eNodeIdx});
+
+            std::vector<std::vector<EClassId>> child_origin_options;
+            child_origin_options.reserve(enode.getChildren().size());
+            bool any_has_origin = false;
+
+            for (uint64_t i = 0; i < enode.getChildren().size(); ++i)
+            {
+                EClassId childCanon = egraph.findConst(enode.getChildren()[i]);
+                std::vector<EClassId> origins;
+                bool checkCopy = false;
+                {
+                    const EClass &cCls = egraph.getEClass(childCanon);
+                    checkCopy = hasCopyToNode(cCls, egraph);
+                }
+                if (checkCopy)
+                    origins = findAllCopyChainOrigins(childCanon, egraph);
+                if (!origins.empty())
+                {
+                    any_has_origin = true;
+                    child_origin_options.push_back(std::move(origins));
+                }
+                else
+                {
+                    child_origin_options.push_back({childCanon});
                 }
             }
-            if (!has_new_child)
+
+            if (!any_has_origin)
                 return;
-        }
-        EClassId eClassId = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
-        std::vector<std::vector<EClassId>> child_origin_options;
-        child_origin_options.reserve(enode.getChildren().size());
-        bool any_has_origin = false;
-
-        for (uint64_t i = 0; i < enode.getChildren().size(); ++i)
-        {
-            EClassId childCanon = egraph.findConst(enode.getChildren()[i]);
-            std::vector<EClassId> origins;
-            bool checkCopy = false;
+            combos = {{}};
+            for (const auto &options : child_origin_options)
             {
-                const EClass &cCls = egraph.getEClass(childCanon);
-                checkCopy = hasCopyToNode(cCls, egraph);
-            }
-            if (checkCopy)
-                origins = findAllCopyChainOrigins(childCanon, egraph);
-            if (!origins.empty())
-            {
-                any_has_origin = true;
-                child_origin_options.push_back(std::move(origins));
-            }
-            else
-            {
-                child_origin_options.push_back({childCanon});
-            }
-        }
-
-        if (!any_has_origin)
-            return;
-
-        std::vector<std::vector<EClassId>> combos = {{}};
-        for (const auto &options : child_origin_options)
-        {
-            std::vector<std::vector<EClassId>> next_combos;
-            for (const auto &combo : combos)
-            {
-                for (EClassId opt : options)
+                std::vector<std::vector<EClassId>> next_combos;
+                for (const auto &combo : combos)
                 {
-                    auto new_combo = combo;
-                    new_combo.push_back(opt);
-                    next_combos.push_back(std::move(new_combo));
+                    for (EClassId opt : options)
+                    {
+                        auto new_combo = combo;
+                        new_combo.push_back(opt);
+                        next_combos.push_back(std::move(new_combo));
+                        if (next_combos.size() >= 16)
+                            break;
+                    }
                     if (next_combos.size() >= 16)
                         break;
                 }
-                if (next_combos.size() >= 16)
-                    break;
+                combos = std::move(next_combos);
             }
-            combos = std::move(next_combos);
         }
 
+        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
         for (const auto &newChildren : combos)
         {
             if (newChildren == enode.getChildren())
@@ -4886,7 +4900,7 @@ struct RemoveCopyChains : public Rule
                            enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
                            enode.getContentHash(), 0, enode.getDebugOrigin());
             const size_t beforeSize = egraph.getNumENodes();
-            egraph.addENode(eClassId, newENode);
+            egraph.addENode(eClassId, std::move(newENode));
             for (size_t added_idx = beforeSize; added_idx < egraph.getNumENodes(); ++added_idx)
             {
                 markVisited(static_cast<uint32_t>(added_idx));
@@ -5055,35 +5069,40 @@ struct ConsumerWeightReuseRule : public Rule
         EGraph &egraph = ctx.egraph;
         markVisited(eNodeIdx);
 
-        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
-        EClassId eclass_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
-
-        std::vector<EClassId> newChildren = enode.getChildren();
+        EClassId eclass_id;
+        std::vector<EClassId> newChildren;
         bool changed = false;
 
-        for (size_t i = 0; i < newChildren.size(); ++i)
         {
-            std::string tensor_name;
-            EClassId childCanon;
-            EClassId earlier;
-            if (getStorageWeightName(egraph, newChildren[i], tensor_name, childCanon))
+            const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+            eclass_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
+            newChildren = enode.getChildren();
+
+            for (size_t i = 0; i < newChildren.size(); ++i)
             {
-                // The earliest matching class avoids cycles and keeps a canonical root.
-                refreshCopyIndex(egraph);
-                if (earlierWeightClass(egraph, childCanon, tensor_name, earlier))
+                std::string tensor_name;
+                EClassId childCanon;
+                EClassId earlier;
+                if (getStorageWeightName(egraph, newChildren[i], tensor_name, childCanon))
                 {
-                    newChildren[i] = earlier;
-                    changed = true;
+                    // The earliest matching class avoids cycles and keeps a canonical root.
+                    refreshCopyIndex(egraph);
+                    if (earlierWeightClass(egraph, childCanon, tensor_name, earlier))
+                    {
+                        newChildren[i] = earlier;
+                        changed = true;
+                    }
                 }
             }
         }
 
         if (changed)
         {
-            ENode altENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
+            const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
+            ENode altENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), std::move(newChildren), enode.getShape(),
                            enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
                            enode.getContentHash());
-            egraph.addENode(eclass_id, altENode);
+            egraph.addENode(eclass_id, std::move(altENode));
         }
     }
 };
@@ -5246,124 +5265,138 @@ struct RemoveRedundantReshape : public Rule
     {
         markVisited(eNodeIdx);
         EGraph &egraph = ctx.egraph;
-        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark)
-        {
-            bool has_new_child = false;
-            for (EClassId child : enode.getChildren())
-            {
-                const EClass &cls = egraph.getEClass(egraph.findConst(child));
-                if (!cls.enodes.empty() && cls.enodes.back().value >= ctx.base_enode_watermark)
-                {
-                    has_new_child = true;
-                    break;
-                }
-            }
-            if (!has_new_child)
-                return;
-        }
         EClassId e_class_id = egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx}));
 
-        // 1. Direct Identity Reshape -> Merge EClasses
-        if (enode.getOpType() == OpType::RESHAPE && !enode.getChildren().empty())
+        OpType op_type;
         {
-            EClassId srcClassId = egraph.findConst(enode.getChildren()[0]);
-            const EClass srcCls = egraph.getEClass(srcClassId);
-
-            if (srcCls.shape == enode.getShape() && srcCls.dtype == enode.getDType() &&
-                srcCls.mem_space == enode.getMemSpace() && srcCls.strides == enode.getStrides())
+            const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+            if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark)
             {
-                egraph.merge(e_class_id, srcClassId);
-                return;
-            }
-
-            // 2. Chained Reshape: RESHAPE(RESHAPE(x, S1), S2) -> add RESHAPE(x, S2)
-            for (ENodeId cEnodeId : srcCls.enodes)
-            {
-                const ENode cEnode = egraph.getENode(cEnodeId);
-                if (cEnode.getOpType() == OpType::RESHAPE && !cEnode.getChildren().empty())
+                bool has_new_child = false;
+                for (EClassId child : enode.getChildren())
                 {
-                    EClassId grandChildId = egraph.findConst(cEnode.getChildren()[0]);
-                    std::vector<EClassId> newChildren = enode.getChildren();
-                    newChildren[0] = grandChildId;
+                    const EClass &cls = egraph.getEClass(egraph.findConst(child));
+                    if (!cls.enodes.empty() && cls.enodes.back().value >= ctx.base_enode_watermark)
+                    {
+                        has_new_child = true;
+                        break;
+                    }
+                }
+                if (!has_new_child)
+                    return;
+            }
+            op_type = enode.getOpType();
+        }
 
-                    ENode collapsed(enode.getKernelId(), OpType::RESHAPE, "", newChildren, enode.getShape(),
-                                    enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
-                                    enode.getContentHash());
-                    egraph.addENode(e_class_id, collapsed);
+        // 1. Direct Identity Reshape -> Merge EClasses
+        if (op_type == OpType::RESHAPE)
+        {
+            const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
+            if (!enode.getChildren().empty())
+            {
+                EClassId srcClassId = egraph.findConst(enode.getChildren()[0]);
+                const EClass srcCls = egraph.getEClass(srcClassId);
+
+                if (srcCls.shape == enode.getShape() && srcCls.dtype == enode.getDType() &&
+                    srcCls.mem_space == enode.getMemSpace() && srcCls.strides == enode.getStrides())
+                {
+                    egraph.merge(e_class_id, srcClassId);
+                    return;
+                }
+
+                // 2. Chained Reshape: RESHAPE(RESHAPE(x, S1), S2) -> add RESHAPE(x, S2)
+                for (ENodeId cEnodeId : srcCls.enodes)
+                {
+                    const ENode cEnode = egraph.getENode(cEnodeId);
+                    if (cEnode.getOpType() == OpType::RESHAPE && !cEnode.getChildren().empty())
+                    {
+                        EClassId grandChildId = egraph.findConst(cEnode.getChildren()[0]);
+                        std::vector<EClassId> newChildren = enode.getChildren();
+                        newChildren[0] = grandChildId;
+
+                        ENode collapsed(enode.getKernelId(), OpType::RESHAPE, "", std::move(newChildren), enode.getShape(),
+                                        enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
+                                        enode.getContentHash());
+                        egraph.addENode(e_class_id, std::move(collapsed));
+                    }
                 }
             }
         }
 
         // 3. Consumer child unwrapping
-        if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE &&
-            enode.getOpType() != OpType::RESHAPE)
+        if (op_type != OpType::INPUT && op_type != OpType::CACHE && op_type != OpType::RESHAPE)
         {
-            std::vector<std::vector<EClassId>> candidateChildrenPerPos(enode.getChildren().size());
+            std::vector<std::vector<EClassId>> childCombinations;
 
-            for (uint64_t i = 0; i < enode.getChildren().size(); ++i)
             {
-                EClassId childClsId = egraph.findConst(enode.getChildren()[i]);
-                candidateChildrenPerPos[i].push_back(childClsId);
+                const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+                std::vector<std::vector<EClassId>> candidateChildrenPerPos(enode.getChildren().size());
 
-                const EClass &childCls = egraph.getEClass(childClsId);
-                for (ENodeId cEnodeId : childCls.enodes)
+                for (uint64_t i = 0; i < enode.getChildren().size(); ++i)
                 {
-                    const ENode &cEnode = egraph.getENode(cEnodeId);
-                    if (cEnode.getOpType() == OpType::RESHAPE && !cEnode.getChildren().empty())
+                    EClassId childClsId = egraph.findConst(enode.getChildren()[i]);
+                    candidateChildrenPerPos[i].push_back(childClsId);
+
+                    const EClass &childCls = egraph.getEClass(childClsId);
+                    for (ENodeId cEnodeId : childCls.enodes)
                     {
-                        EClassId unwrappedChildId = egraph.findConst(cEnode.getChildren()[0]);
-                        const EClass &unwrappedCls = egraph.getEClass(unwrappedChildId);
-                        if (unwrappedCls.shape == childCls.shape && unwrappedChildId != childClsId)
+                        const ENode &cEnode = egraph.getENode(cEnodeId);
+                        if (cEnode.getOpType() == OpType::RESHAPE && !cEnode.getChildren().empty())
                         {
-                            bool contig_ok = true;
-                            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+                            EClassId unwrappedChildId = egraph.findConst(cEnode.getChildren()[0]);
+                            const EClass &unwrappedCls = egraph.getEClass(unwrappedChildId);
+                            if (unwrappedCls.shape == childCls.shape && unwrappedChildId != childClsId)
                             {
-                                const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
-                                if (!kernel.requiresContiguous.empty())
+                                bool contig_ok = true;
+                                if (KernelRegistry::get().hasKernel(enode.getKernelId()))
                                 {
-                                    size_t rule_idx =
-                                        std::min(static_cast<size_t>(i), kernel.requiresContiguous.size() - 1);
-                                    if (kernel.requiresContiguous[rule_idx] && !isContiguous(unwrappedCls))
+                                    const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
+                                    if (!kernel.requiresContiguous.empty())
                                     {
-                                        contig_ok = false;
+                                        size_t rule_idx =
+                                            std::min(static_cast<size_t>(i), kernel.requiresContiguous.size() - 1);
+                                        if (kernel.requiresContiguous[rule_idx] && !isContiguous(unwrappedCls))
+                                        {
+                                            contig_ok = false;
+                                        }
                                     }
                                 }
-                            }
-                            if (contig_ok)
-                            {
-                                candidateChildrenPerPos[i].push_back(unwrappedChildId);
+                                if (contig_ok)
+                                {
+                                    candidateChildrenPerPos[i].push_back(unwrappedChildId);
+                                }
                             }
                         }
                     }
                 }
+
+                std::vector<EClassId> currentCombination(enode.getChildren().size());
+                auto generateCombos = [&](auto &self, uint64_t pos, bool hasUnwrapped) -> void {
+                    if (pos == enode.getChildren().size())
+                    {
+                        if (hasUnwrapped)
+                            childCombinations.push_back(currentCombination);
+                        return;
+                    }
+                    for (uint64_t cIdx = 0; cIdx < candidateChildrenPerPos[pos].size(); ++cIdx)
+                    {
+                        currentCombination[pos] = candidateChildrenPerPos[pos][cIdx];
+                        self(self, pos + 1, hasUnwrapped || (cIdx > 0));
+                    }
+                };
+                generateCombos(generateCombos, 0, false);
             }
 
-            std::vector<std::vector<EClassId>> childCombinations;
-            std::vector<EClassId> currentCombination(enode.getChildren().size());
+            if (childCombinations.empty())
+                return;
 
-            std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
-                if (pos == enode.getChildren().size())
-                {
-                    if (hasUnwrapped)
-                        childCombinations.push_back(currentCombination);
-                    return;
-                }
-                for (uint64_t cIdx = 0; cIdx < candidateChildrenPerPos[pos].size(); ++cIdx)
-                {
-                    currentCombination[pos] = candidateChildrenPerPos[pos][cIdx];
-                    generateCombos(pos + 1, hasUnwrapped || (cIdx > 0));
-                }
-            };
-
-            generateCombos(0, false);
-
+            const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
             for (const auto &newChildren : childCombinations)
             {
                 ENode newENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
                                enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
                                enode.getContentHash());
-                egraph.addENode(e_class_id, newENode);
+                egraph.addENode(e_class_id, std::move(newENode));
             }
         }
     }

@@ -88,7 +88,7 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
             if (inplace_idx < enode.getChildren().size())
             {
                 EClassId child = ctx.egraph.findConst(enode.getChildren()[inplace_idx]);
-                const EClass cls = ctx.egraph.getEClass(child);
+                const EClass &cls = ctx.egraph.getEClass(child);
                 if (cls.mem_space == ms)
                 {
                     uint32_t in_align = plan::SearchState::getDefaultPageAlignment(cls.mem_space);
@@ -104,13 +104,25 @@ inline bool isENodeMemCapDominated(ENodeId enodeId, const ENodeDominationContext
     }
 
     uint64_t sum_inputs_in_ms = 0;
-    std::unordered_set<EClassId> seen_children;
+    std::array<EClassId, 8> seen_children;
+    size_t num_seen = 0;
     for (EClassId child : enode.getChildren())
     {
         EClassId canon_child = ctx.egraph.findConst(child);
-        if (seen_children.insert(canon_child).second)
+        bool already_seen = false;
+        for (size_t s = 0; s < num_seen; ++s)
         {
-            const EClass cls = ctx.egraph.getEClass(canon_child);
+            if (seen_children[s] == canon_child)
+            {
+                already_seen = true;
+                break;
+            }
+        }
+        if (!already_seen)
+        {
+            if (num_seen < seen_children.size())
+                seen_children[num_seen++] = canon_child;
+            const EClass &cls = ctx.egraph.getEClass(canon_child);
             if (cls.mem_space == ms)
             {
                 uint32_t in_align = plan::SearchState::getDefaultPageAlignment(cls.mem_space);
@@ -131,13 +143,14 @@ inline bool isFasterEquivalentENodeDominated(ENodeId enodeId, const ENodeDominat
 
     const ENode &a = ctx.egraph.getENode(enodeId);
     EClassId e_class_id = ctx.egraph.getENodeEClass(enodeId);
-    const EClass cls = ctx.egraph.getEClass(ctx.egraph.findConst(e_class_id));
+    const EClass &cls = ctx.egraph.getEClass(ctx.egraph.findConst(e_class_id));
     const ENodeInfo &infoA = ctx.enodeInfos[enodeId.value];
 
-    std::vector<uint32_t> a_inplace;
+    static const std::vector<uint32_t> empty_inplace;
+    const std::vector<uint32_t> *a_inplace = &empty_inplace;
     if (a.getKernelId().value != 0 && KernelRegistry::get().hasKernel(a.getKernelId()))
     {
-        a_inplace = KernelRegistry::get().getKernel(a.getKernelId()).safe_inplace_idxs;
+        a_inplace = &KernelRegistry::get().getKernel(a.getKernelId()).safe_inplace_idxs;
     }
 
     for (ENodeId otherId : cls.enodes)
@@ -182,16 +195,16 @@ inline bool isFasterEquivalentENodeDominated(ENodeId enodeId, const ENodeDominat
         if (a.getContentHash() != b.getContentHash())
             continue;
 
-        std::vector<uint32_t> b_inplace;
+        const std::vector<uint32_t> *b_inplace = &empty_inplace;
         if (b.getKernelId().value != 0 && KernelRegistry::get().hasKernel(b.getKernelId()))
         {
-            b_inplace = KernelRegistry::get().getKernel(b.getKernelId()).safe_inplace_idxs;
+            b_inplace = &KernelRegistry::get().getKernel(b.getKernelId()).safe_inplace_idxs;
         }
 
         bool inplace_compatible = true;
-        for (uint32_t in_idx : a_inplace)
+        for (uint32_t in_idx : *a_inplace)
         {
-            if (std::find(b_inplace.begin(), b_inplace.end(), in_idx) == b_inplace.end())
+            if (std::find(b_inplace->begin(), b_inplace->end(), in_idx) == b_inplace->end())
             {
                 inplace_compatible = false;
                 break;
@@ -207,11 +220,11 @@ inline bool isFasterEquivalentENodeDominated(ENodeId enodeId, const ENodeDominat
 
         if (std::abs(costA - costB) <= 1e-9f)
         {
-            if (b_inplace.size() > a_inplace.size())
+            if (b_inplace->size() > a_inplace->size())
             {
                 return true;
             }
-            if (b_inplace.size() == a_inplace.size() && otherId < enodeId)
+            if (b_inplace->size() == a_inplace->size() && otherId < enodeId)
             {
                 return true;
             }
@@ -263,6 +276,37 @@ struct Planner
     std::vector<LogicalId> cached_topo_;
     LogicalId cached_topo_root_;
     const Graph *cached_topo_graph_ = nullptr;
+
+    // Persistent scratch buffers to eliminate per-bucket vector heap allocations
+    std::vector<uint8_t> logical_dirty_;
+    std::vector<uint32_t> clean_dirty_child_count_;
+    std::vector<uint32_t> clean_parent_head_;
+    std::vector<uint32_t> clean_parent_next_;
+    std::vector<uint32_t> clean_parent_node_;
+    std::vector<uint32_t> clean_queue_;
+    std::vector<uint8_t> clean_in_queue_;
+
+    std::vector<uint32_t> saturate_ruleMatchCounts_;
+    std::vector<uint8_t> saturate_sweepFilter_;
+    std::vector<uint32_t> saturate_classSizeAtSweepStart_;
+    std::vector<uint8_t> saturate_stagedAtSweepStart_;
+    std::vector<uint32_t> saturate_parent_head_;
+    std::vector<uint32_t> saturate_parent_next_;
+    std::vector<uint32_t> saturate_parent_node_;
+    std::vector<uint8_t> saturate_seenClass_;
+    std::vector<uint32_t> saturate_frontier_;
+    std::vector<uint32_t> saturate_next_frontier_;
+    std::vector<uint32_t> saturate_filtered_base_enodes_;
+    std::vector<uint8_t> saturate_rule_active_;
+    std::array<std::vector<size_t>, static_cast<size_t>(OpType::FUSED) + 1> saturate_rules_by_op_;
+    std::array<std::vector<size_t>, static_cast<size_t>(OpType::FUSED) + 1> saturate_active_rules_by_op_;
+
+    std::vector<uint8_t> death_cascade_enode_valid_;
+    std::vector<uint32_t> death_cascade_valid_enode_count_;
+    std::vector<uint32_t> death_cascade_parents_head_;
+    std::vector<uint32_t> death_cascade_parents_next_;
+    std::vector<ENodeId> death_cascade_parents_node_;
+    std::vector<EClassId> death_cascade_worklist_;
 
     struct CostMemo
     {
@@ -443,7 +487,9 @@ struct Planner
                         rules.end());
         }
 
-        std::array<std::vector<size_t>, static_cast<size_t>(OpType::FUSED) + 1> rules_by_op;
+        auto &rules_by_op = saturate_rules_by_op_;
+        for (auto &v : rules_by_op)
+            v.clear();
         for (size_t op_val = 0; op_val <= static_cast<size_t>(OpType::FUSED); ++op_val)
         {
             const OpType op = static_cast<OpType>(op_val);
@@ -454,7 +500,8 @@ struct Planner
             }
         }
 
-        std::vector<uint32_t> ruleMatchCounts(rules.size(), 0);
+        std::vector<uint32_t> &ruleMatchCounts = saturate_ruleMatchCounts_;
+        ruleMatchCounts.assign(rules.size(), 0);
         uint64_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
@@ -470,9 +517,11 @@ struct Planner
         for (auto &rule : rules)
             if (auto *f = dynamic_cast<FusionRule *>(rule.get()))
                 fusion = f;
-        std::vector<uint8_t> sweepFilter;
-        std::vector<uint32_t> classSizeAtSweepStart;
-        std::vector<uint8_t> stagedAtSweepStart;
+        std::vector<uint8_t> &sweepFilter = saturate_sweepFilter_;
+        std::vector<uint32_t> &classSizeAtSweepStart = saturate_classSizeAtSweepStart_;
+        std::vector<uint8_t> &stagedAtSweepStart = saturate_stagedAtSweepStart_;
+        const std::vector<uint32_t> *currClassSize = &classSizeAtSweepStart;
+        const std::vector<uint8_t> *currStaged = &stagedAtSweepStart;
         size_t classesAtSweepStart = 0;
         auto snapshotSweepStart = [&]() {
             classesAtSweepStart = egraph.getNumClasses();
@@ -483,15 +532,17 @@ struct Planner
             for (const auto &[cid, data] : egraph.constantStaging)
                 if (cid.value < classesAtSweepStart)
                     stagedAtSweepStart[cid.value] = 1;
+            currClassSize = &classSizeAtSweepStart;
+            currStaged = &stagedAtSweepStart;
         };
 
-        std::vector<uint32_t> parent_head;
-        std::vector<uint32_t> parent_next;
-        std::vector<uint32_t> parent_node;
-        std::vector<uint8_t> seenClass;
-        std::vector<uint32_t> frontier;
-        std::vector<uint32_t> next_frontier;
-        std::vector<uint32_t> filtered_base_enodes;
+        std::vector<uint32_t> &parent_head = saturate_parent_head_;
+        std::vector<uint32_t> &parent_next = saturate_parent_next_;
+        std::vector<uint32_t> &parent_node = saturate_parent_node_;
+        std::vector<uint8_t> &seenClass = saturate_seenClass_;
+        std::vector<uint32_t> &frontier = saturate_frontier_;
+        std::vector<uint32_t> &next_frontier = saturate_next_frontier_;
+        std::vector<uint32_t> &filtered_base_enodes = saturate_filtered_base_enodes_;
 
         auto buildSweepFilter = [&]() {
             if (!fusion)
@@ -526,7 +577,7 @@ struct Planner
             frontier.clear();
             for (size_t c = 0; c < num_classes; ++c)
             {
-                if (c >= classesAtSweepStart || egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size() != classSizeAtSweepStart[c])
+                if (c >= classesAtSweepStart || egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size() != (*currClassSize)[c])
                 {
                     const uint32_t canon = egraph.findConst(EClassId{static_cast<uint32_t>(c)}).value;
                     if (!seenClass[canon])
@@ -538,7 +589,7 @@ struct Planner
             }
             for (const auto &[cid, data] : egraph.constantStaging)
             {
-                if (cid.value < classesAtSweepStart && !stagedAtSweepStart[cid.value])
+                if (cid.value < classesAtSweepStart && !(*currStaged)[cid.value])
                 {
                     const uint32_t canon = egraph.findConst(cid).value;
                     if (canon < num_classes && !seenClass[canon])
@@ -583,11 +634,14 @@ struct Planner
         if (seed && initial_unchanged_classes > 0 && initial_class_sizes)
         {
             classesAtSweepStart = initial_unchanged_classes;
-            classSizeAtSweepStart = *initial_class_sizes;
+            currClassSize = initial_class_sizes;
             if (initial_staged)
-                stagedAtSweepStart = *initial_staged;
+                currStaged = initial_staged;
             else
+            {
                 stagedAtSweepStart.assign(classesAtSweepStart, 0);
+                currStaged = &stagedAtSweepStart;
+            }
             buildSweepFilter();
         }
         else
@@ -597,8 +651,9 @@ struct Planner
             ctx.sweep_filter = nullptr;
         }
         size_t last_sweep_enodes_bound = ctx.base_enode_watermark;
-        std::vector<uint8_t> rule_active(rules.size(), 1);
-        std::array<std::vector<size_t>, static_cast<size_t>(OpType::FUSED) + 1> active_rules_by_op;
+        std::vector<uint8_t> &rule_active = saturate_rule_active_;
+        rule_active.assign(rules.size(), 1);
+        auto &active_rules_by_op = saturate_active_rules_by_op_;
         while (changed)
         {
             iterations++;
@@ -763,9 +818,19 @@ struct Planner
     uint32_t deathCascade(EGraph &egraph)
     {
         uint32_t numClasses = static_cast<uint32_t>(egraph.getNumClasses());
-        std::vector<bool> enode_valid(egraph.getNumENodes(), false);
-        std::vector<uint32_t> valid_enode_count(numClasses, 0);
-        std::vector<std::vector<ENodeId>> parents_map(numClasses);
+        uint32_t numEnodes = static_cast<uint32_t>(egraph.getNumENodes());
+        std::vector<uint8_t> &enode_valid = death_cascade_enode_valid_;
+        enode_valid.assign(numEnodes, 0);
+        std::vector<uint32_t> &valid_enode_count = death_cascade_valid_enode_count_;
+        valid_enode_count.assign(numClasses, 0);
+        std::vector<uint32_t> &parents_head = death_cascade_parents_head_;
+        parents_head.assign(numClasses, UINT32_MAX);
+        std::vector<uint32_t> &parents_next = death_cascade_parents_next_;
+        parents_next.clear();
+        parents_next.reserve(numEnodes * 2);
+        std::vector<ENodeId> &parents_node = death_cascade_parents_node_;
+        parents_node.clear();
+        parents_node.reserve(numEnodes * 2);
 
         for (uint32_t i = 0; i < numClasses; ++i)
         {
@@ -778,17 +843,24 @@ struct Planner
 
             for (ENodeId enodeId : cls.enodes)
             {
-                enode_valid[enodeId.value] = true;
+                enode_valid[enodeId.value] = 1;
                 const ENode &enode = egraph.getENode(enodeId);
                 for (EClassId child : enode.getChildren())
                 {
                     EClassId canon_child = egraph.findConst(child);
-                    parents_map[canon_child.value].push_back(enodeId);
+                    if (canon_child.value < numClasses)
+                    {
+                        uint32_t edge_idx = static_cast<uint32_t>(parents_next.size());
+                        parents_next.push_back(parents_head[canon_child.value]);
+                        parents_node.push_back(enodeId);
+                        parents_head[canon_child.value] = edge_idx;
+                    }
                 }
             }
         }
 
-        std::vector<EClassId> dead_worklist;
+        std::vector<EClassId> &dead_worklist = death_cascade_worklist_;
+        dead_worklist.clear();
         for (uint32_t i = 0; i < numClasses; ++i)
         {
             EClassId e_class_id = egraph.find(EClassId{i});
@@ -807,11 +879,12 @@ struct Planner
             EClassId dead_cls = dead_worklist.back();
             dead_worklist.pop_back();
 
-            for (ENodeId parent_enode_id : parents_map[dead_cls.value])
+            for (uint32_t edge = parents_head[dead_cls.value]; edge != UINT32_MAX; edge = parents_next[edge])
             {
+                ENodeId parent_enode_id = parents_node[edge];
                 if (enode_valid[parent_enode_id.value])
                 {
-                    enode_valid[parent_enode_id.value] = false;
+                    enode_valid[parent_enode_id.value] = 0;
                     cascadePruned++;
 
                     EClassId parent_cls = egraph.findConst(egraph.getENodeEClass(parent_enode_id));
@@ -840,19 +913,11 @@ struct Planner
                 continue;
 
             EClass &cls = egraph.getEClass(e_class_id);
-            std::vector<ENodeId> validEnodes;
-            validEnodes.reserve(cls.enodes.size());
-
-            for (ENodeId enodeId : cls.enodes)
-            {
-                if (enodeId.value < enodeInfos.size() && enodeInfos[enodeId.value].cost != TGConstants::INF)
-                {
-                    validEnodes.push_back(enodeId);
-                }
-            }
-
-            totalPruned += (cls.enodes.size() - validEnodes.size());
-            cls.enodes = std::move(validEnodes);
+            auto it = std::remove_if(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId enodeId) {
+                return enodeId.value >= enodeInfos.size() || enodeInfos[enodeId.value].cost == TGConstants::INF;
+            });
+            totalPruned += static_cast<uint32_t>(cls.enodes.end() - it);
+            cls.enodes.erase(it, cls.enodes.end());
         }
 
         totalPruned += deathCascade(egraph);
@@ -1818,14 +1883,21 @@ struct Planner
         if (dirtyRegions.empty() || E_L == EClassId{})
             return false;
 
-        const EClass lClass = egraph.getEClass(E_L);
+        const auto lStrides = egraph.getEClass(E_L).strides;
+        const DType lDType = egraph.getEClass(E_L).dtype;
+        const MemSpace lMemSpace = egraph.getEClass(E_L).mem_space;
         // Runtime inputs already contain current values after writeInput.
         // Expose real views of them; a fabricated partial INPUT would have
         // no binding and could scatter uninitialized memory into that input.
         for (const Region &reg : normalizeRegions(dirtyRegions))
         {
+            const size_t rank = reg.region.size();
             std::vector<uint32_t> shape;
+            shape.reserve(rank);
             std::vector<int32_t> starts, ends, steps;
+            starts.reserve(rank);
+            ends.reserve(rank);
+            steps.reserve(rank);
             for (const Dim &dim : reg.region)
             {
                 starts.push_back(static_cast<int32_t>(dim.start));
@@ -1835,9 +1907,9 @@ struct Planner
             }
             const EClassId slice = addOpToEGraph(egraph, OpType::SLICE,
                 {E_L, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps)},
-                shape, lClass.strides, lClass.dtype, lClass.mem_space);
+                shape, lStrides, lDType, lMemSpace);
             addOpToEGraph(egraph, OpType::CONTIGUOUS, {slice}, shape,
-                calcContiguousStrides(shape), lClass.dtype, lClass.mem_space);
+                calcContiguousStrides(shape), lDType, lMemSpace);
         }
         return true;
     }
@@ -1953,7 +2025,8 @@ struct Planner
         uint32_t max_logical_id = 0;
         for (LogicalId nodeId : topo)
             max_logical_id = std::max(max_logical_id, nodeId.value);
-        std::vector<uint8_t> logicalDirty(max_logical_id + 1, 0);
+        std::vector<uint8_t> &logicalDirty = logical_dirty_;
+        logicalDirty.assign(max_logical_id + 1, 0);
         for (LogicalId nodeId : topo)
         {
             bool dirty = bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty();
@@ -1994,7 +2067,7 @@ struct Planner
         {
             if (!graph.hasNode(inputPair.first))
                 continue;
-            const auto shape = graph.getNode(inputPair.first).getShape();
+            const auto &shape = graph.getNode(inputPair.first).getShape();
             for (const Region &region : inputPair.second)
             {
                 if (!isFullRegion(region, shape))
@@ -2007,7 +2080,7 @@ struct Planner
                 break;
         }
         bool hasPartialOutputRegion = false;
-        const auto outputShape = graph.getNode(rootId).getShape();
+        const auto &outputShape = graph.getNode(rootId).getShape();
         for (const Region &region : bucket.outputNeededRegion)
         {
             if (!isFullRegion(region, outputShape))
@@ -2250,11 +2323,15 @@ struct Planner
         auto clean_propagation_start = BucketClock::now();
         const uint32_t num_classes = maxClasses;
         const uint32_t num_enodes = static_cast<uint32_t>(egraph.getNumENodes());
-        std::vector<uint32_t> dirty_child_count(num_enodes, 0);
-        std::vector<uint32_t> parent_head(num_classes, UINT32_MAX);
-        std::vector<uint32_t> parent_next;
-        std::vector<uint32_t> parent_node;
+        std::vector<uint32_t> &dirty_child_count = clean_dirty_child_count_;
+        dirty_child_count.assign(num_enodes, 0);
+        std::vector<uint32_t> &parent_head = clean_parent_head_;
+        parent_head.assign(num_classes, UINT32_MAX);
+        std::vector<uint32_t> &parent_next = clean_parent_next_;
+        parent_next.clear();
         parent_next.reserve(num_enodes * 2);
+        std::vector<uint32_t> &parent_node = clean_parent_node_;
+        parent_node.clear();
         parent_node.reserve(num_enodes * 2);
 
         for (uint32_t e = 0; e < num_enodes; ++e)
@@ -2293,9 +2370,11 @@ struct Planner
             }
         }
 
-        std::vector<uint32_t> queue;
+        std::vector<uint32_t> &queue = clean_queue_;
+        queue.clear();
         queue.reserve(num_classes / 4);
-        std::vector<uint8_t> in_queue(num_classes, 0);
+        std::vector<uint8_t> &in_queue = clean_in_queue_;
+        in_queue.assign(num_classes, 0);
         for (uint32_t i = 0; i < num_classes; ++i)
         {
             if (clean[i] && egraph.findConst(EClassId{i}).value == i)
