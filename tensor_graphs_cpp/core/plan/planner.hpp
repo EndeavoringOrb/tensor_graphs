@@ -260,6 +260,9 @@ struct Planner
     std::vector<uint8_t> fullSaturationBaseClassStaged_;
     // Bucket-independent region facts of the graph planAll is planning.
     const RegionFacts *regionFacts_ = nullptr;
+    std::vector<LogicalId> cached_topo_;
+    LogicalId cached_topo_root_;
+    const Graph *cached_topo_graph_ = nullptr;
 
     struct CostMemo
     {
@@ -594,9 +597,22 @@ struct Planner
             ctx.sweep_filter = nullptr;
         }
         size_t last_sweep_enodes_bound = ctx.base_enode_watermark;
+        std::vector<uint8_t> rule_active(rules.size(), 1);
+        std::array<std::vector<size_t>, static_cast<size_t>(OpType::FUSED) + 1> active_rules_by_op;
         while (changed)
         {
             iterations++;
+            for (size_t r = 0; r < rules.size(); ++r)
+                rule_active[r] = rules[r]->prepareSweep(ctx) ? 1 : 0;
+            for (size_t op_val = 0; op_val <= static_cast<size_t>(OpType::FUSED); ++op_val)
+            {
+                active_rules_by_op[op_val].clear();
+                for (size_t rule_idx : rules_by_op[op_val])
+                {
+                    if (rule_active[rule_idx])
+                        active_rules_by_op[op_val].push_back(rule_idx);
+                }
+            }
             snapshotSweepStart();
             uint32_t preUniqueNodes = egraph.getNumUniqueENodes();
             uint32_t preMatches = nMatches;
@@ -618,9 +634,9 @@ struct Planner
                 }
                 const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
                 const size_t op_val = static_cast<size_t>(enode.getOpType());
-                if (op_val >= rules_by_op.size())
+                if (op_val >= active_rules_by_op.size())
                     return;
-                const auto &candidate_rules = rules_by_op[op_val];
+                const auto &candidate_rules = active_rules_by_op[op_val];
                 for (size_t rule_idx : candidate_rules)
                 {
                     const auto &rule = rules[rule_idx];
@@ -1882,7 +1898,13 @@ struct Planner
             report_bucket_timing("start", "doSaturate=" + std::string(doSaturate ? "true" : "false"));
         EGraph egraph;
         auto graph_setup_start = BucketClock::now();
-        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
+        if (cached_topo_graph_ != &graph || cached_topo_root_ != rootId || cached_topo_.empty())
+        {
+            cached_topo_ = topologicalSort({rootId}, graph);
+            cached_topo_root_ = rootId;
+            cached_topo_graph_ = &graph;
+        }
+        const std::vector<LogicalId> &topo = cached_topo_;
         bool base_state_has_base_ids = false;
 
         if (startingState)
@@ -2272,6 +2294,7 @@ struct Planner
         }
 
         std::vector<uint32_t> queue;
+        queue.reserve(num_classes / 4);
         std::vector<uint8_t> in_queue(num_classes, 0);
         for (uint32_t i = 0; i < num_classes; ++i)
         {
@@ -2348,6 +2371,7 @@ struct Planner
             egraph.freezeClasses();
             egraph.freezeHashcons();
             egraph.freezeENodes();
+            egraph.freezeLogicalIndex();
         }
         if (report_timing)
             report_bucket_timing("finished bucket postprocessing", "clean rounds=" + std::to_string(clean_round) +

@@ -29,6 +29,7 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
 | **Step 20** (`seq_len=620`) | 28458.00 | 81.21 | 28376.79 | ~3000x | Zero-allocation `hasCopyChainOrigin` in `RemoveCopyChains`, single-pass adjacency list in `buildSweepFilter` cutting `findConst` calls in half, direct vector-indexed `ruleMatchCounts[rule_idx]`, and intermediate sweep log elimination. Scaled to `seq_len=620` across **1,241 buckets** (1 full + 620 prefill + 620 decode) and 217,847 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.55x seq_len increase over Step 19, 9.39x over Step 16)** |
 | **Step 21** (`seq_len=670`) | 28867.02 | 78.10 | 28788.92 | ~3000x | Constant staging scan elimination in `buildSweepFilter`, single-pass forward-star clean class propagation, flat vector visited in `FusionRule`, append-only early exits in `ConsumerWeightReuseRule`, `RemoveRedundantReshape`, `RemoveCopyChains`, visited hoisting in `SlicePushDownStructural`, canonical children precomputation in `materializeFusedCandidates`. Scaled to `seq_len=670` across **1,341 buckets** and 235,523 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.68x sequence length increase over Step 19, 10.15x over Step 16)** |
 | **Step 22** (`seq_len=760`) | 29829.30 | 70.06 | 29759.24 | ~3500x | Flat visited vectors across all rewrite rules (`DotSplitRule`, `RemoveContiguous`, `RemoveCopyChains`, `ScatterPullUp`, `ConsumerWeightReuseRule`, `RemoveRedundantReshape`, `InfinityDomination`), flat vector `logicalDirty`, word-level FNV hashing in `addOpToEGraph`, guarded timing logs, and allocation-free duplicate detection & precomputed contigStrides in `materializeFusedCandidates`. Scaled to `seq_len=760` across **1,521 buckets** and 245,726 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.90x sequence length increase over Step 19, 11.52x over Step 16)** |
+| **Step 23** (`seq_len=795`) | 29794.56 | 70.72 | 29723.84 | ~3700x | Copy-on-Write `shared_logical_map` in `EGraph`, sweep-level rule activity pre-filtering via `prepareSweep` and `active_rules_by_op`, flat `PatternSet` arrays in `FusionRule` with duplicate hash lookup elimination, topological sort caching in `Planner`, and clean propagation worklist reservation. Scaled to `seq_len=795` across **1,591 buckets** (1 full + 795 prefill + 795 decode) and 279,509 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.99x sequence length increase over Step 19, 12.05x over Step 16)** |
 
 
 ## Detailed Breakdown
@@ -520,6 +521,47 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
   - `tests/verify_saturation.py --seq-len 700` passes 100% exact graph equivalence across 1,401 buckets in **27,270.61 ms** (down from 29,760.13 ms, **-2,489.52 ms reduction**).
   - `tests/verify_saturation.py --seq-len 750` passes 100% exact graph equivalence across 1,501 buckets in **28,529.78 ms**.
   - `tests/verify_saturation.py --seq-len 760` passes 100% exact graph equivalence across 1,521 buckets in **29,829.30 ms** (< 30s budget, 245,726 family vertices).
+
+---
+
+### Step 23: Copy-on-Write Logical Map, Sweep-Level Active Rule Indexing, Flat Pattern Arrays & Topo Sort Caching (`seq_len=795`, 29,794.56 ms)
+- **Time Before:**
+  - `seq_len = 760`: 29,829.30 ms (Step 22 record).
+- **Time After:**
+  - `seq_len = 760`: **28,738.30 ms** (**-1,091.00 ms speedup**, 1,521 buckets, 245,726 family vertices, 100% exact match).
+  - `seq_len = 770`: **28,693.54 ms** (1,541 buckets, 270,671 family vertices, 100% exact match).
+  - `seq_len = 790`: **29,866.82 ms** (1,581 buckets, 277,823 family vertices, 100% exact match).
+  - `seq_len = 795`: **29,794.56 ms** (Full: 70.72 ms, Prefill + Decode: 29,723.84 ms, **1,591 buckets** [1 full + 795 prefill + 795 decode], 279,509 family vertices) — **NEW RECORD UNDER 30 SECONDS! (1.99x sequence length increase over Step 19, 12.05x over Step 16)**
+- **What Changed:**
+  - **Copy-on-Write `shared_logical_map` in `EGraph` (`egraph.hpp`):**
+    - Introduced `std::shared_ptr<const std::unordered_map<LogicalId, EClassId>> shared_logical_map;` and `freezeLogicalIndex()` on the saturated base state.
+    - In `EGraph::operator=`, when `other.shared_logical_map && other.logicalToEClass.empty()`, shares the pointer instead of performing hundreds of dynamic map node allocations per bucket, eliminating tens of thousands of map allocations across 1,500+ partial buckets.
+    - Updated `findEClassByLogicalId`, `setLogicalId`, `merge`, and `rebuild` to support copy-on-write sharing.
+  - **Sweep-Level Rule Activity Pre-Filtering via `prepareSweep` and `active_rules_by_op` (`rewrite.hpp` & `planner.hpp`):**
+    - Added `virtual bool prepareSweep(RuleCtx &ctx) { return true; }` to `struct Rule`.
+    - Implemented `prepareSweep` in:
+      - `ConsumerWeightReuseRule`: `refreshCopyIndex(ctx.egraph); return !copy_enodes.empty();`
+      - `RemoveRedundantReshape`: `refreshReshapeIndex(ctx.egraph); return !reshape_enodes.empty();`
+      - `RemoveCopyChains`: `refreshCopyIndex(ctx.egraph); return !copy_enodes.empty();`
+      - `ScatterPullUp`: `return ctx.regions != nullptr;`
+    - When target operations are absent (e.g. 0 copy enodes, 0 reshape enodes in partial buckets), the rule is marked inactive once per sweep, eliminating ~70 million virtual function calls to `match()` across 1,500+ buckets.
+    - In `Planner::saturate`, maintained a sweep-level `active_rules_by_op` dispatch table updated once per sweep after `prepareSweep()`. The inner enode loop directly accesses `active_rules_by_op[op_val]`, completely skipping inactive rules without checking `if (!rule_active[rule_idx]) continue;` on every candidate rule of every enode.
+  - **Flat Array Indexing and Duplicate Lookup Elimination in `FusionRule` (`rewrite.hpp`):**
+    - Converted `PatternSet::singleNodePatternsByOp` and `multiNodePatternsByOp` from `std::unordered_map<OpType, std::vector<Pattern>>` to flat arrays `std::array<std::vector<Pattern>, static_cast<size_t>(OpType::FUSED) + 1>`.
+    - Looking up pattern lists is now a direct $O(1)$ memory access `patterns->singleNodePatternsByOp[op_val]` instead of a hash table lookup.
+    - Eliminated redundant `if (!isCompleted(eNodeIdx, pattern, mr.inputs, egraph))` call which was re-checking `hasCompleted(ApplicationKey{eNodeIdx, &pattern})` after it had already been checked at the beginning of the loop.
+    - Exponential capacity growth for `single_node_visited.resize(std::max(eNodeIdx + 128, egraph.getNumENodes()))`.
+  - **Planner-Level Topological Sort & Worklist Queue Caching (`planner.hpp`):**
+    - Cached `cached_topo_` for `(rootId, &graph)` in `Planner`, computing topological order once on the static graph and reusing it across all 1,590 partial buckets without allocating vectors or running graph DFS.
+    - Pre-reserved capacity in `queue` for clean-class propagation (`queue.reserve(num_classes / 4)`).
+- **Verification:**
+  - `tests/verify_saturation.py --seq-len 4` passes 100% exact graph equivalence in **78.13 ms** (`EQUIVALENT (explicit class-order bijection match)`).
+  - `tests/verify_saturation.py --seq-len 16` passes 100% exact graph equivalence in **456.05 ms** (down from 503.12 ms).
+  - `tests/verify_saturation.py --seq-len 760` dropped from 29,829.30 ms down to **28,738.30 ms** (**-1,091.00 ms speedup**, 1,521 buckets, 245,726 family vertices, 100% exact match).
+  - `tests/verify_saturation.py --seq-len 770` passes 100% exact graph equivalence across 1,541 buckets in **28,693.54 ms**.
+  - `tests/verify_saturation.py --seq-len 790` passes 100% exact graph equivalence across 1,581 buckets in **29,866.82 ms**.
+  - `tests/verify_saturation.py --seq-len 795` passes 100% exact graph equivalence across 1,591 buckets in **29,794.56 ms** (< 30s budget, 279,509 family vertices) — **NEW RECORD UNDER 30 SECONDS!**
+
 
 
 

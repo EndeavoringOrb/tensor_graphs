@@ -244,7 +244,21 @@ struct EGraph
             base_equalities = other.base_equalities;
             baseEClassToEClass.clear();
             baseEClassIndexInitialized = false;
-            logicalToEClass = other.logicalToEClass;
+            if (other.shared_logical_map && other.logicalToEClass.empty())
+            {
+                shared_logical_map = other.shared_logical_map;
+                logicalToEClass.clear();
+            }
+            else if (other.shared_logical_map)
+            {
+                shared_logical_map = other.shared_logical_map;
+                logicalToEClass = other.logicalToEClass;
+            }
+            else
+            {
+                shared_logical_map.reset();
+                logicalToEClass = other.logicalToEClass;
+            }
             logicalIndexInitialized = other.logicalIndexInitialized;
             auto t4 = std::chrono::high_resolution_clock::now();
             if (profile && (other.getNumClasses() > 100000))
@@ -274,6 +288,7 @@ struct EGraph
     }
 
     // Logical node ID -> current canonical eclass ID.
+    std::shared_ptr<const std::unordered_map<LogicalId, EClassId>> shared_logical_map;
     mutable std::unordered_map<LogicalId, EClassId> logicalToEClass;
     mutable bool logicalIndexInitialized = false;
 
@@ -439,6 +454,29 @@ struct EGraph
             shared_hashcons = std::make_shared<std::unordered_map<uint64_t, std::vector<ENodeId>>>(
                 std::move(hashcons));
             hashcons.clear();
+        }
+    }
+
+    void freezeLogicalIndex()
+    {
+        if (!logicalIndexInitialized && !shared_logical_map)
+        {
+            const size_t num_classes = getNumClasses();
+            logicalToEClass.reserve(std::min<size_t>(num_classes, 256));
+            for (size_t i = 0; i < num_classes; ++i)
+            {
+                EClassId cid{static_cast<uint32_t>(i)};
+                const EClass &cls = getEClass(cid);
+                if (cls.logical_id != LogicalId{})
+                    logicalToEClass.insert_or_assign(cls.logical_id, findConst(cls.id));
+            }
+            logicalIndexInitialized = true;
+        }
+        if (!shared_logical_map && !logicalToEClass.empty())
+        {
+            shared_logical_map = std::make_shared<std::unordered_map<LogicalId, EClassId>>(
+                std::move(logicalToEClass));
+            logicalToEClass.clear();
         }
     }
 
@@ -722,7 +760,7 @@ struct EGraph
             getMutableEClass(ra).logical_id = logB;
             logA = logB;
         }
-        if (logicalIndexInitialized)
+        if (logicalIndexInitialized || shared_logical_map)
         {
             if (logA != LogicalId{})
                 logicalToEClass.insert_or_assign(logA, ra);
@@ -1011,10 +1049,26 @@ struct EGraph
         }
 
         // Rebuild logicalToEClass map if initialized
-        if (logicalIndexInitialized)
+        if (logicalIndexInitialized || shared_logical_map)
         {
             std::unordered_map<LogicalId, EClassId> new_logical_map;
-            new_logical_map.reserve(logicalToEClass.size());
+            if (shared_logical_map)
+            {
+                new_logical_map.reserve(shared_logical_map->size() + logicalToEClass.size());
+                for (const auto &pair : *shared_logical_map)
+                {
+                    if (pair.second.value < num_old_classes)
+                    {
+                        EClassId canon = find(pair.second);
+                        if (canon.value < num_old_classes)
+                        {
+                            EClassId new_id = old_to_new_class[canon.value];
+                            if (new_id.value != UINT32_MAX)
+                                new_logical_map.emplace(pair.first, new_id);
+                        }
+                    }
+                }
+            }
             for (const auto &pair : logicalToEClass)
             {
                 if (pair.second.value < num_old_classes)
@@ -1024,7 +1078,7 @@ struct EGraph
                     {
                         EClassId new_id = old_to_new_class[canon.value];
                         if (new_id.value != UINT32_MAX)
-                            new_logical_map.emplace(pair.first, new_id);
+                            new_logical_map.insert_or_assign(pair.first, new_id);
                     }
                 }
             }
@@ -1033,7 +1087,9 @@ struct EGraph
                 if (cls.logical_id != LogicalId{})
                     new_logical_map.insert_or_assign(cls.logical_id, cls.id);
             }
+            shared_logical_map.reset();
             logicalToEClass = std::move(new_logical_map);
+            logicalIndexInitialized = true;
         }
 
         // Rebuild hashcons
@@ -1181,6 +1237,15 @@ struct EGraph
     {
         if (logical_id == LogicalId{})
             return EClassId{};
+        auto it = logicalToEClass.find(logical_id);
+        if (it != logicalToEClass.end())
+            return findConst(it->second);
+        if (shared_logical_map)
+        {
+            auto it2 = shared_logical_map->find(logical_id);
+            if (it2 != shared_logical_map->end())
+                return findConst(it2->second);
+        }
         if (!logicalIndexInitialized)
         {
             logicalToEClass.clear();
@@ -1194,9 +1259,11 @@ struct EGraph
                     logicalToEClass.insert_or_assign(cls.logical_id, findConst(cls.id));
             }
             logicalIndexInitialized = true;
+            auto it3 = logicalToEClass.find(logical_id);
+            if (it3 != logicalToEClass.end())
+                return findConst(it3->second);
         }
-        auto it = logicalToEClass.find(logical_id);
-        return it == logicalToEClass.end() ? EClassId{} : findConst(it->second);
+        return EClassId{};
     }
 
     LogicalId getLogicalId(EClassId id) const
@@ -1208,7 +1275,7 @@ struct EGraph
     {
         EClassId cid = find(id);
         getMutableEClass(cid).logical_id = logical_id;
-        if (logicalIndexInitialized && logical_id != LogicalId{})
+        if ((logicalIndexInitialized || shared_logical_map) && logical_id != LogicalId{})
             logicalToEClass.insert_or_assign(logical_id, cid);
     }
 

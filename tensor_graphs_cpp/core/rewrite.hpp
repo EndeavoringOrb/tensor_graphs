@@ -299,6 +299,7 @@ struct Rule
     uint32_t base_enode_watermark = 0;
     virtual void clearVisited() {}
     virtual bool canMatchOp(OpType op) const { return true; }
+    virtual bool prepareSweep(RuleCtx &ctx) { return true; }
 };
 
 // Enabled only in --profile builds. Keeping the instrumentation at the Rule
@@ -738,8 +739,9 @@ struct FusionRule : public Rule
 
     struct PatternSet
     {
-        std::unordered_map<OpType, std::vector<Pattern>> singleNodePatternsByOp;
-        std::unordered_map<OpType, std::vector<Pattern>> multiNodePatternsByOp;
+        static constexpr size_t kNumOpTypes = static_cast<size_t>(OpType::FUSED) + 1;
+        std::array<std::vector<Pattern>, kNumOpTypes> singleNodePatternsByOp;
+        std::array<std::vector<Pattern>, kNumOpTypes> multiNodePatternsByOp;
         uint32_t max_pattern_depth = 0;
     };
     // Immutable after construction and shared by clones, so the Pattern
@@ -889,14 +891,14 @@ struct FusionRule : public Rule
 
                 if (is_single)
                 {
-                    singleNodePatternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+                    singleNodePatternsByOp[static_cast<size_t>(pattern.rootOpType)].push_back(std::move(pattern));
                 }
                 else
                 {
-                    multiNodePatternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+                    multiNodePatternsByOp[static_cast<size_t>(pattern.rootOpType)].push_back(std::move(pattern));
                 }
             }
-            for (const auto &[op, list] : pattern_set->multiNodePatternsByOp)
+            for (const auto &list : pattern_set->multiNodePatternsByOp)
                 for (const auto &pattern : list)
                     pattern_set->max_pattern_depth = std::max(pattern_set->max_pattern_depth, pattern.depth);
             return pattern_set;
@@ -923,7 +925,9 @@ struct FusionRule : public Rule
 
     bool canMatchOp(OpType op) const override
     {
-        return patterns && (patterns->singleNodePatternsByOp.count(op) > 0 || patterns->multiNodePatternsByOp.count(op) > 0);
+        const size_t op_val = static_cast<size_t>(op);
+        return patterns && op_val < PatternSet::kNumOpTypes &&
+               (!patterns->singleNodePatternsByOp[op_val].empty() || !patterns->multiNodePatternsByOp[op_val].empty());
     }
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
@@ -931,12 +935,15 @@ struct FusionRule : public Rule
         activeMatches.clear();
         const EGraph &egraph = ctx.egraph;
         const ENode &eNode = egraph.getENode(ENodeId{eNodeIdx});
+        const size_t op_val = static_cast<size_t>(eNode.getOpType());
+        if (op_val >= PatternSet::kNumOpTypes)
+            return false;
 
         bool is_new_single = false;
         if (eNodeIdx >= ctx.base_enode_watermark)
         {
             if (eNodeIdx >= single_node_visited.size())
-                single_node_visited.resize(eNodeIdx + 1, 0);
+                single_node_visited.resize(std::max<size_t>(eNodeIdx + 128, egraph.getNumENodes()), 0);
             if (!single_node_visited[eNodeIdx])
             {
                 single_node_visited[eNodeIdx] = 1;
@@ -945,68 +952,14 @@ struct FusionRule : public Rule
         }
         if (is_new_single)
         {
-            auto it_single = patterns->singleNodePatternsByOp.find(eNode.getOpType());
-            if (it_single != patterns->singleNodePatternsByOp.end())
+            const auto &single_list = patterns->singleNodePatternsByOp[op_val];
+            for (const auto &pattern : single_list)
             {
-                for (const auto &pattern : it_single->second)
-                {
-                    if (hasCompleted(ApplicationKey{eNodeIdx, &pattern}))
-                        continue;
-                    Binding binding(pattern.variables.size());
-                    if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
-                    {
-                        MatchResult mr;
-                        mr.pattern = &pattern;
-                        if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
-                        {
-                            mr.inputs.reserve(eNode.getChildren().size());
-                            mr.inputs.push_back(binding.slots[0]);
-                            for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
-                            {
-                                mr.inputs.push_back(egraph.findConst(eNode.getChildren()[i]));
-                            }
-                        }
-                        else
-                        {
-                            mr.inputs = std::move(binding.slots);
-                        }
-
-                        if (!isCompleted(eNodeIdx, pattern, mr.inputs, egraph))
-                        {
-                            activeMatches.push_back(std::move(mr));
-                        }
-                    }
-                }
-            }
-        }
-
-        auto it_multi = patterns->multiNodePatternsByOp.find(eNode.getOpType());
-        // Distance (in levels) from this enode down to the nearest class
-        // that changed in the previous sweep; patterns shallower than that
-        // read only unchanged classes.
-        uint32_t changedDistance = 0;
-        const bool filtered = sweep_filter && eNodeIdx < sweep_filter->size();
-        if (filtered)
-        {
-            changedDistance = (*sweep_filter)[eNodeIdx];
-            if (changedDistance == 0)
-                it_multi = patterns->multiNodePatternsByOp.end();
-        }
-        if (it_multi != patterns->multiNodePatternsByOp.end())
-        {
-            for (const auto &pattern : it_multi->second)
-            {
-                if (filtered && pattern.depth < changedDistance)
-                    continue;
                 if (hasCompleted(ApplicationKey{eNodeIdx, &pattern}))
                     continue;
                 Binding binding(pattern.variables.size());
-                bool has_new_node = (ctx.base_enode_watermark > 0 && eNodeIdx >= ctx.base_enode_watermark);
-                if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses,
-                                     false, ctx.base_enode_watermark, ctx.base_class_watermark, ctx.base_staged, &has_new_node))
+                if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
                 {
-                    if (ctx.base_enode_watermark > 0 && !has_new_node)
-                        continue;
                     MatchResult mr;
                     mr.pattern = &pattern;
                     if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
@@ -1023,8 +976,54 @@ struct FusionRule : public Rule
                         mr.inputs = std::move(binding.slots);
                     }
 
-                    if (!isCompleted(eNodeIdx, pattern, mr.inputs, egraph))
+                    activeMatches.push_back(std::move(mr));
+                }
+            }
+        }
+
+        const auto &multi_list = patterns->multiNodePatternsByOp[op_val];
+        if (!multi_list.empty())
+        {
+            uint32_t changedDistance = 0;
+            bool skip_multi = false;
+            const bool filtered = sweep_filter && eNodeIdx < sweep_filter->size();
+            if (filtered)
+            {
+                changedDistance = (*sweep_filter)[eNodeIdx];
+                if (changedDistance == 0)
+                    skip_multi = true;
+            }
+            if (!skip_multi)
+            {
+                for (const auto &pattern : multi_list)
+                {
+                    if (filtered && pattern.depth < changedDistance)
+                        continue;
+                    if (hasCompleted(ApplicationKey{eNodeIdx, &pattern}))
+                        continue;
+                    Binding binding(pattern.variables.size());
+                    bool has_new_node = (ctx.base_enode_watermark > 0 && eNodeIdx >= ctx.base_enode_watermark);
+                    if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses,
+                                         false, ctx.base_enode_watermark, ctx.base_class_watermark, ctx.base_staged, &has_new_node))
                     {
+                        if (ctx.base_enode_watermark > 0 && !has_new_node)
+                            continue;
+                        MatchResult mr;
+                        mr.pattern = &pattern;
+                        if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
+                        {
+                            mr.inputs.reserve(eNode.getChildren().size());
+                            mr.inputs.push_back(binding.slots[0]);
+                            for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
+                            {
+                                mr.inputs.push_back(egraph.findConst(eNode.getChildren()[i]));
+                            }
+                        }
+                        else
+                        {
+                            mr.inputs = std::move(binding.slots);
+                        }
+
                         activeMatches.push_back(std::move(mr));
                     }
                 }
@@ -2447,6 +2446,11 @@ struct ScatterPullUp : public Rule
     bool canMatchOp(OpType op) const override
     {
         return op != OpType::SCATTER && op != OpType::INPUT && op != OpType::CACHE;
+    }
+
+    bool prepareSweep(RuleCtx &ctx) override
+    {
+        return ctx.regions != nullptr;
     }
 
     static bool hasScatter(const EGraph &egraph, EClassId cid)
@@ -4722,9 +4726,14 @@ struct RemoveCopyChains : public Rule
         scanned_enodes = 0;
     }
 
-    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    bool prepareSweep(RuleCtx &ctx) override
     {
         refreshCopyIndex(ctx.egraph);
+        return !copy_enodes.empty();
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
         if (copy_enodes.empty())
             return false;
 
@@ -4997,9 +5006,14 @@ struct ConsumerWeightReuseRule : public Rule
         scanned_enodes = 0;
     }
 
-    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    bool prepareSweep(RuleCtx &ctx) override
     {
         refreshCopyIndex(ctx.egraph);
+        return !copy_enodes.empty();
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
         if (copy_enodes.empty())
             return false;
 
@@ -5129,9 +5143,14 @@ struct RemoveRedundantReshape : public Rule
         scanned_enodes = 0;
     }
 
-    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    bool prepareSweep(RuleCtx &ctx) override
     {
         refreshReshapeIndex(ctx.egraph);
+        return !reshape_enodes.empty();
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
         if (reshape_enodes.empty())
             return false;
         if (eNodeIdx < ctx.base_enode_watermark && ctx.sweep_filter &&
