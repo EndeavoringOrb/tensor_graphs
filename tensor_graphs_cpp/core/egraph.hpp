@@ -122,6 +122,30 @@ struct ENode
     std::string debugOrigin;
 };
 
+inline std::string toString(const ENode &node)
+{
+    std::stringstream ss;
+    ss << "ENode {\n"
+       << "  KernelUID:  0x" << std::hex << node.getKernelId().value << std::dec << "\n"
+       << "  OpType:     " << toString(node.getOpType()) << "\n"
+       << "  OpName:     " << (node.getOpName().empty() ? "N/A" : node.getOpName()) << "\n"
+       << "  Children:   [";
+    const auto &children = node.getChildren();
+    for (uint64_t i = 0; i < children.size(); ++i)
+    {
+        ss << children[i].value << (i == children.size() - 1 ? "" : ", ");
+    }
+    ss << "]\n"
+       << "  Shape:      " << ::toString(node.getShape()) << "\n"
+       << "  Strides:    " << ::toString(node.getStrides()) << "\n"
+       << "  DType:      " << ::toString(node.getDType()) << "\n"
+       << "  MemSpace:   " << node.getMemSpace().idx << "\n"
+       << "  DebugOrigin: " << (node.getDebugOrigin().empty() ? "N/A" : node.getDebugOrigin()) << "\n"
+       << "  Signature:  0x" << std::hex << node.getSig() << std::dec << "\n"
+       << "}";
+    return ss.str();
+}
+
 struct EClass
 {
     EClassId id;
@@ -292,7 +316,7 @@ struct EGraph
     mutable std::unordered_map<LogicalId, EClassId> logicalToEClass;
     mutable bool logicalIndexInitialized = false;
 
-    inline std::vector<int32_t> getConstantInt32(EClassId id) const
+    inline std::vector<int32_t> getConstantInt32(EClassId id, SourceLocation loc = SourceLocation::current()) const
     {
         if (constantStaging.count(id))
         {
@@ -312,7 +336,7 @@ struct EGraph
         ss << "Expected constant for shape inference but not found in staging. "
               "Node ID: "
            << id;
-        Error::throw_err(ss.str());
+        Error::throw_err(ss.str(), loc);
     }
 
     void reserve(uint64_t classCap, uint64_t nodeCap)
@@ -726,10 +750,7 @@ struct EGraph
                 for (ENodeId enode_id : e_class.enodes)
                 {
                     const ENode &enode = getENode(enode_id);
-                    details << "\n  ENode " << toString(enode_id) << ": op=" << toString(enode.getOpType())
-                            << ", name=" << (enode.getOpName().empty() ? "N/A" : enode.getOpName())
-                            << ", kernel=" << toString(enode.getKernelId()) << ", debugOrigin="
-                            << (enode.getDebugOrigin().empty() ? "N/A" : enode.getDebugOrigin());
+                    details << "\n  ENode " << toString(enode_id) << ":\n" << toString(enode);
                 }
                 return details.str();
             };
@@ -1372,29 +1393,6 @@ struct EGraph
 inline bool isContiguous(const EClass &eclass)
 {
     return isContiguous(eclass.strides, eclass.shape);
-}
-
-inline std::string toString(const ENode &node)
-{
-    std::stringstream ss;
-    ss << "ENode {\n"
-       << "  KernelUID:  0x" << std::hex << node.getKernelId().value << std::dec << "\n"
-       << "  OpType:     " << toString(node.getOpType()) << "\n"
-       << "  OpName:     " << (node.getOpName().empty() ? "N/A" : node.getOpName()) << "\n"
-       << "  Children:   [";
-    const auto &children = node.getChildren();
-    for (uint64_t i = 0; i < children.size(); ++i)
-    {
-        ss << children[i].value << (i == children.size() - 1 ? "" : ", ");
-    }
-    ss << "]\n"
-       << "  Shape:      " << ::toString(node.getShape()) << "\n"
-       << "  Strides:    " << ::toString(node.getStrides()) << "\n"
-       << "  DType:      " << ::toString(node.getDType()) << "\n"
-       << "  MemSpace:   " << node.getMemSpace().idx << "\n"
-       << "  Signature:  0x" << std::hex << node.getSig() << std::dec << "\n"
-       << "}";
-    return ss.str();
 }
 
 inline std::string toString(const EClass &cls, const std::string &prefix = "")

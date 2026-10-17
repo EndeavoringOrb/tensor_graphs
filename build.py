@@ -817,6 +817,7 @@ class Toolchain:
             flags.append("-DTG_PROFILE")
 
         if self.platform.is_windows:
+            flags.extend(["-g", "-gcodeview"])
             if target_arm64 and not self.config.use_cuda:
                 flags.extend(
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
@@ -829,8 +830,6 @@ class Toolchain:
                 flags.extend(["-g", "-O0", "-DTG_DEBUG"])
             else:
                 flags.append("-O3")
-                if self.config.profile:
-                    flags.extend(["-g", "-gcodeview"])
         else:
             if target_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
@@ -905,11 +904,9 @@ class Toolchain:
                 flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
             flags.append("-lOpenCL")
 
-            if self.platform.is_windows and self.config.profile:
-                flags.append("-Wl,-debug")
 
         if self.platform.is_windows:
-            flags.append("-ldbghelp")
+            flags.extend(["-ldbghelp", "-Wl,-debug"])
 
         if not self.config.use_cuda:
             flags.extend(["-static"])

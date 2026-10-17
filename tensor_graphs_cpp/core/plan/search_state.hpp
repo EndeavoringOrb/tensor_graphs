@@ -1064,8 +1064,18 @@ class SearchState
             uint32_t n_enodes = static_cast<uint32_t>(cls.enodes.size());
             if (n_enodes > 63)
             {
-                Error::throw_err("EClass " + std::to_string(cid.value) + " has " + std::to_string(n_enodes) +
-                                 " enodes, exceeding domain bitmask capacity (max 63).");
+                std::stringstream error;
+                error << "EClass " << cid.value << " has " << n_enodes
+                      << " enodes, exceeding domain bitmask capacity (max 63).\n"
+                      << toString(cls) << "\nEnode details:\n";
+                for (size_t enode_idx = 0; enode_idx < cls.enodes.size(); ++enode_idx)
+                {
+                    const ENodeId enode_id = cls.enodes[enode_idx];
+                    const ENode &enode = egraph.getENode(enode_id);
+                    error << "  [" << enode_idx << "] ENode " << enode_id.value << ":\n"
+                          << toString(enode) << "\n";
+                }
+                Error::throw_err(error.str());
             }
 
             // selected_<bucket_id>_<eclass_id> in {0, 1, ..., n_enodes}

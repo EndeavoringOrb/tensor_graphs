@@ -591,12 +591,81 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
   - `tests/verify_saturation.py --seq-len 800` passes 100% exact graph equivalence across 1,601 buckets in **29,547.72 ms**.
   - `tests/verify_saturation.py --seq-len 805` passes 100% exact graph equivalence across 1,611 buckets in **29,741.41 ms** (< 30s budget, 283,085 family vertices) — **NEW RECORD UNDER 30 SECONDS!**
 
+### Step 25: Isolate Planner Scratch Buffers Across Parallel Bucket Workers (2026-10-17)
+
+The persistent scratch buffers introduced in Step 24 are reusable within one worker, but must not be shared by concurrent workers. `Planner::planAll` dispatched partial bucket saturation through the same `Planner` instance. Each call resized and overwrote its `saturate_*`, `logical_dirty_`, and clean-class propagation vectors while other workers were using them.
+
+The Gemma reproduction captured this crash stack with the improved Windows crash handler:
+
+```text
+memcpy_unaligned
+Planner::saturate::<lambda_3>::operator()  planner.hpp:559
+Planner::saturate                        planner.hpp:655
+Planner::saturateBucket                  planner.hpp:2161
+Planner::planAll::<lambda_2>::operator()  planner.hpp:2839
+```
+
+These line numbers refer to the instrumented version before this fix. The failing operation was `parent_head.assign(num_classes, UINT32_MAX)` in `buildSweepFilter`. Concurrent assignments to the same vector can invalidate its storage while another thread is writing it. The parallel pruning phase also shared the `deathCascade` scratch vectors and required the same ownership fix.
+
+**Changes:**
+
+- Each saturation worker now constructs its own `Planner`, seeds it from the full saturation results, and reuses its own scratch allocations across its assigned buckets. Full rules are shared as seeds and cloned by `saturate`; the full e-graph and region facts remain available to all workers.
+- Each pruning worker owns its own planner and death-cascade scratch buffers. Workers continue to share the cost memo protected by its existing mutex.
+- Windows crash reporting flushes the raw exception address, module offset, and thread ID before DbgHelp calls; writes a best-effort minidump; uses the native Windows ARM64 unwinder; and protects optional dump/stack reporting with SEH. Dumps are currently written in the failing process, so they are not guaranteed if process state is damaged.
+- DbgHelp initialization happens once, with a shared lock coordinating the crash reporter and sampling profiler. The profiler no longer destroys the symbol session after each report. Fatal reporting uses the unhandled exception filter.
+- Optimized Windows builds now generate matching CodeView/PDB symbols by default. Optimization remains `-O3`.
+
+**Performance measurement:**
+
+```powershell
+.venv/Scripts/python.exe build.py --t bindings
+.venv/Scripts/python.exe tests/verify_saturation.py --seq-len 256
+```
+
+Compared the original planner from commit `87ecca07` against this worker isolation fix on Windows ARM64. Both versions used the same improved diagnostics and optimized Clang flags (`-O3 -g -gcodeview`, linker `-debug`). Each version had a warmup, followed by three measured runs in separate Python processes, without the Gemma workload running concurrently. The reference dumps were generated with the original planner at sequence length 256.
+
+| Run | Before: saturation score (ms) | After: saturation score (ms) |
+| :--- | ---: | ---: |
+| 1 | 8813.62 | 8896.71 |
+| 2 | 8853.48 | 8837.41 |
+| 3 | 8875.52 | 8836.15 |
+
+| Median metric | Before (ms) | After (ms) | Change |
+| :--- | ---: | ---: | ---: |
+| Full saturation | 68.14 | 68.39 | +0.25 ms |
+| Prefill + decode | 8785.34 | 8770.49 | -14.85 ms |
+| Total saturation score | 8853.48 | 8837.41 | -0.18% |
+
+Medians are calculated independently for each metric. The total median decreased by 16.07 ms (0.18%), and the run ranges overlap. This harness invokes `saturateBucket` serially, so it does not exercise the parallel worker setup or measure its memory overhead. Its score includes full and partial saturation, excluding graph dumping, pruning for verification, and Python graph comparison. The measured complete verifier invocations took approximately 63 seconds each.
+
+**Verification and remaining failures:**
+
+- All six measured runs produced **513 dump files byte-for-byte identical** to the reference (1 full, 256 prefill, 256 decode). The full state had 2,481 enodes and 5,791 classes; each parsed dump family had 550,835 vertices.
+- The existing Python equivalence verifier fails even when comparing the original planner with its own newly generated reference: `Equivalence comparison error: 'label'`. For example, both `gold-decode1.txt` and `candidate-decode1.txt` reference 36 class IDs without corresponding `C` records, so NetworkX creates nodes without labels. The script then prints `FAIL (EGraph Divergence Detected)` and exits 1. This is a pre-existing comparison failure, not evidence of changed dumps. The verifier has not been modified; byte equality was checked separately for every measured run.
+- `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode` no longer encounters the access violation and reaches search initialization. It still **fails** with `EClass 3803 has 70 enodes, exceeding domain bitmask capacity (max 63)` in `search_state.hpp`. Generation correctness is therefore not verified by this run.
+
+Local measurement artifacts: [before timings](../../logs/crash_diagnosis/saturation_before.json), [after timings](../../logs/crash_diagnosis/saturation_after.json), [original crash trace](../../logs/crash_diagnosis/gemma_before.log), and [fixed Gemma run](../../logs/crash_diagnosis/gemma_after.log). These artifacts are under the ignored `logs` directory.
+
+---
+
+### Follow-up: Commit Death-Cascade Removals (2026-10-17)
+
+`deathCascade` now removes the enodes it marks invalid from canonical classes after propagation completes. Previously it returned a removal count without applying those removals, leaving expressions that referenced empty classes. Subsequent `rebuild(true)` now excludes those expressions from compacted storage and dumps.
+
+Added `tensor_graphs_cpp/tests/prune_egraph_regression.hpp`, available through `tensor_graphs_cpp/test.exe --prune-egraph` and the default structural suite. It covers an infinite-cost leaf, an initially empty class, transitive removal, repeated child references, preservation of a live alternative and its consumer, idempotence, source snapshot isolation, and compaction. Both ordinary storage and frozen shared storage are exercised. The test failed before the fix with `dead class retained expressions` and passes after it.
+
+Rebuilt the test executable and Python bindings with `.venv/Scripts/python.exe build.py --t test bindings`. Regenerated the sequence-length-256 reference because dead-expression removal intentionally changes the dumps; the previous reference is preserved locally under `logs/crash_diagnosis/gold_before_cascade_fix`.
+
+`.venv/Scripts/python.exe tests/verify_saturation.py --seq-len 256` now **passes** all 513 buckets with `EQUIVALENT (explicit class-order bijection match)` and no `KeyError: 'label'`. The single validation run scored 8,969.58 ms (full: 71.55 ms; prefill + decode: 8,898.03 ms). This is a correctness check against the regenerated reference, not an additional three-run performance comparison or a claim of equivalence to the former malformed dumps. The Step 25 timings above describe the earlier worker isolation change.
+
+---
+
 # Potential paths to try next
 ```mermaid
 flowchart TD
-        subgraph MultiCore["1. Multi-Core Parallelism (Immediate 6x-10x)"]
-            MC1["Shard 2N buckets across 12 Oryon cores"]
-            MC2["Thread-local Planner scratch buffers (zero locks)"]
+        subgraph MultiCore["1. Parallel Bucket Performance"]
+            MC1["Benchmark parallel planAll across all buckets"]
+            MC2["Measure per-worker scratch memory and reuse"]
         end
 
         subgraph DeltaBFS["2. Base-Graph Delta Sweep Filter (2x-3x)"]

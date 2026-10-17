@@ -900,6 +900,23 @@ struct Planner
             }
         }
 
+        // Commit the cascade to class membership; counting invalid expressions
+        // alone leaves their references to empty classes in the graph.
+        if (cascadePruned > 0)
+        {
+            for (uint32_t i = 0; i < numClasses; ++i)
+            {
+                const EClassId class_id{i};
+                if (egraph.findConst(class_id) != class_id)
+                    continue;
+                EClass &cls = egraph.getEClass(class_id);
+                const auto end = std::remove_if(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId node_id) {
+                    return !enode_valid[node_id.value];
+                });
+                cls.enodes.erase(end, cls.enodes.end());
+            }
+        }
+
         return cascadePruned;
     }
 
@@ -2832,11 +2849,24 @@ struct Planner
 #endif
                     try
                     {
+                        // Each worker reuses its own scratch buffers. Sharing this planner's
+                        // vectors lets another bucket resize memory while a rule is using it.
+                        Planner worker_planner(costModel, settings);
+                        worker_planner.fullSaturationRules_ = fullSaturationRules_;
+                        worker_planner.fullSaturationState_ = &full_state;
+                        worker_planner.fullSaturationSliceMemo_ = fullSaturationSliceMemo_;
+                        worker_planner.fullSaturationBaseClassEnodeCounts_ = fullSaturationBaseClassEnodeCounts_;
+                        worker_planner.fullSaturationBaseClassStaged_ = fullSaturationBaseClassStaged_;
+                        worker_planner.regionFacts_ = &region_facts;
+                        worker_planner.cached_topo_ = cached_topo_;
+                        worker_planner.cached_topo_root_ = cached_topo_root_;
+                        worker_planner.cached_topo_graph_ = cached_topo_graph_;
+                        worker_planner.cost_memo_ = cost_memo_;
                         for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
                         {
                             if (b == full_idx)
                                 continue;
-                            bucket_states[b] = saturateBucket(
+                            bucket_states[b] = worker_planner.saturateBucket(
                                 rootId, graph, buckets[b], settings.saturate_partial_buckets, repo, &full_state);
                         }
                     }
@@ -3050,11 +3080,11 @@ struct Planner
             uint32_t removed1 = 0, removed2 = 0, removed3 = 0, removed4 = 0, removed5 = 0;
         };
         std::vector<BucketCycleReport> cycle_reports(buckets.size());
-        auto reduceBucket = [&](uint32_t b) {
+        auto reduceBucket = [&](uint32_t b, Planner &worker_planner) {
             BucketCycleReport &r = cycle_reports[b];
             bucket_states[b].rebuild(true);
 
-            all_enode_infos[b] = computeENodeInfos(bucket_states[b]);
+            all_enode_infos[b] = worker_planner.computeENodeInfos(bucket_states[b]);
             if (std::getenv("TG_DEBUG_ROOTS"))
             {
                 const EGraph &eg = bucket_states[b];
@@ -3092,7 +3122,7 @@ struct Planner
                         ++scatterBefore;
                         scatterInf += all_enode_infos[b][e].cost == TGConstants::INF;
                     }
-            pruneEGraph(bucket_states[b], all_enode_infos[b]);
+            worker_planner.pruneEGraph(bucket_states[b], all_enode_infos[b]);
             if (std::getenv("TG_DEBUG_ROOTS"))
             {
                 uint32_t scatterAfter = 0;
@@ -3154,7 +3184,7 @@ struct Planner
             if (total_removed > 0 || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
             {
                 bucket_states[b].rebuild(true);
-                all_enode_infos[b] = computeENodeInfos(bucket_states[b]);
+                all_enode_infos[b] = worker_planner.computeENodeInfos(bucket_states[b]);
                 bucket_states[b].clearHashcons();
                 bucket_states[b].constantHashIndex.clear();
                 bucket_states[b].classes.shrink_to_fit();
@@ -3165,7 +3195,7 @@ struct Planner
             // The first bucket fills the cost memo the others mostly reuse.
             const uint32_t nb = static_cast<uint32_t>(buckets.size());
             if (nb > 0)
-                reduceBucket(0);
+                reduceBucket(0, *this);
             const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), std::max(nb, 1u)));
             std::atomic<uint32_t> next_bucket{1};
             std::vector<std::thread> threads;
@@ -3178,8 +3208,10 @@ struct Planner
 #endif
                     try
                     {
+                        Planner worker_planner(costModel, settings);
+                        worker_planner.cost_memo_ = cost_memo_;
                         for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
-                            reduceBucket(b);
+                            reduceBucket(b, worker_planner);
                     }
                     catch (...)
                     {

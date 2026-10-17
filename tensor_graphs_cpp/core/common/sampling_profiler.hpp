@@ -26,6 +26,7 @@
 #pragma comment(lib, "dbghelp.lib")
 
 #include "core/types.hpp"
+#include "core/common/windows_symbols.hpp"
 
 class SamplingProfiler
 {
@@ -84,8 +85,8 @@ class SamplingProfiler
         if (!out)
             Error::throw_err(std::string("[SamplingProfiler] cannot write ") + path);
         HANDLE process = GetCurrentProcess();
-        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-        SymInitialize(process, nullptr, TRUE);
+        ensureWindowsSymbols();
+        WindowsSymbolsLock symbol_lock;
         auto name = [&](DWORD64 address) {
             alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 512];
             SYMBOL_INFO *symbol = reinterpret_cast<SYMBOL_INFO *>(buffer);
@@ -134,7 +135,6 @@ class SamplingProfiler
         };
         dump("leaf", leafByName);
         dump("inclusive", inclusiveByName);
-        SymCleanup(process);
         stacks_.clear();
     }
 

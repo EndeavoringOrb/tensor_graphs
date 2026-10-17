@@ -21,6 +21,7 @@
 // clang-format on
 
 #pragma comment(lib, "dbghelp.lib")
+#include "core/common/windows_symbols.hpp"
 
 inline const char *get_exception_code_name(DWORD code)
 {
@@ -51,6 +52,8 @@ inline const char *get_exception_code_name(DWORD code)
 
 inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
 {
+    fprintf(stderr, "  frame %d: 0x%llx\n", frame_idx, addr);
+    fflush(stderr);
     // 1. Resolve module name and relative base offset
     char mod_name[MAX_PATH] = "<unknown>";
     DWORD64 mod_base = SymGetModuleBase64(process, addr);
@@ -117,69 +120,41 @@ inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
     std::cerr << "\n";
 }
 
-inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+// Keep SEH in a function without C++ objects requiring stack unwinding.
+inline void reportCrashStack(EXCEPTION_POINTERS *ep)
 {
-    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
-    {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    DWORD code = ep->ExceptionRecord->ExceptionCode;
-
-    // Filter strictly for fatal hardware/memory errors
-    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
-        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
-        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
-        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
-        code != EXCEPTION_FLT_UNDERFLOW)
-    {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
-    static volatile LONG g_in_handler = 0;
-    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
-    {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
     HANDLE process = GetCurrentProcess();
     HANDLE thread = GetCurrentThread();
-
-    // Ensure DbgHelp symbol engine is initialized
-    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
-    SymInitialize(process, NULL, TRUE);
-
     DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
-
-    std::cerr << "\n========================================================\n"
-              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
-              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
-
-    // Diagnostic information for Access Violations
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
-    {
-        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
-        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
-        const char *op = (access_type == 0)   ? "read from"
-                         : (access_type == 1) ? "write to"
-                         : (access_type == 8) ? "execute at"
-                                              : "access";
-        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
-        if (fault_target < 0x1000)
-        {
-            std::cerr << " (Null / near-null pointer dereference)";
-        }
-        std::cerr << "\n";
-    }
-
-    std::cerr << "========================================================\n"
-              << "Call Stack (Crash Site):\n";
-
     // Copy the context record because StackWalk64 mutates it during unwinding
     CONTEXT ctx = *ep->ContextRecord;
     ctx.ContextFlags = CONTEXT_FULL;
 
+#if defined(_M_ARM64) || defined(__aarch64__)
+    // Use the OS ARM64 unwinder; system DbgHelp versions can fail in StackWalk64.
+    for (int frame_idx = 0; frame_idx < 64 && ctx.Pc; ++frame_idx)
+    {
+        const DWORD64 previous_pc = ctx.Pc;
+        const DWORD64 previous_sp = ctx.Sp;
+        print_frame_info(process, ctx.Pc, frame_idx);
+        DWORD64 image_base = 0;
+        PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(ctx.Pc, &image_base, nullptr);
+        if (entry)
+        {
+            PVOID handler_data = nullptr;
+            DWORD64 establisher_frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Pc, entry, &ctx,
+                             &handler_data, &establisher_frame, nullptr);
+        }
+        else
+        {
+            ctx.Pc = ctx.Lr;
+            ctx.Lr = 0;
+        }
+        if (ctx.Pc == previous_pc && ctx.Sp == previous_sp)
+            break;
+    }
+#else
     STACKFRAME64 frame;
     memset(&frame, 0, sizeof(frame));
     DWORD machineType = IMAGE_FILE_MACHINE_UNKNOWN;
@@ -210,7 +185,8 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
     frame.AddrStack.Mode = AddrModeFlat;
 #endif
 
-    int frame_idx = 0;
+    print_frame_info(process, fault_pc, 0);
+    int frame_idx = 1;
     DWORD64 prev_pc = 0;
 
     while (frame_idx < 64)
@@ -232,11 +208,130 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
         frame_idx++;
     }
 
-    // If StackWalk64 was unable to unwind even frame 0, print the fault PC directly
-    if (frame_idx == 0)
+
+#endif
+
+}
+
+inline void reportCrashStackProtected(EXCEPTION_POINTERS *ep)
+{
+    __try
     {
-        print_frame_info(process, fault_pc, 0);
+        reportCrashStack(ep);
     }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        fprintf(stderr, "Stack reporting failed: exception 0x%08lx\n", GetExceptionCode());
+        fflush(stderr);
+    }
+}
+
+inline void writeCrashDump(EXCEPTION_POINTERS *ep)
+{
+    char dump_path[MAX_PATH];
+    snprintf(dump_path, sizeof(dump_path), "tensor_graphs_crash_%lu_%llu.dmp",
+             GetCurrentProcessId(), GetTickCount64());
+    HANDLE dump_file = CreateFileA(dump_path, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (dump_file == INVALID_HANDLE_VALUE)
+    {
+        fprintf(stderr, "Cannot create crash dump: Windows error %lu\n", GetLastError());
+        return;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION exception_info = {GetCurrentThreadId(), ep, FALSE};
+    __try
+    {
+        BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), dump_file,
+            static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules),
+            &exception_info, nullptr, nullptr);
+        if (written)
+            fprintf(stderr, "Crash dump: %s\n", dump_path);
+        else
+            fprintf(stderr, "Crash dump failed: Windows error %lu\n", GetLastError());
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        fprintf(stderr, "Crash dump writer faulted: exception 0x%08lx\n", GetExceptionCode());
+    }
+    CloseHandle(dump_file);
+    fflush(stderr);
+}
+
+inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // Filter strictly for fatal hardware/memory errors
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_FLT_UNDERFLOW)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
+    static volatile LONG g_in_handler = 0;
+    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE process = GetCurrentProcess();
+
+    DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
+
+    // Record the original fault without touching DbgHelp or the C++ heap.
+    fprintf(stderr, "\nFatal exception 0x%08lx, thread %lu, PC 0x%llx\n",
+            code, GetCurrentThreadId(), fault_pc);
+    MEMORY_BASIC_INFORMATION fault_memory = {};
+    if (VirtualQuery(reinterpret_cast<LPCVOID>(fault_pc), &fault_memory, sizeof(fault_memory)))
+    {
+        char module_path[MAX_PATH] = {};
+        GetModuleFileNameA(static_cast<HMODULE>(fault_memory.AllocationBase), module_path, MAX_PATH);
+        fprintf(stderr, "Module: %s + 0x%llx\n", module_path,
+                fault_pc - reinterpret_cast<DWORD64>(fault_memory.AllocationBase));
+    }
+    fflush(stderr);
+    std::cerr << "\n========================================================\n"
+              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
+              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
+
+    // Diagnostic information for Access Violations
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+    {
+        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
+        const char *op = (access_type == 0)   ? "read from"
+                         : (access_type == 1) ? "write to"
+                         : (access_type == 8) ? "execute at"
+                                              : "access";
+        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
+        if (fault_target < 0x1000)
+        {
+            std::cerr << " (Null / near-null pointer dereference)";
+        }
+        std::cerr << "\n";
+    }
+
+    std::cerr << "========================================================\n"
+              << "Call Stack (Crash Site):\n";
+
+    fflush(stderr);
+    if (TryAcquireSRWLockExclusive(&tg_symbol_lock))
+    {
+        writeCrashDump(ep);
+        reportCrashStackProtected(ep);
+        ReleaseSRWLockExclusive(&tg_symbol_lock);
+    }
+    else
+        fprintf(stderr, "DbgHelp busy; skipping optional diagnostics.\n");
 
     std::cerr << "========================================================\n" << std::flush;
     fflush(stderr);
@@ -249,10 +344,8 @@ struct InstallCrashHandler
 {
     InstallCrashHandler()
     {
-        HANDLE process = GetCurrentProcess();
-        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
-        SymInitialize(process, NULL, TRUE);
-        AddVectoredExceptionHandler(1, TG_CrashHandler);
+        ensureWindowsSymbols();
+        SetUnhandledExceptionFilter(TG_CrashHandler);
     }
 } static _install_crash_handler;
 #endif
