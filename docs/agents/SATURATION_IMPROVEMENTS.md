@@ -590,3 +590,33 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
   - `tests/verify_saturation.py --seq-len 4` passes 100% exact graph equivalence (`EQUIVALENT (explicit class-order bijection match)`).
   - `tests/verify_saturation.py --seq-len 800` passes 100% exact graph equivalence across 1,601 buckets in **29,547.72 ms**.
   - `tests/verify_saturation.py --seq-len 805` passes 100% exact graph equivalence across 1,611 buckets in **29,741.41 ms** (< 30s budget, 283,085 family vertices) — **NEW RECORD UNDER 30 SECONDS!**
+
+# Potential paths to try next
+```mermaid
+flowchart TD
+        subgraph MultiCore["1. Multi-Core Parallelism (Immediate 6x-10x)"]
+            MC1["Shard 2N buckets across 12 Oryon cores"]
+            MC2["Thread-local Planner scratch buffers (zero locks)"]
+        end
+
+        subgraph DeltaBFS["2. Base-Graph Delta Sweep Filter (2x-3x)"]
+            DB1["Precompute parent adjacency list once on base snapshot"]
+            DB2["Partial buckets only link newly added dirty classes"]
+            DB3["Skip O(num_classes) assign/clearing passes"]
+        end
+
+        subgraph Backtracking["3. Transactional Undo Log vs. Full EGraph Copy"]
+            BT1["Instead of copying EGraph per bucket, log additions"]
+            BT2["Roll back changes between buckets (zero-copy reset)"]
+        end
+
+        subgraph Equivalence["4. In-Memory Graph Fingerprinting"]
+            EQ1["Replace text file dumps with fast 64-bit structural hashes"]
+            EQ2["Zero disk I/O during candidate verification"]
+        end
+
+        MultiCore --> UltimateGoal["Target: seq_len = 131,072"]
+        DeltaBFS --> UltimateGoal
+        Backtracking --> UltimateGoal
+        Equivalence --> UltimateGoal
+```
