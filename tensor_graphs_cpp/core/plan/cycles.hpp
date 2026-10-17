@@ -46,7 +46,7 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
     CycleAdjacency &incoming,
     std::vector<uint8_t> &canonical)
 {
-    const uint32_t class_count = static_cast<uint32_t>(egraph.getClasses().size());
+    const uint32_t class_count = static_cast<uint32_t>(egraph.getNumClasses());
     canonical.assign(class_count, 0);
 
     for (uint32_t class_id = 0; class_id < class_count; ++class_id)
@@ -232,7 +232,7 @@ inline void printEGraphCycles(const EGraph &egraph, std::ostream &output)
 inline uint32_t removeDirectSelfReferenceENodes(EGraph &egraph)
 {
     uint32_t removed_count = 0;
-    for (uint32_t class_index = 0; class_index < egraph.getClasses().size(); ++class_index)
+    for (uint32_t class_index = 0; class_index < egraph.getNumClasses(); ++class_index)
     {
         EClassId class_id{class_index};
         if (egraph.findConst(class_id) != class_id)

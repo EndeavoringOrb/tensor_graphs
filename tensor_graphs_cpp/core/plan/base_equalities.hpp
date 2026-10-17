@@ -6,6 +6,21 @@
 // without sharing extractions or changing any bucket's regions.
 inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buckets)
 {
+    bool has_any_equalities = !full_state.base_equalities.empty();
+    if (!has_any_equalities)
+    {
+        for (const EGraph &b : buckets)
+        {
+            if (!b.base_equalities.empty())
+            {
+                has_any_equalities = true;
+                break;
+            }
+        }
+    }
+    if (!has_any_equalities)
+        return;
+
     std::unordered_map<BaseEClassId, BaseEClassId> aliases;
     auto canonical = [&](BaseEClassId id) {
         auto it = aliases.find(id);
@@ -19,6 +34,11 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
     std::vector<EGraph *> graphs{&full_state};
     for (EGraph &graph : buckets)
         graphs.push_back(&graph);
+    for (EGraph *graph : graphs)
+    {
+        graph->materializeClasses();
+        graph->materializeENodes();
+    }
     bool changed;
     do
     {

@@ -38,17 +38,11 @@ class KernelPatternCache
         reference_only_mode = refOnly;
     }
 
-    // Same result as KernelRegistry::get().findMatchingKernelsByPatternHash
-    // with the same arguments.
-    std::vector<KernelId> find(const Graph &patternGraph, LogicalId patternRootId,
-                               const std::vector<TensorNode> &inputs, const TensorNode &output, bool reference_only,
-                               MemSpace output_mem_space, const std::vector<MemSpace> &input_mem_spaces,
-                               const std::vector<Engine> &engines, bool ignore_output_mem_space,
-                               bool ignore_input_mem_spaces, bool ignore_engines, bool ignore_input_contig)
+    std::vector<KernelId> getCandidates(const Graph &patternGraph, LogicalId patternRootId, bool refOnly = false)
     {
         const KernelRegistry &registry = KernelRegistry::get();
-        const bool refOnly = reference_only_mode || reference_only;
-        std::string key = refOnly ? "r" : "a";
+        const bool ref_only = reference_only_mode || refOnly;
+        std::string key = ref_only ? "r" : "a";
         appendStructureKey(patternGraph, patternRootId, key);
         std::vector<KernelId> candidates;
         bool found = false;
@@ -63,10 +57,23 @@ class KernelPatternCache
         }
         if (!found)
         {
-            candidates = patternMatchingEntries(registry, patternGraph, patternRootId, refOnly);
+            candidates = patternMatchingEntries(registry, patternGraph, patternRootId, ref_only);
             std::lock_guard<std::mutex> lock(mtx);
             cache.emplace(key, candidates);
         }
+        return candidates;
+    }
+
+    // Same result as KernelRegistry::get().findMatchingKernelsByPatternHash
+    // with the same arguments.
+    std::vector<KernelId> find(const Graph &patternGraph, LogicalId patternRootId,
+                               const std::vector<TensorNode> &inputs, const TensorNode &output, bool reference_only,
+                               MemSpace output_mem_space, const std::vector<MemSpace> &input_mem_spaces,
+                               const std::vector<Engine> &engines, bool ignore_output_mem_space,
+                               bool ignore_input_mem_spaces, bool ignore_engines, bool ignore_input_contig)
+    {
+        const KernelRegistry &registry = KernelRegistry::get();
+        std::vector<KernelId> candidates = getCandidates(patternGraph, patternRootId, reference_only);
 
         std::vector<KernelId> matches;
         for (KernelId uid : candidates)

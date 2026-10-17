@@ -58,15 +58,16 @@ inline void dumpSaturationGraph(const EGraph &egraph, const Graph &graph, const 
         out << "C " << cls.id.value << ' ' << std::quoted(label.str()) << '\n';
     }
     std::set<std::string> expressions;
-    for (const auto &node : egraph.enodes)
+    const auto &all_enodes = egraph.getENodes();
+    for (size_t index = 0; index < all_enodes.size(); ++index)
     {
+        const auto &node = all_enodes[index];
         std::ostringstream row, label;
         label << node.getKernelId().value << '|' << int(node.getOpType()) << '|' << node.getOpName()
               << '|' << toString(node.getShape()) << '|' << toString(node.getStrides()) << '|'
               << int(node.getDType()) << '|' << toString(node.getMemSpace()) << '|' << node.getContentHash();
         for (auto engine : node.getEngines())
             label << '|' << toString(engine);
-        const auto index = &node - egraph.enodes.data();
         if (index < egraph.nodeToEClass.size())
             row << egraph.findConst(egraph.nodeToEClass[index]).value << ' ' << std::quoted(label.str());
         else
@@ -150,7 +151,9 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, co
         auto prefill_t0 = std::chrono::steady_clock::now();
         auto prefill_result = planner.saturateBucket(root, graph, prefill, true, nullptr, &state);
         auto prefill_t1 = std::chrono::steady_clock::now();
-        partial_ms += std::chrono::duration<double, std::milli>(prefill_t1 - prefill_t0).count();
+        double p_ms = std::chrono::duration<double, std::milli>(prefill_t1 - prefill_t0).count();
+        partial_ms += p_ms;
+        std::cout << "[bucket_timing] prefill" << bucket_seq_len << ": " << p_ms << " ms" << std::endl;
 
         if (!dump_prefix.empty())
             dumpPrunedSaturationGraph(planner, prefill_result, graph,
@@ -165,7 +168,9 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, co
         auto decode_t0 = std::chrono::steady_clock::now();
         auto decode_result = planner.saturateBucket(root, graph, decode, true, nullptr, &state);
         auto decode_t1 = std::chrono::steady_clock::now();
-        partial_ms += std::chrono::duration<double, std::milli>(decode_t1 - decode_t0).count();
+        double d_ms = std::chrono::duration<double, std::milli>(decode_t1 - decode_t0).count();
+        partial_ms += d_ms;
+        std::cout << "[bucket_timing] decode" << bucket_seq_len << ": " << d_ms << " ms" << std::endl;
 
         if (!dump_prefix.empty())
             dumpPrunedSaturationGraph(planner, decode_result, graph,
@@ -173,12 +178,13 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, co
     }
 
     double full_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "[bucket_timing] full: " << full_ms << " ms" << std::endl;
 
     SaturationBenchmarkResult res;
     res.full_ms = full_ms;
     res.partial_ms = partial_ms;
     res.total_ms = full_ms + partial_ms;
-    res.full_enodes = state.getENodes().size();
-    res.full_classes = state.getClasses().size();
+    res.full_enodes = state.getNumENodes();
+    res.full_classes = state.getNumClasses();
     return res;
 }

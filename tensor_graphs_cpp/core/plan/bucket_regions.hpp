@@ -15,6 +15,7 @@
 #include "core/misc.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
+#include "core/coordinate_predicate.hpp"
 
 // Diagnostics switch, read once (getenv takes the CRT environment lock).
 inline bool debugEnvTgDebugMissing()
@@ -45,6 +46,11 @@ struct TriuBound
     uint32_t col_axis = 0;
     int32_t diag_k = 1;
 
+    CoordinatePredicate toPredicate(size_t rank) const
+    {
+        return CoordinatePredicate::triangular(rank, row_axis, col_axis, diag_k);
+    }
+
     bool operator==(const TriuBound &other) const
     {
         return row_axis == other.row_axis && col_axis == other.col_axis && diag_k == other.diag_k;
@@ -67,6 +73,29 @@ struct RegionFacts
     std::unordered_map<LogicalId, std::vector<Region>> finite, support;
     std::unordered_map<LogicalId, TriuBound> triuMasks;
     std::unordered_map<LogicalId, TriuBound> triuFinite, triuSupport;
+
+    // Missing facts are unknown, distinct from an explicitly empty domain.
+    // Prefer analytic triangles so conversion never enumerates their rows.
+    std::optional<CoordinatePredicate> finitePredicateOf(LogicalId id, size_t rank) const
+    {
+        const auto triangular = triuFinite.find(id);
+        if (triangular != triuFinite.end())
+            return triangular->second.toPredicate(rank);
+        const auto boxes = finite.find(id);
+        if (boxes != finite.end())
+            return CoordinatePredicate::fromRegions(rank, boxes->second);
+        return std::nullopt;
+    }
+    std::optional<CoordinatePredicate> supportPredicateOf(LogicalId id, size_t rank) const
+    {
+        const auto triangular = triuSupport.find(id);
+        if (triangular != triuSupport.end())
+            return triangular->second.toPredicate(rank);
+        const auto boxes = support.find(id);
+        if (boxes != support.end())
+            return CoordinatePredicate::fromRegions(rank, boxes->second);
+        return std::nullopt;
+    }
     // Elements the full output needs (bucket-independent), computed by the
     // first computeBucketRegions call that needs them.
     struct LiveCache
@@ -99,6 +128,22 @@ struct BucketRegions
     {
         auto it = needed.find(id);
         return it == needed.end() ? empty_ : it->second;
+    }
+
+    // Preserve the exact set represented by the existing box analysis. These
+    // adapters do not silently intersect with mask/support facts: doing so can
+    // change cached-value requirements for operations with masked outputs.
+    CoordinatePredicate dirtyPredicateOf(LogicalId id, size_t rank) const
+    {
+        return CoordinatePredicate::fromRegions(rank, dirtyOf(id));
+    }
+    CoordinatePredicate neededPredicateOf(LogicalId id, size_t rank) const
+    {
+        return CoordinatePredicate::fromRegions(rank, neededOf(id));
+    }
+    CoordinatePredicate livePredicateOf(LogicalId id, size_t rank) const
+    {
+        return dirtyPredicateOf(id, rank).intersect(neededPredicateOf(id, rank));
     }
 
     // Elements that must be (re)computed this run: dirty & needed.

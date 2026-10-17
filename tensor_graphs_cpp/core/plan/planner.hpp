@@ -255,6 +255,9 @@ struct Planner
     // saturation produced (set by the caller that keeps it alive).
     std::vector<std::shared_ptr<Rule>> fullSaturationRules_;
     const EGraph *fullSaturationState_ = nullptr;
+    SliceMemoTable fullSaturationSliceMemo_;
+    std::vector<uint32_t> fullSaturationBaseClassEnodeCounts_;
+    std::vector<uint8_t> fullSaturationBaseClassStaged_;
     // Bucket-independent region facts of the graph planAll is planning.
     const RegionFacts *regionFacts_ = nullptr;
 
@@ -377,14 +380,38 @@ struct Planner
     void saturate(EGraph &egraph, const std::unordered_set<EClassId> &protectedEClasses,
                   bool injected, bool allowPushDownOnProtected = false, TGStore *repo = nullptr,
                   const std::vector<std::shared_ptr<Rule>> *seed = nullptr,
-                  std::vector<std::shared_ptr<Rule>> *saturated = nullptr, const BucketRegions *regions = nullptr)
+                  std::vector<std::shared_ptr<Rule>> *saturated = nullptr, const BucketRegions *regions = nullptr,
+                  size_t initial_unchanged_classes = 0,
+                  const std::vector<uint32_t> *initial_class_sizes = nullptr,
+                  const std::vector<uint8_t> *initial_staged = nullptr,
+                  const SliceMemoTable *seed_slice_memo = nullptr,
+                  SliceMemoTable *saved_slice_memo = nullptr)
     {
+        SliceMemoTable slice_memo_table;
+        if (seed_slice_memo)
+            slice_memo_table = *seed_slice_memo;
         RuleCtx ctx{egraph, protectedEClasses, repo, &costModel, regions};
+        ctx.slice_memo = &slice_memo_table;
+        if (seed && !seed->empty())
+        {
+            ctx.base_enode_watermark = (*seed)[0]->base_enode_watermark;
+            ctx.base_class_watermark = static_cast<uint32_t>(initial_unchanged_classes);
+            ctx.base_staged = initial_staged;
+        }
         std::vector<std::unique_ptr<Rule>> rules;
         if (seed)
         {
             for (const auto &rule : *seed)
                 rules.emplace_back(rule->clone());
+            if (regions)
+            {
+                bool has_scatter_pull_up = false;
+                for (const auto &r : rules)
+                    if (dynamic_cast<ScatterPullUp *>(r.get()))
+                        has_scatter_pull_up = true;
+                if (!has_scatter_pull_up)
+                    rules.emplace_back(makeProfiledRewriteRule<ScatterPullUp>());
+            }
         }
         else
         {
@@ -394,14 +421,7 @@ struct Planner
             rules.emplace_back(makeProfiledRewriteRule<RemoveCopyChains>());
             rules.emplace_back(makeProfiledRewriteRule<ConsumerWeightReuseRule>());
             rules.emplace_back(makeProfiledRewriteRule<RemoveRedundantReshape>());
-        }
-        if (!seed || regions)
             rules.emplace_back(makeProfiledRewriteRule<InfinityDomination>());
-        // Full saturation must also close standalone slice equalities before
-        // assigning persistent identities. Partial saturation may otherwise
-        // discover equality between two already distinct base classes.
-        if (!seed || injected)
-        {
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownElementwise>(allowPushDownOnProtected));
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownDot>(allowPushDownOnProtected));
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownStructural>());
@@ -418,6 +438,17 @@ struct Planner
                                            return list.find("," + rule->name() + ",") != std::string::npos;
                                        }),
                         rules.end());
+        }
+
+        std::array<std::vector<size_t>, static_cast<size_t>(OpType::FUSED) + 1> rules_by_op;
+        for (size_t op_val = 0; op_val <= static_cast<size_t>(OpType::FUSED); ++op_val)
+        {
+            const OpType op = static_cast<OpType>(op_val);
+            for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
+            {
+                if (rules[rule_idx]->canMatchOp(op))
+                    rules_by_op[op_val].push_back(rule_idx);
+            }
         }
 
         std::map<std::string, uint32_t> ruleMatchCounts;
@@ -441,36 +472,72 @@ struct Planner
         std::vector<uint8_t> stagedAtSweepStart;
         size_t classesAtSweepStart = 0;
         auto snapshotSweepStart = [&]() {
-            classesAtSweepStart = egraph.getClasses().size();
+            classesAtSweepStart = egraph.getNumClasses();
             classSizeAtSweepStart.resize(classesAtSweepStart);
             stagedAtSweepStart.assign(classesAtSweepStart, 0);
             for (size_t c = 0; c < classesAtSweepStart; ++c)
-                classSizeAtSweepStart[c] = static_cast<uint32_t>(egraph.getClasses()[c].enodes.size());
+                classSizeAtSweepStart[c] = static_cast<uint32_t>(egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size());
             for (const auto &[cid, data] : egraph.constantStaging)
                 if (cid.value < classesAtSweepStart)
                     stagedAtSweepStart[cid.value] = 1;
         };
+
+        std::vector<uint32_t> parent_counts;
+        std::vector<uint32_t> parent_offsets;
+        std::vector<uint32_t> parent_edges;
+        std::vector<uint32_t> current_offsets;
+        std::vector<uint8_t> seenClass;
+        std::vector<uint32_t> frontier;
+        std::vector<uint32_t> next_frontier;
+        std::vector<uint32_t> filtered_base_enodes;
+
         auto buildSweepFilter = [&]() {
             if (!fusion)
                 return;
             fusion->sweep_filter = nullptr;
-            const auto &classes = egraph.getClasses();
-            // Constant data newly staged in an existing class can complete
-            // constant-matching patterns: treat that class as changed.
-            std::vector<uint8_t> newlyStaged(classes.size(), 0);
-            for (const auto &[cid, data] : egraph.constantStaging)
-                if (cid.value < classesAtSweepStart && !stagedAtSweepStart[cid.value])
-                    newlyStaged[cid.value] = 1;
-            const auto &enodes = egraph.getENodes();
-            std::vector<std::vector<uint32_t>> parents(classes.size());
-            for (uint32_t e = 0; e < enodes.size(); ++e)
-                for (EClassId child : enodes[e].getChildren())
-                    parents[egraph.findConst(child).value].push_back(e);
-            std::vector<uint8_t> seenClass(classes.size(), 0);
-            std::vector<uint32_t> frontier;
-            for (size_t c = 0; c < classes.size(); ++c)
+            ctx.sweep_filter = nullptr;
+            const size_t num_classes = egraph.getNumClasses();
+            const size_t num_enodes = egraph.getNumENodes();
+
+            parent_counts.assign(num_classes, 0);
+            for (uint32_t e = 0; e < num_enodes; ++e)
             {
-                if (c >= classesAtSweepStart || classes[c].enodes.size() != classSizeAtSweepStart[c] || newlyStaged[c])
+                for (EClassId child : egraph.getENode(ENodeId{e}).getChildren())
+                {
+                    uint32_t c = egraph.findConst(child).value;
+                    if (c < num_classes)
+                        parent_counts[c]++;
+                }
+            }
+
+            parent_offsets.resize(num_classes + 1);
+            parent_offsets[0] = 0;
+            for (size_t c = 0; c < num_classes; ++c)
+                parent_offsets[c + 1] = parent_offsets[c] + parent_counts[c];
+            parent_edges.resize(parent_offsets.back());
+            current_offsets = parent_offsets;
+
+            for (uint32_t e = 0; e < num_enodes; ++e)
+            {
+                for (EClassId child : egraph.getENode(ENodeId{e}).getChildren())
+                {
+                    uint32_t c = egraph.findConst(child).value;
+                    if (c < num_classes)
+                        parent_edges[current_offsets[c]++] = e;
+                }
+            }
+
+            seenClass.assign(num_classes, 0);
+            frontier.clear();
+            for (size_t c = 0; c < num_classes; ++c)
+            {
+                bool changed_class = (c >= classesAtSweepStart || egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size() != classSizeAtSweepStart[c]);
+                if (!changed_class && c < classesAtSweepStart && !stagedAtSweepStart[c])
+                {
+                    if (egraph.constantStaging.count(EClassId{static_cast<uint32_t>(c)}))
+                        changed_class = true;
+                }
+                if (changed_class)
                 {
                     const uint32_t canon = egraph.findConst(EClassId{static_cast<uint32_t>(c)}).value;
                     if (!seenClass[canon])
@@ -480,32 +547,57 @@ struct Planner
                     }
                 }
             }
-            sweepFilter.assign(enodes.size(), 0);
+            sweepFilter.assign(num_enodes, 0);
+            filtered_base_enodes.clear();
             for (uint32_t depth = 0; depth < fusion->max_pattern_depth && !frontier.empty(); ++depth)
             {
-                std::vector<uint32_t> next;
+                next_frontier.clear();
                 for (uint32_t c : frontier)
                 {
-                    for (uint32_t e : parents[c])
+                    const uint32_t start_idx = parent_offsets[c];
+                    const uint32_t end_idx = parent_offsets[c + 1];
+                    for (uint32_t idx = start_idx; idx < end_idx; ++idx)
                     {
+                        uint32_t e = parent_edges[idx];
                         if (sweepFilter[e])
                             continue;
                         sweepFilter[e] = static_cast<uint8_t>(std::min<uint32_t>(depth + 1, 255));
+                        if (ctx.base_enode_watermark > 0 && e < ctx.base_enode_watermark)
+                        {
+                            filtered_base_enodes.push_back(e);
+                        }
                         const uint32_t owner = egraph.findConst(egraph.getENodeEClass(ENodeId{e})).value;
                         if (!seenClass[owner])
                         {
                             seenClass[owner] = 1;
-                            next.push_back(owner);
+                            next_frontier.push_back(owner);
                         }
                     }
                 }
-                frontier = std::move(next);
+                frontier = std::move(next_frontier);
             }
+            std::sort(filtered_base_enodes.begin(), filtered_base_enodes.end());
             fusion->sweep_filter = &sweepFilter;
+            ctx.sweep_filter = &sweepFilter;
         };
 
-        if (fusion)
-            fusion->sweep_filter = nullptr;
+        if (seed && initial_unchanged_classes > 0 && initial_class_sizes)
+        {
+            classesAtSweepStart = initial_unchanged_classes;
+            classSizeAtSweepStart = *initial_class_sizes;
+            if (initial_staged)
+                stagedAtSweepStart = *initial_staged;
+            else
+                stagedAtSweepStart.assign(classesAtSweepStart, 0);
+            buildSweepFilter();
+        }
+        else
+        {
+            if (fusion)
+                fusion->sweep_filter = nullptr;
+            ctx.sweep_filter = nullptr;
+        }
+        size_t last_sweep_enodes_bound = ctx.base_enode_watermark;
         while (changed)
         {
             iterations++;
@@ -514,20 +606,25 @@ struct Planner
             uint32_t preMatches = nMatches;
             auto last_progress = std::chrono::steady_clock::now();
             const auto sweep_start = last_progress;
-            for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
-            {
+
+            auto run_node = [&](uint32_t eNodeIdx) {
                 if (time_rules && (eNodeIdx & 0x3FF) == 0 &&
                     std::chrono::steady_clock::now() - last_progress > std::chrono::seconds(5))
                 {
                     last_progress = std::chrono::steady_clock::now();
                     std::stringstream ss;
                     ss << "[saturate progress] sweep=" << iterations << " enode=" << eNodeIdx << "/"
-                       << egraph.getENodes().size() << " classes=" << egraph.getClasses().size();
+                       << egraph.getNumENodes() << " classes=" << egraph.getNumClasses();
                     for (auto const &[name, count] : ruleMatchCounts)
                         ss << " " << name << "=" << count;
                     LOG(INFO) << ss.str();
                 }
-                for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
+                const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+                const size_t op_val = static_cast<size_t>(enode.getOpType());
+                if (op_val >= rules_by_op.size())
+                    return;
+                const auto &candidate_rules = rules_by_op[op_val];
+                for (size_t rule_idx : candidate_rules)
                 {
                     const auto &rule = rules[rule_idx];
                     // Clock reads cost a kernel call on some platforms and
@@ -564,7 +661,25 @@ struct Planner
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
+            };
+
+            const size_t sweep_enodes_bound = egraph.getNumENodes();
+            if (ctx.sweep_filter && ctx.base_enode_watermark > 0)
+            {
+                for (uint32_t eNodeIdx : filtered_base_enodes)
+                    run_node(eNodeIdx);
+                for (uint32_t eNodeIdx = ctx.base_enode_watermark; eNodeIdx < sweep_enodes_bound; ++eNodeIdx)
+                {
+                    if (eNodeIdx >= last_sweep_enodes_bound || (eNodeIdx < ctx.sweep_filter->size() && (*ctx.sweep_filter)[eNodeIdx]))
+                        run_node(eNodeIdx);
+                }
             }
+            else
+            {
+                for (uint32_t eNodeIdx = 0; eNodeIdx < sweep_enodes_bound; ++eNodeIdx)
+                    run_node(eNodeIdx);
+            }
+            last_sweep_enodes_bound = sweep_enodes_bound;
             sweep_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sweep_start).count();
             if (nMatches == preMatches)
             {
@@ -592,17 +707,13 @@ struct Planner
                 ss << "  " << name << ": " << count << " matches\n";
             }
             ss << "Total Matches: " << nMatches;
-            LOG(DEBUG) << ss.str();
-            if (!changed)
-            {
-                LOG(INFO) << ss.str();
-            }
+            LOG(INFO) << ss.str();
             timer.tick();
             if (time_rules && fusion)
             {
                 for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
                     if (rules[rule_idx].get() == fusion)
-                        LOG(INFO) << "[saturate sweep] sweep=" << iterations << " enodes=" << egraph.getENodes().size()
+                        LOG(INFO) << "[saturate sweep] sweep=" << iterations << " enodes=" << egraph.getNumENodes()
                                   << " fusion match total=" << rule_match_seconds[rule_idx] << "s";
             }
             const auto filter_start = std::chrono::steady_clock::now();
@@ -611,15 +722,18 @@ struct Planner
         }
         if (fusion)
             fusion->sweep_filter = nullptr;
+        ctx.sweep_filter = nullptr;
         if (time_rules)
-            LOG(INFO) << "[saturate phases] sweeps=" << iterations << " sweep=" << sweep_seconds
-                      << "s rebuild=" << rebuild_seconds << "s filter=" << filter_seconds << "s";
+            std::cout << "[saturate phases] sweeps=" << iterations << " sweep=" << sweep_seconds
+                      << "s rebuild=" << rebuild_seconds << "s filter=" << filter_seconds << "s" << std::endl;
         if (time_rules)
             for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
-                LOG(INFO) << "[saturate timing] rule=" << rules[rule_idx]->name()
+                std::cout << "[saturate timing] rule=" << rules[rule_idx]->name()
                           << " match=" << rule_match_seconds[rule_idx] << "s apply=" << rule_apply_seconds[rule_idx]
-                          << "s";
+                          << "s" << std::endl;
         printRewriteProfileSummary();
+        if (saved_slice_memo)
+            *saved_slice_memo = std::move(slice_memo_table);
         if (saturated)
         {
             saturated->clear();
@@ -630,8 +744,8 @@ struct Planner
 
     uint32_t deathCascade(EGraph &egraph)
     {
-        uint32_t numClasses = egraph.getClasses().size();
-        std::vector<bool> enode_valid(egraph.getENodes().size(), false);
+        uint32_t numClasses = static_cast<uint32_t>(egraph.getNumClasses());
+        std::vector<bool> enode_valid(egraph.getNumENodes(), false);
         std::vector<uint32_t> valid_enode_count(numClasses, 0);
         std::vector<std::vector<ENodeId>> parents_map(numClasses);
 
@@ -701,7 +815,7 @@ struct Planner
     void pruneEGraph(EGraph &egraph, const std::vector<ENodeInfo> &enodeInfos)
     {
         uint32_t totalPruned = 0;
-        for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
+        for (uint32_t i = 0; i < egraph.getNumClasses(); ++i)
         {
             EClassId e_class_id = egraph.find(EClassId{i});
             if (e_class_id != EClassId{i})
@@ -738,8 +852,8 @@ struct Planner
     // ignores scheduling precedence and memory constraints.
     void computeENodeHeuristicCosts(const EGraph &egraph, std::vector<ENodeInfo> &enodeInfos) const
     {
-        const uint32_t num_classes = static_cast<uint32_t>(egraph.getClasses().size());
-        const uint32_t num_enodes = static_cast<uint32_t>(egraph.getENodes().size());
+        const uint32_t num_classes = static_cast<uint32_t>(egraph.getNumClasses());
+        const uint32_t num_enodes = static_cast<uint32_t>(egraph.getNumENodes());
 
         std::vector<float> eclass_dp_cost(num_classes, TGConstants::INF);
         std::vector<float> eclass_dp_cp_cost(num_classes, TGConstants::INF);
@@ -785,7 +899,7 @@ struct Planner
         uint32_t changed_class = 0;
         auto evaluate = [&](uint32_t i) -> bool {
 
-            const ENode &enode = egraph.getENodes()[i];
+            const ENode &enode = egraph.getENode(ENodeId{i});
             const float cost = enodeInfos[i].cost;
             if (cost == TGConstants::INF || std::isnan(cost))
             {
@@ -917,7 +1031,7 @@ struct Planner
             if (cost == TGConstants::INF || std::isnan(cost))
                 continue;
             const uint32_t owner = egraph.findConst(egraph.getENodeEClass(ENodeId{i})).value;
-            for (EClassId child : egraph.getENodes()[i].getChildren())
+            for (EClassId child : egraph.getENode(ENodeId{i}).getChildren())
             {
                 const uint32_t c = egraph.findConst(child).value;
                 if (c >= num_classes || (!class_users[c].empty() && class_users[c].back() == i))
@@ -1055,7 +1169,7 @@ struct Planner
             ENodeWork &work = enode_work[i];
             work.cost = cost;
             work.begin = static_cast<uint32_t>(enode_engine_ids.size());
-            for (const Engine &engine : egraph.getENodes()[i].getEngines())
+            for (const Engine &engine : egraph.getENode(ENodeId{i}).getEngines())
             {
                 auto inserted = engine_ordinal.emplace(
                     engine, static_cast<uint32_t>(engine_ordinal.size()));
@@ -1095,7 +1209,7 @@ struct Planner
         std::vector<std::vector<EClassId>> canonical_children(num_enodes);
         for (uint32_t i = 0; i < num_enodes; ++i)
         {
-            const auto &children = egraph.getENodes()[i].getChildren();
+            const auto &children = egraph.getENode(ENodeId{i}).getChildren();
             auto &canonical = canonical_children[i];
             canonical.reserve(children.size());
             for (EClassId child : children)
@@ -1375,11 +1489,11 @@ struct Planner
 
     std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph)
     {
-        std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
+        std::vector<ENodeInfo> enodeInfos(egraph.getNumENodes());
 
-        for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+        for (uint32_t i = 0; i < egraph.getNumENodes(); ++i)
         {
-            const ENode &enode = egraph.getENodes()[i];
+            const ENode &enode = egraph.getENode(ENodeId{i});
             ENodeInfo info;
             info.is_view = false;
             info.dp_cost = TGConstants::INF;
@@ -1726,8 +1840,6 @@ struct Planner
                            injected;
             }
         }
-        if (injected)
-            egraph.rebuild();
         return injected;
     }
 
@@ -1739,8 +1851,6 @@ struct Planner
         {
             injected = injectPartialPath(egraph, graph, rootId, outputNeeded);
         }
-        if (injected)
-            egraph.rebuild();
         return injected;
     }
 
@@ -1782,19 +1892,27 @@ struct Planner
         }
         report_bucket_timing("prepared egraph state", "topological nodes=" + std::to_string(topo.size()) +
                                                             ", classes=" +
-                                                            std::to_string(egraph.getClasses().size()) +
-                                                            ", enodes=" + std::to_string(egraph.getENodes().size()) +
+                                                            std::to_string(egraph.getNumClasses()) +
+                                                            ", enodes=" + std::to_string(egraph.getNumENodes()) +
                                                             ", elapsed=" + std::to_string(
                                                                 std::chrono::duration<double, std::milli>(BucketClock::now() - graph_setup_start).count()) +
                                                             " ms");
 
         auto base_ids_start = BucketClock::now();
-        for (const EClass &cls : egraph.getClasses())
+        if (startingState != nullptr)
         {
-            if (egraph.findConst(cls.id) == cls.id && cls.base_eclass_id != BaseEClassId{})
+            base_state_has_base_ids = true;
+        }
+        else
+        {
+            for (size_t i = 0; i < egraph.getNumClasses(); ++i)
             {
-                base_state_has_base_ids = true;
-                break;
+                EClassId cid{static_cast<uint32_t>(i)};
+                if (egraph.findConst(cid) == cid && egraph.getEClass(cid).base_eclass_id != BaseEClassId{})
+                {
+                    base_state_has_base_ids = true;
+                    break;
+                }
             }
         }
         report_bucket_timing("checked base IDs", "elapsed=" + std::to_string(
@@ -1878,25 +1996,76 @@ struct Planner
                                                                  std::chrono::duration<double, std::milli>(BucketClock::now() - inject_start).count()) +
                                                              " ms");
 
+        const size_t base_class_count = egraph.getNumClasses();
+        const bool seeded = startingState && startingState == fullSaturationState_ && !fullSaturationRules_.empty();
+        std::vector<uint32_t> local_base_class_enode_counts;
+        std::vector<uint8_t> local_base_class_staged;
+        const std::vector<uint32_t> *base_class_enode_counts_ptr = nullptr;
+        const std::vector<uint8_t> *base_class_staged_ptr = nullptr;
+        if (seeded)
+        {
+            base_class_enode_counts_ptr = &fullSaturationBaseClassEnodeCounts_;
+            base_class_staged_ptr = &fullSaturationBaseClassStaged_;
+        }
+        else if (startingState && (dirtyInjected || neededInjected))
+        {
+            local_base_class_enode_counts.resize(base_class_count);
+            for (size_t c = 0; c < base_class_count; ++c)
+                local_base_class_enode_counts[c] = static_cast<uint32_t>(egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size());
+            local_base_class_staged.assign(base_class_count, 0);
+            for (const auto &[cid, data] : egraph.constantStaging)
+                if (cid.value < base_class_count)
+                    local_base_class_staged[cid.value] = 1;
+            base_class_enode_counts_ptr = &local_base_class_enode_counts;
+            base_class_staged_ptr = &local_base_class_staged;
+        }
+
         auto saturation_start = BucketClock::now();
-        const size_t enodes_before_saturation = egraph.getENodes().size();
+        const size_t enodes_before_saturation = egraph.getNumENodes();
         if (doSaturate && settings.do_saturate)
         {
             // A partial bucket starts from the saturated full state: continue
             // from the full saturation's rules when this planner ran it.
-            const bool seeded = startingState && startingState == fullSaturationState_ && !fullSaturationRules_.empty();
             BucketRegions regions;
-            if (dirtyInjected || neededInjected)
-                regions = computeBucketRegions(graph, rootId, bucket, topo, repo, regionFacts_,
-                                               &settings.padded_inputs);
-            if (std::getenv("TG_DEBUG_ROOTS"))
-                LOG(INFO) << "[debug regions] root dirty=" << encodeRegionList(regions.dirtyOf(rootId))
-                          << " needed=" << encodeRegionList(regions.neededOf(rootId))
-                          << " live=" << encodeRegionList(regions.liveOf(rootId))
-                          << " root class logical=" << egraph.getEClass(egraph.findConst(egraph.findEClassByLogicalId(rootId))).logical_id.value;
-            saturate(egraph, protectedEClasses, dirtyInjected || neededInjected, false, repo,
-                     seeded ? &fullSaturationRules_ : nullptr, startingState ? nullptr : &fullSaturationRules_,
-                     (dirtyInjected || neededInjected) ? &regions : nullptr);
+            if (seeded && !dirtyInjected && !neededInjected)
+            {
+                // The base egraph was already saturated to fixpoint with fullSaturationRules_.
+                // With zero injected partial paths or merges, zero rewrites can match.
+            }
+            else
+            {
+                if (dirtyInjected || neededInjected)
+                    regions = computeBucketRegions(graph, rootId, bucket, topo, repo, regionFacts_,
+                                                   &settings.padded_inputs);
+                if (std::getenv("TG_DEBUG_ROOTS"))
+                    LOG(INFO) << "[debug regions] root dirty=" << encodeRegionList(regions.dirtyOf(rootId))
+                              << " needed=" << encodeRegionList(regions.neededOf(rootId))
+                              << " live=" << encodeRegionList(regions.liveOf(rootId))
+                              << " root class logical=" << egraph.getEClass(egraph.findConst(egraph.findEClassByLogicalId(rootId))).logical_id.value;
+                saturate(egraph, protectedEClasses, dirtyInjected || neededInjected, false, repo,
+                         seeded ? &fullSaturationRules_ : nullptr, startingState ? nullptr : &fullSaturationRules_,
+                         (dirtyInjected || neededInjected) ? &regions : nullptr,
+                         seeded ? base_class_count : 0,
+                         base_class_enode_counts_ptr,
+                         base_class_staged_ptr,
+                         seeded ? &fullSaturationSliceMemo_ : nullptr,
+                         startingState ? nullptr : &fullSaturationSliceMemo_);
+                if (!startingState)
+                {
+                    const uint32_t watermark = static_cast<uint32_t>(egraph.getNumENodes());
+                    for (auto &r : fullSaturationRules_)
+                    {
+                        r->base_enode_watermark = watermark;
+                        r->clearVisited();
+                    }
+                    for (auto &it : fullSaturationSliceMemo_)
+                    {
+                        it.second = egraph.findConst(it.second);
+                    }
+                    egraph.freezeHashcons();
+                    egraph.freezeENodes();
+                }
+            }
             if (std::getenv("TG_DEBUG_MISSING") && (dirtyInjected || neededInjected))
             {
                 std::map<std::string, uint32_t> missing, present;
@@ -1989,7 +2158,7 @@ struct Planner
         {
             std::map<std::string, uint32_t> histogram;
             std::map<std::string, std::unordered_set<uint32_t>> distinct_classes;
-            for (size_t i = enodes_before_saturation; i < egraph.getENodes().size(); ++i)
+            for (size_t i = enodes_before_saturation; i < egraph.getNumENodes(); ++i)
             {
                 const ENode &enode = egraph.getENode(ENodeId{static_cast<uint32_t>(i)});
                 std::string key = toString(enode.getOpType()) + ":" + enode.getOpName() + " " + toString(enode.getShape()) +
@@ -2009,108 +2178,191 @@ struct Planner
         report_bucket_timing("finished rewrite saturation", "elapsed=" + std::to_string(
                                                                    std::chrono::duration<double, std::milli>(BucketClock::now() - saturation_start).count()) +
                                                                    " ms, classes=" +
-                                                                   std::to_string(egraph.getClasses().size()) +
+                                                                   std::to_string(egraph.getNumClasses()) +
                                                                    ", enodes=" +
-                                                                   std::to_string(egraph.getENodes().size()));
+                                                                   std::to_string(egraph.getNumENodes()));
 
-        const uint32_t maxClasses = static_cast<uint32_t>(egraph.getClasses().size());
+        const uint32_t maxClasses = static_cast<uint32_t>(egraph.getNumClasses());
         auto clean_init_start = BucketClock::now();
         std::vector<uint8_t> clean(maxClasses, 0);
-        for (uint32_t i = 0; i < maxClasses; ++i)
+        for (LogicalId id : topo)
         {
-            EClassId id{i};
-            if (egraph.findConst(id) != id)
-                continue;
-            const EClass &cls = egraph.getEClass(id);
-            if (cls.logical_id != LogicalId{} && !logicalDirty[cls.logical_id])
-                clean[i] = 1;
-            if (egraph.constantStaging.count(id))
-                clean[i] = 1;
-            for (ENodeId enodeId : cls.enodes)
+            if (!logicalDirty[id])
             {
-                if (egraph.getENode(enodeId).getOpType() == OpType::CACHE)
-                    clean[i] = 1;
+                EClassId cid = egraph.findEClassByLogicalId(id);
+                if (cid != EClassId{})
+                {
+                    uint32_t canon = egraph.findConst(cid).value;
+                    if (canon < maxClasses)
+                        clean[canon] = 1;
+                }
             }
+        }
+        for (const auto &[cid, _] : egraph.constantStaging)
+        {
+            uint32_t canon = egraph.findConst(cid).value;
+            if (canon < maxClasses)
+                clean[canon] = 1;
         }
         report_bucket_timing("seeded clean classes", "classes=" + std::to_string(maxClasses) +
                                                         ", elapsed=" + std::to_string(
                                                             std::chrono::duration<double, std::milli>(BucketClock::now() - clean_init_start).count()) +
                                                         " ms");
-        bool changed = true;
-        uint32_t clean_round = 0;
+        uint32_t clean_round = 1;
         uint64_t clean_class_checks = 0;
         auto clean_propagation_start = BucketClock::now();
-        while (changed)
-        {
-            ++clean_round;
-            changed = false;
-            auto clean_round_start = BucketClock::now();
-            auto clean_round_last_report = clean_round_start;
-            for (uint32_t i = 0; i < maxClasses; ++i)
-            {
-                ++clean_class_checks;
-                if ((i & 0xFFFFU) == 0 &&
-                    BucketClock::now() - clean_round_last_report >= std::chrono::seconds(2))
-                {
-                    report_bucket_timing("clean-class propagation", "round=" + std::to_string(clean_round) +
-                                                                         ", classes scanned=" +
-                                                                         std::to_string(i) + "/" +
-                                                                         std::to_string(maxClasses));
-                    clean_round_last_report = BucketClock::now();
-                }
+        const uint32_t num_classes = maxClasses;
+        const uint32_t num_enodes = static_cast<uint32_t>(egraph.getNumENodes());
+        std::vector<uint32_t> parent_counts(num_classes, 0);
+        std::vector<uint32_t> dirty_child_count(num_enodes, 0);
 
-                EClassId id{i};
-                if (egraph.findConst(id) != id || clean[i])
-                    continue;
-                for (ENodeId enodeId : egraph.getEClass(id).enodes)
+        for (uint32_t e = 0; e < num_enodes; ++e)
+        {
+            const ENode &enode = egraph.getENode(ENodeId{e});
+            if (enode.getOpType() == OpType::INPUT)
+                continue;
+            std::array<uint32_t, 8> unique_children;
+            size_t num_unique = 0;
+            for (EClassId cid : enode.getChildren())
+            {
+                uint32_t c_val = egraph.findConst(cid).value;
+                bool found = false;
+                for (size_t i = 0; i < num_unique; ++i)
                 {
-                    const ENode &enode = egraph.getENode(enodeId);
-                    if (enode.getOpType() == OpType::INPUT)
-                        continue;
-                    bool allChildrenClean = true;
-                    for (EClassId child : enode.getChildren())
+                    if (unique_children[i] == c_val)
                     {
-                        EClassId canonChild = egraph.findConst(child);
-                        allChildrenClean =
-                            allChildrenClean && canonChild.value < clean.size() && clean[canonChild.value];
-                    }
-                    if (allChildrenClean)
-                    {
-                        clean[i] = 1;
-                        changed = true;
+                        found = true;
                         break;
                     }
                 }
+                if (!found && num_unique < unique_children.size())
+                    unique_children[num_unique++] = c_val;
             }
-            const double clean_round_elapsed_ms = std::chrono::duration<double, std::milli>(
-                                                      BucketClock::now() - clean_round_start)
-                                                      .count();
-            if (clean_round <= 5 || clean_round % 100 == 0 || clean_round_elapsed_ms >= 2000.0)
+            dirty_child_count[e] = static_cast<uint32_t>(num_unique);
+            for (size_t i = 0; i < num_unique; ++i)
             {
-                report_bucket_timing("finished clean-class propagation round", "round=" +
-                                                                                     std::to_string(clean_round) +
-                                                                                     ", changed=" +
-                                                                                     (changed ? std::string("true") :
-                                                                                                std::string("false")) +
-                                                                                     ", elapsed=" + std::to_string(
-                                                                                         clean_round_elapsed_ms) +
-                                                                                     " ms");
+                uint32_t c_val = unique_children[i];
+                if (c_val < num_classes)
+                    parent_counts[c_val]++;
+            }
+        }
+
+        std::vector<uint32_t> parent_offsets(num_classes + 1, 0);
+        for (uint32_t c = 0; c < num_classes; ++c)
+            parent_offsets[c + 1] = parent_offsets[c] + parent_counts[c];
+        std::vector<uint32_t> parent_edges(parent_offsets.back());
+        std::vector<uint32_t> current_offsets = parent_offsets;
+
+        for (uint32_t e = 0; e < num_enodes; ++e)
+        {
+            const ENode &enode = egraph.getENode(ENodeId{e});
+            if (enode.getOpType() == OpType::INPUT)
+                continue;
+            std::array<uint32_t, 8> unique_children;
+            size_t num_unique = 0;
+            for (EClassId cid : enode.getChildren())
+            {
+                uint32_t c_val = egraph.findConst(cid).value;
+                bool found = false;
+                for (size_t i = 0; i < num_unique; ++i)
+                {
+                    if (unique_children[i] == c_val)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found && num_unique < unique_children.size())
+                    unique_children[num_unique++] = c_val;
+            }
+            for (size_t i = 0; i < num_unique; ++i)
+            {
+                uint32_t c_val = unique_children[i];
+                if (c_val < num_classes)
+                    parent_edges[current_offsets[c_val]++] = e;
+            }
+        }
+
+        std::vector<uint32_t> queue;
+        std::vector<uint8_t> in_queue(num_classes, 0);
+        for (uint32_t i = 0; i < num_classes; ++i)
+        {
+            if (clean[i] && egraph.findConst(EClassId{i}).value == i)
+            {
+                in_queue[i] = 1;
+                queue.push_back(i);
+            }
+        }
+
+        for (uint32_t e = 0; e < num_enodes; ++e)
+        {
+            const ENode &enode = egraph.getENode(ENodeId{e});
+            if (enode.getOpType() == OpType::INPUT)
+                continue;
+            if (dirty_child_count[e] == 0)
+            {
+                const uint32_t owner_val = egraph.findConst(egraph.getENodeEClass(ENodeId{e})).value;
+                if (owner_val < num_classes && !clean[owner_val])
+                {
+                    clean[owner_val] = 1;
+                    if (!in_queue[owner_val])
+                    {
+                        in_queue[owner_val] = 1;
+                        queue.push_back(owner_val);
+                    }
+                }
+            }
+        }
+
+        while (!queue.empty())
+        {
+            uint32_t c = queue.back();
+            queue.pop_back();
+            const uint32_t start_idx = parent_offsets[c];
+            const uint32_t end_idx = parent_offsets[c + 1];
+            for (uint32_t idx = start_idx; idx < end_idx; ++idx)
+            {
+                uint32_t e = parent_edges[idx];
+                ++clean_class_checks;
+                if (dirty_child_count[e] == 0)
+                    continue;
+                dirty_child_count[e]--;
+                if (dirty_child_count[e] == 0)
+                {
+                    const uint32_t owner_val = egraph.findConst(egraph.getENodeEClass(ENodeId{e})).value;
+                    if (owner_val < num_classes && !clean[owner_val])
+                    {
+                        clean[owner_val] = 1;
+                        if (!in_queue[owner_val])
+                        {
+                            in_queue[owner_val] = 1;
+                            queue.push_back(owner_val);
+                        }
+                    }
+                }
             }
         }
         const double clean_propagation_ms = std::chrono::duration<double, std::milli>(
                                                 BucketClock::now() - clean_propagation_start)
                                                 .count();
         auto collect_clean_start = BucketClock::now();
-        for (uint32_t i = 0; i < maxClasses; ++i)
+        egraph.clean_classes = std::move(clean);
+        if (!startingState)
         {
-            if (clean[i])
-            {
-                EClassId cid = egraph.findConst(EClassId{i});
-                egraph.getEClass(cid).is_clean = true;
-            }
+            if (!base_state_has_base_ids)
+                egraph.populateBaseEClassIds();
+            const size_t base_count = egraph.getNumClasses();
+            fullSaturationBaseClassEnodeCounts_.resize(base_count);
+            for (size_t c = 0; c < base_count; ++c)
+                fullSaturationBaseClassEnodeCounts_[c] = static_cast<uint32_t>(egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size());
+            fullSaturationBaseClassStaged_.assign(base_count, 0);
+            for (const auto &[cid, data] : egraph.constantStaging)
+                if (cid.value < base_count)
+                    fullSaturationBaseClassStaged_[cid.value] = 1;
+            egraph.freezeClasses();
+            egraph.freezeHashcons();
+            egraph.freezeENodes();
         }
-        if (!startingState && !base_state_has_base_ids)
-            egraph.populateBaseEClassIds();
         report_bucket_timing("finished bucket postprocessing", "clean rounds=" + std::to_string(clean_round) +
                                                                      ", class checks=" +
                                                                      std::to_string(clean_class_checks) +
@@ -2355,10 +2607,12 @@ struct Planner
             compiled.nodeCosts[cid] = en_cost;
         }
 
-        for (const EClass &cls : egraph.getClasses())
+        for (size_t i = 0; i < egraph.getNumClasses(); ++i)
         {
-            if (egraph.findConst(cls.id) != cls.id)
+            EClassId cid{static_cast<uint32_t>(i)};
+            if (egraph.findConst(cid) != cid)
                 continue;
+            const EClass &cls = egraph.getEClass(cid);
             if (cls.logical_id != LogicalId{})
             {
                 compiled.logical_to_eclass[cls.logical_id] = cls.id;
@@ -2459,6 +2713,8 @@ struct Planner
             {
                 planner.fullSaturationState_ = nullptr;
                 planner.regionFacts_ = nullptr;
+                planner.fullSaturationBaseClassEnodeCounts_.clear();
+                planner.fullSaturationBaseClassStaged_.clear();
             }
         } full_state_scope{*this};
         std::vector<EGraph> bucket_states(buckets.size());
@@ -2545,9 +2801,13 @@ struct Planner
                     user_counts[child_id]++;
             }
 
-            for (const EClass &cls : full_state.getClasses())
+            for (size_t i = 0; i < full_state.getNumClasses(); ++i)
             {
-                if (full_state.findConst(cls.id) != cls.id || cls.base_eclass_id == BaseEClassId{} ||
+                EClassId cid{static_cast<uint32_t>(i)};
+                if (full_state.findConst(cid) != cid)
+                    continue;
+                const EClass &cls = full_state.getEClass(cid);
+                if (cls.base_eclass_id == BaseEClassId{} ||
                     cls.mem_space.type == HandleType::STORAGE || getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) == 0)
                     continue;
 
@@ -2606,7 +2866,7 @@ struct Planner
                     if (bid == EClassId{})
                         continue;
                     const EClass &bcls = bucket_states[b].getEClass(bid);
-                    bool updatable = bcls.is_clean;
+                    bool updatable = bucket_states[b].isClean(bid);
                     for (ENodeId enodeId : bcls.enodes)
                         updatable = updatable || bucket_states[b].getENode(enodeId).getOpType() == OpType::SCATTER;
                     if (updatable)
@@ -2642,7 +2902,7 @@ struct Planner
             for (const auto &cand : candidates)
             {
                 EClassId cid = bstate.findEClassByBaseId(cand.base_eclass_id);
-                if (cid == EClassId{} || !bstate.getEClass(cid).is_clean)
+                if (cid == EClassId{} || !bstate.isClean(cid))
                     continue;
                 const EClass &cls = bstate.getEClass(cid);
                 bool has_cache = false;
@@ -2746,9 +3006,14 @@ struct Planner
             if (std::getenv("TG_DEBUG_ROOTS"))
             {
                 uint32_t scatterAfter = 0;
-                for (const EClass &cls : bucket_states[b].getClasses())
-                    for (ENodeId e : cls.enodes)
+                for (size_t i = 0; i < bucket_states[b].getNumClasses(); ++i)
+                {
+                    EClassId cid{static_cast<uint32_t>(i)};
+                    if (bucket_states[b].findConst(cid) != cid)
+                        continue;
+                    for (ENodeId e : bucket_states[b].getEClass(cid).enodes)
                         scatterAfter += bucket_states[b].getENode(e).getOpType() == OpType::SCATTER;
+                }
                 LOG(INFO) << "[debug scatter] bucket=" << b << " before=" << scatterBefore << " inf=" << scatterInf
                           << " after_prune=" << scatterAfter;
             }
@@ -2794,6 +3059,17 @@ struct Planner
 
             r.removed5 = removeSingleExternalComputationalProducerCycleENodes(bucket_states[b]);
             r.pass5 = countCyclicComponents(bucket_states[b]);
+
+            const uint32_t total_removed = r.removed1 + r.removed2 + r.removed3 + r.removed4 + r.removed5;
+            if (total_removed > 0 || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
+            {
+                bucket_states[b].rebuild(true);
+                all_enode_infos[b] = computeENodeInfos(bucket_states[b]);
+                bucket_states[b].clearHashcons();
+                bucket_states[b].constantHashIndex.clear();
+                bucket_states[b].classes.shrink_to_fit();
+                bucket_states[b].enodes.shrink_to_fit();
+            }
         };
         {
             // The first bucket fills the cost memo the others mostly reuse.
@@ -2947,8 +3223,8 @@ struct Planner
         {
             LOG(INFO) << "[Planner.planAll] Search bucket " << b
                       << ": reachable classes=" << search_state.reachable_cids[b].size()
-                      << ", egraph classes=" << search_state.bucket_egraphs[b].getClasses().size()
-                      << ", egraph enodes=" << search_state.bucket_egraphs[b].getENodes().size();
+                      << ", egraph classes=" << search_state.bucket_egraphs[b].getNumClasses()
+                      << ", egraph enodes=" << search_state.bucket_egraphs[b].getNumENodes();
         }
 
         // Set up SearchEngine with Propagators and Selector
