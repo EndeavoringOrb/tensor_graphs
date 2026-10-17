@@ -711,8 +711,11 @@ struct CostModel
         if (callFile.is_open())
             return;
 
-        const std::string path = "benchmarks/calls.bin";
-        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+        // TG_COST_CALLS_PATH redirects the log, e.g. to one calibration run's file.
+        const char *path_override = std::getenv("TG_COST_CALLS_PATH");
+        const std::string path = path_override ? path_override : "benchmarks/calls.bin";
+        if (std::filesystem::path(path).has_parent_path())
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path());
         {
             std::ifstream inFile(path, std::ios::binary);
             if (inFile.is_open())

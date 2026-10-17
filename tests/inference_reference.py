@@ -56,7 +56,7 @@ def main():
     torch.manual_seed(0)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokens, text_sha256 = build_tokens(tokenizer, args.model_path)
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32,
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, dtype=torch.float32,
                                                  attn_implementation="eager")
     model.eval()
     with torch.no_grad():

@@ -32,6 +32,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
     parser.add_option({"--cache"}, "Path to cache file. If provided, benchmark only configurations from this cache.",
                       "");
+    parser.add_option({"--calls"}, "Calls log to benchmark (written by the cost model).", "benchmarks/calls.bin");
     parser.add_positional("targetKernel", "Bench only kernels whose name contain this string.", "");
 
     if (!parser.parse(argc, argv))
@@ -45,7 +46,7 @@ int main(int argc, char *argv[])
     std::string targetKernel = parser.get_positional("targetKernel");
 
     std::filesystem::create_directories("benchmarks");
-    std::string callsPath = "benchmarks/calls.bin";
+    std::string callsPath = parser.get_option("--calls");
     std::string recordsPath = "benchmarks/records.bin";
 
     if (!targetKernel.empty())
@@ -92,6 +93,7 @@ int main(int argc, char *argv[])
         {
             std::cerr << "No calls file found at " << callsPath
                       << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
+            std::cout << "[Bench summary] pending=0 benchmarked=0 failed=0" << std::endl;
             return 0;
         }
 
@@ -132,6 +134,7 @@ int main(int argc, char *argv[])
     if (toBenchmark.empty())
     {
         std::cout << "No kernels match the filters or all already benchmarked." << std::endl;
+        std::cout << "[Bench summary] pending=0 benchmarked=0 failed=0" << std::endl;
         return 0;
     }
 
@@ -181,6 +184,7 @@ int main(int argc, char *argv[])
         outFile.open(recordsPath, std::ios::app | std::ios::binary);
     }
     BinaryWriter bw(outFile);
+    uint64_t benchmarked = 0, failed = 0;
 
     for (uint64_t i = startIdx; i < toBenchmark.size(); ++i)
     {
@@ -235,6 +239,7 @@ int main(int argc, char *argv[])
             {
                 std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId
                           << "): record fails matches() validity check." << std::endl;
+                ++failed;
                 continue;
             }
 
@@ -298,13 +303,17 @@ int main(int argc, char *argv[])
             }
 
             std::cout << "\n  Benchmarked -> " << runtimeMs << " ms" << std::endl;
+            ++benchmarked;
         }
         catch (const std::exception &e)
         {
             std::cerr << "Failed to benchmark kernel " << kernelId << ": " << e.what() << std::endl;
+            ++failed;
         }
     }
 
     std::cout << "Benchmarking complete." << std::endl;
+    std::cout << "[Bench summary] pending=" << (toBenchmark.size() - startIdx) << " benchmarked=" << benchmarked
+              << " failed=" << failed << std::endl;
     return 0;
 }

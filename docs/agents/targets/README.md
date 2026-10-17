@@ -49,6 +49,8 @@ A target's `target.md` may tighten these rules but not loosen them.
 
 **Generality.** Exploit structure common in neural networks (repeated blocks, near-identical buckets, residual chains, KV caches, CPU/GPU copies) through graph properties the planner sees. Do not hard-code instance facts: e-class/e-node IDs, model-specific sizes, operator names chosen because they appear in this graph, or thresholds tuned to land events at particular times in one run.
 
+**One evaluation at a time.** Timed evaluations run alone on the machine: no builds, oracle runs, other evaluations or heavy diagnostics in parallel. Budgets and throughput are sensitive to load and thermals. Untimed phases of an evaluation (calibration, checks) may overlap only with nothing timed.
+
 **Evidence.** Run each candidate once; if promising, run two confirmations (three runs total) with identical source and build. Diagnostic runs (shorter budgets, profiling builds, temporary logging) are welcome but are not evaluations. Label them, and remove the instrumentation before an evaluation. Restoring a backup file keeps its old timestamp, so touch it and confirm the build log shows a compile.
 
 **Records.** Keep `progress.md` and the run logs sufficient to resume without conversation history:

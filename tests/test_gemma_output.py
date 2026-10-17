@@ -18,6 +18,23 @@ MODEL_PATH = PROJECT_ROOT / "models" / "google" / "gemma-3-270m"
 SEARCH_MARGIN_SECONDS = 15.0
 PLAN_NAME = "plan.bin"
 RUNS_DIR = PROJECT_ROOT / "logs" / "gemma_output_runs"
+BENCH_EXE = PROJECT_ROOT / "tensor_graphs_cpp" / ("bench.exe" if sys.platform == "win32" else "bench")
+# Saturate-only + bench rounds before giving up on reaching exact cost records.
+MAX_CALIBRATION_ROUNDS = 5
+# Whether the planner may use OpenCL, per machine: the Windows arm64 laptop
+# plans with its GPU through OpenCL; the Linux CUDA box does not use OpenCL.
+OPENCL_BY_PLATFORM = {"win32": True, "linux": False}
+
+
+def pinPlatformEnvironment(env):
+    """Set TG_DISABLE_OPENCL for this machine (fail loud on an unknown platform)."""
+    if sys.platform not in OPENCL_BY_PLATFORM:
+        raise SystemExit(f"No OpenCL policy for platform {sys.platform}; add it to OPENCL_BY_PLATFORM")
+    if OPENCL_BY_PLATFORM[sys.platform]:
+        env.pop("TG_DISABLE_OPENCL", None)
+    else:
+        env["TG_DISABLE_OPENCL"] = "1"
+    return env
 
 CONFIGS = {
     "full": {
@@ -49,7 +66,8 @@ def prefillDecodeBuckets(seq_len):
     return [bucket for t in range(1, seq_len + 1) for bucket in ((0, t, t - 1, 1.0), (t - 1, t, t - 1, 1.0))]
 
 
-def openLogitsSession(seq_len, cache_file="", min_compile_time=0.0, repo_path=""):
+def openLogitsSession(seq_len, cache_file="", min_compile_time=0.0, repo_path="", log_cost_calls=False,
+                      saturate_only=False):
     import tensor_graphs
 
     return tensor_graphs.LLMSession(
@@ -62,6 +80,8 @@ def openLogitsSession(seq_len, cache_file="", min_compile_time=0.0, repo_path=""
         cache_file=cache_file,
         disable_node_caching=False,
         disable_compilation_caching=not bool(cache_file),
+        log_cost_calls=log_cost_calls,
+        saturate_only=saturate_only,
         repo_path=repo_path,
     )
 
@@ -84,7 +104,7 @@ def referenceLogits(tokens):
     import torch
     from transformers import AutoModelForCausalLM
 
-    model = AutoModelForCausalLM.from_pretrained(str(MODEL_PATH), torch_dtype=torch.float32,
+    model = AutoModelForCausalLM.from_pretrained(str(MODEL_PATH), dtype=torch.float32,
                                                  attn_implementation="eager")
     model.eval()
     with torch.no_grad():
@@ -226,9 +246,60 @@ def test_gemma_output(cache_file="", min_compile_time=0.0, saturate_only=False):
 
 
 # ----------------------------------------------------------------------------
-# Timed logits evaluation: compile (budgeted) and check (unbudgeted) run in
-# separate processes; the reference and comparison run in the supervisor.
+# Timed logits evaluation: calibration (unbudgeted), compile (budgeted) and
+# check (unbudgeted) run in separate processes; the reference and comparison
+# run in the supervisor.
 # ----------------------------------------------------------------------------
+def phaseCalibrate(run_dir, seq_len):
+    """Saturate only, logging every cost lookup without an exact record to TG_COST_CALLS_PATH."""
+    if "TG_COST_CALLS_PATH" not in os.environ:
+        raise SystemExit("[Gemma calibrate] TG_COST_CALLS_PATH must name this round's calls log")
+    openLogitsSession(seq_len, "", -1.0, str(run_dir / "calibrate_repo"), log_cost_calls=True, saturate_only=True)
+
+
+def calibrate(common, run_dir):
+    """Saturate-only + bench rounds until every cost lookup of this N has an exact record.
+
+    New records can change which fused candidates saturation keeps, so a round
+    can log calls the previous one did not; stop when a round logs none that
+    still lack a record. Returns (ok, rounds, total benchmarked).
+    """
+    if not BENCH_EXE.exists():
+        raise SystemExit(f"Missing {BENCH_EXE}; build it: .venv/Scripts/python.exe build.py --targets bench")
+    total = 0
+    for round_index in range(1, MAX_CALIBRATION_ROUNDS + 1):
+        calls = run_dir / f"calibrate{round_index}_calls.bin"
+        env = pinPlatformEnvironment(os.environ.copy())
+        for key in ("TG_PROGRAM_DEADLINE", "TG_SEARCH_DEADLINE", "TG_SEARCH_VOLUME", "TG_SEARCH_GAP"):
+            env.pop(key, None)
+        env["TG_COST_CALLS_PATH"] = str(calls)
+        code, output, _ = runChild(["--phase", "calibrate", *common], env, None, echo=False)
+        (run_dir / f"calibrate{round_index}.log").write_text(output, encoding="utf-8")
+        if code != 0:
+            print(f"[Gemma failure] calibration round {round_index} saturate-only run exited {code}", flush=True)
+            return False, round_index, total
+        bench_log = run_dir / f"calibrate{round_index}_bench.log"
+        with open(bench_log, "w", encoding="utf-8", errors="replace") as log:
+            bench = subprocess.run([str(BENCH_EXE), "--calls", str(calls)], cwd=PROJECT_ROOT, env=env,
+                                   stdout=log, stderr=subprocess.STDOUT)
+        summaries = re.findall(r"\[Bench summary\] pending=(\d+) benchmarked=(\d+) failed=(\d+)",
+                               bench_log.read_text(encoding="utf-8", errors="replace"))
+        if bench.returncode != 0 or not summaries:
+            print(f"[Gemma failure] bench exited {bench.returncode} without a summary; see {bench_log}", flush=True)
+            return False, round_index, total
+        pending, benchmarked, failed = (int(v) for v in summaries[-1])
+        total += benchmarked
+        print(f"[Gemma calibrate] round={round_index} pending={pending} benchmarked={benchmarked} failed={failed} "
+              f"log={bench_log}", flush=True)
+        if pending == 0:
+            return True, round_index, total
+        if benchmarked == 0:
+            print(f"[Gemma failure] {pending} cost configurations cannot be benchmarked; see {bench_log}", flush=True)
+            return False, round_index, total
+    print(f"[Gemma failure] cost records still incomplete after {MAX_CALIBRATION_ROUNDS} rounds", flush=True)
+    return False, MAX_CALIBRATION_ROUNDS, total
+
+
 def phaseCompile(run_dir, seq_len):
     started = time.time()
     openLogitsSession(seq_len, str(run_dir / PLAN_NAME), -1.0, str(run_dir / "repo"))
@@ -250,23 +321,25 @@ def phaseCheck(run_dir, seq_len):
     print(f"[Gemma check] graphs={len(results)} saved={run_dir / 'logits.npz'}", flush=True)
 
 
-def runChild(arguments, env, timeout):
+def runChild(arguments, env, timeout, echo=True):
+    """Run one phase; timeout None means no limit."""
     command = [sys.executable, "-u", "-m", "tests.test_gemma_output", *arguments]
     process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace")
     try:
-        output, _ = process.communicate(timeout=max(0.001, timeout))
+        output, _ = process.communicate(timeout=None if timeout is None else max(0.001, timeout))
         timed_out = False
     except subprocess.TimeoutExpired:
         process.kill()
         output, _ = process.communicate()
         timed_out = True
-    print(output, end="", flush=True)
+    if echo or process.returncode != 0:
+        print(output, end="", flush=True)
     return process.returncode, output, timed_out
 
 
 def superviseLogits(args):
-    """Compile within --timeout seconds, then check every graph's logits.
+    """Calibrate cost records (untimed), compile within --timeout seconds, then check every graph's logits.
 
     Prints `[Gemma prefill+decode] ok=... final-gap=... gap-target-met=...`
     and writes <run-dir>/results.json. Exit 0 iff the compile finished within
@@ -286,8 +359,18 @@ def superviseLogits(args):
     summary = {"config": args.config, "seq_len": args.seq_len, "buckets": buckets,
                "budget": args.timeout, "search_margin": SEARCH_MARGIN_SECONDS}
 
+    # Untimed: benchmark every cost configuration this N looks up, so the timed
+    # compile (which does not log cost calls) uses exact records only.
+    calibrated, rounds, benchmarked = calibrate(common, run_dir)
+    summary.update(calibrated=calibrated, calibration_rounds=rounds, calibration_benchmarked=benchmarked)
+    if not calibrated:
+        (run_dir / "results.json").write_text(json.dumps(dict(summary, ok=False), indent=2), encoding="utf-8")
+        print(f"[Gemma {args.config}] ok=false seq_len={args.seq_len} buckets={buckets} calibrated=false "
+              f"run_dir={run_dir}", flush=True)
+        raise SystemExit(1)
+
     started = time.time()
-    env = os.environ.copy()
+    env = pinPlatformEnvironment(os.environ.copy())
     env["TG_SEARCH_DEADLINE"] = repr(started + args.timeout - SEARCH_MARGIN_SECONDS)
     env["TG_SEARCH_VOLUME"] = "1"
     env["TG_SEARCH_GAP"] = "1"
@@ -310,7 +393,7 @@ def superviseLogits(args):
 
     logits_ok = False
     if ok:
-        env = os.environ.copy()
+        env = pinPlatformEnvironment(os.environ.copy())
         for key in ("TG_PROGRAM_DEADLINE", "TG_SEARCH_DEADLINE", "TG_SEARCH_VOLUME", "TG_SEARCH_GAP"):
             env.pop(key, None)
         code, output, timed_out = runChild(["--phase", "check", *common], env, args.check_timeout)
@@ -385,13 +468,15 @@ def main():
     parser.add_argument("--run-dir", help="prefill+decode with --timeout: fresh directory for the plan and results")
     parser.add_argument("--check-timeout", type=float, default=3600.0,
                         help="prefill+decode with --timeout: limit for the logits check process")
-    parser.add_argument("--phase", choices=["compile", "check"], help=argparse.SUPPRESS)
+    parser.add_argument("--phase", choices=["calibrate", "compile", "check"], help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.seq_len < 0:
         parser.error("--seq-len must be non-negative")
     if args.phase:
         run_dir = Path(args.run_dir).resolve()
-        if args.phase == "compile":
+        if args.phase == "calibrate":
+            phaseCalibrate(run_dir, args.seq_len)
+        elif args.phase == "compile":
             phaseCompile(run_dir, args.seq_len)
         else:
             phaseCheck(run_dir, args.seq_len)
