@@ -27,6 +27,7 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
 | **Step 18** (`seq_len=256`) | 29238.25 | 166.35 | 29071.90 | ~3000x | Scaled sequence length to `seq_len=256` across **513 buckets** (1 full + 256 prefill + 256 decode) and 82,430 family vertices under the 30-second budget (exact bijection match). |
 | **Step 19** (`seq_len=400`) | 29203.23 | 132.44 | 29070.79 | ~3000x | OpType-indexed rule dispatch array (`rules_by_op`), early `hasCompleted` check in `FusionRule`, hoisted OpType guards in `DotSplitRule` & `SlicePushDownFused`, and incremental sweep filtering for new enodes. Scaled to `seq_len=400` across **801 buckets** (1 full + 400 prefill + 400 decode) and 129,086 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS!** |
 | **Step 20** (`seq_len=620`) | 28458.00 | 81.21 | 28376.79 | ~3000x | Zero-allocation `hasCopyChainOrigin` in `RemoveCopyChains`, single-pass adjacency list in `buildSweepFilter` cutting `findConst` calls in half, direct vector-indexed `ruleMatchCounts[rule_idx]`, and intermediate sweep log elimination. Scaled to `seq_len=620` across **1,241 buckets** (1 full + 620 prefill + 620 decode) and 217,847 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.55x seq_len increase over Step 19, 9.39x over Step 16)** |
+| **Step 21** (`seq_len=670`) | 28867.02 | 78.10 | 28788.92 | ~3000x | Constant staging scan elimination in `buildSweepFilter`, single-pass forward-star clean class propagation, flat vector visited in `FusionRule`, append-only early exits in `ConsumerWeightReuseRule`, `RemoveRedundantReshape`, `RemoveCopyChains`, visited hoisting in `SlicePushDownStructural`, canonical children precomputation in `materializeFusedCandidates`. Scaled to `seq_len=670` across **1,341 buckets** and 235,523 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.68x sequence length increase over Step 19, 10.15x over Step 16)** |
 
 
 ## Detailed Breakdown
@@ -447,6 +448,40 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
   - `tests/verify_saturation.py --seq-len 400` passes 100% exact graph equivalence across 801 buckets in **17,528.05 ms** (vs 29,203.23 ms previously, a 1.67x speedup).
   - `tests/verify_saturation.py --seq-len 600` passes 100% exact graph equivalence across 1,201 buckets in **27,036.85 ms**.
   - `tests/verify_saturation.py --seq-len 620` passes 100% exact graph equivalence across 1,241 buckets in **28,458.00 ms** (< 30s budget).
+
+---
+
+### Step 21: Constant Staging Scan Elimination, Forward-Star Clean Propagation & Append-Only Rule Indexing (seq_len=670: 28867.02 ms)
+- **Time Before:** Record was `seq_len = 620` at 28,458.00 ms. At `seq_len = 650`, runtime was ~29,800 ms.
+- **Time After:**
+  - `seq_len = 650`: **27,977.87 ms** (228,371 family vertices, 100% exact match).
+  - `seq_len = 670`: **28,867.02 ms** (Full: 78.10 ms, Prefill + Decode: 28,788.92 ms, **1,341 buckets** [1 full + 670 prefill + 670 decode], 235,523 family vertices) — **NEW RECORD UNDER 30 SECONDS! (1.68x sequence length increase over Step 19, 10.15x over Step 16)**
+- **What Changed:**
+  - **Constant Staging Scan Elimination in `buildSweepFilter` (`planner.hpp`):**
+    - Replaced the $O(\text{num\_classes})$ loop that performed `constantStaging.count(EClassId{c})` hash table lookups for every unchanged class with a direct $O(K)$ iteration over `constantStaging` (~5 elements).
+    - Eliminated over 330 million hash map queries across saturation sweeps.
+  - **Single-Pass Forward-Star Adjacency List for Clean Class Propagation (`planner.hpp`):**
+    - Replaced the 2-pass CSR construction (`parent_counts`, `parent_offsets`, `parent_edges`, `current_offsets`) with a single-pass `parent_head` / `parent_next` / `parent_node` linked list.
+    - Halved enode child lookups and eliminated 4 vector allocations per bucket.
+  - **Flat Visited Vector in `FusionRule::single_node_visited` (`rewrite.hpp`):**
+    - Replaced `std::unordered_set<uint32_t>` with `std::vector<uint8_t>`, eliminating dynamic hash node allocations during single-node pattern matching.
+  - **Append-Only Early Exits in `ConsumerWeightReuseRule`, `RemoveRedundantReshape`, and `RemoveCopyChains` (`rewrite.hpp`):**
+    - Maintained indexed vectors (`copy_enodes`, `reshape_enodes`) updated incrementally from `scanned_enodes`. If the target operation does not exist anywhere in the egraph, `match()` exits in $O(1)$ without examining children or classes.
+  - **Visited Hoisting in `SlicePushDownStructural` (`rewrite.hpp`):**
+    - Hoisted `if (visited.count(MatchKey{contig_class, sliceIdx.value})) continue;` to the very top of the `sliceEnodes` loop, skipping `sliceBox`, `scatterFormValid`, `hasScatter`, and `src.enodes` scans for already-evaluated pairs.
+  - **Early Visited Marking in `DotSplitRule` (`rewrite.hpp`):**
+    - Marked non-matching DOT nodes visited in $O(1)$ so they are not re-evaluated across subsequent sweeps.
+  - **Canonical Children Precomputation in `materializeFusedCandidates` (`rewrite.hpp`):**
+    - Precomputed canonical IDs of `enode.getChildren()` once before iterating over `cls.enodes` in the candidate duplicate check, cutting `findConst` calls in half.
+  - **Early Visited Marking in `ScatterPullUp` & `InfinityDomination` (`rewrite.hpp`):**
+    - In `ScatterPullUp`, marked `visited_classes.insert(cid.value)` when `cls.logical_id == LogicalId{}` or `!regionFor(cls, ctx, box)`. In `InfinityDomination`, marked `visited_enodes.insert(eNodeIdx)` when `cls.logical_id` or `cls.base_eclass_id` is missing.
+- **Verification:**
+  - `tests/verify_saturation.py --seq-len 4` passes 100% exact graph equivalence in 83.20 ms (`EQUIVALENT (explicit class-order bijection match)`).
+  - `tests/verify_saturation.py --seq-len 16` passes 100% exact graph equivalence in 515.16 ms (down from 536.35 ms).
+  - `tests/verify_saturation.py --seq-len 400` passes 100% exact graph equivalence in **16,911.17 ms** (down from 17,528.05 ms, a further 617 ms speedup).
+  - `tests/verify_saturation.py --seq-len 650` passes 100% exact graph equivalence in **27,977.87 ms**.
+  - `tests/verify_saturation.py --seq-len 670` passes 100% exact graph equivalence across 1,341 buckets in **28,867.02 ms** (< 30s budget, 235,523 family vertices).
+
 
 
 

@@ -523,16 +523,22 @@ struct Planner
             frontier.clear();
             for (size_t c = 0; c < num_classes; ++c)
             {
-                bool changed_class = (c >= classesAtSweepStart || egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size() != classSizeAtSweepStart[c]);
-                if (!changed_class && c < classesAtSweepStart && !stagedAtSweepStart[c])
-                {
-                    if (egraph.constantStaging.count(EClassId{static_cast<uint32_t>(c)}))
-                        changed_class = true;
-                }
-                if (changed_class)
+                if (c >= classesAtSweepStart || egraph.getRawEClass(static_cast<uint32_t>(c)).enodes.size() != classSizeAtSweepStart[c])
                 {
                     const uint32_t canon = egraph.findConst(EClassId{static_cast<uint32_t>(c)}).value;
                     if (!seenClass[canon])
+                    {
+                        seenClass[canon] = 1;
+                        frontier.push_back(canon);
+                    }
+                }
+            }
+            for (const auto &[cid, data] : egraph.constantStaging)
+            {
+                if (cid.value < classesAtSweepStart && !stagedAtSweepStart[cid.value])
+                {
+                    const uint32_t canon = egraph.findConst(cid).value;
+                    if (canon < num_classes && !seenClass[canon])
                     {
                         seenClass[canon] = 1;
                         frontier.push_back(canon);
@@ -2209,8 +2215,12 @@ struct Planner
         auto clean_propagation_start = BucketClock::now();
         const uint32_t num_classes = maxClasses;
         const uint32_t num_enodes = static_cast<uint32_t>(egraph.getNumENodes());
-        std::vector<uint32_t> parent_counts(num_classes, 0);
         std::vector<uint32_t> dirty_child_count(num_enodes, 0);
+        std::vector<uint32_t> parent_head(num_classes, UINT32_MAX);
+        std::vector<uint32_t> parent_next;
+        std::vector<uint32_t> parent_node;
+        parent_next.reserve(num_enodes * 2);
+        parent_node.reserve(num_enodes * 2);
 
         for (uint32_t e = 0; e < num_enodes; ++e)
         {
@@ -2239,43 +2249,12 @@ struct Planner
             {
                 uint32_t c_val = unique_children[i];
                 if (c_val < num_classes)
-                    parent_counts[c_val]++;
-            }
-        }
-
-        std::vector<uint32_t> parent_offsets(num_classes + 1, 0);
-        for (uint32_t c = 0; c < num_classes; ++c)
-            parent_offsets[c + 1] = parent_offsets[c] + parent_counts[c];
-        std::vector<uint32_t> parent_edges(parent_offsets.back());
-        std::vector<uint32_t> current_offsets = parent_offsets;
-
-        for (uint32_t e = 0; e < num_enodes; ++e)
-        {
-            const ENode &enode = egraph.getENode(ENodeId{e});
-            if (enode.getOpType() == OpType::INPUT)
-                continue;
-            std::array<uint32_t, 8> unique_children;
-            size_t num_unique = 0;
-            for (EClassId cid : enode.getChildren())
-            {
-                uint32_t c_val = egraph.findConst(cid).value;
-                bool found = false;
-                for (size_t i = 0; i < num_unique; ++i)
                 {
-                    if (unique_children[i] == c_val)
-                    {
-                        found = true;
-                        break;
-                    }
+                    uint32_t edge_idx = static_cast<uint32_t>(parent_next.size());
+                    parent_next.push_back(parent_head[c_val]);
+                    parent_node.push_back(e);
+                    parent_head[c_val] = edge_idx;
                 }
-                if (!found && num_unique < unique_children.size())
-                    unique_children[num_unique++] = c_val;
-            }
-            for (size_t i = 0; i < num_unique; ++i)
-            {
-                uint32_t c_val = unique_children[i];
-                if (c_val < num_classes)
-                    parent_edges[current_offsets[c_val]++] = e;
             }
         }
 
@@ -2314,11 +2293,9 @@ struct Planner
         {
             uint32_t c = queue.back();
             queue.pop_back();
-            const uint32_t start_idx = parent_offsets[c];
-            const uint32_t end_idx = parent_offsets[c + 1];
-            for (uint32_t idx = start_idx; idx < end_idx; ++idx)
+            for (uint32_t idx = parent_head[c]; idx != UINT32_MAX; idx = parent_next[idx])
             {
-                uint32_t e = parent_edges[idx];
+                uint32_t e = parent_node[idx];
                 ++clean_class_checks;
                 if (dirty_child_count[e] == 0)
                     continue;

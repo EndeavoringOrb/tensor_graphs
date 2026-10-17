@@ -739,7 +739,7 @@ struct FusionRule : public Rule
     // addresses in completed_applications stay valid across clones.
     std::shared_ptr<const PatternSet> patterns;
     std::vector<MatchResult> activeMatches;
-    std::unordered_set<uint32_t> single_node_visited;
+    std::vector<uint8_t> single_node_visited;
 
     // Multi-node patterns read only classes within this many levels below
     // the root enode. During a sweep, enodes outside `sweep_filter` (set by
@@ -925,7 +925,18 @@ struct FusionRule : public Rule
         const EGraph &egraph = ctx.egraph;
         const ENode &eNode = egraph.getENode(ENodeId{eNodeIdx});
 
-        if (eNodeIdx >= ctx.base_enode_watermark && single_node_visited.insert(eNodeIdx).second)
+        bool is_new_single = false;
+        if (eNodeIdx >= ctx.base_enode_watermark)
+        {
+            if (eNodeIdx >= single_node_visited.size())
+                single_node_visited.resize(eNodeIdx + 1, 0);
+            if (!single_node_visited[eNodeIdx])
+            {
+                single_node_visited[eNodeIdx] = 1;
+                is_new_single = true;
+            }
+        }
+        if (is_new_single)
         {
             auto it_single = patterns->singleNodePatternsByOp.find(eNode.getOpType());
             if (it_single != patterns->singleNodePatternsByOp.end())
@@ -1495,18 +1506,32 @@ struct FusionRule : public Rule
                 if (cand.target_mem_space == originalMemSpace && enode.getStrides() == cls.strides)
                 {
                     stridesMatch = true;
+                    std::array<EClassId, 8> canon_enode_children;
+                    const size_t num_enode_children = enode.getChildren().size();
+                    if (num_enode_children <= canon_enode_children.size())
+                    {
+                        for (size_t c = 0; c < num_enode_children; ++c)
+                            canon_enode_children[c] = egraph.findConst(enode.getChildren()[c]);
+                    }
                     for (ENodeId existing : cls.enodes)
                     {
                         const ENode &other = egraph.getENode(existing);
                         if (other.getKernelId() != enode.getKernelId() ||
                             other.getMemSpace() != enode.getMemSpace() ||
                             other.getStrides() != enode.getStrides() ||
-                            other.getChildren().size() != enode.getChildren().size())
+                            other.getChildren().size() != num_enode_children)
                             continue;
                         bool same_children = true;
-                        for (size_t c = 0; c < enode.getChildren().size() && same_children; ++c)
-                            same_children = egraph.findConst(other.getChildren()[c]) ==
-                                            egraph.findConst(enode.getChildren()[c]);
+                        if (num_enode_children <= canon_enode_children.size())
+                        {
+                            for (size_t c = 0; c < num_enode_children && same_children; ++c)
+                                same_children = (egraph.findConst(other.getChildren()[c]) == canon_enode_children[c]);
+                        }
+                        else
+                        {
+                            for (size_t c = 0; c < num_enode_children && same_children; ++c)
+                                same_children = (egraph.findConst(other.getChildren()[c]) == egraph.findConst(enode.getChildren()[c]));
+                        }
                         if (same_children)
                         {
                             duplicate = true;
@@ -2061,9 +2086,15 @@ struct InfinityDomination : public Rule
         const EClassId cid = ctx.egraph.getENodeEClass(ENodeId{eNodeIdx});
         const EClass &cls = ctx.egraph.getEClass(ctx.egraph.findConst(cid));
         if (cls.logical_id == LogicalId{})
+        {
+            visited_enodes.insert(ENodeId{eNodeIdx});
             return false;
+        }
         if (ctx.regions && cls.base_eclass_id == BaseEClassId{})
+        {
+            visited_enodes.insert(ENodeId{eNodeIdx});
             return false;
+        }
 
         TriuBound dummy;
         return isConstantFloat(enode.getChildren()[0], ctx) || isConstantFloat(enode.getChildren()[1], ctx) ||
@@ -2459,10 +2490,16 @@ struct ScatterPullUp : public Rule
             return false;
         const EClass &cls = egraph.getEClass(cid);
         if (cls.logical_id == LogicalId{})
+        {
+            visited_classes.insert(cid.value);
             return false;
+        }
         Region box;
         if (!regionFor(cls, ctx, box))
+        {
+            visited_classes.insert(cid.value);
             return false;
+        }
         for (EClassId child : enode.getChildren())
         {
             if (isUpdated(egraph, child, 4, ctx))
@@ -3488,6 +3525,8 @@ struct SlicePushDownStructural : public Rule
         const auto &sliceEnodes = egraph.getEClass(sliceClass).enodes;
         for (ENodeId sliceIdx : sliceEnodes)
         {
+            if (visited.count(MatchKey{contig_class, sliceIdx.value}))
+                continue;
             const ENode &sliceNode = egraph.getENode(sliceIdx);
             if (sliceNode.getOpType() != OpType::SLICE || sliceNode.getChildren().size() != 4)
                 continue;
@@ -3514,8 +3553,6 @@ struct SlicePushDownStructural : public Rule
             if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark &&
                 sliceIdx.value < ctx.base_enode_watermark && (!scatter_valid || has_scatter) &&
                 (src.enodes.empty() || src.enodes.back().value < ctx.base_enode_watermark))
-                continue;
-            if (visited.count(MatchKey{contig_class, sliceIdx.value}))
                 continue;
             const auto &srcEnodes = src.enodes;
             for (ENodeId srcIdx : srcEnodes)
@@ -4089,9 +4126,7 @@ struct DotSplitRule : public Rule
                 return true;
         }
 
-        if (aCls.mem_space != enode.getMemSpace() || bCls.mem_space != enode.getMemSpace())
-            return false;
-
+        visited.insert(eNodeIdx);
         return false;
     }
 
@@ -4498,10 +4533,28 @@ struct RemoveCopyChains : public Rule
 {
     std::unique_ptr<Rule> clone() const override
     {
-        return std::make_unique<RemoveCopyChains>(*this);
+        auto copy = std::make_unique<RemoveCopyChains>(*this);
+        copy->scanned_enodes = 0;
+        copy->copy_enodes.clear();
+        return copy;
     }
 
     std::unordered_set<uint32_t> visited;
+    size_t scanned_enodes = 0;
+    std::vector<uint32_t> copy_enodes;
+
+    void refreshCopyIndex(const EGraph &egraph)
+    {
+        const size_t total_enodes = egraph.getNumENodes();
+        if (total_enodes < scanned_enodes)
+        {
+            scanned_enodes = 0;
+            copy_enodes.clear();
+        }
+        for (; scanned_enodes < total_enodes; ++scanned_enodes)
+            if (egraph.getENode(ENodeId{static_cast<uint32_t>(scanned_enodes)}).getOpType() == OpType::COPY_TO)
+                copy_enodes.push_back(static_cast<uint32_t>(scanned_enodes));
+    }
 
     std::string name() const override
     {
@@ -4612,10 +4665,16 @@ struct RemoveCopyChains : public Rule
     void clearVisited() override
     {
         visited.clear();
+        copy_enodes.clear();
+        scanned_enodes = 0;
     }
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        refreshCopyIndex(ctx.egraph);
+        if (copy_enodes.empty())
+            return false;
+
         if (eNodeIdx < ctx.base_enode_watermark && ctx.sweep_filter &&
             eNodeIdx < ctx.sweep_filter->size() && (*ctx.sweep_filter)[eNodeIdx] == 0)
             return false;
@@ -4797,7 +4856,10 @@ struct ConsumerWeightReuseRule : public Rule
     {
         const size_t total_enodes = egraph.getNumENodes();
         if (total_enodes < scanned_enodes)
-            Error::throw_err("[ConsumerWeightReuseRule] egraph enodes shrank below the indexed count");
+        {
+            scanned_enodes = 0;
+            copy_enodes.clear();
+        }
         for (; scanned_enodes < total_enodes; ++scanned_enodes)
             if (egraph.getENode(ENodeId{static_cast<uint32_t>(scanned_enodes)}).getOpType() == OpType::COPY_TO)
                 copy_enodes.push_back(static_cast<uint32_t>(scanned_enodes));
@@ -4877,6 +4939,10 @@ struct ConsumerWeightReuseRule : public Rule
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        refreshCopyIndex(ctx.egraph);
+        if (copy_enodes.empty())
+            return false;
+
         if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark)
             return false;
         if (eNodeIdx < ctx.base_enode_watermark && ctx.sweep_filter &&
@@ -4956,10 +5022,28 @@ struct RemoveRedundantReshape : public Rule
 {
     std::unique_ptr<Rule> clone() const override
     {
-        return std::make_unique<RemoveRedundantReshape>(*this);
+        auto copy = std::make_unique<RemoveRedundantReshape>(*this);
+        copy->scanned_enodes = 0;
+        copy->reshape_enodes.clear();
+        return copy;
     }
 
     std::unordered_set<uint32_t> visited;
+    size_t scanned_enodes = 0;
+    std::vector<uint32_t> reshape_enodes;
+
+    void refreshReshapeIndex(const EGraph &egraph)
+    {
+        const size_t total_enodes = egraph.getNumENodes();
+        if (total_enodes < scanned_enodes)
+        {
+            scanned_enodes = 0;
+            reshape_enodes.clear();
+        }
+        for (; scanned_enodes < total_enodes; ++scanned_enodes)
+            if (egraph.getENode(ENodeId{static_cast<uint32_t>(scanned_enodes)}).getOpType() == OpType::RESHAPE)
+                reshape_enodes.push_back(static_cast<uint32_t>(scanned_enodes));
+    }
 
     std::string name() const override
     {
@@ -4974,10 +5058,15 @@ struct RemoveRedundantReshape : public Rule
     void clearVisited() override
     {
         visited.clear();
+        reshape_enodes.clear();
+        scanned_enodes = 0;
     }
 
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        refreshReshapeIndex(ctx.egraph);
+        if (reshape_enodes.empty())
+            return false;
         if (eNodeIdx < ctx.base_enode_watermark && ctx.sweep_filter &&
             eNodeIdx < ctx.sweep_filter->size() && (*ctx.sweep_filter)[eNodeIdx] == 0)
             return false;
