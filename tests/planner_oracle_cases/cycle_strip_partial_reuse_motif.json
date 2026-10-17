@@ -1,0 +1,15 @@
+{
+  "name": "cycle strip: partial-reuse scatter/slice motif from gemma prefill+decode",
+  "description": "x = full compute | scatter(r) into cached x; v = slice view of x; r = contiguous(v) | compute rows; s = scatter(v), a scatter of x's own slice back into x, which only occurs inside a cycle. Both directions of the x <-> r choice must survive.",
+  "root": "out",
+  "caches": {"x": {}},
+  "nodes": {
+    "out": {"alternatives": [{"children": ["x", "r"], "cost": 1}]},
+    "x": {"alternatives": [{"children": ["inp"], "cost": 10}, {"op": "scatter", "children": ["r"], "cost": 1}, {"op": "scatter", "children": ["v"], "cost": 1}]},
+    "v": {"alternatives": [{"children": ["x"], "view": true, "cost": 0}]},
+    "r": {"alternatives": [{"children": ["v"], "cost": 1}, {"children": ["inp"], "cost": 3}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 5,
+  "probes": [{"name": "x not cached", "fixes": [{"cache": 0, "domain": [0]}]}]
+}

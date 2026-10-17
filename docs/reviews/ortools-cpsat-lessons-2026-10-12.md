@@ -1,6 +1,6 @@
 # What the planner search can borrow from OR-Tools CP-SAT and MIP solvers
 
-Date: 2026-10-12. Context: `docs/agents/improve_search.md` (decode, `--optimal --timeout 600`), current retained implementation O8 (eliminated 2,056,153 of 4,851,513 bits; target 2,425,757). Run records live in `docs/agents/SEARCH_IMPROVEMENTS.md` and `logs/search_improvements/`.
+Date: 2026-10-12. Context: `docs/agents/targets/search_volume/target.md` (decode, `--optimal --timeout 600`), current retained implementation O8 (eliminated 2,056,153 of 4,851,513 bits; target 2,425,757). Run records live in `docs/agents/targets/search_volume/progress.md` and `logs/search_improvements/`.
 
 ## 1. Experiments with CP-SAT on the real Gemma decode bucket
 
@@ -46,7 +46,7 @@ So borrowing CP-SAT's LP bound and LNS is worthwhile for the incumbent-cost and 
 1. **Root engine-load bound** (LP or Lagrangian; validated against R166 = 30.36 on bucket 0). Sound, cheap at the root, raises root LB 0.53 -> ~30. Improves pruning in deep subtrees and gives an honest optimality gap.
 2. **LP-guided first dive / LNS** for a better incumbent (target < 45 vs 75). Improves "first-incumbent cost" and "best cost" metrics; prerequisite for any bound-based closure.
 3. **Root probing of SELECTED values** (small, sound).
-4. **Contract question for the user:** whether the volume metric should exclude coordinates of classes whose presence is undecided (CP-SAT-style optional semantics). Without it, the measured experiments and the analysis in `SEARCH_IMPROVEMENTS.md` find no sound route to the 50% target under the fixed encoding.
+4. **Contract question for the user:** whether the volume metric should exclude coordinates of classes whose presence is undecided (CP-SAT-style optional semantics). Without it, the measured experiments and the analysis in `docs/agents/targets/search_volume/progress.md` find no sound route to the 50% target under the fixed encoding.
 
 ## Sources
 
@@ -61,4 +61,4 @@ So borrowing CP-SAT's LP bound and LNS is worthwhile for the incumbent-cost and 
 
 The analysis above assumed OPENCL layouts must reserve room for every possible cache set. A further CP-SAT experiment (R169, `logs/search_improvements/cpsat_max_coactive.py`, reachability included) shows that a single bucket plan can hold at most **467,559 co-active OPENCL pages** (430,590 cacheable), below the 524,288-page capacity, although all OPENCL classes total 1,631,336 pages. Most cacheable classes are alternative weight layouts consumed by different alternatives of one kernel class, so they are mutually exclusive.
 
-Borrowed idea: CP-SAT-style *implied literals* from reachability. Each class gets necessary selection conditions (`x active => class P selects from S`), and disjoint conditions on a common class certify exclusivity. An offline prototype (R170) places every OPENCL class first-fit, sharing pages only between certified-exclusive classes, in 467,784 pages. This is within 0.05% of the co-activity optimum and fits the capacity. This became H27, an exclusivity-shared static layout in `StaticPrivateLayoutPropagator`, with oracle cases 27/28 (see `SEARCH_IMPROVEMENTS.md` for runs).
+Borrowed idea: CP-SAT-style *implied literals* from reachability. Each class gets necessary selection conditions (`x active => class P selects from S`), and disjoint conditions on a common class certify exclusivity. An offline prototype (R170) places every OPENCL class first-fit, sharing pages only between certified-exclusive classes, in 467,784 pages. This is within 0.05% of the co-activity optimum and fits the capacity. This became H27, an exclusivity-shared static layout in `StaticPrivateLayoutPropagator`, with oracle cases 27/28 (see `docs/agents/targets/search_volume/progress.md` for runs).

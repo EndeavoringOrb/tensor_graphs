@@ -1,0 +1,13 @@
+{
+  "name": "cycle strip: a cached member is the cheapest way into the cycle",
+  "description": "SCC x <-> y, both consumed by the root. y can be loaded from the cache; x is cheapest computed from y. single_external_compute_producer ignores the CACHE producer, treats x as the only entry and deletes x = g(y).",
+  "root": "out",
+  "caches": {"y": {}},
+  "nodes": {
+    "out": {"alternatives": [{"children": ["x", "y"], "cost": 1}]},
+    "x": {"alternatives": [{"children": ["y"], "cost": 1}, {"children": ["inp"], "cost": 10}]},
+    "y": {"alternatives": [{"op": "cache", "cost": 0}, {"children": ["x"], "cost": 1}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 2
+}

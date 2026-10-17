@@ -1,6 +1,7 @@
 #pragma once
 
 #include <json.hpp>
+#include "core/plan/cycles.hpp"
 #include "core/plan/search_engine.hpp"
 
 // Adapter only: the independent specification and enumeration live in Python.
@@ -147,9 +148,93 @@ inline json exportDomains(const SearchState &state, const json &problem)
     return out;
 }
 
+
+inline std::vector<std::string> cycleStripPassNames()
+{
+    std::vector<std::string> names;
+    for (const CycleStripPass &pass : cycleStripPasses())
+        names.push_back(pass.name);
+    return names;
+}
+
+// Rebuild each bucket's alternatives (those still in their selection domain)
+// as an egraph, run one cycle strip pass (or "pipeline": all of them, in
+// planner order) and narrow selection domains to the surviving enodes.
+inline json stripCycles(const json &problem, const std::string &pass_name)
+{
+    std::vector<const CycleStripPass *> passes;
+    for (const CycleStripPass &pass : cycleStripPasses())
+        if (pass_name == "pipeline" || pass_name == pass.name)
+            passes.push_back(&pass);
+    if (passes.empty())
+        Error::throw_err("Unknown cycle strip pass: " + pass_name);
+    json out = problem;
+    json removed_counts = json::array();
+    for (uint32_t b = 0; b < out.at("buckets").size(); ++b)
+    {
+        auto &nodes = out["buckets"][b]["nodes"];
+        const MemSpace space{1, HandleType::CPP};
+        EGraph graph;
+        for (const auto &node : nodes)
+        {
+            const uint32_t pages = node.at("size_pages").get<uint32_t>();
+            const EClassId cid = graph.addEClass({pages}, {1}, DType::FLOAT32, space);
+            graph.getEClass(cid).base_eclass_id = BaseEClassId{node.at("base_id").get<uint32_t>()};
+        }
+        std::unordered_map<uint32_t, int32_t> value_of_enode;
+        for (uint32_t c = 0; c < nodes.size(); ++c)
+        {
+            const auto &node = nodes.at(c);
+            const auto selected = node.at("selected").get<std::vector<int32_t>>();
+            for (uint32_t a = 0; a < node.at("alternatives").size(); ++a)
+            {
+                const int32_t value = static_cast<int32_t>(a + 1);
+                if (std::find(selected.begin(), selected.end(), value) == selected.end())
+                    continue;
+                const auto &alternative = node.at("alternatives").at(a);
+                const std::string op = alternative.at("op").get<std::string>();
+                const OpType op_type = op == "input" ? OpType::INPUT : op == "cache" ? OpType::CACHE :
+                                       op == "scatter" ? OpType::SCATTER : OpType::ADD;
+                std::vector<EClassId> children;
+                for (uint32_t child : alternative.at("children").get<std::vector<uint32_t>>())
+                    children.push_back(EClassId{child});
+                const uint32_t pages = node.at("size_pages").get<uint32_t>();
+                const size_t before = graph.getEClass(EClassId{c}).enodes.size();
+                graph.addENode(EClassId{c}, ENode(KernelId{0}, op_type,
+                    "oracle_" + std::to_string(c) + "_" + std::to_string(a), children,
+                    {pages}, {1}, DType::FLOAT32, space, {}));
+                if (graph.getEClass(EClassId{c}).enodes.size() != before + 1)
+                    Error::throw_err("Oracle strip adapter: alternative was deduplicated");
+                value_of_enode[graph.getEClass(EClassId{c}).enodes.back().value] = value;
+            }
+        }
+        uint32_t removed = 0;
+        for (const CycleStripPass *pass : passes)
+            removed += pass->run(graph);
+        removed_counts.push_back(removed);
+        for (uint32_t c = 0; c < nodes.size(); ++c)
+        {
+            json selected = json::array();
+            for (int32_t value : nodes[c].at("selected").get<std::vector<int32_t>>())
+                if (value == 0)
+                    selected.push_back(0);
+            std::vector<int32_t> kept;
+            for (ENodeId enode_id : graph.getEClass(EClassId{c}).enodes)
+                kept.push_back(value_of_enode.at(enode_id.value));
+            std::sort(kept.begin(), kept.end());
+            for (int32_t value : kept)
+                selected.push_back(value);
+            nodes[c]["selected"] = selected;
+        }
+    }
+    return json{{"problem", out}, {"removed", removed_counts}};
+}
+
 inline std::string runCase(const std::string &problem_text, const std::string &mode, float cutoff)
 {
     const json problem = json::parse(problem_text);
+    if (mode.rfind("strip:", 0) == 0)
+        return stripCycles(problem, mode.substr(6)).dump();
     SearchEngine engine(makeState(problem));
     engine.measure_search_volume = false;
     addAllPropagators(engine, false, problem.at("is_dag").get<bool>());

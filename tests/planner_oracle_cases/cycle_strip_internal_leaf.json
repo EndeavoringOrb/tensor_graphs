@@ -1,0 +1,13 @@
+{
+  "name": "cycle strip: an internal class with a leaf producer",
+  "description": "SCC x <-> y where y has no edge leaving the component but has a CACHE producer. single_external_connection treats y as derivable only from x, clears y and deletes x = g(y).",
+  "root": "out",
+  "caches": {"y": {}},
+  "nodes": {
+    "out": {"alternatives": [{"children": ["x"], "cost": 1}]},
+    "x": {"alternatives": [{"children": ["y"], "cost": 1}, {"children": ["inp"], "cost": 10}]},
+    "y": {"alternatives": [{"op": "cache", "cost": 0}, {"children": ["x"], "cost": 1}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 2
+}

@@ -18,7 +18,7 @@ asking permission for routine edits, rebuilds, evaluations, or oracle checks.
 Unless the user specifies otherwise, use the supplied configuration and
 timeout, current hardware and build options, one baseline run, and two
 confirmation runs for promising candidates. Record these settings before
-editing. Create `docs/agents/SEARCH_IMPROVEMENTS.md` if it does not exist.
+editing. Create `docs/agents/targets/search_volume/progress.md` if it does not exist.
 
 Strive for `remaining-domain-bits <= total-domain-bits / 2` within the fixed
 evaluation budget, with all correctness checks and the non-regression gate below
@@ -117,11 +117,11 @@ mark any nonconforming change as requiring repair or rejection.
    next run. Repeat promising results to distinguish noise from gains.
 5. Retain a change only after correctness and the comparison/non-regression
    gate pass; label accepted changes as "optimizations".
-   Explain rejected hypotheses too as "trials". Log the explanations in docs/agents/SEARCH_IMPROVEMENTS.md
+   Explain rejected hypotheses too as "trials". Log the explanations in docs/agents/targets/search_volume/progress.md
 
 ## Logs and resumable progress
 
-Keep `docs/agents/SEARCH_IMPROVEMENTS.md` and the referenced files under `logs/`
+Keep `docs/agents/targets/search_volume/progress.md` and the referenced files under `logs/`
 sufficient to resume optimization without the conversation history. Read the
 existing record before starting; resume pending work and reuse comparable
 recorded baselines rather than silently restarting the experiment.
@@ -143,7 +143,7 @@ time to first incumbent, first-incumbent cost, best incumbent cost at the
 deadline, and any failure or interruption. Mark unavailable metrics explicitly; do not
 infer success from missing output.
 
-Copy every `[SearchEngine volume]` report into `SEARCH_IMPROVEMENTS.md`, linked
+Copy every `[SearchEngine volume]` report into `progress.md`, linked
 to its run and complete log. Record all reported fields: `iterations`, `elapsed`,
 `total-domain-bits`, `remaining-domain-bits`, `log2-remaining-fraction`,
 `eliminated-bits`, `remaining-nodes`, `exhausted`, and `incomplete-branches`.
@@ -159,7 +159,7 @@ to every run and saved patch. Explain the measured difference and whether the
 change was retained, rejected, reverted, or remains pending. Preserve rejected
 trial records when reverting code.
 
-Include a comparison table in `SEARCH_IMPROVEMENTS.md` covering the original
+Include a comparison table in `progress.md` covering the original
 baseline, currently accepted implementation, candidate, and every confirmation:
 eliminated/remaining bits, time to first incumbent (with timing origin and any
 uncertainty), first-incumbent cost, and best incumbent cost at the deadline.
@@ -167,7 +167,7 @@ Link the incumbent events in the saved logs, record deltas for every metric,
 and state the gate verdict and reason. A bit improvement alone cannot justify
 retention when incumbent discovery or cost regresses.
 
-Keep a current resume checkpoint in `SEARCH_IMPROVEMENTS.md`: the retained
+Keep a current resume checkpoint in `progress.md`: the retained
 implementation and baseline, current working-tree changes and build state,
 completed and pending checks, any running process and its log location, and
 the next concrete optimization step. Update it after each change and run, and

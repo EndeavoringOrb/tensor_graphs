@@ -1,4 +1,4 @@
-"""Benchmark cases for docs/agents/improve_inference_speed.md (fixed contract).
+"""Benchmark cases for docs/agents/targets/inference_speed/target.md (fixed contract).
 
 Every case is a slice of one fixed token sequence S (stored with the HF
 reference). A case `pp<n>@<c>` prefills n tokens on top of c already-processed

@@ -100,7 +100,7 @@ Python and repo:
   args and plumbing.
 - `pyproject.toml`: remove the `ortools` extra; regenerate `uv.lock`.
 - `AGENTS.md`: remove the `.venvx64` / OR-Tools sentence.
-- `docs/agents/improve_gap_integral.md`, `docs/agents/SEARCH_IMPROVEMENTS.md`: remove or
+- `docs/agents/targets/gap_integral/target.md`, `docs/agents/targets/search_volume/progress.md`: remove or
   rewrite the OR-Tools passages.
 - `thinking.txt:4` mentions the OR-Tools CP model as inspiration; confirm with the user
   whether to edit it (it is a notes file).
@@ -374,7 +374,7 @@ generically, fix `replaceRegion` instead of deleting it:
 - saturation time recorded (expected to drop);
 - `tests/verify_saturation.py`: saturation changes on purpose. Regenerate gold
   (`--generate-gold`) after the checks above pass (approved), and note it in
-  `SATURATION_IMPROVEMENTS.md`. The same applies after Phase 3;
+  `docs/agents/targets/saturation_seq_len/progress.md`. The same applies after Phase 3;
 - cycle-reduction stats before/after (expected fewer remaining cyclic components).
 
 ---

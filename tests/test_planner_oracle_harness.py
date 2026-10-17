@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from tests import planner_oracle_reference as reference
-from tests.test_planner_oracle import checkPropagation, checkSearch
+from tests.test_planner_oracle import checkCycleStrip, checkPropagation, checkSearch
 
 
 class PlannerOracleHarnessTest(unittest.TestCase):
@@ -42,6 +42,13 @@ class PlannerOracleHarnessTest(unittest.TestCase):
             "consistent": True, "conflict": "", "lower_bound": 2, "problem": narrowed,
         }):
             checkPropagation(self.problem, self.optimum, 1000)
+
+    def testOptimumLosingCycleStripIsRejected(self):
+        stripped = deepcopy(self.problem)
+        stripped["buckets"][0]["nodes"][0]["selected"] = []
+        with patch("tests.test_planner_oracle.nativeCall", return_value={"problem": stripped, "removed": [2]}):
+            with self.assertRaisesRegex(ValueError, "changed the optimum"):
+                checkCycleStrip(self.problem, self.optimum, 1000, "fake")
 
     def testFakeIncumbentIsRejected(self):
         with patch("tests.test_planner_oracle.nativeCall", return_value={

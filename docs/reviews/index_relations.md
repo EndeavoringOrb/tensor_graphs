@@ -168,6 +168,6 @@ For masks, test early causal contexts, triangle interiors, sliding-window bounda
 
 Run planner oracle (including bound validity), search-gap tests, applicable native planner/cache/layout suites, and affected kernel/rewrite tests. Follow AGENTS.md naming, fail-loud, Python environment, and separate-kernel-variant requirements.
 
-Official inference evaluation remains governed by `docs/agents/improve_inference_speed.md`; do not alter its reference files, precision, timing contract, or acceptance gate. First demonstrate correctness on small independent cases, then evaluate fresh compilation and actual throughput. Count compile time honestly; no offline precomputed relations/plans that violate the evaluation contract.
+Official inference evaluation remains governed by `docs/agents/targets/inference_speed/target.md`; do not alter its reference files, precision, timing contract, or acceptance gate. First demonstrate correctness on small independent cases, then evaluate fresh compilation and actual throughput. Count compile time honestly; no offline precomputed relations/plans that violate the evaluation contract.
 
 Completion requires exact primitive and fused mapping, no silent domain widening, sound mask/state handling, retained independent bucket optimization, and recorded compile/runtime results. Explicitly document unresolved symbolic queries and unsupported operations; do not claim universal exact numerical dependence or universal query decidability.

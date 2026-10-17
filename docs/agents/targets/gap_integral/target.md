@@ -76,7 +76,7 @@ Watch out for stale builds: copying a backup file over a source file keeps its o
 
 ## Logs and resumable progress
 
-Keep `docs/agents/GAP_IMPROVEMENTS.md` and `logs/gap_improvements/` sufficient to resume without conversation history. The runner refuses to overwrite a run id and appends an in-progress entry and a completion entry for each run: command, revision, patch, exit status, volume, deadline, gap and first-incumbent lines, and the oracle verdict. After each run add a short note covering:
+Keep `docs/agents/targets/gap_integral/progress.md` and `logs/gap_improvements/` sufficient to resume without conversation history. The runner refuses to overwrite a run id and appends an in-progress entry and a completion entry for each run: command, revision, patch, exit status, volume, deadline, gap and first-incumbent lines, and the oracle verdict. After each run add a short note covering:
 - the hypothesis label;
 - the metrics compared with the accepted implementation and the original gap baseline;
 - the gate verdict and its reason.

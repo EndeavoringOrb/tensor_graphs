@@ -658,6 +658,41 @@ class LLMSession
         session->invalidateCaches();
     }
 
+    // Per compiled graph: dirty token range [start, end) and needed logits
+    // rows [row_start, row_end), in the order of runGraphLogits indices.
+    std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> graphTokenRanges() const
+    {
+        std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> ranges;
+        for (const CompiledGraph &cg : session->getCachedGraphs())
+        {
+            const auto dirty = cg.bucket.inputDirtyRegions.find(inputIdsId);
+            if (dirty == cg.bucket.inputDirtyRegions.end() || dirty->second.size() != 1 ||
+                dirty->second[0].region.size() != 2 || cg.bucket.outputNeededRegion.size() != 1 ||
+                cg.bucket.outputNeededRegion[0].region.size() != 3)
+                throw std::runtime_error("graphTokenRanges: compiled graph is not a single token range bucket");
+            const Region &in = dirty->second[0];
+            const Region &out = cg.bucket.outputNeededRegion[0];
+            ranges.emplace_back(in.region[1].start, in.region[1].stop, out.region[1].start, out.region[1].stop);
+        }
+        return ranges;
+    }
+
+    // Writes `tokens` (zero padded) and runs compiled graph `graph_idx`
+    // directly, bypassing bucket selection. Returns every logits row.
+    std::vector<float> runGraphLogits(uint32_t graph_idx, const std::vector<uint32_t> &tokens)
+    {
+        if (tokens.size() > max_seq_len)
+            throw std::runtime_error("runGraphLogits: more tokens than max_sequence_length");
+        std::vector<int32_t> input_data(max_seq_len, 0);
+        for (size_t k = 0; k < tokens.size(); ++k)
+            input_data[k] = tokens[k];
+        session->writeInput(inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
+        const float *device_output = static_cast<const float *>(session->runGraph(graph_idx));
+        has_run = true;
+        prev_tokens = tokens;
+        return std::vector<float>(device_output, device_output + static_cast<size_t>(max_seq_len) * vocab_size);
+    }
+
     uint32_t maxSequenceLength() const { return max_seq_len; }
     uint32_t vocabSize() const { return vocab_size; }
 
@@ -878,6 +913,8 @@ PYBIND11_MODULE(tensor_graphs, m)
     m.def("_run_planner_oracle_case", &planner_oracle::runCase,
           py::arg("problem_json"), py::arg("mode"), py::arg("cutoff") = TGConstants::INF,
           "Diagnostic adapter for independent exhaustive planner correctness cases.");
+    m.def("_cycle_strip_pass_names", &planner_oracle::cycleStripPassNames,
+          "Names of the planner's cycle strip passes, in pipeline order.");
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
     KernelBench::registerBindings(m);
 
@@ -1433,6 +1470,16 @@ PYBIND11_MODULE(tensor_graphs, m)
             std::vector<float> row = s.step_logits(tokens);
             return py::array_t<float>(static_cast<py::ssize_t>(row.size()), row.data());
         }, py::arg("tokens"), "Run on tokens (dirty positions only) and return the last position's logits")
+        .def("graph_token_ranges", &LLMSession::graphTokenRanges,
+             "Per compiled graph: (dirty_start, dirty_end, row_start, row_end) token ranges")
+        .def("run_graph_logits", [](LLMSession &s, uint32_t graph_idx, const std::vector<uint32_t> &tokens) {
+            std::vector<float> rows = s.runGraphLogits(graph_idx, tokens);
+            py::array_t<float> out({static_cast<py::ssize_t>(s.maxSequenceLength()),
+                                    static_cast<py::ssize_t>(s.vocabSize())});
+            std::copy(rows.begin(), rows.end(), out.mutable_data());
+            return out;
+        }, py::arg("graph_idx"), py::arg("tokens"),
+           "Write tokens (zero padded), run one compiled graph and return all logits rows")
         .def("reset", &LLMSession::reset, "Forget previous tokens so the next step recomputes every position")
         .def_property_readonly("max_sequence_length", &LLMSession::maxSequenceLength)
         .def_property_readonly("vocab_size", &LLMSession::vocabSize);

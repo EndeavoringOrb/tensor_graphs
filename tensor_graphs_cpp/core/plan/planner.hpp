@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <queue>
 #include <shared_mutex>
 #include <sstream>
@@ -466,6 +467,7 @@ struct Planner
             rules.emplace_back(makeProfiledRewriteRule<FusionRule>(settings.disable_fusion));
             rules.emplace_back(makeProfiledRewriteRule<DotSplitRule>());
             rules.emplace_back(makeProfiledRewriteRule<RemoveContiguous>());
+            rules.emplace_back(makeProfiledRewriteRule<RemoveIdentityContiguous>());
             rules.emplace_back(makeProfiledRewriteRule<RemoveCopyChains>());
             rules.emplace_back(makeProfiledRewriteRule<ConsumerWeightReuseRule>());
             rules.emplace_back(makeProfiledRewriteRule<RemoveRedundantReshape>());
@@ -3071,39 +3073,26 @@ struct Planner
 
         // Compute enode infos and prune egraphs
         std::vector<std::vector<ENodeInfo>> all_enode_infos(buckets.size());
-        // Full cycle listings (egraph_cycles{0..3}.txt) are debug output and
-        // cost seconds per bucket to format; write them only on request.
+        // Full cycle listings (egraph_cycles{0..N}.txt: before any pass, then
+        // after each pass) are debug output and cost seconds per bucket to
+        // format; write them only on request.
         const bool cycle_diagnostics = std::getenv("TG_CYCLE_DIAGNOSTICS") != nullptr;
-        std::ofstream cycleLogBeforeClean, cycleLogAfterClean, cycleLogAfterClean2, cycleLogAfterClean3,
-            cycleLogAfterClean4, cycleLogAfterClean5;
-        if (cycle_diagnostics)
+        const auto &cycle_passes = cycleStripPasses();
+        std::vector<std::ofstream> cycle_logs(cycle_diagnostics ? cycle_passes.size() + 1 : 0);
+        for (size_t i = 0; i < cycle_logs.size(); ++i)
         {
-            cycleLogBeforeClean.open("egraph_cycles0.txt", std::ios::out | std::ios::trunc);
-            cycleLogAfterClean.open("egraph_cycles1.txt", std::ios::out | std::ios::trunc);
-            cycleLogAfterClean2.open("egraph_cycles2.txt", std::ios::out | std::ios::trunc);
-            cycleLogAfterClean3.open("egraph_cycles3.txt", std::ios::out | std::ios::trunc);
-            cycleLogAfterClean4.open("egraph_cycles4.txt", std::ios::out | std::ios::trunc);
-            cycleLogAfterClean5.open("egraph_cycles5.txt", std::ios::out | std::ios::trunc);
-            if (!cycleLogBeforeClean)
-                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles0.txt for cycle diagnostics.";
-            if (!cycleLogAfterClean)
-                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles1.txt for cycle diagnostics.";
-            if (!cycleLogAfterClean2)
-                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
-            if (!cycleLogAfterClean3)
-                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles3.txt for cycle diagnostics.";
-            if (!cycleLogAfterClean4)
-                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles4.txt for cycle diagnostics.";
-            if (!cycleLogAfterClean5)
-                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles5.txt for cycle diagnostics.";
+            const std::string path = "egraph_cycles" + std::to_string(i) + ".txt";
+            cycle_logs[i].open(path, std::ios::out | std::ios::trunc);
+            if (!cycle_logs[i])
+                LOG(WARNING) << "[Planner.planAll] Could not open " << path << " for cycle diagnostics.";
         }
         // Buckets are independent here: run them in parallel and emit their
         // diagnostics afterwards in bucket order.
         struct BucketCycleReport
         {
-            std::ostringstream before, after1, after2, after3, after4, after5;
-            uint32_t initial = 0, pass1 = 0, pass2 = 0, pass3 = 0, pass4 = 0, pass5 = 0;
-            uint32_t removed1 = 0, removed2 = 0, removed3 = 0, removed4 = 0, removed5 = 0;
+            std::vector<std::ostringstream> logs;    // before, then after each pass
+            std::vector<uint32_t> components;        // before, then after each pass
+            std::vector<uint32_t> removed;           // per pass
         };
         std::vector<BucketCycleReport> cycle_reports(buckets.size());
         auto reduceBucket = [&](uint32_t b, Planner &worker_planner) {
@@ -3165,63 +3154,27 @@ struct Planner
                           << " after_prune=" << scatterAfter;
             }
 
-            r.initial = countCyclicComponents(bucket_states[b]);
+            r.logs.resize(cycle_logs.size());
+            r.components.push_back(countCyclicComponents(bucket_states[b]));
             if (cycle_diagnostics)
             {
-                r.before << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n";
-                printEGraphCycles(bucket_states[b], r.before);
+                r.logs[0] << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n";
+                printEGraphCycles(bucket_states[b], r.logs[0]);
             }
-
-            r.removed1 = removeDirectSelfReferenceENodes(bucket_states[b]);
-            r.pass1 = countCyclicComponents(bucket_states[b]);
-            if (cycle_diagnostics)
+            for (size_t p = 0; p < cycle_passes.size(); ++p)
             {
-                r.after1 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                         << "[Planner.planAll] Removed " << r.removed1 << " enode(s) with direct self-references.\n";
-                printEGraphCycles(bucket_states[b], r.after1);
+                r.removed.push_back(cycle_passes[p].run(bucket_states[b]));
+                r.components.push_back(countCyclicComponents(bucket_states[b]));
+                if (cycle_diagnostics)
+                {
+                    r.logs[p + 1] << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                                  << "[Planner.planAll] Removed " << r.removed.back() << " "
+                                  << cycle_passes[p].description << ".\n";
+                    printEGraphCycles(bucket_states[b], r.logs[p + 1]);
+                }
             }
 
-            r.removed2 = removeSingleExternalConnectionCycleENodes(bucket_states[b]);
-            r.pass2 = countCyclicComponents(bucket_states[b]);
-            if (cycle_diagnostics)
-            {
-                r.after2 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                         << "[Planner.planAll] Removed " << r.removed2
-                         << " enode(s) from single-external-connection cycles.\n";
-                printEGraphCycles(bucket_states[b], r.after2);
-            }
-
-            r.removed3 = removeSingleExternalInputCycleENodes(bucket_states[b]);
-            r.pass3 = countCyclicComponents(bucket_states[b]);
-            if (cycle_diagnostics)
-            {
-                r.after3 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                         << "[Planner.planAll] Removed " << r.removed3
-                         << " enode(s) from single-external-input cycles.\n";
-                printEGraphCycles(bucket_states[b], r.after3);
-            }
-
-            r.removed4 = removeSingleExternalConsumerCycleENodes(bucket_states[b]);
-            r.pass4 = countCyclicComponents(bucket_states[b]);
-            if (cycle_diagnostics)
-            {
-                r.after4 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                         << "[Planner.planAll] Removed " << r.removed4
-                         << " enode(s) from single-external-consumer cycles.\n";
-                printEGraphCycles(bucket_states[b], r.after4);
-            }
-
-            r.removed5 = removeSingleExternalComputationalProducerCycleENodes(bucket_states[b]);
-            r.pass5 = countCyclicComponents(bucket_states[b]);
-            if (cycle_diagnostics)
-            {
-                r.after5 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
-                         << "[Planner.planAll] Removed " << r.removed5
-                         << " enode(s) from single-external-compute-producer cycles.\n";
-                printEGraphCycles(bucket_states[b], r.after5);
-            }
-
-            const uint32_t total_removed = r.removed1 + r.removed2 + r.removed3 + r.removed4 + r.removed5;
+            const uint32_t total_removed = std::accumulate(r.removed.begin(), r.removed.end(), 0u);
             if (total_removed > 0 || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
             {
                 bucket_states[b].rebuild(true);
@@ -3293,40 +3246,21 @@ struct Planner
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
             const BucketCycleReport &r = cycle_reports[b];
-            if (cycleLogBeforeClean.is_open())
-                cycleLogBeforeClean << r.before.str();
-            if (cycleLogAfterClean.is_open())
-                cycleLogAfterClean << r.after1.str();
-            if (cycleLogAfterClean2.is_open())
-                cycleLogAfterClean2 << r.after2.str();
-            if (cycleLogAfterClean3.is_open())
-                cycleLogAfterClean3 << r.after3.str();
-            if (cycleLogAfterClean4.is_open())
-                cycleLogAfterClean4 << r.after4.str();
-            if (cycleLogAfterClean5.is_open())
-                cycleLogAfterClean5 << r.after5.str();
-            if (r.pass5 > 0)
+            for (size_t i = 0; i < cycle_logs.size(); ++i)
+                if (cycle_logs[i].is_open())
+                    cycle_logs[i] << r.logs[i].str();
+            if (r.components.back() > 0)
                 all_buckets_dag = false;
 
             LOG(INFO) << "[Planner.planAll] Bucket " << b << " cycle reduction:";
-            LOG(INFO) << "  Initial cyclic components: " << r.initial;
-            LOG(INFO) << "  Pass 1 (direct self-references): " << r.initial << " -> " << r.pass1 << " (-"
-                      << (r.initial - r.pass1) << ", removed " << r.removed1 << " enodes)";
-            LOG(INFO) << "  Pass 2 (single-external connection): " << r.pass1 << " -> " << r.pass2 << " (-"
-                      << (r.pass1 - r.pass2) << ", removed " << r.removed2 << " enodes)";
-            LOG(INFO) << "  Pass 3 (single-external input): " << r.pass2 << " -> " << r.pass3 << " (-"
-                      << (r.pass2 - r.pass3) << ", removed " << r.removed3 << " enodes)";
-            LOG(INFO) << "  Pass 4 (single-external consumer): " << r.pass3 << " -> " << r.pass4 << " (-"
-                      << (r.pass3 - r.pass4) << ", removed " << r.removed4 << " enodes)";
-            LOG(INFO) << "  Pass 5 (single-external compute producer): " << r.pass4 << " -> " << r.pass5 << " (-"
-                      << (r.pass4 - r.pass5) << ", removed " << r.removed5 << " enodes)";
+            LOG(INFO) << "  Initial cyclic components: " << r.components.front();
+            for (size_t p = 0; p < cycle_passes.size(); ++p)
+                LOG(INFO) << "  Pass " << (p + 1) << " (" << cycle_passes[p].name << "): " << r.components[p]
+                          << " -> " << r.components[p + 1] << ", removed " << r.removed[p] << " "
+                          << cycle_passes[p].description;
         }
-        cycleLogBeforeClean.flush();
-        cycleLogAfterClean.flush();
-        cycleLogAfterClean2.flush();
-        cycleLogAfterClean3.flush();
-        cycleLogAfterClean4.flush();
-        cycleLogAfterClean5.flush();
+        for (std::ofstream &log : cycle_logs)
+            log.flush();
 
         if (all_buckets_dag)
         {

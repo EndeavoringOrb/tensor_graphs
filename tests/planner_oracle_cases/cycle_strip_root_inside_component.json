@@ -1,0 +1,11 @@
+{
+  "name": "cycle strip: the bucket root is inside a cycle",
+  "description": "SCC out <-> a; the root has no consumer, so single_external_connection sees a as the only member touching the outside and clears the root.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a"], "cost": 1}]},
+    "a": {"alternatives": [{"children": ["out"], "cost": 0}, {"children": ["inp"], "cost": 3}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 4
+}

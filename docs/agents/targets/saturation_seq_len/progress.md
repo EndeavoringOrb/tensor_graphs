@@ -1,6 +1,6 @@
 # Multi-Bucket Saturation Optimizations & Progress
 
-Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms while preserving 100% graph equivalence.
+Task: follow `docs/agents/targets/saturation_seq_len/target.md` (largest seq_len under 30 s with exact equivalence). Original goal, met at Step 2: reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms while preserving 100% graph equivalence.
 
 ## Summary Table
 

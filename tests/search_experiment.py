@@ -3,12 +3,14 @@
 Usage (from the repository root):
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> -m tests.test_gemma_output --config decode --optimal --timeout 600
   .venv/Scripts/python.exe tests/search_experiment.py --record inference <run_id> -m tests.inference_benchmark --run-dir logs/inference_runs/<run_id>
+  .venv/Scripts/python.exe tests/search_experiment.py --record prefill_decode_seq_len <run_id> -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len 4 --run-dir logs/gemma_output_runs/<run_id>
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> build.py --targets bindings test --log-level INFO
   .venv/Scripts/python.exe tests/search_experiment.py --record gap <run_id> --native-command tensor_graphs_cpp/test.exe --start-rank-window
 
 Every run writes logs/<record>_improvements/<run_id>.{log,json,patch} (refusing to
 overwrite) and appends an in-progress entry, then a completion entry, to the
-record document (docs/agents/GAP_IMPROVEMENTS.md for --record gap). The patch
+record document (docs/agents/targets/gap_integral/progress.md for --record gap,
+docs/agents/targets/<name>/progress.md for --record <name>). The patch
 captures the uncommitted state of tensor_graphs_cpp, tests and docs/core,
 including untracked files, relative to HEAD.
 """
@@ -25,11 +27,24 @@ import traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RECORDS = {
-    "gap": ("logs/gap_improvements", "docs/agents/GAP_IMPROVEMENTS.md"),
-    "search": ("logs/search_improvements", "docs/agents/SEARCH_IMPROVEMENTS.md"),
-    "inference": ("logs/inference_improvements", "docs/agents/INFERENCE_IMPROVEMENTS.md"),
+    "gap": ("logs/gap_improvements", "docs/agents/targets/gap_integral/progress.md"),
+    "search": ("logs/search_improvements", "docs/agents/targets/search_volume/progress.md"),
+    "inference": ("logs/inference_improvements", "docs/agents/targets/inference_speed/progress.md"),
 }
+# Target folders whose runs predate logs/targets/ keep their log folder under either name.
+RECORDS.update({"gap_integral": RECORDS["gap"], "search_volume": RECORDS["search"],
+                "inference_speed": RECORDS["inference"]})
+TARGETS_DIR = ROOT / "docs" / "agents" / "targets"
 PATCH_PATHS = ["tensor_graphs_cpp", "tests", "docs/core"]
+
+
+def recordPaths(record_name):
+    """Legacy records above, or any docs/agents/targets/<name>/ (logs in logs/targets/<name>)."""
+    if record_name in RECORDS:
+        return RECORDS[record_name]
+    if record_name.startswith("_") or not (TARGETS_DIR / record_name / "progress.md").is_file():
+        return None
+    return f"logs/targets/{record_name}", f"docs/agents/targets/{record_name}/progress.md"
 
 
 def capturePatch():
@@ -51,12 +66,24 @@ def parseMetrics(output, timeout):
         "incumbent_events": re.findall(r"\[SearchEngine\] New best cost:.*", output),
         "oracle_verdict": re.findall(r"\d+/\d+ cases passed", output),
         "inference_lines": re.findall(r"\[Inference (?:compile\] supervisor|case|failure|summary)\].*", output),
+        "gemma_lines": re.findall(r"\[Gemma (?:compile\] supervisor|logits\] ok|failure|prefill\+decode)\].*", output),
     }
+    if metrics["gap_report"]:
+        metrics["gap"] = {key: (None if value == "none" else float(value))
+                          for key, value in re.findall(r"([\w-]+)=([^ ]+)", metrics["gap_report"][-1])}
     first = None
     for line in metrics["incumbent_events"]:
         event = re.search(r"cost: ([0-9.eE+\-]+).*event-epoch=([0-9.eE+\-]+) program-deadline=([0-9.eE+\-]+)", line)
         if event and timeout:
-            first = {"cost": float(event[1]), "program_elapsed": float(event[2]) - float(event[3]) + timeout}
+            if float(event[3]) > 0:
+                elapsed = float(event[2]) - float(event[3]) + timeout
+            else:
+                # Without TG_PROGRAM_DEADLINE (search-deadline compiles) the
+                # supervisor's gap report has the time since its start.
+                elapsed = metrics.get("gap", {}).get("first-incumbent-elapsed")
+                if elapsed is None:
+                    raise ValueError("Incumbent event without a program deadline and no [Program gap] report")
+            first = {"cost": float(event[1]), "program_elapsed": elapsed}
             break
     metrics["first_incumbent"] = first
     costs = re.findall(r"best=([0-9.eE+\-]+)", output)
@@ -66,21 +93,18 @@ def parseMetrics(output, timeout):
         total, remaining = float(fields["total-domain-bits"]), float(fields["remaining-domain-bits"])
         metrics["eliminated_bits"] = float(fields["eliminated-bits"])
         metrics["volume_target_met"] = remaining <= total / 2
-    if metrics["gap_report"]:
-        metrics["gap"] = {key: (None if value == "none" else float(value))
-                          for key, value in re.findall(r"([\w-]+)=([^ ]+)", metrics["gap_report"][-1])}
     return metrics
 
 
 def main():
     arguments = sys.argv[1:]
-    if len(arguments) < 3 or arguments[0] != "--record" or arguments[1] not in RECORDS:
+    if len(arguments) < 3 or arguments[0] != "--record" or recordPaths(arguments[1]) is None:
         raise SystemExit(__doc__)
     record_name, run_id, *arguments = arguments[1:]
     native = bool(arguments) and arguments[0] == "--native-command"
     if native:
         arguments = arguments[1:]
-    log_dir, document_name = RECORDS[record_name]
+    log_dir, document_name = recordPaths(record_name)
     directory = ROOT / log_dir
     directory.mkdir(parents=True, exist_ok=True)
     document = ROOT / document_name

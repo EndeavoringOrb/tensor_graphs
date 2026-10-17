@@ -1,6 +1,6 @@
 # Inference-speed improvements record
 
-Task: follow `docs/agents/improve_inference_speed.md`. Runs are appended by `tests/search_experiment.py --record inference`; logs, metadata and source patches live in `logs/inference_improvements/`, run directories (compiled plan, results) in `logs/inference_runs/`.
+Task: follow `docs/agents/targets/inference_speed/target.md`. Runs are appended by `tests/search_experiment.py --record inference`; logs, metadata and source patches live in `logs/inference_improvements/`, run directories (compiled plan, results) in `logs/inference_runs/`.
 
 ## Fixed evaluation contract
 - Evaluation: `.venv/Scripts/python.exe tests/search_experiment.py --record inference <run_id> -m tests.inference_benchmark --run-dir logs/inference_runs/<run_id>`

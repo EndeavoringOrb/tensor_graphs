@@ -1,6 +1,6 @@
 # Search improvements record
 
-Task: follow `docs/agents/improve_search.md`; goal `remaining-domain-bits <= total-domain-bits / 2`
+Task: follow `docs/agents/targets/search_volume/target.md`; goal `remaining-domain-bits <= total-domain-bits / 2`
 (i.e. `eliminated-bits >= total-domain-bits / 2`) within the fixed budget.
 
 ## Fixed evaluation contract
@@ -9,7 +9,7 @@ Task: follow `docs/agents/improve_search.md`; goal `remaining-domain-bits <= tot
 - Hardware: Snapdragon X Elite X1E78100 (Windows arm64), 31.5 GB RAM. Repeats: 1 baseline + 2 confirmations for promising candidates.
 - Base revision: `d6397868` (branch `faster-search`).
 - Correctness gates: `tests.test_planner_oracle` (full suite) after every native change.
-- Overshoot limit: 50 ms originally; **changed by the user to 1 second** (mid-session, after R013). Edited `tests/test_gemma_output.py`, `docs/core/search_volume.md`, `docs/agents/improve_search.md` accordingly. R002/R005/R010 also satisfy the old limit; R013 (0.1167 s) is valid under the new one.
+- Overshoot limit: 50 ms originally; **changed by the user to 1 second** (mid-session, after R013). Edited `tests/test_gemma_output.py`, `docs/core/search_volume.md`, `docs/agents/targets/search_volume/target.md` accordingly. R002/R005/R010 also satisfy the old limit; R013 (0.1167 s) is valid under the new one.
 
 ## Runs
 Target for all decode runs = total-domain-bits / 2 = 2425756.58187016 (total 4851513.1637403192).

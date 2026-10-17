@@ -1,4 +1,4 @@
-"""Inference speed benchmark (fixed contract; docs/agents/improve_inference_speed.md).
+"""Inference speed benchmark (fixed contract; docs/agents/targets/inference_speed/target.md).
 
 Usage (from the repository root):
   .venv/Scripts/python.exe -m tests.inference_benchmark --run-dir logs/inference_runs/<run_id>

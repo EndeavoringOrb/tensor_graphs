@@ -1320,6 +1320,14 @@ struct FusionRule : public Rule
             if (!valid_paths)
                 continue;
 
+            // CONTIGUOUS(x) for a strided x in another memory space first
+            // makes x contiguous in the original space, which is this class
+            // itself. The candidate is then copy(identity(copy(this class))),
+            // usable only inside a cycle.
+            if (oldENode.getOpType() == OpType::CONTIGUOUS && child_ids.size() == 1 && cand.child_need_copy[0] &&
+                cand.child_need_contig[0])
+                continue;
+
             std::vector<uint64_t> actualOutStrides =
                 kernel->is_view ? oldENode.getStrides() : calcContiguousStrides(outShape);
 
@@ -3974,6 +3982,61 @@ struct RemoveContiguous : public Rule
                 }
             }
         }
+    }
+};
+
+// CONTIGUOUS(x) where x already has the same contiguous layout in the same
+// memory space is x itself: merge the classes. Full saturation runs before base
+// ids exist, so its merges never join two base values; later merges of two
+// base values need allow_base_equalities (reconciled across buckets).
+struct RemoveIdentityContiguous : public Rule
+{
+    std::unique_ptr<Rule> clone() const override
+    {
+        return std::make_unique<RemoveIdentityContiguous>(*this);
+    }
+
+    std::string name() const override
+    {
+        return "RemoveIdentityContiguous";
+    }
+
+    bool canMatchOp(OpType op) const override
+    {
+        return op == OpType::CONTIGUOUS;
+    }
+
+    void clearVisited() override {}
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        const EGraph &egraph = ctx.egraph;
+        if (eNodeIdx >= egraph.getNumENodes())
+            return false;
+        const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+        if (enode.getOpType() != OpType::CONTIGUOUS || enode.getChildren().size() != 1)
+            return false;
+        const EClassId class_id = egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx}));
+        const EClassId child_id = egraph.findConst(enode.getChildren()[0]);
+        if (class_id == child_id)
+            return false;
+        const EClass &cls = egraph.getEClass(class_id);
+        const EClass &child = egraph.getEClass(child_id);
+        if (child.shape != cls.shape || child.strides != cls.strides || child.dtype != cls.dtype ||
+            child.mem_space != cls.mem_space || !isContiguous(child))
+            return false;
+        return egraph.allow_base_equalities || cls.base_eclass_id == BaseEClassId{} ||
+               child.base_eclass_id == BaseEClassId{};
+    }
+
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        if (!match(eNodeIdx, ctx))
+            return;
+        EGraph &egraph = ctx.egraph;
+        const EClassId class_id = egraph.findConst(egraph.getENodeEClass(ENodeId{eNodeIdx}));
+        const EClassId child_id = egraph.findConst(egraph.getENode(ENodeId{eNodeIdx}).getChildren()[0]);
+        egraph.merge(class_id, child_id);
     }
 };
 

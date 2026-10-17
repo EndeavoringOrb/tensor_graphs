@@ -1,6 +1,6 @@
 """How the inference benchmark builds and opens the compiled model.
 
-This module is AGENT-EDITABLE (docs/agents/improve_inference_speed.md): bucket
+This module is AGENT-EDITABLE (docs/agents/targets/inference_speed/target.md): bucket
 choice, search budget, threads and any other session option may change here
 or in the native code behind it. The measurement and correctness checks in
 tests/inference_benchmark.py are fixed.

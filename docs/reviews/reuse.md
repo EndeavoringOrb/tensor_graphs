@@ -74,7 +74,7 @@ If another stage dominates, optimize that stage while preserving alternatives. R
 
 Run planner oracle (including certified-bound validity), search-gap tests, and the applicable native private-layout/write-after-read-cache/incremental-propagators/start-rank-window/relaxation-bound suites after implementation. Use `.venv/Scripts/python.exe` on Windows; `.venvx64/Scripts/python` is for OR-Tools. Follow local AGENTS.md naming, fail-loud, and kernel-variant requirements.
 
-Official performance claims must follow `docs/agents/improve_inference_speed.md`: fresh compilation, fixed precision/reference checks, the 600-second compile budget, and repeated-run acceptance gate. Diagnostic runs are not official evaluations. Compare identical bucket sets, source/build conditions, and workload weights. Report large-bucket-set budget failures rather than hiding them with widening or pruning.
+Official performance claims must follow `docs/agents/targets/inference_speed/target.md`: fresh compilation, fixed precision/reference checks, the 600-second compile budget, and repeated-run acceptance gate. Diagnostic runs are not official evaluations. Compare identical bucket sets, source/build conditions, and workload weights. Report large-bucket-set budget failures rather than hiding them with widening or pruning.
 
 ## Completion criteria
 

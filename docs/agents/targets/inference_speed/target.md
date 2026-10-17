@@ -101,7 +101,7 @@ Profile freely (`build.py --profile`, temporary timing logs, `--cases` subsets),
 
 ## Logs and resumable progress
 
-Keep `docs/agents/INFERENCE_IMPROVEMENTS.md` and `logs/inference_improvements/` sufficient to resume without conversation history. The runner appends an in-progress and a completion entry per run with the result lines. After each run add a short note: the hypothesis; per-case tok/s and the score compared with the accepted implementation; the gate verdict and its reason. Maintain:
+Keep `docs/agents/targets/inference_speed/progress.md` and `logs/inference_improvements/` sufficient to resume without conversation history. The runner appends an in-progress and a completion entry per run with the result lines. After each run add a short note: the hypothesis; per-case tok/s and the score compared with the accepted implementation; the gate verdict and its reason. Maintain:
 - a **comparison table** (run, implementation, score, per-case median tok/s, compile seconds, correct);
 - a **resume checkpoint**: the accepted implementation and its patch, the working-tree and build state, any running process and its log, and the next concrete step.
 
@@ -111,4 +111,4 @@ Never append to the record with Windows PowerShell's `Add-Content`/`Set-Content`
 
 - The default `tests/inference_session.py` compiles only the full bucket (one plan for the whole 1024-token graph), so every step recomputes the whole sequence. Decode steps are therefore as slow as a full prefill. Adding decode and prefill buckets, or symbolic and shared ones, is the obvious first speed lever once outputs are correct. One bucket per length and phase would mean 2 × 1024 buckets; the current per-bucket planning cost (seconds per bucket) makes that infeasible within 600 s.
 - `LLMSession.step_logits(tokens)` diffs `tokens` against the previous call to form the dirty region, writes the input, runs the best compiled bucket for the request (`Session::getBestGraphIdx`) and copies one logits row back.
-- The planner work in `docs/agents/GAP_IMPROVEMENTS.md` (relaxation bounds, root primal heuristic, faster preprocessing) and its notes on startup costs apply directly to the compile budget.
+- The planner work in `docs/agents/targets/gap_integral/progress.md` (relaxation bounds, root primal heuristic, faster preprocessing) and its notes on startup costs apply directly to the compile budget.

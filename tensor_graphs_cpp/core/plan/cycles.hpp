@@ -1,10 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <functional>
 #include <iostream>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "core/egraph.hpp"
@@ -229,389 +226,143 @@ inline void printEGraphCycles(const EGraph &egraph, std::ostream &output)
     }
 }
 
-inline uint32_t removeDirectSelfReferenceENodes(EGraph &egraph)
-{
-    uint32_t removed_count = 0;
-    for (uint32_t class_index = 0; class_index < egraph.getNumClasses(); ++class_index)
-    {
-        EClassId class_id{class_index};
-        if (egraph.findConst(class_id) != class_id)
-            continue;
-
-        EClass &eclass = egraph.getEClass(class_id);
-        std::vector<ENodeId> retained_enodes;
-        retained_enodes.reserve(eclass.enodes.size());
-        for (ENodeId enode_id : eclass.enodes)
-        {
-            const ENode &enode = egraph.getENode(enode_id);
-            const bool has_direct_self_reference = std::any_of(
-                enode.getChildren().begin(), enode.getChildren().end(),
-                [&](EClassId child) { return egraph.findConst(child) == class_id; });
-            if (has_direct_self_reference)
-            {
-                ++removed_count;
-                continue;
-            }
-            retained_enodes.push_back(enode_id);
-        }
-        eclass.enodes = std::move(retained_enodes);
-    }
-    return removed_count;
-}
-
-inline uint32_t removeSingleExternalConnectionCycleENodes(EGraph &egraph)
-{
-    CycleAdjacency outgoing, incoming;
-    std::vector<uint8_t> canonical;
-    auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
-
-    uint32_t removed_count = 0;
-
-    for (const auto &component : cyclic_components)
-    {
-        std::unordered_set<uint32_t> comp_set(component.begin(), component.end());
-        std::vector<uint32_t> outside_members;
-
-        for (uint32_t member : component)
-        {
-            bool connects_outside = false;
-            for (const CycleEdge &edge : outgoing[member])
-            {
-                if (comp_set.find(edge.to) == comp_set.end())
-                {
-                    connects_outside = true;
-                    break;
-                }
-            }
-            if (!connects_outside)
-            {
-                for (const CycleEdge &edge : incoming[member])
-                {
-                    if (comp_set.find(edge.from) == comp_set.end())
-                    {
-                        connects_outside = true;
-                        break;
-                    }
-                }
-            }
-            if (connects_outside)
-            {
-                outside_members.push_back(member);
-            }
-        }
-
-        if (outside_members.size() != 1)
-            continue;
-
-        const uint32_t ext_class_id = outside_members.front();
-        std::unordered_set<uint32_t> internal_classes;
-        for (uint32_t member : component)
-        {
-            if (member != ext_class_id)
-                internal_classes.insert(member);
-        }
-
-        // 1. Remove from ext_class_id any enode that consumes a child in internal_classes
-        EClass &ext_eclass = egraph.getEClass(EClassId{ext_class_id});
-        std::vector<ENodeId> kept_ext_enodes;
-        kept_ext_enodes.reserve(ext_eclass.enodes.size());
-        for (ENodeId enode_id : ext_eclass.enodes)
-        {
-            const ENode &enode = egraph.getENode(enode_id);
-            bool uses_internal = false;
-            for (EClassId child : enode.getChildren())
-            {
-                uint32_t canon_child = egraph.findConst(child).value;
-                if (internal_classes.count(canon_child))
-                {
-                    uses_internal = true;
-                    break;
-                }
-            }
-            if (uses_internal)
-            {
-                ++removed_count;
-            }
-            else
-            {
-                kept_ext_enodes.push_back(enode_id);
-            }
-        }
-        ext_eclass.enodes = std::move(kept_ext_enodes);
-
-        // 2. Clear all enodes in internal_classes (they have 0 external connections)
-        for (uint32_t int_class_id : internal_classes)
-        {
-            EClass &int_eclass = egraph.getEClass(EClassId{int_class_id});
-            removed_count += static_cast<uint32_t>(int_eclass.enodes.size());
-            int_eclass.enodes.clear();
-        }
-    }
-
-    return removed_count;
-}
-
-inline uint32_t removeSingleExternalInputCycleENodes(EGraph &egraph)
+// A plan selects one enode per class. If class A has an enode with a child B in
+// A's cyclic component and B cannot be derived at all once A is forbidden, every
+// derivation of B reaches A again, so that enode is only ever selected inside a
+// cycle. Removing it keeps every acyclic plan. Classes outside the component
+// count as derivable, which only removes less. Subsumes direct self-references.
+inline uint32_t removeDominatedCycleENodes(EGraph &egraph)
 {
     uint32_t total_removed = 0;
-
+    std::vector<int32_t> local_of;
     while (true)
     {
         CycleAdjacency outgoing, incoming;
         std::vector<uint8_t> canonical;
         auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
-        if (cyclic_components.empty())
-            break;
+        local_of.assign(egraph.getNumClasses(), -1);
 
         uint32_t iter_removed = 0;
-
         for (const auto &component : cyclic_components)
         {
-            std::unordered_set<uint32_t> comp_set(component.begin(), component.end());
+            const uint32_t k = static_cast<uint32_t>(component.size());
+            for (uint32_t i = 0; i < k; ++i)
+                local_of[component[i]] = static_cast<int32_t>(i);
 
-            std::vector<uint32_t> external_producers;
-            for (uint32_t member : component)
+            // Flattened enodes of the component with their distinct internal children.
+            struct LocalENode
             {
-                const EClass &eclass = egraph.getEClass(EClassId{member});
-                bool has_pure_external_enode = false;
-                for (ENodeId enode_id : eclass.enodes)
+                uint32_t owner;
+                std::vector<uint32_t> internal_children;
+            };
+            std::vector<LocalENode> enodes;
+            std::vector<std::vector<uint32_t>> enodes_of(k), readers_of(k);
+            for (uint32_t i = 0; i < k; ++i)
+                for (ENodeId enode_id : egraph.getEClass(EClassId{component[i]}).enodes)
                 {
-                    const ENode &enode = egraph.getENode(enode_id);
-                    bool has_internal_child = false;
-                    for (EClassId child : enode.getChildren())
+                    LocalENode local{i, {}};
+                    for (EClassId child : egraph.getENode(enode_id).getChildren())
                     {
-                        uint32_t canon_child = egraph.findConst(child).value;
-                        if (comp_set.count(canon_child))
+                        const int32_t c = local_of[egraph.findConst(child).value];
+                        if (c >= 0 && std::find(local.internal_children.begin(), local.internal_children.end(),
+                                                static_cast<uint32_t>(c)) == local.internal_children.end())
+                            local.internal_children.push_back(static_cast<uint32_t>(c));
+                    }
+                    const uint32_t e = static_cast<uint32_t>(enodes.size());
+                    enodes_of[i].push_back(e);
+                    for (uint32_t c : local.internal_children)
+                        readers_of[c].push_back(e);
+                    enodes.push_back(std::move(local));
+                }
+
+            std::vector<std::vector<uint8_t>> removed(k);
+            std::vector<uint8_t> derivable(k);
+            std::vector<uint32_t> missing(enodes.size());
+            std::vector<uint32_t> worklist;
+            for (uint32_t forbidden = 0; forbidden < k; ++forbidden)
+            {
+                // Least fixpoint: a class is derivable without `forbidden` once
+                // one of its enodes has every internal child derivable.
+                std::fill(derivable.begin(), derivable.end(), 0);
+                worklist.clear();
+                for (uint32_t e = 0; e < enodes.size(); ++e)
+                {
+                    missing[e] = static_cast<uint32_t>(enodes[e].internal_children.size());
+                    const uint32_t owner = enodes[e].owner;
+                    if (missing[e] == 0 && owner != forbidden && !derivable[owner])
+                    {
+                        derivable[owner] = 1;
+                        worklist.push_back(owner);
+                    }
+                }
+                while (!worklist.empty())
+                {
+                    const uint32_t c = worklist.back();
+                    worklist.pop_back();
+                    for (uint32_t e : readers_of[c])
+                    {
+                        const uint32_t owner = enodes[e].owner;
+                        if (--missing[e] == 0 && owner != forbidden && !derivable[owner])
                         {
-                            has_internal_child = true;
-                            break;
+                            derivable[owner] = 1;
+                            worklist.push_back(owner);
                         }
                     }
-                    if (!has_internal_child)
-                    {
-                        has_pure_external_enode = true;
-                        break;
-                    }
                 }
-                if (has_pure_external_enode)
-                {
-                    external_producers.push_back(member);
-                }
+                removed[forbidden].assign(enodes_of[forbidden].size(), 0);
+                for (uint32_t j = 0; j < enodes_of[forbidden].size(); ++j)
+                    for (uint32_t c : enodes[enodes_of[forbidden][j]].internal_children)
+                        if (c == forbidden || !derivable[c])
+                            removed[forbidden][j] = 1;
             }
 
-            if (external_producers.size() != 1)
-                continue;
-
-            const uint32_t ext_member = external_producers.front();
-            EClass &ext_eclass = egraph.getEClass(EClassId{ext_member});
-            std::vector<ENodeId> kept_enodes;
-            kept_enodes.reserve(ext_eclass.enodes.size());
-
-            for (ENodeId enode_id : ext_eclass.enodes)
+            // Every removal is justified against the same snapshot, so applying
+            // them together is exact.
+            for (uint32_t i = 0; i < k; ++i)
             {
-                const ENode &enode = egraph.getENode(enode_id);
-                bool has_internal_child = false;
-                for (EClassId child : enode.getChildren())
+                EClass &eclass = egraph.getEClass(EClassId{component[i]});
+                if (eclass.enodes.size() != removed[i].size())
+                    Error::throw_err("removeDominatedCycleENodes: enode count changed while pruning");
+                std::vector<ENodeId> kept;
+                kept.reserve(eclass.enodes.size());
+                for (uint32_t j = 0; j < eclass.enodes.size(); ++j)
                 {
-                    uint32_t canon_child = egraph.findConst(child).value;
-                    if (comp_set.count(canon_child))
-                    {
-                        has_internal_child = true;
-                        break;
-                    }
-                }
-                if (has_internal_child)
-                {
-                    ++iter_removed;
-                }
-                else
-                {
-                    kept_enodes.push_back(enode_id);
-                }
-            }
-            ext_eclass.enodes = std::move(kept_enodes);
-        }
-
-        if (iter_removed == 0)
-            break;
-        total_removed += iter_removed;
-    }
-
-    return total_removed;
-}
-
-inline uint32_t removeSingleExternalConsumerCycleENodes(EGraph &egraph)
-{
-    uint32_t total_removed = 0;
-
-    while (true)
-    {
-        CycleAdjacency outgoing, incoming;
-        std::vector<uint8_t> canonical;
-        auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
-        if (cyclic_components.empty())
-            break;
-
-        uint32_t iter_removed = 0;
-
-        for (const auto &component : cyclic_components)
-        {
-            std::unordered_set<uint32_t> comp_set(component.begin(), component.end());
-
-            std::vector<uint32_t> external_consumers;
-            for (uint32_t member : component)
-            {
-                bool has_outside_consumer = false;
-                for (const CycleEdge &edge : incoming[member])
-                {
-                    if (comp_set.find(edge.from) == comp_set.end())
-                    {
-                        has_outside_consumer = true;
-                        break;
-                    }
-                }
-                if (has_outside_consumer)
-                {
-                    external_consumers.push_back(member);
-                }
-            }
-
-            if (external_consumers.size() != 1)
-                continue;
-
-            const uint32_t ext_consumer = external_consumers.front();
-            for (uint32_t member : component)
-            {
-                if (member == ext_consumer)
-                    continue;
-
-                EClass &int_eclass = egraph.getEClass(EClassId{member});
-                std::vector<ENodeId> kept_enodes;
-                kept_enodes.reserve(int_eclass.enodes.size());
-
-                for (ENodeId enode_id : int_eclass.enodes)
-                {
-                    const ENode &enode = egraph.getENode(enode_id);
-                    bool has_internal_child = false;
-                    for (EClassId child : enode.getChildren())
-                    {
-                        uint32_t canon_child = egraph.findConst(child).value;
-                        if (comp_set.count(canon_child))
-                        {
-                            has_internal_child = true;
-                            break;
-                        }
-                    }
-                    if (has_internal_child)
-                    {
+                    if (removed[i][j])
                         ++iter_removed;
-                    }
                     else
-                    {
-                        kept_enodes.push_back(enode_id);
-                    }
+                        kept.push_back(eclass.enodes[j]);
                 }
-                int_eclass.enodes = std::move(kept_enodes);
+                eclass.enodes = std::move(kept);
             }
-        }
-
-        if (iter_removed == 0)
-            break;
-        total_removed += iter_removed;
-    }
-
-    return total_removed;
-}
-
-inline uint32_t removeSingleExternalComputationalProducerCycleENodes(EGraph &egraph)
-{
-    uint32_t total_removed = 0;
-
-    while (true)
-    {
-        CycleAdjacency outgoing, incoming;
-        std::vector<uint8_t> canonical;
-        auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
-        if (cyclic_components.empty())
-            break;
-
-        uint32_t iter_removed = 0;
-
-        for (const auto &component : cyclic_components)
-        {
-            std::unordered_set<uint32_t> comp_set(component.begin(), component.end());
-
-            std::vector<uint32_t> computational_producers;
             for (uint32_t member : component)
-            {
-                const EClass &eclass = egraph.getEClass(EClassId{member});
-                bool has_pure_external_compute = false;
-                for (ENodeId enode_id : eclass.enodes)
-                {
-                    const ENode &enode = egraph.getENode(enode_id);
-                    if (enode.getOpType() == OpType::CACHE || enode.getOpType() == OpType::INPUT)
-                        continue;
-
-                    bool has_internal_child = false;
-                    for (EClassId child : enode.getChildren())
-                    {
-                        uint32_t canon_child = egraph.findConst(child).value;
-                        if (comp_set.count(canon_child))
-                        {
-                            has_internal_child = true;
-                            break;
-                        }
-                    }
-                    if (!has_internal_child)
-                    {
-                        has_pure_external_compute = true;
-                        break;
-                    }
-                }
-                if (has_pure_external_compute)
-                {
-                    computational_producers.push_back(member);
-                }
-            }
-
-            if (computational_producers.size() != 1)
-                continue;
-
-            const uint32_t ext_member = computational_producers.front();
-            EClass &ext_eclass = egraph.getEClass(EClassId{ext_member});
-            std::vector<ENodeId> kept_enodes;
-            kept_enodes.reserve(ext_eclass.enodes.size());
-
-            for (ENodeId enode_id : ext_eclass.enodes)
-            {
-                const ENode &enode = egraph.getENode(enode_id);
-                bool has_internal_child = false;
-                for (EClassId child : enode.getChildren())
-                {
-                    uint32_t canon_child = egraph.findConst(child).value;
-                    if (comp_set.count(canon_child))
-                    {
-                        has_internal_child = true;
-                        break;
-                    }
-                }
-                if (has_internal_child)
-                {
-                    ++iter_removed;
-                }
-                else
-                {
-                    kept_enodes.push_back(enode_id);
-                }
-            }
-            ext_eclass.enodes = std::move(kept_enodes);
+                local_of[member] = -1;
         }
 
         if (iter_removed == 0)
             break;
         total_removed += iter_removed;
     }
-
     return total_removed;
 }
 
+struct CycleStripPass
+{
+    const char *name;
+    const char *description;
+    uint32_t (*run)(EGraph &);
+};
+
+// Every pass registered here must keep every acyclic plan;
+// tests/test_planner_oracle checks each one alone and the whole pipeline.
+// Removed after tests/planner_oracle_cases/cycle_strip_* showed they drop
+// optimal plans: single-external connection (an internal class with a leaf
+// producer, or the root inside the component), single-external consumer and
+// single-external compute producer. Direct self-reference and single-external
+// input were exact but are subsumed by dominated_child.
+inline const std::vector<CycleStripPass> &cycleStripPasses()
+{
+    static const std::vector<CycleStripPass> passes{
+        {"dominated_child", "enode(s) whose child needs the enode's own class", &removeDominatedCycleENodes},
+    };
+    return passes;
+}

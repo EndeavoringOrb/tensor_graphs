@@ -117,7 +117,7 @@ The simulator gives views zero duration and no engine, but `EngineWorkloadPropag
 
 ## Commit 2: optimizations
 
-The changes are grouped by the problem they attack. The `H#` labels match `docs/agents/SEARCH_IMPROVEMENTS.md`.
+The changes are grouped by the problem they attack. The `H#` labels match `docs/agents/targets/search_volume/progress.md`.
 
 ### 5. Static private memory layout for CPP (H6, with repairs H8 and H17): `static_private_layout.hpp`
 

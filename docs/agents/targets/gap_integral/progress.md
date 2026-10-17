@@ -1,6 +1,6 @@
 # Gap-integral improvements record
 
-Task: follow `docs/agents/improve_gap_integral.md`. Runs are appended by `tests/search_experiment.py --record gap`; logs, metadata and source patches live in `logs/gap_improvements/`.
+Task: follow `docs/agents/targets/gap_integral/target.md`. Runs are appended by `tests/search_experiment.py --record gap`; logs, metadata and source patches live in `logs/gap_improvements/`.
 
 ## Fixed evaluation contract
 - Command (cwd repository root): `.venv/Scripts/python.exe -m tests.test_gemma_output --config decode --optimal --timeout 600`

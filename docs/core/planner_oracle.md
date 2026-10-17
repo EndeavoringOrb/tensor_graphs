@@ -119,6 +119,12 @@ For each case:
    independently validate its returned implementation choices, order, cache
    decisions, addresses, and cost. This exercises branching and restoration.
 
+Cycle stripping is checked too. Every registered pass (`cycleStripPasses()` in
+`core/plan/cycles.hpp`) runs alone, and then the whole planner pipeline runs, on
+each bucket's alternatives (adapter mode `strip:<pass>`). The survivors are
+enumerated and must have the same optimum. The `cycle_strip_*` cases are the
+counterexamples that removed earlier passes; keep them.
+
 Optional `probes` add parent-domain restrictions and repeat all these checks:
 
 ```json

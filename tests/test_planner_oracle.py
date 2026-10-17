@@ -105,6 +105,22 @@ def checkSearch(problem, reference, limit):
             f"Native incumbent has an incorrect cost: {result['witness']}")
 
 
+def cyclePassNames():
+    import tensor_graphs
+    require(hasattr(tensor_graphs, "_cycle_strip_pass_names"),
+            "Rebuild bindings: .venv/Scripts/python.exe build.py --targets bindings --log-level INFO")
+    return list(tensor_graphs._cycle_strip_pass_names()) + ["pipeline"]
+
+
+def checkCycleStrip(problem, reference, limit, pass_name):
+    """A cycle strip pass may only drop alternatives no optimal plan needs."""
+    result = nativeCall(problem, "strip:" + pass_name)
+    survivors = enumerateOptimum(result["problem"], limit)
+    require(survivors["cost"] == reference["cost"],
+            f"Cycle strip pass {pass_name} changed the optimum: before={reference['cost']}, after={survivors['cost']} "
+            f"(removed {result['removed']} enodes); witness={reference['witness']}")
+
+
 def runCase(path, limit, reference_only):
     start_time = time.perf_counter()
     case = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -121,8 +137,12 @@ def runCase(path, limit, reference_only):
         variants.append((probe["name"], narrowed, enumerateOptimum(narrowed, limit)))
     checks = 0
     if not reference_only:
+        pass_names = cyclePassNames()
         for name, variant, oracle in variants:
             try:
+                for pass_name in pass_names:
+                    checkCycleStrip(variant, oracle, limit, pass_name)
+                    checks += 1
                 checkPropagation(variant, oracle, limit)
                 checks += 1
                 # Above, exactly at, and below the independently known optimum.

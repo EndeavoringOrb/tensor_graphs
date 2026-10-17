@@ -4,16 +4,24 @@ Usage:
   .venv/Scripts/python.exe tests/verify_saturation.py [--generate-gold] [--seq-len 7] [--build]
 
 Workflow:
-  1. Generate baseline reference dump:
-     .venv/Scripts/python.exe tests/verify_saturation.py --generate-gold
-  2. Modify planner.hpp / rewrite.hpp for section 3.
+  1. With the accepted implementation built, generate the reference dump for
+     the N to evaluate:
+     .venv/Scripts/python.exe tests/verify_saturation.py --generate-gold --seq-len N
+  2. Modify planner.hpp / rewrite.hpp and rebuild.
   3. Run verification and get score. Graph equivalence is checked after
      pruneEGraph and EGraph.rebuild(true) compaction:
-     .venv/Scripts/python.exe tests/verify_saturation.py
+     .venv/Scripts/python.exe tests/verify_saturation.py --seq-len N
+
+Gold lives in tests/data/gold_saturation/seq<N>/, one folder per N.
+Verification refuses to run when the gold for N is missing or incomplete:
+gold made from the candidate build would compare it with itself.
+The gold metadata records the source tree it was built from; both fingerprints
+are printed with the verdict.
 """
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -30,9 +38,24 @@ if str(ROOT) not in sys.path:
 
 DATA_DIR = ROOT / "tests" / "data" / "gold_saturation"
 CAND_DIR = ROOT / "logs" / "candidate_saturation"
-GOLD_PREFIX = str(DATA_DIR / "gold")
 CAND_PREFIX = str(CAND_DIR / "candidate")
-BASELINE_META = DATA_DIR / "baseline_score.json"
+
+
+def goldPaths(seq_len: int):
+    """Each N keeps its own gold: (directory, dump prefix, metadata file)."""
+    directory = DATA_DIR / f"seq{seq_len}"
+    return directory, str(directory / "gold"), directory / "baseline_score.json"
+
+
+def sourceFingerprint():
+    """HEAD revision plus a hash of uncommitted native source (tracked diff and untracked files)."""
+    def git(*command):
+        return subprocess.check_output(["git", *command], cwd=ROOT)
+
+    digest = hashlib.sha256(git("diff", "HEAD", "--", "tensor_graphs_cpp"))
+    for name in sorted(git("ls-files", "--others", "--exclude-standard", "--", "tensor_graphs_cpp").decode().splitlines()):
+        digest.update(name.encode() + bytes(1) + (ROOT / name).read_bytes())
+    return {"revision": git("rev-parse", "HEAD").decode().strip(), "native_diff_sha256": digest.hexdigest()}
 
 
 def expectedBucketSuffixes(seq_len: int):
@@ -276,11 +299,12 @@ def main():
 
     if args.generate_gold:
         print(f"[verify_saturation] Generating baseline gold saturation dump (seq_len={args.seq_len})...")
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        for f in DATA_DIR.glob("gold-*.txt"):
+        gold_dir, gold_prefix, gold_meta = goldPaths(args.seq_len)
+        gold_dir.mkdir(parents=True, exist_ok=True)
+        for f in gold_dir.glob("gold-*.txt"):
             f.unlink()
 
-        total_ms, full_ms, partial_ms, enodes, classes = run_benchmark(args.seq_len, GOLD_PREFIX)
+        total_ms, full_ms, partial_ms, enodes, classes = run_benchmark(args.seq_len, gold_prefix)
         meta = {
             "seq_len": args.seq_len,
             "bucket_count": 2 * args.seq_len + 1,
@@ -290,42 +314,33 @@ def main():
             "full_enodes": enodes,
             "full_classes": classes,
             "generated_at": time.time(),
+            "source": sourceFingerprint(),
         }
-        BASELINE_META.write_text(json.dumps(meta, indent=2))
-        requireBucketDumps(GOLD_PREFIX, args.seq_len)
-        print(f"[verify_saturation] Gold dump generated successfully at {DATA_DIR}")
+        gold_meta.write_text(json.dumps(meta, indent=2))
+        requireBucketDumps(gold_prefix, args.seq_len)
+        print(f"[verify_saturation] Gold dump generated successfully at {gold_dir}")
         print(f"  Full Saturation:    {full_ms:.2f} ms")
         print(f"  Prefill + Decode:   {partial_ms:.2f} ms")
         print(f"  SCORE (Total Time): {total_ms:.2f} ms")
         return
 
-    # Normal verification mode
-    gold_is_compatible = False
-    if BASELINE_META.exists():
-        try:
-            b_data = json.loads(BASELINE_META.read_text())
-            gold_is_compatible = (
-                b_data.get("seq_len") == args.seq_len
-                and b_data.get("bucket_count") == 2 * args.seq_len + 1
-            )
-        except (OSError, json.JSONDecodeError):
-            pass
-    if gold_is_compatible:
-        try:
-            requireBucketDumps(GOLD_PREFIX, args.seq_len)
-        except (FileNotFoundError, ValueError):
-            gold_is_compatible = False
-    if not gold_is_compatible:
-        print("[verify_saturation] Gold baseline is missing or incompatible. Generating it first...")
-        subprocess.check_call([sys.executable, __file__, "--generate-gold", "--seq-len", str(args.seq_len)])
-
-    baseline_ms = None
-    if BASELINE_META.exists():
-        try:
-            b_data = json.loads(BASELINE_META.read_text())
-            baseline_ms = b_data.get("total_ms")
-        except Exception:
-            pass
+    # Normal verification mode: never regenerate gold here.
+    regenerate = (f"Generate it from the accepted implementation's build first: "
+                  f".venv/Scripts/python.exe tests/verify_saturation.py --generate-gold --seq-len {args.seq_len}")
+    _, gold_prefix, gold_meta = goldPaths(args.seq_len)
+    if not gold_meta.exists():
+        raise SystemExit(f"[verify_saturation] No gold baseline for seq_len={args.seq_len} ({gold_meta}). {regenerate}")
+    b_data = json.loads(gold_meta.read_text())
+    if b_data.get("seq_len") != args.seq_len or b_data.get("bucket_count") != 2 * args.seq_len + 1:
+        raise SystemExit(f"[verify_saturation] Gold baseline is for seq_len={b_data.get('seq_len')}, "
+                         f"not {args.seq_len}. {regenerate}")
+    try:
+        requireBucketDumps(gold_prefix, args.seq_len)
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(f"[verify_saturation] Gold dumps are incomplete: {error}. {regenerate}")
+    baseline_ms = b_data.get("total_ms")
+    gold_source = b_data.get("source")
+    candidate_source = sourceFingerprint()
 
     CAND_DIR.mkdir(parents=True, exist_ok=True)
     for f in CAND_DIR.glob("candidate-*.txt"):
@@ -336,7 +351,7 @@ def main():
 
     print("\n[verify_saturation] Verifying pruned, compacted e-graph equivalence against baseline...")
     try:
-        equivalent = comparePrefixes(GOLD_PREFIX, CAND_PREFIX, args.seq_len)
+        equivalent = comparePrefixes(gold_prefix, CAND_PREFIX, args.seq_len)
     except Exception as e:
         print(f"Equivalence comparison error: {e}")
         equivalent = False
@@ -352,6 +367,11 @@ def main():
         print(f"BASELINE SCORE:     {baseline_ms:.2f} ms")
         print(f"SPEEDUP:            {speedup:.2f}x")
     print(f"E-NODES / CLASSES:  {cand_enodes} enodes / {cand_classes} classes")
+    print(f"GOLD SOURCE:        {gold_source or 'unrecorded (gold predates source fingerprints)'}")
+    print(f"CANDIDATE SOURCE:   {candidate_source}")
+    if gold_source == candidate_source:
+        print("NOTE:               gold was generated from this source tree; equivalence is only "
+              "meaningful if this is the accepted implementation")
     print("=" * 60 + "\n")
 
     if not equivalent:
