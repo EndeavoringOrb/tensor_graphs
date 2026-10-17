@@ -1,5 +1,8 @@
 #pragma once
 #include "core/egraph.hpp"
+#include "core/logging.hpp"
+
+#include <chrono>
 
 // Equalities discovered by independent bucket rewrites refer to the same
 // persistent value in every bucket. Reconcile identity before cache decisions,
@@ -21,6 +24,8 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
     if (!has_any_equalities)
         return;
 
+    const auto start = std::chrono::steady_clock::now();
+    uint32_t rounds = 0;
     std::unordered_map<BaseEClassId, BaseEClassId> aliases;
     auto canonical = [&](BaseEClassId id) {
         auto it = aliases.find(id);
@@ -42,6 +47,7 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
     bool changed;
     do
     {
+        ++rounds;
         changed = false;
         for (EGraph *graph : graphs)
             for (const auto &[left_id, right_id] : graph->base_equalities)
@@ -89,6 +95,9 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
                 changed = changed || canonical(left) != canonical(right);
         }
     } while (changed);
+    LOG(INFO) << "[reconcileBaseEqualities] " << aliases.size() << " base alias(es) across " << graphs.size()
+              << " graph(s) in " << rounds << " round(s), "
+              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() << " ms";
     for (EGraph *graph : graphs)
     {
         graph->allow_base_equalities = false;

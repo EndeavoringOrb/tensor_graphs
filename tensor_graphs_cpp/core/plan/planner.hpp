@@ -35,6 +35,7 @@
 #include "core/ops/ops.hpp"
 #include "core/plan/brancher.hpp"
 #include "core/plan/cycles.hpp"
+#include "core/plan/egraph_diagnostics.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/propagator.hpp"
 #include "core/plan/search_engine.hpp"
@@ -468,7 +469,6 @@ struct Planner
             rules.emplace_back(makeProfiledRewriteRule<RemoveCopyChains>());
             rules.emplace_back(makeProfiledRewriteRule<ConsumerWeightReuseRule>());
             rules.emplace_back(makeProfiledRewriteRule<RemoveRedundantReshape>());
-            rules.emplace_back(makeProfiledRewriteRule<InfinityDomination>());
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownElementwise>(allowPushDownOnProtected));
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownDot>(allowPushDownOnProtected));
             rules.emplace_back(makeProfiledRewriteRule<SlicePushDownStructural>());
@@ -502,6 +502,12 @@ struct Planner
 
         std::vector<uint32_t> &ruleMatchCounts = saturate_ruleMatchCounts_;
         ruleMatchCounts.assign(rules.size(), 0);
+        // Merge trace diagnostics name the applying rule.
+        const bool trace_rule_names = mergeTraceConfig().enabled;
+        std::vector<std::string> rule_names;
+        if (trace_rule_names)
+            for (const auto &rule : rules)
+                rule_names.push_back(rule->name());
         uint64_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
@@ -705,9 +711,12 @@ struct Planner
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - match_start).count();
                     if (!matched)
                         continue;
+                    if (trace_rule_names)
+                        tg_active_rule = rule_names[rule_idx].c_str();
                     if (!time_rules)
                     {
                         rule->apply(eNodeIdx, ctx);
+                        tg_active_rule = nullptr;
                         changed = true;
                         ruleMatchCounts[rule_idx]++;
                         nMatches++;
@@ -716,6 +725,7 @@ struct Planner
                     const auto apply_start = std::chrono::steady_clock::now();
                     const ENode applied = egraph.getENode(ENodeId{eNodeIdx});
                     rule->apply(eNodeIdx, ctx);
+                    tg_active_rule = nullptr;
                     {
                         const double seconds =
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - apply_start).count();
@@ -931,7 +941,10 @@ struct Planner
 
             EClass &cls = egraph.getEClass(e_class_id);
             auto it = std::remove_if(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId enodeId) {
-                return enodeId.value >= enodeInfos.size() || enodeInfos[enodeId.value].cost == TGConstants::INF;
+                if (enodeId.value >= enodeInfos.size())
+                    Error::throw_err("[Planner.pruneEGraph] ENode " + std::to_string(enodeId.value) +
+                                     " has no ENodeInfo (" + std::to_string(enodeInfos.size()) + " infos)");
+                return enodeInfos[enodeId.value].cost == TGConstants::INF;
             });
             totalPruned += static_cast<uint32_t>(cls.enodes.end() - it);
             cls.enodes.erase(it, cls.enodes.end());
@@ -941,7 +954,8 @@ struct Planner
 
         if (totalPruned > 0)
         {
-            LOG(DEBUG) << "[Planner.pruneEGraph] Pruned " << totalPruned << " dominated enodes from the search space.";
+            LOG(DEBUG) << "[Planner.pruneEGraph] Pruned " << totalPruned
+                       << " infinite-cost enodes (including dead-class cascade) from the search space.";
         }
     }
 
@@ -2890,7 +2904,13 @@ struct Planner
                     std::rethrow_exception(error);
         }
 
+        for (uint32_t b = 0; b < bucket_states.size(); ++b)
+            egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
+                                                      "bucket=" + std::to_string(b) + " stage=saturated");
         reconcileBaseEqualities(full_state, bucket_states);
+        for (uint32_t b = 0; b < bucket_states.size(); ++b)
+            egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
+                                                      "bucket=" + std::to_string(b) + " stage=reconciled");
         LOG(INFO) << "[Planner.planAll timeline] saturation done at " << planAllSeconds() << "s";
 #ifdef _WIN32
         if (SamplingProfiler::enabled())
@@ -3028,8 +3048,7 @@ struct Planner
                 bool has_cache = false;
                 for (ENodeId en_id : cls.enodes)
                 {
-                    if (bstate.getENode(en_id).getOpType() == OpType::CACHE &&
-                        bstate.getENode(en_id).getMemSpace() == cls.mem_space)
+                    if (bstate.getENode(en_id).getOpType() == OpType::CACHE)
                     {
                         has_cache = true;
                         break;
@@ -3055,13 +3074,16 @@ struct Planner
         // Full cycle listings (egraph_cycles{0..3}.txt) are debug output and
         // cost seconds per bucket to format; write them only on request.
         const bool cycle_diagnostics = std::getenv("TG_CYCLE_DIAGNOSTICS") != nullptr;
-        std::ofstream cycleLogBeforeClean, cycleLogAfterClean, cycleLogAfterClean2, cycleLogAfterClean3;
+        std::ofstream cycleLogBeforeClean, cycleLogAfterClean, cycleLogAfterClean2, cycleLogAfterClean3,
+            cycleLogAfterClean4, cycleLogAfterClean5;
         if (cycle_diagnostics)
         {
             cycleLogBeforeClean.open("egraph_cycles0.txt", std::ios::out | std::ios::trunc);
             cycleLogAfterClean.open("egraph_cycles1.txt", std::ios::out | std::ios::trunc);
             cycleLogAfterClean2.open("egraph_cycles2.txt", std::ios::out | std::ios::trunc);
             cycleLogAfterClean3.open("egraph_cycles3.txt", std::ios::out | std::ios::trunc);
+            cycleLogAfterClean4.open("egraph_cycles4.txt", std::ios::out | std::ios::trunc);
+            cycleLogAfterClean5.open("egraph_cycles5.txt", std::ios::out | std::ios::trunc);
             if (!cycleLogBeforeClean)
                 LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles0.txt for cycle diagnostics.";
             if (!cycleLogAfterClean)
@@ -3070,12 +3092,16 @@ struct Planner
                 LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles2.txt for cycle diagnostics.";
             if (!cycleLogAfterClean3)
                 LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles3.txt for cycle diagnostics.";
+            if (!cycleLogAfterClean4)
+                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles4.txt for cycle diagnostics.";
+            if (!cycleLogAfterClean5)
+                LOG(WARNING) << "[Planner.planAll] Could not open egraph_cycles5.txt for cycle diagnostics.";
         }
         // Buckets are independent here: run them in parallel and emit their
         // diagnostics afterwards in bucket order.
         struct BucketCycleReport
         {
-            std::ostringstream before, after1, after2, after3;
+            std::ostringstream before, after1, after2, after3, after4, after5;
             uint32_t initial = 0, pass1 = 0, pass2 = 0, pass3 = 0, pass4 = 0, pass5 = 0;
             uint32_t removed1 = 0, removed2 = 0, removed3 = 0, removed4 = 0, removed5 = 0;
         };
@@ -3095,7 +3121,8 @@ struct Planner
                     const ENode &en = eg.getENode(enodeId);
                     if (en.getOpType() != OpType::SCATTER)
                         continue;
-                    ss << "\n  scatter cost=" << all_enode_infos[b][enodeId.value].cost;
+                    ss << "\n  scatter cost=" << all_enode_infos[b][enodeId.value].cost << " kernel=0x" << std::hex
+                       << en.getKernelId().value << std::dec << " name=" << en.getOpName();
                     const EClassId child = eg.findConst(en.getChildren()[0]);
                     for (ENodeId ce : eg.getEClass(child).enodes)
                     {
@@ -3176,9 +3203,23 @@ struct Planner
 
             r.removed4 = removeSingleExternalConsumerCycleENodes(bucket_states[b]);
             r.pass4 = countCyclicComponents(bucket_states[b]);
+            if (cycle_diagnostics)
+            {
+                r.after4 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                         << "[Planner.planAll] Removed " << r.removed4
+                         << " enode(s) from single-external-consumer cycles.\n";
+                printEGraphCycles(bucket_states[b], r.after4);
+            }
 
             r.removed5 = removeSingleExternalComputationalProducerCycleENodes(bucket_states[b]);
             r.pass5 = countCyclicComponents(bucket_states[b]);
+            if (cycle_diagnostics)
+            {
+                r.after5 << "[Planner.planAll] Cycle diagnostic for bucket " << b << ":\n"
+                         << "[Planner.planAll] Removed " << r.removed5
+                         << " enode(s) from single-external-compute-producer cycles.\n";
+                printEGraphCycles(bucket_states[b], r.after5);
+            }
 
             const uint32_t total_removed = r.removed1 + r.removed2 + r.removed3 + r.removed4 + r.removed5;
             if (total_removed > 0 || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
@@ -3190,6 +3231,9 @@ struct Planner
                 bucket_states[b].classes.shrink_to_fit();
                 bucket_states[b].enodes.shrink_to_fit();
             }
+            egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
+                                                      "bucket=" + std::to_string(b) + " stage=pruned");
+            egraph_diagnostics::dumpRequestedClasses(bucket_states[b], b);
         };
         {
             // The first bucket fills the cost memo the others mostly reuse.
@@ -3257,6 +3301,10 @@ struct Planner
                 cycleLogAfterClean2 << r.after2.str();
             if (cycleLogAfterClean3.is_open())
                 cycleLogAfterClean3 << r.after3.str();
+            if (cycleLogAfterClean4.is_open())
+                cycleLogAfterClean4 << r.after4.str();
+            if (cycleLogAfterClean5.is_open())
+                cycleLogAfterClean5 << r.after5.str();
             if (r.pass5 > 0)
                 all_buckets_dag = false;
 
@@ -3277,6 +3325,8 @@ struct Planner
         cycleLogAfterClean.flush();
         cycleLogAfterClean2.flush();
         cycleLogAfterClean3.flush();
+        cycleLogAfterClean4.flush();
+        cycleLogAfterClean5.flush();
 
         if (all_buckets_dag)
         {

@@ -37,7 +37,8 @@ inline bool debugEnvTgDebugMissing()
 // Additive masks: in add(x, m) where m is a known float constant, elements
 // with m == TGConstants::NEG_INF are masked by the explicit sentinel convention. Their sum stays far below every
 // unmasked value of a softmax row under the mask-sentinel approximation.
-// This is not an identity for arbitrary input values (NEG_INF is finite).
+// This is not an identity for arbitrary input values (NEG_INF is finite); it
+// relies on the accepted assumption that model values are never NaN or +inf.
 // Represents the unmasked coordinate set:
 //   coord[col_axis] < coord[row_axis] + diag_k   (when upper_masked == true, i.e., TRIU(NEG_INF, diag_k))
 struct TriuBound
@@ -369,61 +370,48 @@ inline std::optional<Dim> axisRange(const std::vector<Region> &valid, const Regi
     return range;
 }
 
-inline std::optional<Region> intersectBoxWithTriuBound(const Region &box, const TriuBound &b)
+// Exact intersection of `box` with the unmasked triangle
+// (coord[col_axis] < coord[row_axis] + diag_k), as boxes: one per row whose
+// column range the diagonal cuts, plus one for the rows it leaves whole.
+inline std::vector<Region> intersectBoxWithTriuBound(const Region &box, const TriuBound &b)
 {
     if (b.row_axis >= box.region.size() || b.col_axis >= box.region.size())
         Error::throw_err("[intersectBoxWithTriuBound] triu bound axis out of range for box");
-    const uint32_t r0 = box.region[b.row_axis].start;
-    const uint32_t r1 = box.region[b.row_axis].stop;
-    const uint32_t c0 = box.region[b.col_axis].start;
-    const uint32_t c1 = box.region[b.col_axis].stop;
+    const int64_t r0 = box.region[b.row_axis].start;
+    const int64_t r1 = box.region[b.row_axis].stop;
+    const int64_t c0 = box.region[b.col_axis].start;
+    const int64_t c1 = box.region[b.col_axis].stop;
+    std::vector<Region> out;
     if (r0 >= r1 || c0 >= c1)
-        return std::nullopt;
-
-    const int64_t r_min = std::max<int64_t>(static_cast<int64_t>(r0), static_cast<int64_t>(c0) - b.diag_k + 1);
-    if (r_min >= static_cast<int64_t>(r1))
-        return std::nullopt;
-    const uint32_t restricted_r0 = static_cast<uint32_t>(std::max<int64_t>(0, r_min));
-
-    const int64_t c_limit = static_cast<int64_t>(r1 - 1) + b.diag_k;
-    if (c_limit <= static_cast<int64_t>(c0))
-        return std::nullopt;
-    const uint32_t restricted_stop = std::min<uint32_t>(c1, static_cast<uint32_t>(std::max<int64_t>(0, c_limit)));
-    if (c0 >= restricted_stop)
-        return std::nullopt;
-
-    Region res = box;
-    res.region[b.row_axis].start = restricted_r0;
-    res.region[b.col_axis].stop = restricted_stop;
-    return res;
+        return out;
+    // Row r keeps columns [c0, min(c1, r + diag_k)): nonempty from row
+    // c0 - diag_k + 1, whole from row c1 - diag_k.
+    const int64_t first_row = std::max(r0, c0 - b.diag_k + 1);
+    const int64_t first_whole_row = std::max(first_row, c1 - b.diag_k);
+    for (int64_t r = first_row; r < std::min(r1, first_whole_row); ++r)
+    {
+        Region row = box;
+        row.region[b.row_axis] = {static_cast<uint32_t>(r), static_cast<uint32_t>(r + 1)};
+        row.region[b.col_axis].stop = static_cast<uint32_t>(r + b.diag_k);
+        out.push_back(row);
+    }
+    if (first_whole_row < r1)
+    {
+        Region whole = box;
+        whole.region[b.row_axis].start = static_cast<uint32_t>(first_whole_row);
+        out.push_back(whole);
+    }
+    return out;
 }
 
-inline std::vector<Region> boundedIntersect(const std::vector<Region> &needed, const TriuBound &b)
+// Exact intersection of a region list with the unmasked triangle.
+inline std::vector<Region> intersectTriu(const std::vector<Region> &regions, const TriuBound &b)
 {
     std::vector<Region> out;
-    for (const Region &box : dropEmpty(needed))
-    {
-        auto hit = intersectBoxWithTriuBound(box, b);
-        if (hit)
-            out.push_back(*hit);
-    }
+    for (const Region &box : dropEmpty(regions))
+        for (Region &part : intersectBoxWithTriuBound(box, b))
+            out.push_back(std::move(part));
     return dropEmpty(mergeRegions(out));
-}
-
-// Per box of `needed`, the bounding box of its part inside `valid` (dropped
-// when empty). A superset of the exact intersection with one box per input
-// box: masks are staircases, and exact intersections would split every box
-// into one per row.
-inline std::vector<Region> boundedIntersect(const std::vector<Region> &needed, const std::vector<Region> &valid)
-{
-    std::vector<Region> out;
-    for (const Region &box : bucket_regions::dropEmpty(needed))
-    {
-        const std::vector<Region> part = bucket_regions::intersect({box}, valid);
-        if (!part.empty())
-            out.push_back(bucket_regions::boundingBox(part));
-    }
-    return bucket_regions::dropEmpty(mergeRegions(out));
 }
 
 inline std::optional<Dim> axisRange(const TriuBound &b, const Region &box, size_t axis, bool everyRow)
@@ -914,7 +902,7 @@ inline RegionFacts computeRegionFacts(const Graph &graph, const std::vector<Logi
     return facts;
 }
 
-using bucket_regions::boundedIntersect;
+using bucket_regions::intersectTriu;
 
 // paddedInputs: input -> axis along which the input is padded past each
 // bucket's dirty region (e.g. token ids past the request). Values depending
@@ -1084,14 +1072,7 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                 auto triuIt = f.triuMasks.find(id);
                 if (triuIt != f.triuMasks.end())
                 {
-                    std::vector<Region> restricted;
-                    for (const auto &r : regions)
-                    {
-                        auto hit = intersectBoxWithTriuBound(r, triuIt->second);
-                        if (hit)
-                            restricted.push_back(*hit);
-                    }
-                    regions = dropEmpty(mergeRegions(restricted));
+                    regions = intersectTriu(regions, triuIt->second);
                 }
                 else
                 {
@@ -1194,7 +1175,7 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                 // still is: they need not be refreshed.
                 auto triuFin = f.triuFinite.find(id);
                 if (triuFin != f.triuFinite.end())
-                    keep = boundedIntersect(keep, triuFin->second);
+                    keep = intersectTriu(keep, triuFin->second);
                 else
                 {
                     auto fin = finite.find(id);
@@ -1205,7 +1186,7 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                 // so their cached value stays right.
                 auto triuSupp = f.triuSupport.find(id);
                 if (triuSupp != f.triuSupport.end())
-                    keep = boundedIntersect(keep, triuSupp->second);
+                    keep = intersectTriu(keep, triuSupp->second);
                 else
                 {
                     auto supp = support.find(id);
@@ -1224,18 +1205,20 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
             if (const TriuBound *triuSuppA = dotTriuSupport(node))
             {
                 childNeeded[1] = dotNeededBTriu(*triuSuppA, needed, graph.getNode(node.child_ids[0]).getShape()[2]);
-                childNeeded[0] = boundedIntersect(childNeeded[0], *triuSuppA);
+                childNeeded[0] = intersectTriu(childNeeded[0], *triuSuppA);
             }
             else if (const std::vector<Region> *suppA = dotSupport(node))
             {
                 childNeeded[1] = dotNeededB(*suppA, needed, graph.getNode(node.child_ids[0]).getShape()[2]);
                 // Columns of A outside its support are exactly zero in every run
                 // (the masks are graph constants), so they are not needed.
-                childNeeded[0] = boundedIntersect(childNeeded[0], *suppA);
+                childNeeded[0] = intersect(childNeeded[0], *suppA);
             }
             // A sum needs its input only where it can be nonzero; a max only
             // where it is unmasked, for boxes whose every row keeps an unmasked
-            // element (masked ones sit ~1e9 below them).
+            // element (masked ones sit ~1e9 below them). A box with a fully
+            // masked row keeps all of its cells: that row's max is a masked
+            // value, so every masked cell of the row matters.
             if ((node.opType == OpType::SUM || node.opType == OpType::MAX) && node.child_ids.size() == 2)
             {
                 auto triuFact = node.opType == OpType::SUM ? f.triuSupport.find(node.child_ids[0])
@@ -1252,7 +1235,7 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                     if (axis < 0 || axis >= rank)
                         Error::throw_err("[computeBucketRegions] reduction axis out of range");
                     if (node.opType == OpType::SUM)
-                        childNeeded[0] = boundedIntersect(childNeeded[0], triuFact->second);
+                        childNeeded[0] = intersectTriu(childNeeded[0], triuFact->second);
                     else
                     {
                         std::vector<Region> restricted;
@@ -1260,9 +1243,8 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                         {
                             if (bucket_regions::axisRange(triuFact->second, box, static_cast<size_t>(axis), true))
                             {
-                                auto hit = intersectBoxWithTriuBound(box, triuFact->second);
-                                if (hit)
-                                    restricted.push_back(*hit);
+                                for (Region &part : intersectBoxWithTriuBound(box, triuFact->second))
+                                    restricted.push_back(std::move(part));
                             }
                             else
                                 restricted.push_back(box);
@@ -1285,7 +1267,7 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                         if (axis < 0 || axis >= rank)
                             Error::throw_err("[computeBucketRegions] reduction axis out of range");
                         if (node.opType == OpType::SUM)
-                            childNeeded[0] = boundedIntersect(childNeeded[0], valid->second);
+                            childNeeded[0] = intersect(childNeeded[0], valid->second);
                         else
                         {
                             std::vector<Region> restricted;
@@ -1293,7 +1275,7 @@ inline BucketRegions computeBucketRegions(const Graph &graph, LogicalId rootId, 
                             {
                                 if (bucket_regions::axisRange(valid->second, box, static_cast<size_t>(axis), true))
                                 {
-                                    for (Region r : boundedIntersect({box}, valid->second))
+                                    for (Region r : intersect({box}, valid->second))
                                         restricted.push_back(r);
                                 }
                                 else

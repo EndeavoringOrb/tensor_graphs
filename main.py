@@ -119,23 +119,6 @@ def main():
         help="Compare intermediate tensors with this reference file",
     )
     parser.add_argument(
-        "--use-ortools",
-        action="store_true",
-        help="Use the OR-Tools global cache/extraction planner",
-    )
-    parser.add_argument(
-        "--use-ortools-full",
-        action="store_true",
-        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
-    )
-    parser.add_argument(
-        "--use-ortools-lns",
-        action="store_true",
-        help="Use iterative subgraph LNS solver with OR-Tools",
-    )
-    parser.add_argument("--max-time-seconds", type=float, default=None,
-                        help="Maximum time in seconds for the OR-Tools solver")
-    parser.add_argument(
         "--cache-file",
         type=str,
         default="",
@@ -200,9 +183,6 @@ def main():
     else:
         delegate = None
 
-    if args.use_ortools_lns:
-        os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
-
     disable_compilation_caching = (
         args.disable_compilation_caching or args.saturate_only
     )
@@ -220,10 +200,6 @@ def main():
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
         max_sequence_length=args.seq_len,
-        use_ortools=args.use_ortools,
-        use_ortools_full=args.use_ortools_full,
-        max_time_seconds=args.max_time_seconds or 0.0,
-        use_ortools_lns=args.use_ortools_lns,
         disable_fusion=args.disable_fusion,
         write_refs=args.write_refs,
         compare_refs=args.compare_refs,

@@ -159,6 +159,46 @@ struct EClass
     bool is_clean = false;
 };
 
+// Diagnostics: name of the rewrite rule currently applying on this thread
+// (set by Planner::saturate, read by the merge trace).
+inline thread_local const char *tg_active_rule = nullptr;
+
+// Diagnostics: TG_TRACE_MERGE_SHAPE=4,2,16 logs every merge of classes with
+// that shape; TG_TRACE_BASE_ID=<id> logs every merge involving that base id.
+struct MergeTraceConfig
+{
+    bool enabled = false;
+    bool has_shape = false;
+    std::vector<uint32_t> shape;
+    bool has_base_id = false;
+    uint32_t base_id = 0;
+};
+
+inline const MergeTraceConfig &mergeTraceConfig()
+{
+    static const MergeTraceConfig config = [] {
+        MergeTraceConfig c;
+        if (const char *shape_env = std::getenv("TG_TRACE_MERGE_SHAPE"))
+        {
+            std::stringstream ss(shape_env);
+            std::string item;
+            while (std::getline(ss, item, ','))
+                c.shape.push_back(static_cast<uint32_t>(std::stoul(item)));
+            if (c.shape.empty())
+                Error::throw_err("[mergeTraceConfig] TG_TRACE_MERGE_SHAPE is empty");
+            c.has_shape = true;
+        }
+        if (const char *base_env = std::getenv("TG_TRACE_BASE_ID"))
+        {
+            c.base_id = static_cast<uint32_t>(std::stoul(base_env));
+            c.has_base_id = true;
+        }
+        c.enabled = c.has_shape || c.has_base_id;
+        return c;
+    }();
+    return config;
+}
+
 struct EGraph
 {
     std::shared_ptr<const std::vector<EClass>> shared_classes;
@@ -692,6 +732,41 @@ struct EGraph
         return id;
     }
 
+    void traceMerge(EClassId ra, EClassId rb) const
+    {
+        const MergeTraceConfig &config = mergeTraceConfig();
+        const EClass &cls_ra = getRawEClass(ra.value);
+        const EClass &cls_rb = getRawEClass(rb.value);
+        bool hit = config.has_shape && cls_ra.shape == config.shape;
+        if (config.has_base_id)
+        {
+            const BaseEClassId wanted{config.base_id};
+            hit = hit || (cls_ra.base_eclass_id != BaseEClassId{} && resolveBaseId(cls_ra.base_eclass_id) == wanted) ||
+                  (cls_rb.base_eclass_id != BaseEClassId{} && resolveBaseId(cls_rb.base_eclass_id) == wanted);
+        }
+        if (!hit)
+            return;
+        auto describe = [this](const EClass &cls) {
+            std::stringstream ss;
+            ss << "class=" << cls.id.value << " base=" << cls.base_eclass_id.value << " logical=" << cls.logical_id.value
+               << " enodes=" << cls.enodes.size();
+            if (!cls.enodes.empty())
+            {
+                const ENode &first = getENode(cls.enodes.front());
+                ss << " first=" << toString(first.getOpType()) << ":" << first.getOpName() << " children=[";
+                for (size_t i = 0; i < first.getChildren().size(); ++i)
+                    ss << (i ? "," : "") << first.getChildren()[i].value;
+                ss << "] origin=" << (first.getDebugOrigin().empty() ? "N/A" : first.getDebugOrigin());
+            }
+            return ss.str();
+        };
+        std::stringstream out;
+        out << "[merge trace] rule=" << (tg_active_rule ? tg_active_rule : "-") << " shape=" << toString(cls_ra.shape)
+            << " strides=" << toString(cls_ra.strides) << "\n  A " << describe(cls_ra) << "\n  B " << describe(cls_rb)
+            << "\n";
+        std::cout << out.str() << std::flush;
+    }
+
     void merge(EClassId a, EClassId b)
     {
         EClassId ra = find(a);
@@ -721,6 +796,8 @@ struct EGraph
                << ", mem_space=" << toString(cls_rb.mem_space) << ")";
             Error::throw_err(ss.str());
         }
+        if (mergeTraceConfig().enabled)
+            traceMerge(ra, rb);
 
         auto itConstA = constantStaging.find(ra);
         auto itConstB = constantStaging.find(rb);
@@ -728,11 +805,9 @@ struct EGraph
         {
             if (*itConstA->second != *itConstB->second)
             {
-                std::cerr << "[CRITICAL CONSTANT MERGE] Attempting to merge different constants! ra="
-                          << ra.value << " vs rb=" << rb.value << "\n";
-                #ifdef TG_THROW_ON_BAD_MERGE
-                Error::throw_err("Cannot merge different constants!");
-                #endif
+                Error::throw_err("[CRITICAL CONSTANT MERGE] Cannot merge different constants: ra=" +
+                                 std::to_string(ra.value) + " vs rb=" + std::to_string(rb.value) +
+                                 " (shape=" + toString(cls_ra.shape) + ", strides=" + toString(cls_ra.strides) + ")");
             }
         }
 

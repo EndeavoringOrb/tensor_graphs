@@ -205,8 +205,8 @@ inline void testAnalysisConstantsDoNotOverwriteViewStorage()
     Planner planner(cost_model, settings);
     planner.initBaseEGraph(out, graph, topologicalSort({out}, graph));
 
-    // InfinityDomination loads dense reference data for views during analysis.
-    // Reproduce that state without depending on model weights or a reference repo.
+    // Stage dense analysis data for a broadcast view (as an analysis pass
+    // might), without depending on model weights or a reference repo.
     EClassId ones_class = planner.baseState.findEClassByLogicalId(ones);
     std::vector<float> dense_ones(8 * 2048, 1.0f);
     auto snapshot = std::make_shared<std::vector<uint8_t>>(dense_ones.size() * sizeof(float));

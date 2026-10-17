@@ -53,9 +53,8 @@ struct ReshapeOp
 
             if (rank >= 64)
             {
-                uint64_t flat_start, flat_stop;
-                getFlatBounds(reg, sA, flat_start, flat_stop);
-                outBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, outShape));
+                for (Region &box : reshapeRegionExact(reg, sA, outShape))
+                    outBoxes.push_back(std::move(box));
                 continue;
             }
 
@@ -104,9 +103,9 @@ struct ReshapeOp
             }
             else
             {
-                uint64_t flat_start, flat_stop;
-                getFlatBounds(reg, sA, flat_start, flat_stop);
-                outBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, outShape));
+                // The corner box is a superset: map the box's elements exactly.
+                for (Region &box : reshapeRegionExact(reg, sA, outShape))
+                    outBoxes.push_back(std::move(box));
             }
         }
         return mergeRegions(outBoxes);
@@ -133,9 +132,8 @@ struct ReshapeOp
 
             if (rank >= 64)
             {
-                uint64_t flat_start, flat_stop;
-                getFlatBounds(reg, node.getShape(), flat_start, flat_stop);
-                inBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, sA));
+                for (Region &box : reshapeRegionExact(reg, node.getShape(), sA))
+                    inBoxes.push_back(std::move(box));
                 continue;
             }
 
@@ -184,9 +182,9 @@ struct ReshapeOp
             }
             else
             {
-                uint64_t flat_start, flat_stop;
-                getFlatBounds(reg, node.getShape(), flat_start, flat_stop);
-                inBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, sA));
+                // The corner box is a superset: map the box's elements exactly.
+                for (Region &box : reshapeRegionExact(reg, node.getShape(), sA))
+                    inBoxes.push_back(std::move(box));
             }
         }
         return {mergeRegions(inBoxes), makeFull(sShape)};

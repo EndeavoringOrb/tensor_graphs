@@ -12,6 +12,7 @@
 #include "tests/incremental_propagators.hpp"
 #include "tests/planner_structure.hpp"
 #include "tests/prune_egraph_regression.hpp"
+#include "tests/attention_kernels.hpp"
 #include "tests/bucket_independence.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
@@ -50,6 +51,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--start-bounds"}, "Run start bounds and precedence regression tests.");
     parser.add_flag({"--start-run-makespan"}, "Run only start-run makespan propagator tests.");
     parser.add_flag({"--prune-egraph"}, "Run only e-graph pruning regression tests.");
+    parser.add_flag({"--attention-kernels"}, "Run masked / causal attention kernel tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
     parser.add_flag({"--scatter-canonical"}, "Run scatter canonical keys regression tests.");
@@ -101,6 +103,12 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--start-bounds"))
     {
         runStartBoundsTests();
+        return 0;
+    }
+    if (parser.get_flag("--attention-kernels"))
+    {
+        try { AttentionKernelTests::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
         return 0;
     }
     if (parser.get_flag("--prune-egraph"))
@@ -172,6 +180,7 @@ int main(int argc, char *argv[])
         runBF16TransposedWStreamTests();
         runReduceLastAxisTests();
         PruneEGraphRegression::run();
+        AttentionKernelTests::run();
         runPlannerStructureTests();
         FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         runSelectionReachabilityTests();

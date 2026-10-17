@@ -87,6 +87,43 @@ inline void checkCacheRequirement()
         Error::throw_err("[BucketIndependence] scatter did not require persistence");
 }
 
+// A cost record of runtime 1 for every registered kernel, at the kernel's
+// registered dummy input shapes (workload models need real shapes).
+inline void writeDummyRecords(const std::string &path)
+{
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file)
+        Error::throw_err("[BucketIndependence] cannot write dummy records to " + path);
+    BinaryWriter writer(file);
+    for (const auto &[uid, kernel] : KernelRegistry::get().getAllKernels())
+    {
+        Record record;
+        record.kernelId = uid;
+        record.buildContextId = BUILD_CONTEXT_ID;
+        record.hwTag = HW_TAG;
+        record.runTime = 1.0f;
+        record.output_mem_space = kernel.output_mem_space;
+        record.engines = kernel.engines;
+        if (kernel.dummyShapes.size() != kernel.dtypes.size())
+            Error::throw_err("[BucketIndependence] kernel " + kernel.opName + " has " +
+                             std::to_string(kernel.dummyShapes.size()) + " dummy shapes for " +
+                             std::to_string(kernel.dtypes.size()) + " input dtypes");
+        for (size_t i = 0; i < kernel.dummyShapes.size(); ++i)
+        {
+            record.inputShapes.push_back(kernel.dummyShapes[i]);
+            record.inputStrides.push_back(calcContiguousStrides(kernel.dummyShapes[i]));
+            record.inputDTypes.push_back(kernel.dtypes[i]);
+        }
+        if (!kernel.dummyShapes.empty())
+        {
+            record.outputShape = kernel.dummyShapes.front();
+            record.outputStrides = calcContiguousStrides(record.outputShape);
+        }
+        tg_serialize(writer, record);
+    }
+}
+
 inline void run()
 {
     checkCacheRequirement();
@@ -96,30 +133,40 @@ inline void run()
     {
         Graph graph;
         MemoryManager memory;
-        const LogicalId input = graph.input({4, 4}, DType::FLOAT32);
-        std::vector<float> mask(16, TGConstants::NEG_INF);
-        for (uint32_t row = 0; row < 4; ++row)
+        // Large enough that recomputing only the dirty rows (and keeping the
+        // rest of each persistent value) is cheaper than recomputing all.
+        constexpr uint32_t N = 16;
+        const uint32_t late_first = N / 2;
+        const LogicalId input = graph.input({N, N}, DType::FLOAT32);
+        std::vector<float> mask(N * N, TGConstants::NEG_INF);
+        for (uint32_t row = 0; row < N; ++row)
             for (uint32_t col = sliding && row > 0 ? row - 1 : 0; col <= row; ++col)
-                mask[row * 4 + col] = 0;
-        const LogicalId mask_id = graph.constant({4, 4}, mask.data(), DType::FLOAT32);
+                mask[row * N + col] = 0;
+        const LogicalId mask_id = graph.constant({N, N}, mask.data(), DType::FLOAT32);
         const LogicalId scores = graph.add(input, mask_id);
-        const LogicalId weights = graph.pow(graph.fill(std::exp(1.f), {4, 4}), scores);
-        const LogicalId probabilities = graph.div(weights, graph.repeat(graph.sum(weights, 1), 4, 1));
+        const LogicalId weights = graph.pow(graph.fill(std::exp(1.f), {N, N}), scores);
+        const LogicalId probabilities = graph.div(weights, graph.repeat(graph.sum(weights, 1), N, 1));
         const LogicalId root = graph.dot(probabilities, input);
         Settings settings;
         settings.disable_compilation_caching = true;
-        settings.records_path = "";
+        // Search to the end: the first greedy plans recompute everything,
+        // which would not exercise persistent updates (about 20 s per case).
+        settings.min_compile_seconds = -1.0f;
         settings.log_cost_calls = false;
-        settings.repo_path = "logs/bucket-regression-" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count());
+        const std::string run_tag = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        settings.repo_path = "logs/bucket-regression-" + run_tag;
+        // Session::plan() reloads cost records from records_path, so the dummy
+        // records must be in that file (records added to the session's cost
+        // model directly would be dropped).
+        settings.records_path = "logs/bucket-regression-records-" + run_tag + ".bin";
+        writeDummyRecords(settings.records_path);
         Session session(graph, memory, root, settings);
-        ConstantViewRegression::populateAllKernelDummyRecords(session.costModel);
         if (partial)
         {
-            session.addBucket({{input, {makeRegion({{0, 1}, {0, 4}})}}},
-                              {makeRegion({{0, 1}, {0, 4}})}, 3);
-            session.addBucket({{input, {makeRegion({{2, 4}, {0, 4}})}}},
-                              {makeRegion({{2, 4}, {0, 4}})}, 1);
+            session.addBucket({{input, {makeRegion({{0, 1}, {0, N}})}}},
+                              {makeRegion({{0, 1}, {0, N}})}, 3);
+            session.addBucket({{input, {makeRegion({{late_first, N}, {0, N}})}}},
+                              {makeRegion({{late_first, N}, {0, N}})}, 1);
         }
         const auto start = std::chrono::steady_clock::now();
         session.compile(true);
@@ -137,31 +184,31 @@ inline void run()
                     Error::throw_err("[BucketIndependence] bucket domain/order changed");
         uint32_t callbacks = 0;
         Debug::Callback callback = [&](LogicalId, std::string &, const KernelContext &, const void *) { ++callbacks; };
-        std::vector<float> values(16, 1);
+        std::vector<float> values(N * N, 1);
         // First use, late/early bucket changes, changed earlier inputs, reset.
         for (uint32_t step = 0; step < 6; ++step)
         {
             const uint32_t bucket = partial ? step % 2 : session.fullBucketIdx;
-            const uint32_t first = partial && bucket == 1 ? 2 : 0;
-            const uint32_t end = partial && bucket == 0 ? 1 : 4;
+            const uint32_t first = partial && bucket == 1 ? late_first : 0;
+            const uint32_t end = partial && bucket == 0 ? 1 : N;
             for (uint32_t row = first; row < end; ++row)
-                for (uint32_t col = 0; col < 4; ++col)
-                    values[row * 4 + col] = static_cast<float>(step + col + 1);
+                for (uint32_t col = 0; col < N; ++col)
+                    values[row * N + col] = 0.1f * static_cast<float>(step + col + 1);
             if (step == 4)
                 session.invalidateCaches();
             session.writeInput(input, values.data(), values.size() * sizeof(float));
             const float *output = static_cast<const float *>(session.runGraph(bucket, callback));
             for (uint32_t row = first; row < end; ++row)
-                for (uint32_t col = 0; col < 4; ++col)
+                for (uint32_t col = 0; col < N; ++col)
                 {
-                    const uint32_t index = row * 4 + col;
+                    const uint32_t index = row * N + col;
                     float denominator = 0;
                     const uint32_t key_start = sliding && row > 0 ? row - 1 : 0;
                     for (uint32_t k = key_start; k <= row; ++k)
-                        denominator += std::exp(values[row * 4 + k]);
+                        denominator += std::exp(values[row * N + k]);
                     float expected = 0;
                     for (uint32_t k = key_start; k <= row; ++k)
-                        expected += std::exp(values[row * 4 + k]) / denominator * values[k * 4 + col];
+                        expected += std::exp(values[row * N + k]) / denominator * values[k * N + col];
                     if (!std::isfinite(output[index]) || std::abs(output[index] - expected) > 1e-5f)
                         Error::throw_err("[BucketIndependence] wrong masked output at " + std::to_string(index) +
                             " step=" + std::to_string(step) + " expected=" + std::to_string(expected) +

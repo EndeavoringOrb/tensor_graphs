@@ -370,9 +370,7 @@ inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
         return result;
 
     const int rank = result.front().region.size();
-    for (int dim = rank - 1; dim >= 0; dim--) // TODO: maybe merge top down? could discover different
-                                              // optimizations in InfinityDomination if we merge different
-                                              // ways?
+    for (int dim = rank - 1; dim >= 0; dim--)
     {
         // Both lists are normalized.
         std::vector<Region> next = mergeRegionsAlongDim(result, dim);

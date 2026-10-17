@@ -108,8 +108,6 @@ def main():
         action="store_true",
         help="Search until the planner exhausts its search space",
     )
-    parser.add_argument("--max-time-seconds", type=float, default=None,
-                        help="Maximum time in seconds for the OR-Tools solver")
     parser.add_argument(
         "--disable-node-caching",
         action="store_true",
@@ -119,16 +117,6 @@ def main():
         "--disable-compilation-caching",
         action="store_true",
         help="Disable compiled-session cache file reads and writes",
-    )
-    parser.add_argument(
-        "--use-ortools-full",
-        action="store_true",
-        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
-    )
-    parser.add_argument(
-        "--use-ortools-lns",
-        action="store_true",
-        help="Use iterative subgraph LNS solver with OR-Tools",
     )
     parser.add_argument(
         "--log-cost-calls",
@@ -193,9 +181,6 @@ def main():
     prefix_len = len(tokenizer[0].encode(PROMPT_TEMPLATE_ENCODE_PREFIX).ids)
     text_seq_len = len(token_ids) - prefix_len
 
-    if args.use_ortools_lns:
-        os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
-
     session = tensor_graphs.Krea2Session(
         model_path=args.model_path,
         text_encoder_path=args.text_encoder_path,
@@ -211,9 +196,6 @@ def main():
         disable_compilation_caching=args.disable_compilation_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
-        use_ortools_full=args.use_ortools_full,
-        max_time_seconds=args.max_time_seconds or 0.0,
-        use_ortools_lns=args.use_ortools_lns,
     )
 
     latent_h = args.height // 8

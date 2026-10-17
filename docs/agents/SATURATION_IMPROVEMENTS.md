@@ -32,6 +32,8 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
 | **Step 23** (`seq_len=795`) | 29794.56 | 70.72 | 29723.84 | ~3700x | Copy-on-Write `shared_logical_map` in `EGraph`, sweep-level rule activity pre-filtering via `prepareSweep` and `active_rules_by_op`, flat `PatternSet` arrays in `FusionRule` with duplicate hash lookup elimination, topological sort caching in `Planner`, and clean propagation worklist reservation. Scaled to `seq_len=795` across **1,591 buckets** (1 full + 795 prefill + 795 decode) and 279,509 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.99x sequence length increase over Step 19, 12.05x over Step 16)** |
 
 
+**Gold regenerated (2026-10-17, `seq_len=9`):** InfinityDomination / `replaceRegion` were deleted and bucket region facts made exact (`docs/agents/CAUSAL_MASK_AND_REGION_CLEANUP.md`, Phase 4). Saturation output changes on purpose: family vertices 2028 -> 680, score 181.32 ms -> 74.94 ms (Full 27.61 ms, Prefill + Decode 47.32 ms). Earlier rows were measured against the old gold.
+
 ## Detailed Breakdown
 
 ### Baseline (3084.11 ms)

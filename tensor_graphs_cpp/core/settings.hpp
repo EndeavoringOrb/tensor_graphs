@@ -54,13 +54,8 @@ struct Settings
     // axis), e.g. token ids past the request: values that depend on the
     // padding need not be kept valid by a bucket (see computeBucketRegions).
     std::unordered_map<LogicalId, uint32_t> padded_inputs;
-    bool use_ortools = false;
-    bool use_ortools_full = false;
-    bool use_ortools_lns = false;
-    // Restrict native planning to operations that can execute on the CPU.
-    // This is used to produce a portable feasible witness for OR-Tools.
+    // Restrict planning to operations that can execute on the CPU.
     bool cpu_only = false;
-    double max_time_seconds = 0.0;
     // Optional raw weights in bucket insertion order. Session normalizes these
     // when scoring shared cache selections.
     std::vector<float> bucket_weights;
@@ -194,10 +189,6 @@ struct Settings
         parser.add_flag({"--fold-weights"}, "Enable folding of weights (InputDataType::STORAGE).");
         parser.add_flag({"--disable-fusion"}, "Disable multi-operation fusion patterns.");
         parser.add_flag({"--ref-only"}, "Restrict kernel selection to reference implementations.");
-        parser.add_flag({"--use-ortools"}, "Use Google OR-Tools CP-SAT model for optimization.");
-        parser.add_flag({"--use-ortools-full"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools.");
-        parser.add_flag({"--use-ortools-lns"}, "Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools LNS.");
-        parser.add_option({"--max-time-seconds"}, "Maximum time limit in seconds for OR-Tools optimization.", "0.0");
         parser.add_option({"--repo-path"}, "Path to the tensor repository (benchmarks/repo_<name>).", "");
         parser.add_option({"--records"}, "Path to kernel benchmark records file.", records_path);
         parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
@@ -242,24 +233,6 @@ struct Settings
         if (parser.get_flag("--ref-only"))
             reference_only = true;
 
-        if (parser.get_flag("--use-ortools"))
-            use_ortools = true;
-        if (parser.get_flag("--use-ortools-full"))
-            use_ortools_full = true;
-        if (parser.get_flag("--use-ortools-lns"))
-            use_ortools_lns = true;
-
-        std::string cli_max_time = parser.get_option("--max-time-seconds");
-        if (!cli_max_time.empty())
-        {
-            try
-            {
-                max_time_seconds = std::stod(cli_max_time);
-            }
-            catch (...)
-            {
-            }
-        }
 
         std::string cli_repo_path = parser.get_option("--repo-path");
         if (!cli_repo_path.empty())

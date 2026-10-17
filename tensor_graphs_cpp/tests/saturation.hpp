@@ -104,7 +104,7 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, co
     Graph graph;
     auto input = graph.input({seq_len, seq_len}, DType::FLOAT32);
 
-    // Causal mask using TRIU and NEG_INF fill (matches InfinityDomination & matchTriuMask)
+    // Causal mask using TRIU and NEG_INF fill (matches matchTriuMask)
     LogicalId fill_node = graph.fill(TGConstants::NEG_INF, {seq_len, seq_len});
     LogicalId k_node = graph.constant(std::vector<int32_t>{1});
     LogicalId mask = graph.triu(fill_node, k_node);

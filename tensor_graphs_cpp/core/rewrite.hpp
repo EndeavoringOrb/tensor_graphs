@@ -22,6 +22,7 @@
 #include "core/egraph.hpp"
 #include "core/plan/bucket_regions.hpp"
 #include "core/graph.hpp"
+#include "core/fused_row_restriction.hpp"
 #include "core/kernels.hpp"
 #include "core/kernel_pattern_cache.hpp"
 #include "core/ops/ops.hpp"
@@ -253,27 +254,6 @@ inline Region regionFromBounds(const std::vector<int32_t> &starts, const std::ve
         box.region.push_back({(uint32_t)st, (uint32_t)en});
     }
     return box;
-}
-
-// contiguous(slice(src, box)) equals src's op restricted to box. Record that
-// equality (always valid) when both classes have the same layout; e-classes
-// carry their layout, so differing layouts must not be merged.
-inline void mergeRestricted(EGraph &egraph, EClassId contigClass, EClassId restricted)
-{
-    contigClass = egraph.findConst(contigClass);
-    restricted = egraph.findConst(restricted);
-    if (contigClass == restricted)
-        return;
-    {
-        const EClass &a = egraph.getEClass(contigClass);
-        const EClass &b = egraph.getEClass(restricted);
-        if (a.shape != b.shape || a.dtype != b.dtype)
-            Error::throw_err("[mergeRestricted] restricted computation does not match its slice: " + toString(a.shape) +
-                             " vs " + toString(b.shape));
-        if (a.strides != b.strides || a.mem_space != b.mem_space)
-            return;
-    }
-    egraph.merge(contigClass, restricted);
 }
 
 // A stateful update's identity includes the persistent value whose untouched
@@ -1742,673 +1722,6 @@ struct FusionRule : public Rule
     }
 };
 
-// Pure functional replacement: every cell comes from the explicit base or
-// the update. Unlike a cached scatter this result is valid on its first use.
-inline EClassId replaceRegion(EGraph &egraph, EClassId base, EClassId update, const Region &box)
-{
-    const EClass initial = egraph.getEClass(egraph.findConst(base));
-    if (box.region.size() != initial.shape.size())
-        Error::throw_err("[replaceRegion] rank mismatch");
-    std::function<EClassId(EClassId, size_t)> build = [&](EClassId source, size_t axis) -> EClassId {
-        if (axis == initial.shape.size())
-            return update;
-        const EClass cls = egraph.getEClass(egraph.findConst(source));
-        const Dim interval = box.region[axis];
-        if (interval.start >= interval.stop || interval.stop > cls.shape[axis])
-            Error::throw_err("[replaceRegion] invalid update bounds");
-        auto slice = [&](uint32_t start, uint32_t stop) {
-            std::vector<int32_t> starts(cls.shape.size(), 0), ends(cls.shape.begin(), cls.shape.end());
-            std::vector<int32_t> steps(cls.shape.size(), 1);
-            starts[axis] = start;
-            ends[axis] = stop;
-            std::vector<uint32_t> shape = cls.shape;
-            shape[axis] = stop - start;
-            const EClassId sliced = addOpToEGraph(egraph, OpType::SLICE,
-                {source, egraph.addIntConst(starts), egraph.addIntConst(ends), egraph.addIntConst(steps)},
-                shape, cls.strides, cls.dtype, cls.mem_space);
-            return addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliced}, shape,
-                calcContiguousStrides(shape), cls.dtype, cls.mem_space);
-        };
-        std::vector<EClassId> pieces{egraph.addIntConst({static_cast<int32_t>(axis)})};
-        if (interval.start > 0)
-            pieces.push_back(slice(0, interval.start));
-        pieces.push_back(build(slice(interval.start, interval.stop), axis + 1));
-        if (interval.stop < cls.shape[axis])
-            pieces.push_back(slice(interval.stop, cls.shape[axis]));
-        if (pieces.size() == 2)
-            return pieces[1];
-        return addOpToEGraph(egraph, OpType::CONCAT, pieces, cls.shape,
-            calcContiguousStrides(cls.shape), cls.dtype, cls.mem_space);
-    };
-    return build(base, 0);
-}
-
-struct InfinityDomination : public Rule
-{
-    std::unique_ptr<Rule> clone() const override
-    {
-        return std::make_unique<InfinityDomination>(*this);
-    }
-
-    // A causal or sliding mask has one unmasked run per row; splitting into
-    // one piece per row would give every row its own sliced computation. Cover
-    // the unmasked cells with at most this many boxes instead (consecutive
-    // regions share a bounding box). Covered masked cells are still computed
-    // as value + mask, so the result is unchanged.
-    static constexpr size_t kMaxRegions = 8;
-
-    // Constant data/layout -> (no masked element, unmasked boxes).
-    std::unordered_map<std::string, std::pair<bool, std::vector<Region>>> unmasked_memo;
-
-    static std::vector<Region> coverWithFewRegions(std::vector<Region> regions, size_t max_regions)
-    {
-        if (regions.size() <= max_regions)
-            return regions;
-        std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b) {
-            for (size_t d = 0; d < a.region.size() && d < b.region.size(); ++d)
-            {
-                if (a.region[d].start != b.region[d].start)
-                    return a.region[d].start < b.region[d].start;
-            }
-            return false;
-        });
-        std::vector<Region> covered;
-        const size_t group_size = (regions.size() + max_regions - 1) / max_regions;
-        for (size_t first = 0; first < regions.size(); first += group_size)
-        {
-            Region box = regions[first];
-            for (size_t k = first + 1; k < std::min(regions.size(), first + group_size); ++k)
-            {
-                if (regions[k].region.size() != box.region.size())
-                    Error::throw_err("[InfinityDomination] regions of different rank");
-                for (size_t d = 0; d < box.region.size(); ++d)
-                {
-                    box.region[d].start = std::min(box.region[d].start, regions[k].region[d].start);
-                    box.region[d].stop = std::max(box.region[d].stop, regions[k].region[d].stop);
-                }
-            }
-            covered.push_back(box);
-        }
-        return mergeRegions(covered);
-    }
-
-    std::vector<uint8_t> visited_enodes;
-
-    void markVisited(uint32_t eNodeIdx)
-    {
-        if (eNodeIdx >= visited_enodes.size())
-            visited_enodes.resize(eNodeIdx + 1, 0);
-        visited_enodes[eNodeIdx] = 1;
-    }
-
-    std::string name() const override
-    {
-        return "InfinityDomination";
-    }
-
-    bool isFillWithNegInfEClass(EClassId cid, const EGraph &egraph, RuleCtx *ctx = nullptr, int depth = 8) const
-    {
-        if (depth <= 0)
-            return false;
-        cid = egraph.findConst(cid);
-        const EClass &cls = egraph.getEClass(cid);
-        for (ENodeId enode_id : cls.enodes)
-        {
-            const ENode &enode = egraph.getENode(enode_id);
-            if (enode.getOpType() == OpType::FILL && enode.getChildren().size() >= 2)
-            {
-                EClassId val_cid = egraph.findConst(enode.getChildren()[0]);
-                const EClass &val_cls = egraph.getEClass(val_cid);
-                if (val_cls.dtype == DType::FLOAT32)
-                {
-                    if (egraph.constantStaging.count(val_cid))
-                    {
-                        const auto &data = *egraph.constantStaging.at(val_cid);
-                        if (data.size() >= sizeof(float))
-                        {
-                            float val;
-                            std::memcpy(&val, data.data(), sizeof(float));
-                            if (val == TGConstants::NEG_INF)
-                                return true;
-                        }
-                    }
-                    if (ctx && ctx->repo && ctx->repo->isValid())
-                    {
-                        LogicalId lid = val_cls.logical_id;
-                        if (lid != LogicalId() && ctx->repo->has(lid))
-                        {
-                            auto data = ctx->repo->read(lid);
-                            if (data.size() >= sizeof(float))
-                            {
-                                float val;
-                                std::memcpy(&val, data.data(), sizeof(float));
-                                if (val == TGConstants::NEG_INF)
-                                    return true;
-                            }
-                        }
-                    }
-                }
-            }
-            const bool isView = (enode.getOpType() == OpType::REPEAT || enode.getOpType() == OpType::RESHAPE ||
-                                 enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::SLICE ||
-                                 enode.getOpType() == OpType::CONTIGUOUS || enode.getOpType() == OpType::COPY_TO);
-            if (isView && !enode.getChildren().empty())
-            {
-                if (isFillWithNegInfEClass(enode.getChildren()[0], egraph, ctx, depth - 1))
-                    return true;
-            }
-        }
-        return false;
-    }
-
-    bool mapTriuBoundForwardENode(const ENode &enode, const EGraph &egraph,
-                                  const TriuBound &in_bound, TriuBound &out_bound) const
-    {
-        switch (enode.getOpType())
-        {
-        case OpType::CONTIGUOUS:
-        case OpType::COPY_TO:
-            out_bound = in_bound;
-            return true;
-        case OpType::REPEAT: {
-            if (enode.getChildren().size() < 3)
-                return false;
-            EClassId r_cid = egraph.findConst(enode.getChildren()[1]);
-            EClassId a_cid = egraph.findConst(enode.getChildren()[2]);
-            if (!egraph.constantStaging.count(r_cid) || !egraph.constantStaging.count(a_cid))
-                return false;
-            auto r_vec = egraph.getConstantInt32(r_cid);
-            auto a_vec = egraph.getConstantInt32(a_cid);
-            if (r_vec.empty() || a_vec.empty())
-                return false;
-            int32_t repeats = r_vec[0];
-            int32_t axis = a_vec[0];
-            EClassId c0 = egraph.findConst(enode.getChildren()[0]);
-            size_t in_rank = egraph.getEClass(c0).shape.size();
-            if (axis < 0)
-                axis += static_cast<int32_t>(in_rank);
-            if (repeats == 1 || (static_cast<uint32_t>(axis) != in_bound.row_axis &&
-                                 static_cast<uint32_t>(axis) != in_bound.col_axis))
-            {
-                out_bound = in_bound;
-                return true;
-            }
-            return false;
-        }
-        case OpType::PERMUTE: {
-            if (enode.getChildren().size() < 2)
-                return false;
-            EClassId d_cid = egraph.findConst(enode.getChildren()[1]);
-            if (!egraph.constantStaging.count(d_cid))
-                return false;
-            auto dims = egraph.getConstantInt32(d_cid);
-            uint32_t new_row = UINT32_MAX, new_col = UINT32_MAX;
-            for (uint32_t i = 0; i < dims.size(); ++i)
-            {
-                if (static_cast<uint32_t>(dims[i]) == in_bound.row_axis)
-                    new_row = i;
-                if (static_cast<uint32_t>(dims[i]) == in_bound.col_axis)
-                    new_col = i;
-            }
-            if (new_row != UINT32_MAX && new_col != UINT32_MAX)
-            {
-                out_bound = TriuBound{new_row, new_col, in_bound.diag_k};
-                return true;
-            }
-            return false;
-        }
-        case OpType::RESHAPE: {
-            EClassId c0 = egraph.findConst(enode.getChildren()[0]);
-            const auto &in_shape = egraph.getEClass(c0).shape;
-            const auto &out_shape = enode.getShape();
-            if (in_shape.size() >= 2 && out_shape.size() >= 2)
-            {
-                size_t in_rank = in_shape.size();
-                size_t out_rank = out_shape.size();
-                if (in_bound.row_axis == in_rank - 2 && in_bound.col_axis == in_rank - 1 &&
-                    in_shape[in_rank - 2] == out_shape[out_rank - 2] &&
-                    in_shape[in_rank - 1] == out_shape[out_rank - 1])
-                {
-                    out_bound = TriuBound{static_cast<uint32_t>(out_rank - 2),
-                                          static_cast<uint32_t>(out_rank - 1), in_bound.diag_k};
-                    return true;
-                }
-            }
-            return false;
-        }
-        case OpType::SLICE: {
-            if (enode.getChildren().size() < 4)
-                return false;
-            EClassId st_cid = egraph.findConst(enode.getChildren()[1]);
-            EClassId sp_cid = egraph.findConst(enode.getChildren()[3]);
-            if (!egraph.constantStaging.count(st_cid) || !egraph.constantStaging.count(sp_cid))
-                return false;
-            auto starts = egraph.getConstantInt32(st_cid);
-            auto steps = egraph.getConstantInt32(sp_cid);
-            if (in_bound.row_axis < steps.size() && in_bound.col_axis < steps.size() &&
-                steps[in_bound.row_axis] == 1 && steps[in_bound.col_axis] == 1 &&
-                in_bound.row_axis < starts.size() && in_bound.col_axis < starts.size())
-            {
-                int32_t new_k = in_bound.diag_k + starts[in_bound.row_axis] - starts[in_bound.col_axis];
-                out_bound = TriuBound{in_bound.row_axis, in_bound.col_axis, new_k};
-                return true;
-            }
-            return false;
-        }
-        default:
-            return false;
-        }
-    }
-
-    bool isTriuMaskEClass(EClassId cid, const EGraph &egraph, TriuBound &out_bound,
-                          std::unordered_set<EClassId> &visited, RuleCtx *ctx = nullptr) const
-    {
-        cid = egraph.findConst(cid);
-        if (visited.count(cid))
-            return false;
-        visited.insert(cid);
-
-        const EClass &cls = egraph.getEClass(cid);
-        for (ENodeId enode_id : cls.enodes)
-        {
-            const ENode &enode = egraph.getENode(enode_id);
-            if (enode.getOpType() == OpType::TRIU && enode.getChildren().size() == 2 && enode.getShape().size() >= 2)
-            {
-                EClassId k_cid = egraph.findConst(enode.getChildren()[1]);
-                std::optional<int32_t> diag_k;
-                if (egraph.constantStaging.count(k_cid))
-                {
-                    const auto &k_data = *egraph.constantStaging.at(k_cid);
-                    if (k_data.size() >= sizeof(int32_t))
-                    {
-                        int32_t k_val;
-                        std::memcpy(&k_val, k_data.data(), sizeof(int32_t));
-                        diag_k = k_val;
-                    }
-                }
-                else if (ctx && ctx->repo && ctx->repo->isValid())
-                {
-                    const EClass &k_cls = egraph.getEClass(k_cid);
-                    if (k_cls.logical_id != LogicalId() && ctx->repo->has(k_cls.logical_id))
-                    {
-                        auto bytes = ctx->repo->read(k_cls.logical_id);
-                        if (bytes.size() >= sizeof(int32_t))
-                        {
-                            int32_t k_val;
-                            std::memcpy(&k_val, bytes.data(), sizeof(int32_t));
-                            diag_k = k_val;
-                        }
-                    }
-                }
-                if (diag_k)
-                {
-                    EClassId fill_cid = egraph.findConst(enode.getChildren()[0]);
-                    if (isFillWithNegInfEClass(fill_cid, egraph, ctx))
-                    {
-                        out_bound.row_axis = static_cast<uint32_t>(enode.getShape().size() - 2);
-                        out_bound.col_axis = static_cast<uint32_t>(enode.getShape().size() - 1);
-                        out_bound.diag_k = *diag_k;
-                        return true;
-                    }
-                }
-            }
-            const bool isView = (enode.getOpType() == OpType::REPEAT || enode.getOpType() == OpType::RESHAPE ||
-                                 enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::SLICE ||
-                                 enode.getOpType() == OpType::CONTIGUOUS || enode.getOpType() == OpType::COPY_TO);
-            if (isView && !enode.getChildren().empty())
-            {
-                TriuBound child_bound;
-                if (isTriuMaskEClass(enode.getChildren()[0], egraph, child_bound, visited, ctx))
-                {
-                    if (mapTriuBoundForwardENode(enode, egraph, child_bound, out_bound))
-                        return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    bool isTriuMaskEClass(EClassId cid, const EGraph &egraph, TriuBound &out_bound, RuleCtx *ctx = nullptr) const
-    {
-        std::unordered_set<EClassId> visited;
-        return isTriuMaskEClass(cid, egraph, out_bound, visited, ctx);
-    }
-
-    void clearVisited() override
-    {
-        visited_enodes.clear();
-    }
-
-    bool canMatchOp(OpType op) const override
-    {
-        return op == OpType::ADD;
-    }
-
-    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
-    {
-        if (eNodeIdx < ctx.base_enode_watermark && ctx.sweep_filter &&
-            eNodeIdx < ctx.sweep_filter->size() && (*ctx.sweep_filter)[eNodeIdx] == 0)
-            return false;
-        if (eNodeIdx < visited_enodes.size() && visited_enodes[eNodeIdx])
-            return false;
-
-        const ENode &enode = ctx.egraph.getENode(ENodeId{eNodeIdx});
-        if (enode.getOpType() != OpType::ADD || enode.getChildren().size() != 2)
-            return false;
-
-        const EClassId cid = ctx.egraph.getENodeEClass(ENodeId{eNodeIdx});
-        const EClass &cls = ctx.egraph.getEClass(ctx.egraph.findConst(cid));
-        if (cls.logical_id == LogicalId{})
-        {
-            markVisited(eNodeIdx);
-            return false;
-        }
-        if (ctx.regions && cls.base_eclass_id == BaseEClassId{})
-        {
-            markVisited(eNodeIdx);
-            return false;
-        }
-
-        TriuBound dummy;
-        return isConstantFloat(enode.getChildren()[0], ctx) || isConstantFloat(enode.getChildren()[1], ctx) ||
-               isTriuMaskEClass(enode.getChildren()[0], ctx.egraph, dummy, &ctx) ||
-               isTriuMaskEClass(enode.getChildren()[1], ctx.egraph, dummy, &ctx);
-    }
-
-    bool isConstantFloat(EClassId e_class_id, RuleCtx &ctx) const
-    {
-        e_class_id = ctx.egraph.findConst(e_class_id);
-        const EClass &cls = ctx.egraph.getEClass(e_class_id);
-        if (cls.dtype != DType::FLOAT32)
-            return false;
-        if (ctx.egraph.constantStaging.find(e_class_id) != ctx.egraph.constantStaging.end())
-            return true;
-
-        if (ctx.repo && ctx.repo->isValid())
-        {
-            LogicalId logical_id = cls.logical_id;
-
-            if (logical_id != LogicalId() && ctx.repo->has(logical_id))
-            {
-                auto data = ctx.repo->read(logical_id);
-                ctx.egraph.constantStaging[e_class_id] = std::make_shared<std::vector<uint8_t>>(std::move(data));
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
-    {
-        EGraph &egraph = ctx.egraph;
-        markVisited(eNodeIdx);
-
-        // COPY instead of reference to prevent UAF
-        const ENode addNode = egraph.getENode(ENodeId{eNodeIdx});
-        EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
-
-        TriuBound triu_bound_0, triu_bound_1;
-        bool is_triu_1 = isTriuMaskEClass(addNode.getChildren()[1], egraph, triu_bound_1, &ctx);
-        bool is_triu_0 = isTriuMaskEClass(addNode.getChildren()[0], egraph, triu_bound_0, &ctx);
-        bool is_const_1 = isConstantFloat(addNode.getChildren()[1], ctx);
-        bool is_const_0 = isConstantFloat(addNode.getChildren()[0], ctx);
-
-        uint32_t constIdx;
-        bool is_triu = false;
-        TriuBound triu_bound;
-        if (is_triu_1 || is_const_1)
-        {
-            constIdx = 1;
-            if (is_triu_1) { is_triu = true; triu_bound = triu_bound_1; }
-        }
-        else if (is_triu_0 || is_const_0)
-        {
-            constIdx = 0;
-            if (is_triu_0) { is_triu = true; triu_bound = triu_bound_0; }
-        }
-        else
-            return;
-
-        uint32_t varIdx = 1 - constIdx;
-
-        EClassId constClass = egraph.findConst(addNode.getChildren()[constIdx]);
-        EClassId varClass = egraph.findConst(addNode.getChildren()[varIdx]);
-
-        const EClass variable = egraph.getEClass(varClass);
-        const EClass cClass = egraph.getEClass(constClass);
-        if (cClass.shape != variable.shape)
-            return;
-
-        std::vector<Region> nonInfRegions;
-        if (is_triu)
-        {
-            const uint32_t R = cClass.shape[triu_bound.row_axis];
-            const uint32_t C = cClass.shape[triu_bound.col_axis];
-            if (R > 0 && C > 0)
-            {
-                const size_t num_regions = std::min<size_t>(kMaxRegions, R);
-                const size_t group_size = (R + num_regions - 1) / num_regions;
-                std::vector<Region> boxes;
-                for (size_t first = 0; first < R; first += group_size)
-                {
-                    const size_t last = std::min<size_t>(R, first + group_size);
-                    const int64_t max_col = static_cast<int64_t>(last - 1) + triu_bound.diag_k;
-                    if (max_col <= 0)
-                        continue;
-                    const uint32_t col_stop = std::min<uint32_t>(C, static_cast<uint32_t>(max_col));
-                    Region reg;
-                    for (size_t d = 0; d < cClass.shape.size(); ++d)
-                    {
-                        if (d == triu_bound.row_axis)
-                            reg.region.push_back({static_cast<uint32_t>(first), static_cast<uint32_t>(last)});
-                        else if (d == triu_bound.col_axis)
-                            reg.region.push_back({0, col_stop});
-                        else
-                            reg.region.push_back({0, cClass.shape[d]});
-                    }
-                    boxes.push_back(std::move(reg));
-                }
-                nonInfRegions = mergeRegions(boxes);
-            }
-        }
-        else
-        {
-            const auto &constData = *egraph.constantStaging.at(constClass);
-            const float *data = reinterpret_cast<const float *>(constData.data());
-
-            uint64_t numElements = countElements(cClass.shape);
-            if (constData.size() != numElements * sizeof(float))
-                Error::throw_err("[InfinityDomination] constant data size mismatch");
-
-            // Unmasked boxes of this constant (memoized: one mask feeds every
-            // layer). Runs along the last axis, merged, equal to merging the
-            // unmasked cells one by one.
-            std::string memoKey(reinterpret_cast<const char *>(&data), sizeof(data));
-            memoKey.append(reinterpret_cast<const char *>(cClass.shape.data()), cClass.shape.size() * sizeof(uint32_t));
-            memoKey.append(reinterpret_cast<const char *>(cClass.strides.data()), cClass.strides.size() * sizeof(uint64_t));
-            auto memo = unmasked_memo.find(memoKey);
-            if (memo == unmasked_memo.end())
-            {
-                std::vector<Region> runs;
-                bool anyMasked = false;
-                const uint32_t cols = cClass.shape.empty() ? 1 : cClass.shape.back();
-                const uint64_t rows = cols == 0 ? 0 : numElements / cols;
-                for (uint64_t row = 0; row < rows; ++row)
-                {
-                    const std::vector<uint32_t> coords = coordsFromFlatIndex(row * cols, cClass.shape);
-                    uint32_t c = 0;
-                    while (c < cols)
-                    {
-                        while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] == TGConstants::NEG_INF)
-                        {
-                            anyMasked = true;
-                            ++c;
-                        }
-                        const uint32_t start = c;
-                        while (c < cols && data[getStridedIndex(row * cols + c, cClass.shape, cClass.strides)] != TGConstants::NEG_INF)
-                            ++c;
-                        if (c > start)
-                        {
-                            Region r;
-                            for (size_t d = 0; d + 1 < coords.size(); ++d)
-                                r.region.push_back({coords[d], coords[d] + 1});
-                            r.region.push_back({start, c});
-                            runs.push_back(std::move(r));
-                        }
-                    }
-                }
-                std::vector<Region> boxes;
-                if (anyMasked)
-                    boxes = coverWithFewRegions(mergeRegions(runs), kMaxRegions);
-                memo = unmasked_memo.emplace(memoKey, std::make_pair(!anyMasked, std::move(boxes))).first;
-            }
-            const bool noneInf = memo->second.first;
-            if (noneInf)
-            {
-                return;
-            }
-            nonInfRegions = memo->second.second;
-        }
-
-        const EClass vClass = egraph.getEClass(varClass);
-        const EClass outClass = egraph.getEClass(e_class_id);
-
-        std::vector<uint64_t> contigStrides = calcContiguousStrides(outClass.shape);
-        if (outClass.strides != contigStrides)
-            return;
-
-        if (nonInfRegions.empty())
-        {
-            EClassId currentTarget = constClass;
-            if (cClass.strides != contigStrides)
-            {
-                currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentTarget}, outClass.shape,
-                                              contigStrides, outClass.dtype, outClass.mem_space);
-            }
-            if (cClass.mem_space != outClass.mem_space)
-            {
-                currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {currentTarget}, outClass.shape, contigStrides,
-                                              outClass.dtype, outClass.mem_space);
-            }
-            egraph.merge(e_class_id, currentTarget);
-            return;
-        }
-
-        // A cached update writes one box covering this bucket's entire live
-        // domain. The full computation initializes all other cells first.
-        bool cached_update = false;
-        if (ctx.regions && outClass.logical_id != LogicalId{} && outClass.base_eclass_id != BaseEClassId{})
-        {
-            const auto &live = ctx.regions->liveOf(outClass.logical_id);
-            if (!live.empty())
-            {
-                const Region box = bucket_regions::boundingBox(live);
-                if (scatterFormValid(ctx, outClass, box))
-                {
-                    nonInfRegions = {box};
-                    cached_update = true;
-                }
-            }
-        }
-        if (ctx.regions && !cached_update)
-            return;
-
-        if (nonInfRegions.size() == 1)
-        {
-            bool strictlySmaller = false;
-            const Region &reg = nonInfRegions[0];
-            for (uint64_t d = 0; d < cClass.shape.size(); ++d)
-            {
-                if (reg.region[d].start > 0 || reg.region[d].stop < cClass.shape[d])
-                {
-                    strictlySmaller = true;
-                    break;
-                }
-            }
-            if (!strictlySmaller)
-                return;
-        }
-
-        EClassId currentTarget = constClass;
-        if (cClass.strides != contigStrides)
-        {
-            currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentTarget}, outClass.shape, contigStrides,
-                                          outClass.dtype, outClass.mem_space);
-        }
-        if (cClass.mem_space != outClass.mem_space)
-        {
-            currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {currentTarget}, outClass.shape, contigStrides,
-                                          outClass.dtype, outClass.mem_space);
-        }
-
-        for (const Region &reg : nonInfRegions)
-        {
-            std::vector<int32_t> starts, ends, steps;
-            for (const Dim &d : reg.region)
-            {
-                starts.push_back(d.start);
-                ends.push_back(d.stop);
-                steps.push_back(1);
-            }
-
-            EClassId startsId = egraph.addIntConst(starts);
-            EClassId endsId = egraph.addIntConst(ends);
-            EClassId stepsId = egraph.addIntConst(steps);
-
-            std::vector<uint32_t> sliceShape;
-            for (uint64_t d = 0; d < starts.size(); ++d)
-            {
-                sliceShape.push_back(ends[d] - starts[d]);
-            }
-
-            std::vector<uint64_t> sliceStridesV = vClass.strides;
-            for (uint64_t d = 0; d < starts.size(); ++d)
-            {
-                sliceStridesV[d] *= steps[d];
-            }
-            EClassId sliceV = addOpToEGraph(egraph, OpType::SLICE, {varClass, startsId, endsId, stepsId}, sliceShape,
-                                            sliceStridesV, vClass.dtype, vClass.mem_space);
-
-            std::vector<uint64_t> sliceStridesC = cClass.strides;
-            for (uint64_t d = 0; d < starts.size(); ++d)
-            {
-                sliceStridesC[d] *= steps[d];
-            }
-            EClassId sliceC = addOpToEGraph(egraph, OpType::SLICE, {constClass, startsId, endsId, stepsId},
-                                            sliceShape, sliceStridesC, cClass.dtype, cClass.mem_space);
-
-            std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
-            EClassId contigV = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceV}, sliceShape, sliceContigStrides,
-                                             vClass.dtype, vClass.mem_space);
-            EClassId contigC = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceC}, sliceShape, sliceContigStrides,
-                                             cClass.dtype, cClass.mem_space);
-
-            contigV = copyTo(egraph, contigV, outClass.mem_space);
-            contigC = copyTo(egraph, contigC, outClass.mem_space);
-
-            EClassId child0 = (constIdx == 0) ? contigC : contigV;
-            EClassId child1 = (constIdx == 1) ? contigC : contigV;
-            EClassId addId = addOpToEGraph(egraph, OpType::ADD, {child0, child1}, sliceShape, sliceContigStrides,
-                                           outClass.dtype, outClass.mem_space);
-
-            if (cached_update)
-            {
-                const EClassId shape_id = egraph.addIntConst(
-                    std::vector<int32_t>(outClass.shape.begin(), outClass.shape.end()));
-                const EClassId scatter = addOpToEGraph(egraph, OpType::SCATTER,
-                    {addId, startsId, endsId, stepsId, shape_id}, outClass.shape, outClass.strides,
-                    outClass.dtype, outClass.mem_space, EClassId(), SourceLocation::current(), "",
-                    scatterFormTag(egraph, e_class_id));
-                egraph.merge(e_class_id, scatter);
-                return;
-            }
-            currentTarget = replaceRegion(egraph, currentTarget, addId, reg);
-        }
-
-        egraph.merge(e_class_id, currentTarget);
-    }
-};
-
 // A class whose input was partially updated (one of its enode's children has
 // a SCATTER form: "previous value with a region replaced") changes only in
 // its own dirty region, and only the needed part of that matters. Expose
@@ -2476,20 +1789,31 @@ struct ScatterPullUp : public Rule
     // A class is updated when it has a scatter form, is an input with a
     // partial dirty region, or is a view of an updated class: views are not
     // contiguous, so they cannot hold a scatter form themselves, but a
-    // contiguous consumer of one can.
-    static bool isUpdated(const EGraph &egraph, EClassId cid, uint32_t depth, const RuleCtx &ctx)
+    // contiguous consumer of one can. The whole view chain is walked (views
+    // of views may form cycles, hence the visited set).
+    std::vector<EClassId> updated_stack_;
+    std::unordered_set<uint32_t> updated_visited_;
+    bool isUpdated(const EGraph &egraph, EClassId root, const RuleCtx &ctx)
     {
-        if (hasScatter(egraph, cid) || isPartiallyDirtyInput(egraph, cid, ctx))
-            return true;
-        if (depth == 0)
-            return false;
-        for (ENodeId id : egraph.getEClass(egraph.findConst(cid)).enodes)
+        updated_stack_.clear();
+        updated_visited_.clear();
+        updated_stack_.push_back(egraph.findConst(root));
+        while (!updated_stack_.empty())
         {
-            const ENode &enode = egraph.getENode(id);
-            const OpType op = enode.getOpType();
-            if ((op == OpType::PERMUTE || op == OpType::RESHAPE || op == OpType::SLICE || op == OpType::REPEAT) &&
-                !enode.getChildren().empty() && isUpdated(egraph, enode.getChildren()[0], depth - 1, ctx))
+            const EClassId cid = updated_stack_.back();
+            updated_stack_.pop_back();
+            if (!updated_visited_.insert(cid.value).second)
+                continue;
+            if (hasScatter(egraph, cid) || isPartiallyDirtyInput(egraph, cid, ctx))
                 return true;
+            for (ENodeId id : egraph.getEClass(cid).enodes)
+            {
+                const ENode &enode = egraph.getENode(id);
+                const OpType op = enode.getOpType();
+                if ((op == OpType::PERMUTE || op == OpType::RESHAPE || op == OpType::SLICE || op == OpType::REPEAT) &&
+                    !enode.getChildren().empty())
+                    updated_stack_.push_back(egraph.findConst(enode.getChildren()[0]));
+            }
         }
         return false;
     }
@@ -2532,7 +1856,7 @@ struct ScatterPullUp : public Rule
         }
         for (EClassId child : enode.getChildren())
         {
-            if (isUpdated(egraph, child, 4, ctx))
+            if (isUpdated(egraph, child, ctx))
                 return true;
         }
         return false;
@@ -2846,7 +2170,7 @@ struct SlicePushDownElementwise : public Rule
                                                   sliceNode.getDType(), sliceNode.getMemSpace());
                 // Keep the standalone result even when a cached update is valid.
                 // Extraction must choose an acyclic implementation of either form.
-                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), opEClass);
+                egraph.merge(egraph.getENodeEClass(ENodeId{eNodeIdx}), opEClass);
                 if (scatter_valid && !hasScatter(egraph, srcClass))
                 {
                     srcClass = egraph.findConst(srcClass);
@@ -3155,7 +2479,7 @@ struct SlicePushDownDot : public Rule
                 EClassId dotEClass = addOpToEGraph(egraph, OpType::DOT, {aSliced, bSliced}, sliceShape,
                                                    sliceContigStrides, sliceNode.getDType(), sliceNode.getMemSpace());
                 srcClass = egraph.findConst(srcClass);
-                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), dotEClass);
+                egraph.merge(egraph.getENodeEClass(ENodeId{eNodeIdx}), dotEClass);
                 if (scatter_valid && !hasScatter(egraph, srcClass))
                 {
                     const EClass srcEClass = egraph.getEClass(srcClass);
@@ -3689,7 +3013,7 @@ struct SlicePushDownStructural : public Rule
                     restrictedContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {restrictedContig}, rShape,
                                                      calcContiguousStrides(rShape), rDType, rMem);
                 }
-                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), restrictedContig);
+                egraph.merge(egraph.getENodeEClass(ENodeId{eNodeIdx}), restrictedContig);
                 if (scatter_valid && !hasScatter(egraph, srcClass))
                 {
                     srcClass = egraph.findConst(srcClass);
@@ -3880,7 +3204,65 @@ struct SlicePushDownFused : public Rule
     {
         const ENode &op = egraph.getENode(srcIdx);
         return op.getOpType() == OpType::FUSED && op.getKernelId().value != 0 &&
-               KernelRegistry::get().hasKernel(op.getKernelId()) && fusedRowLocality(op.getOpName()).rowLocal;
+               KernelRegistry::get().hasKernel(op.getKernelId()) &&
+               (FusedRowRestrictionRegistry::get().find(op.getOpName()) ||
+                fusedRowLocality(op.getOpName()).rowLocal);
+    }
+
+    // Whether `op` can be restricted to `box` of its output: an explicit row
+    // restriction slices only its output axis; a derived row-local kernel
+    // slices leading axes and keeps the last one whole.
+    static bool boxAllowed(const ENode &op, const std::vector<uint32_t> &shape, const Region &box)
+    {
+        if (const FusedRowRestriction *r = FusedRowRestrictionRegistry::get().find(op.getOpName()))
+        {
+            if (r->output_axis >= shape.size())
+                Error::throw_err("[SlicePushDownFused] row restriction axis out of range for " + op.getOpName());
+            for (size_t d = 0; d < shape.size(); ++d)
+                if (d != r->output_axis && (box.region[d].start != 0 || box.region[d].stop != shape[d]))
+                    return false;
+            return true;
+        }
+        return shape.size() >= 2 && box.region.back().start == 0 && box.region.back().stop == shape.back();
+    }
+
+    // Children of `op` (an explicitly row-restricted kernel) restricted to the
+    // output rows of `box`, or false when an input does not fit.
+    static bool explicitRestrictedChildren(EGraph &egraph, const ENode op, const FusedRowRestriction &r,
+                                           const Region &box, RuleCtx &ctx, std::vector<EClassId> &out)
+    {
+        const auto &children = op.getChildren();
+        if (children.size() != r.input_axis.size())
+            Error::throw_err("[SlicePushDownFused] " + op.getOpName() + " has " + std::to_string(children.size()) +
+                             " inputs but its row restriction describes " + std::to_string(r.input_axis.size()));
+        const Dim rows = box.region[r.output_axis];
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            EClassId child = egraph.findConst(children[i]);
+            if (static_cast<int32_t>(i) == r.offset_input)
+            {
+                std::vector<int32_t> offset;
+                if (!constInts(egraph, child, offset))
+                    return false;
+                if (offset.size() != 1)
+                    Error::throw_err("[SlicePushDownFused] offset input of " + op.getOpName() + " must hold one value");
+                child = egraph.addIntConst({offset[0] + static_cast<int32_t>(rows.start)});
+            }
+            else if (r.input_axis[i] >= 0)
+            {
+                const std::vector<uint32_t> shape = egraph.getEClass(child).shape;
+                const size_t axis = static_cast<size_t>(r.input_axis[i]);
+                if (axis >= shape.size() || rows.stop > shape[axis])
+                    return false;
+                Region childBox;
+                for (uint32_t extent : shape)
+                    childBox.region.push_back({0, extent});
+                childBox.region[axis] = rows;
+                child = egraph.findConst(SlicePushDownStructural::sliceOf(egraph, child, childBox, ctx.slice_memo));
+            }
+            out.push_back(child);
+        }
+        return true;
     }
 
     void clearVisited() override
@@ -3923,9 +3305,6 @@ struct SlicePushDownFused : public Rule
             Region box;
             if (!SlicePushDownStructural::sliceBox(egraph, sliceNode, src.shape, box))
                 continue;
-            const size_t rank = src.shape.size();
-            if (rank < 2 || box.region.back().start != 0 || box.region.back().stop != src.shape.back())
-                continue;
             const bool scatter_valid = scatterFormValid(ctx, src, box);
             const bool has_scatter = scatter_valid && hasScatter(egraph, srcClass);
             if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark &&
@@ -3934,7 +3313,7 @@ struct SlicePushDownFused : public Rule
                 continue;
             for (ENodeId srcIdx : src.enodes)
             {
-                if (!candidate(egraph, srcIdx))
+                if (!candidate(egraph, srcIdx) || !boxAllowed(egraph.getENode(srcIdx), src.shape, box))
                     continue;
                 if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark &&
                     sliceIdx.value < ctx.base_enode_watermark && srcIdx.value < ctx.base_enode_watermark &&
@@ -3980,8 +3359,6 @@ struct SlicePushDownFused : public Rule
             if (!SlicePushDownStructural::sliceBox(egraph, sliceNode, srcShape, box))
                 continue;
             const size_t rank = srcShape.size();
-            if (rank < 2 || box.region.back().start != 0 || box.region.back().stop != srcShape.back())
-                continue;
             const bool scatter_valid = scatterFormValid(ctx, egraph.getEClass(srcClass), box);
             const bool has_scatter = scatter_valid && hasScatter(egraph, srcClass);
             if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark &&
@@ -3999,7 +3376,7 @@ struct SlicePushDownFused : public Rule
             for (size_t s_i = 0; s_i < numSrc; ++s_i)
             {
                 ENodeId srcIdx = egraph.getEClass(srcClass).enodes[s_i];
-                if (!candidate(egraph, srcIdx))
+                if (!candidate(egraph, srcIdx) || !boxAllowed(egraph.getENode(srcIdx), srcShape, box))
                     continue;
                 if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark &&
                     sliceIdx.value < ctx.base_enode_watermark && srcIdx.value < ctx.base_enode_watermark &&
@@ -4007,14 +3384,29 @@ struct SlicePushDownFused : public Rule
                     continue;
                 const ENode op = egraph.getENode(srcIdx);
                 const EClass src = egraph.getEClass(egraph.findConst(srcClass));
-                const FusedRowLocality &loc = fusedRowLocality(op.getOpName());
-                const auto &children = op.getChildren();
-                if (children.size() < loc.rowInput.size())
-                    continue;
                 std::vector<EClassId> newChildren;
                 std::vector<TensorNode> inputNodes;
                 bool valid = true;
-                for (size_t i = 0; i < children.size() && valid; ++i)
+                const FusedRowRestriction *restriction = FusedRowRestrictionRegistry::get().find(op.getOpName());
+                if (restriction)
+                {
+                    valid = explicitRestrictedChildren(egraph, op, *restriction, box, ctx, newChildren);
+                    for (size_t i = 0; i < newChildren.size() && valid; ++i)
+                    {
+                        const EClass c = egraph.getEClass(newChildren[i]);
+                        TensorNode in;
+                        in.opType = OpType::INPUT;
+                        in.dtype = c.dtype;
+                        in.setShape(c.shape);
+                        in.strides = c.strides;
+                        inputNodes.push_back(in);
+                    }
+                }
+                const FusedRowLocality &loc = fusedRowLocality(op.getOpName());
+                const auto &children = op.getChildren();
+                if (!restriction && children.size() < loc.rowInput.size())
+                    continue;
+                for (size_t i = 0; !restriction && i < children.size() && valid; ++i)
                 {
                     EClassId child = egraph.findConst(children[i]);
                     const EClass childCls = egraph.getEClass(child);
@@ -4061,7 +3453,7 @@ struct SlicePushDownFused : public Rule
                                                   outShape, outNode.strides, src.dtype, op.getMemSpace(),
                                                   op.getEngines(), "", 0, op.getDebugOrigin()));
                 srcClass = egraph.findConst(srcClass);
-                mergeRestricted(egraph, egraph.getENodeEClass(ENodeId{eNodeIdx}), restricted);
+                egraph.merge(egraph.getENodeEClass(ENodeId{eNodeIdx}), restricted);
                 if (scatter_valid && !hasScatter(egraph, srcClass))
                 {
                     srcClass = egraph.findConst(srcClass);
@@ -4093,8 +3485,9 @@ struct SlicePushDownFused : public Rule
                     egraph.merge(srcClass, scatterClass);
                     srcClass = egraph.findConst(srcClass);
                 }
-                if (!scatter_valid || hasScatter(egraph, srcClass))
-                    break;
+                // Every fused alternative gets its restricted form (they all
+                // land in the contiguous class the scatter form reads), so
+                // the planner can choose between kernels in partial buckets.
             }
         }
     }
