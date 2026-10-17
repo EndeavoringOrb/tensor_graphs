@@ -116,6 +116,9 @@ int main(int argc, char *argv[])
             if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelId))
             {
                 const auto &kernel = KernelRegistry::get().getKernel(r.kernelId);
+                if (kernel.is_view)
+                    continue;
+
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
                 if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
@@ -247,28 +250,19 @@ int main(int argc, char *argv[])
             std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
-            if (!kernel.is_view)
-            {
-                pk.updateStorageContext(kernel, r, 0);
-                pk.run(kernel);
-                pk.synchronize();
-            }
+            pk.updateStorageContext(kernel, r, 0);
+            pk.run(kernel);
+            pk.synchronize();
 
             int iters = 8;
             std::vector<float> latencies;
             latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
-                if (!kernel.is_view)
-                {
-                    pk.updateStorageContext(kernel, r, it + 1);
-                }
+                pk.updateStorageContext(kernel, r, it + 1);
 
                 auto iterStart = std::chrono::high_resolution_clock::now();
-                if (!kernel.is_view)
-                {
-                    pk.run(kernel);
-                }
+                pk.run(kernel);
                 pk.synchronize();
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();

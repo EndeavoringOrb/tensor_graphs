@@ -281,21 +281,22 @@ inline std::vector<Record> discoverCalls(const std::string &cache_path, Discover
 
 inline std::vector<float> benchmarkRecord(const KernelEntry &kernel, const Record &record, uint32_t iterations)
 {
+    if (kernel.is_view)
+        return std::vector<float>(iterations, 0.0f);
+
     if (iterations < 3)
         Error::throw_err("KernelBench requires at least three measurement iterations");
     PreparedKernel prepared;
     prepared.prepare(kernel, record);
     prepared.updateStorageContext(kernel, record, 0);
-    if (!kernel.is_view)
-        prepared.run(kernel);
+    prepared.run(kernel);
     prepared.synchronize();
     std::vector<float> samples;
     for (uint32_t i = 0; i < iterations; ++i)
     {
         prepared.updateStorageContext(kernel, record, i + 1);
         auto start = std::chrono::steady_clock::now();
-        if (!kernel.is_view)
-            prepared.run(kernel);
+        prepared.run(kernel);
         prepared.synchronize();
         samples.push_back(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count());
     }

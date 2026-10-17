@@ -928,6 +928,9 @@ struct CostModel
                        const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
                        const std::vector<std::vector<uint8_t>> &inConstants = {}, bool exactRecordOnly = false)
     {
+        if (KernelRegistry::get().hasKernel(kernelId) && KernelRegistry::get().getKernel(kernelId).is_view)
+            return 0.0f;
+
         if (callObserver)
             log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
         auto it = records.find(kernelId);
