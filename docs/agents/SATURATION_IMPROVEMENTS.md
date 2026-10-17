@@ -26,6 +26,7 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
 | **Step 17** (`seq_len=66`) | 3860.80 | 87.16 | 3773.64 | ~3000x | Fix exponential enode self-doubling bug in `EGraph::merge`: moving `rb_enodes` after `parent[rb.value] = ra` previously caused `getEClass(rb)` to resolve to `ra`, duplicating all enodes on each merge. Slashed `seq_len=66` from 29,526 ms down to 3,860 ms (7.65x faster, 133 buckets, exact match). |
 | **Step 18** (`seq_len=256`) | 29238.25 | 166.35 | 29071.90 | ~3000x | Scaled sequence length to `seq_len=256` across **513 buckets** (1 full + 256 prefill + 256 decode) and 82,430 family vertices under the 30-second budget (exact bijection match). |
 | **Step 19** (`seq_len=400`) | 29203.23 | 132.44 | 29070.79 | ~3000x | OpType-indexed rule dispatch array (`rules_by_op`), early `hasCompleted` check in `FusionRule`, hoisted OpType guards in `DotSplitRule` & `SlicePushDownFused`, and incremental sweep filtering for new enodes. Scaled to `seq_len=400` across **801 buckets** (1 full + 400 prefill + 400 decode) and 129,086 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS!** |
+| **Step 20** (`seq_len=620`) | 28458.00 | 81.21 | 28376.79 | ~3000x | Zero-allocation `hasCopyChainOrigin` in `RemoveCopyChains`, single-pass adjacency list in `buildSweepFilter` cutting `findConst` calls in half, direct vector-indexed `ruleMatchCounts[rule_idx]`, and intermediate sweep log elimination. Scaled to `seq_len=620` across **1,241 buckets** (1 full + 620 prefill + 620 decode) and 217,847 family vertices under 30 seconds (100% exact bijection match) — **NEW RECORD UNDER 30 SECONDS! (1.55x seq_len increase over Step 19, 9.39x over Step 16)** |
 
 
 ## Detailed Breakdown
@@ -421,6 +422,32 @@ Target: Reduce `tests/verify_saturation.py` runtime from 3047.33 ms to < 100 ms 
     - Tracked `last_sweep_enodes_bound` across sweeps. For older new enodes ($e < \text{last\_sweep\_enodes\_bound}$), only runs `run_node` if `(*ctx.sweep_filter)[eNodeIdx] != 0` (meaning a descendant class changed), eliminating quadratic re-evaluation of unchanged new enodes across iterative sweeps.
 - **Verification:**
   - `tests/verify_saturation.py --seq-len 400` passes 100% exact graph equivalence against baseline gold (`EQUIVALENT (explicit class-order bijection match)`), matching all 801 buckets and 129,086 family vertices exactly.
+
+---
+
+### Step 20: Zero-Allocation Copy Origin Check, Single-Pass Adjacency List & Vector Rule Counters (seq_len=620: 28458.00 ms)
+- **Time Before:** Record was `seq_len = 400` at 29,203.23 ms. On `seq_len = 400`, the new optimizations reduced runtime from 29,203.23 ms down to **17,528.05 ms** (a **1.67x speedup**).
+- **Time After:**
+  - `seq_len = 620`: **28,458.00 ms** (Full: 81.21 ms, Prefill + Decode: 28,376.79 ms, **1,241 buckets** [1 full + 620 prefill + 620 decode], 217,847 family vertices) — **NEW RECORD UNDER 30 SECONDS! (1.55x sequence length increase over Step 19, 9.39x over Step 16)**
+- **What Changed:**
+  - **Zero-Allocation Early-Exit `hasCopyChainOrigin` in `RemoveCopyChains`:**
+    - Replaced `findAllCopyChainOrigins` in `RemoveCopyChains::match` with an allocation-free fixed-stack (capacity 32) BFS that exits on the very first matching copy origin found.
+    - Completely eliminates dynamic allocations of `origins`, `visited`, and `queue` vectors during per-node rewrite matching across every sweep.
+  - **Single-Pass Adjacency List in `buildSweepFilter`:**
+    - Replaced the 2-pass CSR representation (`parent_counts`, `parent_offsets`, `parent_edges`) with a single-pass `parent_head` / `parent_next` / `parent_node` adjacency list.
+    - Halved the number of enode child loop iterations and eliminated redundant `egraph.findConst` canonical lookups, cutting sweep filter graph construction time significantly.
+  - **Direct Vector-Indexed `ruleMatchCounts`:**
+    - Replaced `std::map<std::string, uint32_t> ruleMatchCounts` with `std::vector<uint32_t> ruleMatchCounts(rules.size(), 0)` directly indexed by `rule_idx`.
+    - Eliminates heap string allocations (`rule->name()`) and binary search tree lookups on every rule match application.
+  - **Intermediate Sweep Logging Elimination:**
+    - Guarded verbose intermediate saturation summary logs with `if (time_rules)` while preserving final summary printing upon saturation convergence, eliminating string formatting and mutex acquisition on every intermediate sweep.
+- **Verification:**
+  - `tests/verify_saturation.py --seq-len 4` passes 100% exact graph equivalence (`EQUIVALENT (explicit class-order bijection match)`).
+  - `tests/verify_saturation.py --seq-len 16` passes 100% exact graph equivalence across 33 buckets (candidate: 536.35 ms vs baseline 807.85 ms, a 1.51x speedup).
+  - `tests/verify_saturation.py --seq-len 400` passes 100% exact graph equivalence across 801 buckets in **17,528.05 ms** (vs 29,203.23 ms previously, a 1.67x speedup).
+  - `tests/verify_saturation.py --seq-len 600` passes 100% exact graph equivalence across 1,201 buckets in **27,036.85 ms**.
+  - `tests/verify_saturation.py --seq-len 620` passes 100% exact graph equivalence across 1,241 buckets in **28,458.00 ms** (< 30s budget).
+
 
 
 

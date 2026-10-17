@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #ifdef TG_PROFILE
 #include <chrono>
@@ -4556,6 +4557,58 @@ struct RemoveCopyChains : public Rule
         return origins;
     }
 
+    static bool hasCopyChainOrigin(EClassId startClassId, const EGraph &egraph)
+    {
+        EClassId startCanon = egraph.findConst(startClassId);
+        MemSpace targetMemSpace = egraph.getEClass(startCanon).mem_space;
+
+        constexpr size_t MAX_STACK = 32;
+        std::array<EClassId, MAX_STACK> queue;
+        size_t queue_size = 0;
+        queue[queue_size++] = startCanon;
+
+        for (size_t qi = 0; qi < queue_size; ++qi)
+        {
+            EClassId currClass = queue[qi];
+            const EClass &cls = egraph.getEClass(currClass);
+
+            for (ENodeId enodeId : cls.enodes)
+            {
+                const ENode &enode = egraph.getENode(enodeId);
+                if (enode.getOpType() == OpType::COPY_TO && !enode.getChildren().empty())
+                {
+                    EClassId nextClass = egraph.findConst(enode.getChildren()[0]);
+                    bool already_visited = false;
+                    for (size_t vi = 0; vi < queue_size; ++vi)
+                    {
+                        if (queue[vi] == nextClass)
+                        {
+                            already_visited = true;
+                            break;
+                        }
+                    }
+                    if (!already_visited)
+                    {
+                        if (egraph.getEClass(nextClass).mem_space == targetMemSpace)
+                        {
+                            return true;
+                        }
+                        if (queue_size < MAX_STACK)
+                        {
+                            queue[queue_size++] = nextClass;
+                        }
+                        else
+                        {
+                            std::vector<EClassId> origins = findAllCopyChainOrigins(startClassId, egraph);
+                            return !origins.empty();
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     void clearVisited() override
     {
         visited.clear();
@@ -4601,8 +4654,7 @@ struct RemoveCopyChains : public Rule
             const EClass &cCls = egraph.getEClass(childCanon);
             if (!hasCopyToNode(cCls, egraph))
                 continue;
-            std::vector<EClassId> origins = findAllCopyChainOrigins(childCanon, egraph);
-            if (!origins.empty())
+            if (hasCopyChainOrigin(childCanon, egraph))
             {
                 return true;
             }

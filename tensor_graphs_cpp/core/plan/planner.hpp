@@ -451,7 +451,7 @@ struct Planner
             }
         }
 
-        std::map<std::string, uint32_t> ruleMatchCounts;
+        std::vector<uint32_t> ruleMatchCounts(rules.size(), 0);
         uint64_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
@@ -482,10 +482,9 @@ struct Planner
                     stagedAtSweepStart[cid.value] = 1;
         };
 
-        std::vector<uint32_t> parent_counts;
-        std::vector<uint32_t> parent_offsets;
-        std::vector<uint32_t> parent_edges;
-        std::vector<uint32_t> current_offsets;
+        std::vector<uint32_t> parent_head;
+        std::vector<uint32_t> parent_next;
+        std::vector<uint32_t> parent_node;
         std::vector<uint8_t> seenClass;
         std::vector<uint32_t> frontier;
         std::vector<uint32_t> next_frontier;
@@ -499,23 +498,11 @@ struct Planner
             const size_t num_classes = egraph.getNumClasses();
             const size_t num_enodes = egraph.getNumENodes();
 
-            parent_counts.assign(num_classes, 0);
-            for (uint32_t e = 0; e < num_enodes; ++e)
-            {
-                for (EClassId child : egraph.getENode(ENodeId{e}).getChildren())
-                {
-                    uint32_t c = egraph.findConst(child).value;
-                    if (c < num_classes)
-                        parent_counts[c]++;
-                }
-            }
-
-            parent_offsets.resize(num_classes + 1);
-            parent_offsets[0] = 0;
-            for (size_t c = 0; c < num_classes; ++c)
-                parent_offsets[c + 1] = parent_offsets[c] + parent_counts[c];
-            parent_edges.resize(parent_offsets.back());
-            current_offsets = parent_offsets;
+            parent_head.assign(num_classes, UINT32_MAX);
+            parent_next.clear();
+            parent_node.clear();
+            parent_next.reserve(num_enodes * 2);
+            parent_node.reserve(num_enodes * 2);
 
             for (uint32_t e = 0; e < num_enodes; ++e)
             {
@@ -523,7 +510,12 @@ struct Planner
                 {
                     uint32_t c = egraph.findConst(child).value;
                     if (c < num_classes)
-                        parent_edges[current_offsets[c]++] = e;
+                    {
+                        uint32_t edge_idx = static_cast<uint32_t>(parent_next.size());
+                        parent_next.push_back(parent_head[c]);
+                        parent_node.push_back(e);
+                        parent_head[c] = edge_idx;
+                    }
                 }
             }
 
@@ -554,11 +546,9 @@ struct Planner
                 next_frontier.clear();
                 for (uint32_t c : frontier)
                 {
-                    const uint32_t start_idx = parent_offsets[c];
-                    const uint32_t end_idx = parent_offsets[c + 1];
-                    for (uint32_t idx = start_idx; idx < end_idx; ++idx)
+                    for (uint32_t idx = parent_head[c]; idx != UINT32_MAX; idx = parent_next[idx])
                     {
-                        uint32_t e = parent_edges[idx];
+                        uint32_t e = parent_node[idx];
                         if (sweepFilter[e])
                             continue;
                         sweepFilter[e] = static_cast<uint8_t>(std::min<uint32_t>(depth + 1, 255));
@@ -615,8 +605,9 @@ struct Planner
                     std::stringstream ss;
                     ss << "[saturate progress] sweep=" << iterations << " enode=" << eNodeIdx << "/"
                        << egraph.getNumENodes() << " classes=" << egraph.getNumClasses();
-                    for (auto const &[name, count] : ruleMatchCounts)
-                        ss << " " << name << "=" << count;
+                    for (size_t r = 0; r < rules.size(); ++r)
+                        if (ruleMatchCounts[r] > 0)
+                            ss << " " << rules[r]->name() << "=" << ruleMatchCounts[r];
                     LOG(INFO) << ss.str();
                 }
                 const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
@@ -641,7 +632,7 @@ struct Planner
                     {
                         rule->apply(eNodeIdx, ctx);
                         changed = true;
-                        ruleMatchCounts[rule->name()]++;
+                        ruleMatchCounts[rule_idx]++;
                         nMatches++;
                         continue;
                     }
@@ -658,7 +649,7 @@ struct Planner
                                       << applied.getOpName() << " shape=" << toString(applied.getShape());
                     }
                     changed = true;
-                    ruleMatchCounts[rule->name()]++;
+                    ruleMatchCounts[rule_idx]++;
                     nMatches++;
                 }
             };
@@ -686,9 +677,10 @@ struct Planner
                 changed = false;
                 std::stringstream ss;
                 ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
-                for (auto const &[name, count] : ruleMatchCounts)
+                for (size_t r = 0; r < rules.size(); ++r)
                 {
-                    ss << "  " << name << ": " << count << " matches\n";
+                    if (ruleMatchCounts[r] > 0)
+                        ss << "  " << rules[r]->name() << ": " << ruleMatchCounts[r] << " matches\n";
                 }
                 ss << "Total Matches: " << nMatches;
                 LOG(INFO) << ss.str();
@@ -700,15 +692,19 @@ struct Planner
             rebuild_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - rebuild_start).count();
             uint32_t postUniqueNodes = egraph.getNumUniqueENodes();
             changed = preUniqueNodes != postUniqueNodes;
-            std::stringstream ss;
-            ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
-            for (auto const &[name, count] : ruleMatchCounts)
+            if (time_rules)
             {
-                ss << "  " << name << ": " << count << " matches\n";
+                std::stringstream ss;
+                ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
+                for (size_t r = 0; r < rules.size(); ++r)
+                {
+                    if (ruleMatchCounts[r] > 0)
+                        ss << "  " << rules[r]->name() << ": " << ruleMatchCounts[r] << " matches\n";
+                }
+                ss << "Total Matches: " << nMatches;
+                LOG(INFO) << ss.str();
+                timer.tick();
             }
-            ss << "Total Matches: " << nMatches;
-            LOG(INFO) << ss.str();
-            timer.tick();
             if (time_rules && fusion)
             {
                 for (size_t rule_idx = 0; rule_idx < rules.size(); ++rule_idx)
