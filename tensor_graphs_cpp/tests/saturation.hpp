@@ -153,7 +153,8 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, co
         auto prefill_t1 = std::chrono::steady_clock::now();
         double p_ms = std::chrono::duration<double, std::milli>(prefill_t1 - prefill_t0).count();
         partial_ms += p_ms;
-        std::cout << "[bucket_timing] prefill" << bucket_seq_len << ": " << p_ms << " ms" << std::endl;
+        if (seq_len <= 16 || (bucket_seq_len % 50 == 0) || std::getenv("TG_TIME_BUCKETS"))
+            std::cout << "[bucket_timing] prefill" << bucket_seq_len << ": " << p_ms << " ms\n";
 
         if (!dump_prefix.empty())
             dumpPrunedSaturationGraph(planner, prefill_result, graph,
@@ -170,7 +171,8 @@ inline SaturationBenchmarkResult runSaturationBenchmark(uint32_t seq_len = 4, co
         auto decode_t1 = std::chrono::steady_clock::now();
         double d_ms = std::chrono::duration<double, std::milli>(decode_t1 - decode_t0).count();
         partial_ms += d_ms;
-        std::cout << "[bucket_timing] decode" << bucket_seq_len << ": " << d_ms << " ms" << std::endl;
+        if (seq_len <= 16 || (bucket_seq_len % 50 == 0) || std::getenv("TG_TIME_BUCKETS"))
+            std::cout << "[bucket_timing] decode" << bucket_seq_len << ": " << d_ms << " ms\n";
 
         if (!dump_prefix.empty())
             dumpPrunedSaturationGraph(planner, decode_result, graph,

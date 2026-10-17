@@ -1863,7 +1863,10 @@ struct Planner
         using BucketClock = std::chrono::steady_clock;
         const auto bucket_start = BucketClock::now();
         auto last_report = bucket_start;
+        static const bool report_timing = (std::getenv("TG_TIME_BUCKETS") != nullptr);
         auto report_bucket_timing = [&](const std::string &stage, const std::string &details = std::string()) {
+            if (!report_timing)
+                return;
             const auto now = BucketClock::now();
             std::cout << "[saturateBucket] " << (startingState ? "partial" : "full") << " bucket " << stage
                       << " | total=" << std::chrono::duration<double, std::milli>(now - bucket_start).count()
@@ -1875,7 +1878,8 @@ struct Planner
             last_report = now;
         };
 
-        report_bucket_timing("start", "doSaturate=" + std::string(doSaturate ? "true" : "false"));
+        if (report_timing)
+            report_bucket_timing("start", "doSaturate=" + std::string(doSaturate ? "true" : "false"));
         EGraph egraph;
         auto graph_setup_start = BucketClock::now();
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
@@ -1892,13 +1896,14 @@ struct Planner
             initBaseEGraph(rootId, tempGraph, topo, repo, false);
             egraph = baseState;
         }
-        report_bucket_timing("prepared egraph state", "topological nodes=" + std::to_string(topo.size()) +
-                                                            ", classes=" +
-                                                            std::to_string(egraph.getNumClasses()) +
-                                                            ", enodes=" + std::to_string(egraph.getNumENodes()) +
-                                                            ", elapsed=" + std::to_string(
-                                                                std::chrono::duration<double, std::milli>(BucketClock::now() - graph_setup_start).count()) +
-                                                            " ms");
+        if (report_timing)
+            report_bucket_timing("prepared egraph state", "topological nodes=" + std::to_string(topo.size()) +
+                                                                ", classes=" +
+                                                                std::to_string(egraph.getNumClasses()) +
+                                                                ", enodes=" + std::to_string(egraph.getNumENodes()) +
+                                                                ", elapsed=" + std::to_string(
+                                                                    std::chrono::duration<double, std::milli>(BucketClock::now() - graph_setup_start).count()) +
+                                                                " ms");
 
         auto base_ids_start = BucketClock::now();
         if (startingState != nullptr)
@@ -1917,12 +1922,16 @@ struct Planner
                 }
             }
         }
-        report_bucket_timing("checked base IDs", "elapsed=" + std::to_string(
-                                                       std::chrono::duration<double, std::milli>(BucketClock::now() - base_ids_start).count()) +
-                                                       " ms");
+        if (report_timing)
+            report_bucket_timing("checked base IDs", "elapsed=" + std::to_string(
+                                                           std::chrono::duration<double, std::milli>(BucketClock::now() - base_ids_start).count()) +
+                                                           " ms");
 
         auto dirty_start = BucketClock::now();
-        std::unordered_map<LogicalId, bool> logicalDirty;
+        uint32_t max_logical_id = 0;
+        for (LogicalId nodeId : topo)
+            max_logical_id = std::max(max_logical_id, nodeId.value);
+        std::vector<uint8_t> logicalDirty(max_logical_id + 1, 0);
         for (LogicalId nodeId : topo)
         {
             bool dirty = bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty();
@@ -1930,19 +1939,20 @@ struct Planner
             {
                 for (LogicalId child : graph.getNode(nodeId).child_ids)
                 {
-                    if (logicalDirty[child])
+                    if (child.value < logicalDirty.size() && logicalDirty[child.value])
                     {
                         dirty = true;
                         break;
                     }
                 }
             }
-            logicalDirty[nodeId] = dirty;
+            logicalDirty[nodeId.value] = dirty ? 1 : 0;
         }
-        report_bucket_timing("propagated dirty logical nodes", "nodes=" + std::to_string(topo.size()) +
-                                                                     ", elapsed=" + std::to_string(
-                                                                         std::chrono::duration<double, std::milli>(BucketClock::now() - dirty_start).count()) +
-                                                                     " ms");
+        if (report_timing)
+            report_bucket_timing("propagated dirty logical nodes", "nodes=" + std::to_string(topo.size()) +
+                                                                         ", elapsed=" + std::to_string(
+                                                                             std::chrono::duration<double, std::milli>(BucketClock::now() - dirty_start).count()) +
+                                                                         " ms");
 
         std::unordered_set<EClassId> protectedEClasses;
 
@@ -1991,12 +2001,13 @@ struct Planner
         const bool neededInjected = hasPartialOutputRegion &&
                                     injectOutputPartialPaths(egraph, graph, rootId,
                                                             bucket.outputNeededRegion);
-        report_bucket_timing("injected partial paths", "dirty=" + std::string(dirtyInjected ? "true" : "false") +
-                                                             ", needed=" +
-                                                             (neededInjected ? "true" : "false") +
-                                                             ", elapsed=" + std::to_string(
-                                                                 std::chrono::duration<double, std::milli>(BucketClock::now() - inject_start).count()) +
-                                                             " ms");
+        if (report_timing)
+            report_bucket_timing("injected partial paths", "dirty=" + std::string(dirtyInjected ? "true" : "false") +
+                                                                 ", needed=" +
+                                                                 (neededInjected ? "true" : "false") +
+                                                                 ", elapsed=" + std::to_string(
+                                                                     std::chrono::duration<double, std::milli>(BucketClock::now() - inject_start).count()) +
+                                                                 " ms");
 
         const size_t base_class_count = egraph.getNumClasses();
         const bool seeded = startingState && startingState == fullSaturationState_ && !fullSaturationRules_.empty();
@@ -2177,19 +2188,20 @@ struct Planner
                 LOG(INFO) << "[saturation histogram] " << sorted[i].first << " classes="
                           << distinct_classes[sorted[i].second].size() << " " << sorted[i].second;
         }
-        report_bucket_timing("finished rewrite saturation", "elapsed=" + std::to_string(
-                                                                   std::chrono::duration<double, std::milli>(BucketClock::now() - saturation_start).count()) +
-                                                                   " ms, classes=" +
-                                                                   std::to_string(egraph.getNumClasses()) +
-                                                                   ", enodes=" +
-                                                                   std::to_string(egraph.getNumENodes()));
+        if (report_timing)
+            report_bucket_timing("finished rewrite saturation", "elapsed=" + std::to_string(
+                                                                       std::chrono::duration<double, std::milli>(BucketClock::now() - saturation_start).count()) +
+                                                                       " ms, classes=" +
+                                                                       std::to_string(egraph.getNumClasses()) +
+                                                                       ", enodes=" +
+                                                                       std::to_string(egraph.getNumENodes()));
 
         const uint32_t maxClasses = static_cast<uint32_t>(egraph.getNumClasses());
         auto clean_init_start = BucketClock::now();
         std::vector<uint8_t> clean(maxClasses, 0);
         for (LogicalId id : topo)
         {
-            if (!logicalDirty[id])
+            if (id.value < logicalDirty.size() && !logicalDirty[id.value])
             {
                 EClassId cid = egraph.findEClassByLogicalId(id);
                 if (cid != EClassId{})
@@ -2206,10 +2218,11 @@ struct Planner
             if (canon < maxClasses)
                 clean[canon] = 1;
         }
-        report_bucket_timing("seeded clean classes", "classes=" + std::to_string(maxClasses) +
-                                                        ", elapsed=" + std::to_string(
-                                                            std::chrono::duration<double, std::milli>(BucketClock::now() - clean_init_start).count()) +
-                                                        " ms");
+        if (report_timing)
+            report_bucket_timing("seeded clean classes", "classes=" + std::to_string(maxClasses) +
+                                                            ", elapsed=" + std::to_string(
+                                                                std::chrono::duration<double, std::milli>(BucketClock::now() - clean_init_start).count()) +
+                                                            " ms");
         uint32_t clean_round = 1;
         uint64_t clean_class_checks = 0;
         auto clean_propagation_start = BucketClock::now();
@@ -2336,15 +2349,16 @@ struct Planner
             egraph.freezeHashcons();
             egraph.freezeENodes();
         }
-        report_bucket_timing("finished bucket postprocessing", "clean rounds=" + std::to_string(clean_round) +
-                                                                     ", class checks=" +
-                                                                     std::to_string(clean_class_checks) +
-                                                                     ", propagation elapsed=" +
-                                                                     std::to_string(clean_propagation_ms) + " ms" +
-                                                                     ", collection/remap elapsed=" +
-                                                                     std::to_string(
-                                                                         std::chrono::duration<double, std::milli>(BucketClock::now() - collect_clean_start).count()) +
-                                                                     " ms");
+        if (report_timing)
+            report_bucket_timing("finished bucket postprocessing", "clean rounds=" + std::to_string(clean_round) +
+                                                                         ", class checks=" +
+                                                                         std::to_string(clean_class_checks) +
+                                                                         ", propagation elapsed=" +
+                                                                         std::to_string(clean_propagation_ms) + " ms" +
+                                                                         ", collection/remap elapsed=" +
+                                                                         std::to_string(
+                                                                             std::chrono::duration<double, std::milli>(BucketClock::now() - collect_clean_start).count()) +
+                                                                         " ms");
         egraph.allow_base_equalities = false;
         return egraph;
     }
