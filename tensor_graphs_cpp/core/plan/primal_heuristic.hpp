@@ -59,7 +59,7 @@ inline void markCacheAlternatives(const SearchState &state, RelaxationBucket &rb
         const EClass &cls = egraph.getEClass(rc.cid);
         for (RelaxationAlternative &alt : rc.alternatives)
         {
-            if (alt.is_alias)
+            if (alt.is_alias || alt.value <= 0 || static_cast<size_t>(alt.value - 1) >= cls.enodes.size())
             {
                 alt.requires_cache = false;
                 continue;

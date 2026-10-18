@@ -32,6 +32,7 @@ struct RelaxationAlternative
     uint32_t engine_mask = 0; // bucket-local engines occupied for a positive `duration`
     uint32_t sched_mask = 0;  // engines the simulator waits for (any non-view, non-source op)
     bool is_copy = false;    // COPY_TO: same logical tensor in another memory space
+    bool is_storage_copy = false; // COPY_TO from STORAGE: produces tensor in memory
     bool is_view = false;
     bool is_source = false;  // INPUT or CACHE: finishes at time 0
     bool requires_cache = false; // filled by markCacheAlternatives
@@ -66,6 +67,7 @@ struct RelaxationBucket
     // Classes linked by COPY_TO alternatives hold the same logical tensor.
     std::vector<uint32_t> group;
     std::vector<std::vector<uint32_t>> group_members;
+    std::unordered_map<uint32_t, uint32_t> storage_rep;
     bool acyclic = true;
     bool root_feasible = false;
 };
@@ -103,14 +105,35 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         rc.selected_var = it->second;
         rc.base = egraph.getEClass(cid).base_eclass_id;
         rb.classes.push_back(std::move(rc));
+        if (std::getenv("TG_DEBUG_BOUND") && ((cid.value >= 6870 && cid.value <= 6890) || (cid.value >= 3655 && cid.value <= 3662) || cid.value == 1))
+        {
+            LOG(INFO) << "[debug cid map] cid=" << cid.value << " -> u=" << (rb.classes.size() - 1);
+        }
     }
     const auto root_it = local.find(egraph.findConst(state.bucket_root_ids.at(b)));
     if (root_it == local.end())
         Error::throw_err("Relaxation bound: bucket " + std::to_string(b) + " root has no selection variable");
     rb.root = root_it->second;
 
-    for (RelaxationClass &rc : rb.classes)
+    if (std::getenv("TG_DEBUG_BOUND"))
     {
+        EClassId root_cid = rb.classes[rb.root].cid;
+        const EClass &rcls = egraph.getEClass(root_cid);
+        LOG(INFO) << "[debug root enodes] root_cid=" << root_cid.value << " enodes=" << rcls.enodes.size();
+        for (uint32_t ei = 0; ei < rcls.enodes.size(); ++ei)
+        {
+            const ENode &en = egraph.getENode(rcls.enodes[ei]);
+            float c = rcls.enodes[ei].value < infos.size() ? infos[rcls.enodes[ei].value].cost : 0.0f;
+            std::string kids_str;
+            for (auto ch : en.getChildren()) kids_str += std::to_string(egraph.findConst(ch).value) + " ";
+            LOG(INFO) << "  root enode " << ei << " op=" << static_cast<int>(en.getOpType()) << ":" << en.getOpName()
+                      << " cost=" << c << " kids=[" << kids_str << "]";
+        }
+    }
+
+    for (size_t u_idx = 0; u_idx < rb.classes.size(); ++u_idx)
+    {
+        RelaxationClass &rc = rb.classes[u_idx];
         const Domain &domain = state.domains[rc.selected_var];
         const EClass &cls = egraph.getEClass(rc.cid);
         for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
@@ -122,7 +145,21 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
             const ENode &enode = egraph.getENode(en_id);
             RelaxationAlternative alt;
             alt.value = value;
-            alt.is_copy = enode.getOpType() == OpType::COPY_TO;
+            bool is_storage_copy = false;
+            if (enode.getOpType() == OpType::COPY_TO && !enode.getChildren().empty())
+            {
+                const EClassId src_cid = egraph.findConst(enode.getChildren()[0]);
+                if (egraph.getEClass(src_cid).mem_space.type == HandleType::STORAGE)
+                    is_storage_copy = true;
+                if (std::getenv("TG_DEBUG_BOUND") && rc.cid.value == 8432)
+                {
+                    LOG(INFO) << "[debug cid 8432] en_id=" << en_id.value << " op=" << static_cast<int>(enode.getOpType())
+                              << " ch0=" << enode.getChildren()[0].value << " src_cid=" << src_cid.value
+                              << " src_mem=" << static_cast<int>(egraph.getEClass(src_cid).mem_space.type);
+                }
+            }
+            alt.is_storage_copy = is_storage_copy;
+            alt.is_copy = enode.getOpType() == OpType::COPY_TO && !is_storage_copy;
             const bool is_view = en_id.value < infos.size() && infos[en_id.value].is_view;
             const bool is_source = enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE;
             alt.is_view = is_view;
@@ -139,6 +176,26 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
                 if (std::isnan(cost) || cost < 0.0f)
                     Error::throw_err("Relaxation bound: invalid cost for e-node " + std::to_string(en_id.value));
                 alt.duration = cost;
+                if (std::getenv("TG_DEBUG_BOUND") && (rc.cid.value == 41 || rc.cid.value == 4 || rc.cid.value == 3659 || rc.cid.value == 6882 || rc.cid.value == 6884))
+                {
+                    std::string kids_str;
+                    for (auto ch : enode.getChildren()) kids_str += std::to_string(egraph.findConst(ch).value) + " ";
+                    LOG(INFO) << "[debug cid " << rc.cid.value << "] val=" << value << " en_id=" << en_id.value
+                              << " op=" << static_cast<int>(enode.getOpType()) << " cost=" << cost
+                              << " kname=" << enode.getOpName() << " kids=[" << kids_str << "]";
+                }
+                if (std::getenv("TG_DEBUG_BOUND") && cost > 5.0)
+                {
+                    std::string kname = enode.getOpName();
+                    std::string kids_str;
+                    for (auto ch : enode.getChildren()) kids_str += std::to_string(egraph.findConst(ch).value) + " ";
+                    LOG(INFO) << "[debug heavy enode] cid=" << rc.cid.value << " u=" << u_idx << " en_id=" << en_id.value
+                              << " op=" << static_cast<int>(enode.getOpType()) << " cost=" << cost
+                              << " kname=" << kname << " kids=[" << kids_str << "]"
+                              << " is_storage_copy=" << is_storage_copy
+                              << " engines=" << enode.getEngines().size()
+                              << " shape=" << (cls.shape.empty() ? 0 : cls.shape[0]);
+                }
                 if (cost > 0.0f)
                 {
                     if (enode.getEngines().empty())
@@ -159,6 +216,8 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
             rc.alternatives.push_back(std::move(alt));
         }
     }
+
+
 
     // Original class count before cycle unrolling.
     const uint32_t orig_n = static_cast<uint32_t>(rb.classes.size());
@@ -488,12 +547,34 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         }
         return x;
     };
+    std::unordered_map<uint32_t, uint32_t> storage_rep;
     for (uint32_t u = 0; u < orig_n; ++u)
+    {
         for (const auto &alt : rb.classes[u].alternatives)
+        {
             if (alt.is_copy)
+            {
                 for (uint32_t child : childrenOf(alt))
                     if (child < orig_n)
                         parent[find(child)] = find(u);
+            }
+            else if (alt.is_storage_copy)
+            {
+                for (uint32_t child : childrenOf(alt))
+                {
+                    if (child < orig_n)
+                    {
+                        auto it = storage_rep.find(child);
+                        if (it != storage_rep.end())
+                            parent[find(u)] = find(it->second);
+                        else
+                            storage_rep[child] = u;
+                    }
+                }
+            }
+        }
+    }
+    rb.storage_rep = storage_rep;
     std::vector<uint32_t> group_of_rep(orig_n, UINT32_MAX);
     rb.group.assign(n, 0);
     for (uint32_t u = 0; u < orig_n; ++u)
@@ -510,6 +591,20 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
     for (uint32_t h = orig_n; h < n; ++h)
     {
         rb.group[h] = rb.group[rb.orig_class_of[h]];
+    }
+    uint32_t n_storage_copies = 0;
+    double sum_storage_copy_dur = 0.0;
+    for (const auto &rc : rb.classes)
+        for (const auto &alt : rc.alternatives)
+            if (alt.is_storage_copy)
+            {
+                n_storage_copies++;
+                sum_storage_copy_dur += alt.duration;
+            }
+    if (std::getenv("TG_DEBUG_BOUND"))
+    {
+        LOG(INFO) << "[debug storage copies] count=" << n_storage_copies << " total_dur=" << sum_storage_copy_dur;
+        LOG(INFO) << "[debug step 1] buildRelaxationBucket done n=" << n << " groups=" << rb.group_members.size();
     }
     return rb;
 }
@@ -744,8 +839,18 @@ class RelaxationBoundComputer
             }
         }
         double total = 0.0;
-        for (Region &region : regions_)
-            total += evaluateRegion(region);
+        for (size_t ri = 0; ri < regions_.size(); ++ri)
+        {
+            double rv = evaluateRegion(regions_[ri]);
+            total += rv;
+            if (std::getenv("TG_DEBUG_BOUND") && rv > 0.5 && lambda.size() >= 2 && lambda[0] > 0.98)
+            {
+                LOG(INFO) << "[debug heavy region] ri=" << ri << " val=" << rv
+                          << " nodes=" << regions_[ri].nodes.size()
+                          << " groups=" << regions_[ri].group_members.size()
+                          << " target0=" << (regions_[ri].targets.empty() ? 999999 : regions_[ri].nodes[regions_[ri].targets[0]]);
+            }
+        }
         return total;
     }
 
@@ -820,6 +925,21 @@ class RelaxationBoundComputer
                     for (size_t w = 0; w < wg; ++w)
                         uni[w] |= gc[w];
                     setBit(uni.data(), rb_.group[ch]);
+
+                    const uint32_t orig_ch = ch < rb_.orig_class_count ? ch : rb_.orig_class_of[ch];
+                    auto s_it = rb_.storage_rep.find(orig_ch);
+                    if (s_it != rb_.storage_rep.end())
+                    {
+                        const uint32_t u_copy = s_it->second;
+                        const uint64_t *dc_copy = &desc[static_cast<size_t>(u_copy) * wc];
+                        for (size_t w = 0; w < wc; ++w)
+                            du[w] |= dc_copy[w];
+                        const uint64_t *gc_copy = &gnd[static_cast<size_t>(u_copy) * wg];
+                        for (size_t w = 0; w < wg; ++w)
+                            uni[w] |= gc_copy[w];
+                        setBit(uni.data(), rb_.group[u_copy]);
+                        setBit(du, u_copy);
+                    }
                 }
                 if (first)
                     acc = uni;
@@ -833,6 +953,47 @@ class RelaxationBoundComputer
             gu[rb_.group[u] >> 6] &= ~(1ull << (rb_.group[u] & 63));
         }
 
+        if (std::getenv("TG_DEBUG_BOUND"))
+        {
+            LOG(INFO) << "[debug root alts] root_u=" << rb_.root << " alts=" << rb_.classes[rb_.root].alternatives.size();
+            for (size_t a = 0; a < rb_.classes[rb_.root].alternatives.size(); ++a)
+            {
+                const auto &alt = rb_.classes[rb_.root].alternatives[a];
+                bool alt_has_g1 = false;
+                for (uint32_t ch : alt.children)
+                {
+                    if (rb_.group[ch] == 1 || testBit(&gnd[static_cast<size_t>(ch) * wg], 1))
+                        alt_has_g1 = true;
+                }
+                LOG(INFO) << "  root alt " << a << " val=" << alt.value << " dur=" << alt.duration
+                          << " ch_count=" << alt.children.size() << " has_g1=" << alt_has_g1;
+                for (uint32_t ch : alt.children)
+                {
+                    LOG(INFO) << "    child u=" << ch << " grp=" << rb_.group[ch]
+                              << " has_g1=" << (rb_.group[ch] == 1 || testBit(&gnd[static_cast<size_t>(ch) * wg], 1));
+                }
+            }
+        }
+
+        // Identify which groups are weight / storage copy groups:
+        std::vector<uint8_t> is_storage_group(ng, 0);
+        for (uint32_t g = 0; g < ng; ++g)
+        {
+            for (uint32_t m : rb_.group_members[g])
+            {
+                for (const auto &alt : rb_.classes[m].alternatives)
+                {
+                    if (alt.is_storage_copy)
+                    {
+                        is_storage_group[g] = 1;
+                        break;
+                    }
+                }
+                if (is_storage_group[g])
+                    break;
+            }
+        }
+
         // Containment chain of the root's necessary groups.
         auto groupDesc = [&](uint32_t g) {
             std::vector<uint64_t> bits(wc, 0);
@@ -841,6 +1002,53 @@ class RelaxationBoundComputer
                 const uint64_t *dm = &desc[static_cast<size_t>(m) * wc];
                 for (size_t w = 0; w < wc; ++w)
                     bits[w] |= dm[w];
+            }
+            // If an external storage/weight group is NOT necessary for g,
+            // it must not be included in g's region or swallowed into below!
+            std::vector<uint64_t> unneeded_storage_bits(wg, 0);
+            for (uint32_t s = 0; s < ng; ++s)
+            {
+                if (s != g && is_storage_group[s])
+                {
+                    bool necessary_for_g = true;
+                    for (uint32_t m : rb_.group_members[g])
+                    {
+                        if (rb_.classes[m].alternatives.empty())
+                            continue;
+                        if (!testBit(&gnd[static_cast<size_t>(m) * wg], s))
+                        {
+                            necessary_for_g = false;
+                            break;
+                        }
+                    }
+                    if (!necessary_for_g)
+                        setBit(unneeded_storage_bits.data(), s);
+                }
+            }
+            for (uint32_t u = 0; u < n; ++u)
+            {
+                if (!testBit(bits.data(), u))
+                    continue;
+                const uint32_t gu = rb_.group[u];
+                if (testBit(unneeded_storage_bits.data(), gu))
+                {
+                    bits[u >> 6] &= ~(1ull << (u & 63));
+                    continue;
+                }
+                const uint64_t *gu_bits = &gnd[static_cast<size_t>(u) * wg];
+                bool depends_on_unneeded = false;
+                for (size_t w = 0; w < wg; ++w)
+                {
+                    if (gu_bits[w] & unneeded_storage_bits[w])
+                    {
+                        depends_on_unneeded = true;
+                        break;
+                    }
+                }
+                if (depends_on_unneeded)
+                {
+                    bits[u >> 6] &= ~(1ull << (u & 63));
+                }
             }
             return bits;
         };
@@ -873,22 +1081,163 @@ class RelaxationBoundComputer
             }
             chain.push_back(g);
         }
+        if (std::getenv("TG_DEBUG_BOUND"))
+        {
+            LOG(INFO) << "[debug prepare] ng=" << ng
+                      << " necessary_root=" << necessary.size()
+                      << " chain_size=" << chain.size();
+        }
 
         std::vector<uint64_t> below(wc, 0);
         std::vector<uint64_t> region_bits(wc, 0);
-        for (size_t link = 0; link <= chain.size(); ++link)
+        for (size_t link = 0; link < chain.size(); ++link)
         {
-            const bool final_region = link == chain.size();
-            const std::vector<uint64_t> &top =
-                final_region ? std::vector<uint64_t>(desc.begin() + static_cast<std::ptrdiff_t>(rb_.root * wc),
-                                                     desc.begin() + static_cast<std::ptrdiff_t>((rb_.root + 1) * wc))
-                             : necessary_desc[chain[link]];
+            const std::vector<uint64_t> &top = necessary_desc[chain[link]];
             for (size_t w = 0; w < wc; ++w)
                 region_bits[w] = top[w] & ~below[w];
-            std::vector<uint32_t> targets_global =
-                final_region ? std::vector<uint32_t>{rb_.root} : rb_.group_members[chain[link]];
+            std::vector<uint32_t> targets_global = rb_.group_members[chain[link]];
             buildRegion(regions_, region_bits, below, targets_global, nullptr);
-            below = top;
+            for (size_t w = 0; w < wc; ++w)
+                below[w] |= top[w];
+        }
+
+        // Before the final region: any necessary group of the root whose non-source
+        // dependencies are already in `below` can be safely evaluated in its own region.
+        // Because each such group is necessary for the root, every feasible plan contains
+        // an active member of the group, and since its nodes are disjoint from `below`,
+        // its charge is disjoint and sound.
+        std::vector<uint8_t> group_done(ng, 0);
+        for (uint32_t u : rb_.topo)
+        {
+            const uint32_t g = rb_.group[u];
+            if (group_done[g] || !testBit(groot, g))
+                continue;
+            group_done[g] = 1;
+            bool in_below = false;
+            for (uint32_t m : rb_.group_members[g])
+                if (testBit(below.data(), m))
+                {
+                    in_below = true;
+                    break;
+                }
+            if (in_below)
+                continue;
+
+            bool ready = true;
+            for (uint32_t m : rb_.group_members[g])
+            {
+                const uint64_t *dm = &desc[static_cast<size_t>(m) * wc];
+                for (uint32_t v = 0; v < n; ++v)
+                {
+                    if (testBit(dm, v) && !testBit(below.data(), v) && rb_.group[v] != g)
+                    {
+                        bool is_src = false;
+                        for (const auto &alt : rb_.classes[v].alternatives)
+                            if (alt.is_source) { is_src = true; break; }
+                        if (!is_src && !rb_.classes[v].alternatives.empty())
+                        {
+                            ready = false;
+                            break;
+                        }
+                    }
+                }
+                if (!ready) break;
+            }
+            if (!ready)
+                continue;
+
+            std::vector<uint64_t> top(wc, 0);
+            for (uint32_t m : rb_.group_members[g])
+            {
+                const uint64_t *dm = &desc[static_cast<size_t>(m) * wc];
+                for (size_t w = 0; w < wc; ++w)
+                    top[w] |= dm[w];
+            }
+            for (size_t w = 0; w < wc; ++w)
+                region_bits[w] = top[w] & ~below[w];
+            std::vector<uint32_t> targets_global = rb_.group_members[g];
+            buildRegion(regions_, region_bits, below, targets_global, nullptr);
+            for (size_t w = 0; w < wc; ++w)
+                below[w] |= top[w];
+        }
+
+        // Final region for the root.
+        {
+            const std::vector<uint64_t> top(desc.begin() + static_cast<std::ptrdiff_t>(rb_.root * wc),
+                                            desc.begin() + static_cast<std::ptrdiff_t>((rb_.root + 1) * wc));
+            for (size_t w = 0; w < wc; ++w)
+                region_bits[w] = top[w] & ~below[w];
+            std::vector<uint32_t> targets_global = {rb_.root};
+            buildRegion(regions_, region_bits, below, targets_global, nullptr);
+            for (size_t w = 0; w < wc; ++w)
+                below[w] |= top[w];
+        }
+
+        if (std::getenv("TG_DEBUG_BOUND"))
+        {
+            std::vector<int> group_region_count(ng, 0);
+            for (const auto &reg : regions_)
+            {
+                if (reg.zero_value) continue;
+                for (size_t lg = 0; lg < reg.group_members.size(); ++lg)
+                {
+                    if (reg.group_members[lg].empty()) continue;
+                    uint32_t global_m = reg.nodes[reg.group_members[lg][0]];
+                    uint32_t g = rb_.group[global_m];
+                    group_region_count[g]++;
+                }
+            }
+            uint32_t n_weight_groups = 0, n_weight_in_root = 0, n_weight_in_regions = 0;
+            double sum_weight_min_prod = 0.0;
+            for (uint32_t g = 0; g < ng; ++g)
+            {
+                double min_prod = 1e9;
+                bool is_weight = false;
+                for (uint32_t m : rb_.group_members[g])
+                {
+                    for (const auto &alt : rb_.classes[m].alternatives)
+                    {
+                        if (alt.is_storage_copy) is_weight = true;
+                        if (!alt.is_copy)
+                            min_prod = std::min(min_prod, alt.duration);
+                    }
+                }
+                if (is_weight)
+                {
+                    n_weight_groups++;
+                    if (min_prod < 1e8) sum_weight_min_prod += min_prod;
+                    const bool in_root = testBit(groot, g);
+                    if (in_root) n_weight_in_root++;
+                    if (group_region_count[g] > 0) n_weight_in_regions++;
+                    if (n_weight_groups <= 5 || min_prod == 0.0 || !in_root || group_region_count[g] == 0)
+                    {
+                        LOG(INFO) << "[debug weight group " << n_weight_groups << "] g=" << g
+                                  << " min_prod=" << min_prod << " in_root=" << in_root
+                                  << " in_regions=" << group_region_count[g]
+                                  << " members=" << rb_.group_members[g].size();
+                    }
+                }
+            }
+            LOG(INFO) << "[debug weight summary] total=" << n_weight_groups
+                      << " in_root=" << n_weight_in_root
+                      << " in_regions=" << n_weight_in_regions
+                      << " sum_min_prod=" << sum_weight_min_prod;
+
+            for (size_t ri = 0; ri < regions_.size(); ++ri)
+            {
+                for (size_t lg = 0; lg < regions_[ri].group_members.size(); ++lg)
+                {
+                    if (regions_[ri].group_members[lg].empty()) continue;
+                    uint32_t gm0 = regions_[ri].nodes[regions_[ri].group_members[lg][0]];
+                    uint32_t g = rb_.group[gm0];
+                    if (g == 1 || g == 34)
+                    {
+                        LOG(INFO) << "[debug g region] g=" << g << " in region ri=" << ri
+                                  << " targets=" << regions_[ri].targets.size()
+                                  << " target0=" << (regions_[ri].targets.empty() ? 999999 : regions_[ri].nodes[regions_[ri].targets[0]]);
+                    }
+                }
+            }
         }
 
         // Interval chain: every member of the next link necessarily depends on
@@ -1036,7 +1385,15 @@ class RelaxationBoundComputer
         Region region;
         for (uint32_t u : rb_.topo)
             if (testBit(region_bits.data(), u))
+            {
                 region.nodes.push_back(u);
+                if (std::getenv("TG_DEBUG_BOUND") && (u == 1 || u == 7825))
+                {
+                    LOG(INFO) << "[debug node in region] u=" << u << " region=" << out.size()
+                              << " targets_count=" << targets_global.size()
+                              << " target0=" << (targets_global.empty() ? 999999 : targets_global[0]);
+                }
+            }
         for (uint32_t t : targets_global)
             if (testBit(below.data(), t))
                 region.zero_value = true;
@@ -1127,6 +1484,13 @@ class RelaxationBoundComputer
                 for (uint32_t ch : alts[a].children)
                 {
                     auto it = local.find(ch);
+                    if (std::getenv("TG_DEBUG_BOUND") && (u == 3659 || u == 6810 || u == 8980 || u == 9030 || u == 9050 || u == 7825 || u == 7841 || u == 8979))
+                    {
+                        LOG(INFO) << "[debug child of " << u << "] ch=" << ch
+                                  << " in_local=" << (it != local.end())
+                                  << " grp=" << rb_.group[ch]
+                                  << " in_local_grp=" << (local_group.count(rb_.group[ch]) ? (int)local_group.at(rb_.group[ch]) : -1);
+                    }
                     if (it == local.end())
                         continue; // below the region: counted by an earlier region
                     const uint32_t li = it->second;
@@ -1148,8 +1512,26 @@ class RelaxationBoundComputer
                         info.extras.push_back(lg);
                 const bool alt_pos = (info.weighted && alts[a].duration > 0.0 && alts[a].engine_mask) ||
                                      !info.kids.empty() || !info.extras.empty();
+                if (std::getenv("TG_DEBUG_BOUND") && (u == 7825 || u == 8742 || u == 3659 || u == 6810 || u == 6812 || u == 3660 || u == 7082 || u == 7083 || u == 8313 || u == 8854 || u == 7394 || u == 7395 || u == 8980 || u == 9030 || u == 9050 || u == 7841 || u == 8979))
+                {
+                    LOG(INFO) << "[debug alt detail] u=" << u << " alt=" << a
+                              << " dur=" << alts[a].duration << " mask=" << alts[a].engine_mask
+                              << " is_copy=" << alts[a].is_copy << " is_alias=" << alts[a].is_alias
+                              << " is_view=" << alts[a].is_view << " is_source=" << alts[a].is_source
+                              << " ch=" << alts[a].children.size() << " kids=" << info.kids.size()
+                              << " extras=" << info.extras.size() << " weighted=" << info.weighted
+                              << " alt_pos=" << alt_pos << " uni_has_0=" << (int)testBit(uni.data(), 0);
+                }
                 if (!alt_pos)
+                {
                     pos = false;
+                    if (std::getenv("TG_DEBUG_BOUND") && alts[a].duration > 0.05)
+                    {
+                        LOG(INFO) << "[debug alt_pos false] u=" << u << " alt=" << a
+                                  << " dur=" << alts[a].duration << " weighted=" << info.weighted
+                                  << " mask=" << alts[a].engine_mask;
+                    }
+                }
                 if (first)
                     acc = uni;
                 else
@@ -1162,6 +1544,22 @@ class RelaxationBoundComputer
                 pos = false;
             std::copy(acc.begin(), acc.end(), &gloc[static_cast<size_t>(i) * wl]);
             region.pos[i] = pos ? 1 : 0;
+            if (std::getenv("TG_DEBUG_BOUND") && (u == 3659 || u == 6810 || u == 6812 || u == 3660 || u == 7082 || u == 7083 || u == 8313 || u == 8854 || u == 7394 || u == 7395))
+            {
+                LOG(INFO) << "[debug gloc assigned] u=" << u << " i=" << i << " pos=" << (int)region.pos[i]
+                          << " acc_has_0=" << (int)testBit(&gloc[static_cast<size_t>(i) * wl], 0);
+            }
+            if (std::getenv("TG_DEBUG_BOUND") && !region.pos[i])
+            {
+                for (const auto &alt : alts)
+                {
+                    if (alt.duration > 0.1)
+                    {
+                        LOG(INFO) << "[debug pos 0] class u=" << u << " in region has heavy alt dur=" << alt.duration
+                                  << " total_alts=" << alts.size() << " but pos=0!";
+                    }
+                }
+            }
         }
 
         // Supports: a positive class, every positive child's support and every
@@ -1208,8 +1606,19 @@ class RelaxationBoundComputer
         }
         const size_t ws = region.support_words;
         std::vector<uint64_t> cover(ws);
-        std::vector<uint32_t> order;
         const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        std::vector<uint32_t> order;
+        std::vector<double> region_min_weight(rn, 0.0);
+        for (uint32_t i = 0; i < rn; ++i)
+        {
+            if (!region.pos[i]) continue;
+            const uint32_t u = region.nodes[i];
+            double mw = std::numeric_limits<double>::infinity();
+            for (const AltInfo &info : region.alts[i])
+                mw = std::min(mw, weight(u, info.alt_index));
+            region_min_weight[i] = std::isfinite(mw) ? mw : 0.0;
+        }
+
         for (uint32_t i = 0; i < rn; ++i)
         {
             if (!region.pos[i])
@@ -1241,7 +1650,14 @@ class RelaxationBoundComputer
                             for (size_t w = 0; w < ws && !overlap; ++w)
                                 overlap = (cover[w] & sk[w]) != 0;
                             if (overlap)
+                            {
+                                if (!testBit(cover.data(), k))
+                                {
+                                    sum += region_min_weight[k];
+                                    setBit(cover.data(), k);
+                                }
                                 continue;
+                            }
                             sum += region.L[k];
                             for (size_t w = 0; w < ws; ++w)
                                 cover[w] |= sk[w];
@@ -1264,6 +1680,53 @@ class RelaxationBoundComputer
                 best = std::min(best, weight(u, info.alt_index) + cand);
             }
             region.L[i] = std::isfinite(best) ? best : 0.0;
+            if (std::getenv("TG_DEBUG_BOUND") && &region == &regions_.back())
+            {
+                if (region.L[i] < 2.0 || u == 3660 || u == 1)
+                {
+                    LOG(INFO) << "[debug eval u=" << u << "] i=" << i << " pos=" << (int)region.pos[i] << " L=" << region.L[i]
+                              << " alts=" << region.alts[i].size();
+                    for (size_t a = 0; a < region.alts[i].size(); ++a)
+                    {
+                        const auto &info = region.alts[i][a];
+                        LOG(INFO) << "  u=" << u << " alt " << a << " alt_idx=" << info.alt_index << " w=" << weight(u, info.alt_index)
+                                  << " kids=" << info.kids.size() << " all_kids=" << info.all_kids.size()
+                                  << " extras=" << info.extras.size();
+                        for (uint32_t k : info.kids)
+                            LOG(INFO) << "    kid k=" << k << " u=" << region.nodes[k] << " L=" << region.L[k] << " pos=" << (int)region.pos[k];
+                        for (uint32_t ak : info.all_kids)
+                            LOG(INFO) << "    all_kid ak=" << ak << " u=" << region.nodes[ak] << " L=" << region.L[ak] << " pos=" << (int)region.pos[ak];
+                        for (uint32_t lg : info.extras)
+                            LOG(INFO) << "    extra lg=" << lg << " mp=" << region.mp[lg];
+                    }
+                }
+            }
+        }
+        if (std::getenv("TG_DEBUG_BOUND") && &region == &regions_.back())
+        {
+            LOG(INFO) << "[debug final region] rn=" << rn << " targets=" << region.targets.size();
+            for (uint32_t t : region.targets)
+            {
+                uint32_t u = region.nodes[t];
+                LOG(INFO) << "  final target t=" << t << " u=" << u << " pos=" << (int)region.pos[t]
+                          << " L=" << region.L[t] << " alts=" << region.alts[t].size();
+                for (size_t a = 0; a < region.alts[t].size(); ++a)
+                {
+                    const auto &info = region.alts[t][a];
+                    double w = weight(u, info.alt_index);
+                    LOG(INFO) << "    alt a=" << a << " alt_idx=" << info.alt_index
+                              << " w=" << w << " kids=" << info.kids.size() << " extras=" << info.extras.size();
+                    for (uint32_t k : info.kids)
+                    {
+                        LOG(INFO) << "      kid k=" << k << " u=" << region.nodes[k] << " L=" << region.L[k]
+                                  << " pos=" << (int)region.pos[k];
+                    }
+                    for (uint32_t lg : info.extras)
+                    {
+                        LOG(INFO) << "      extra lg=" << lg << " mp=" << region.mp[lg];
+                    }
+                }
+            }
         }
         double value = std::numeric_limits<double>::infinity();
         for (uint32_t t : region.targets)

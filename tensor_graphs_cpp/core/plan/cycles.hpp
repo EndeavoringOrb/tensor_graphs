@@ -345,6 +345,232 @@ inline uint32_t removeDominatedCycleENodes(EGraph &egraph)
     return total_removed;
 }
 
+// For small cyclic components (k <= 16 classes), an enode is viable only if
+// it can participate in at least one acyclic, internally closed selection of
+// the component's classes whose entry nodes (sources with no incoming edges
+// from other selected members) each have at least one external consumer.
+// Enodes that cannot appear in any such selection are only ever chosen
+// inside a cycle or in a disconnected dead component; removing them keeps
+// every acyclic plan.
+inline uint32_t removeUnviableSCCENodes(EGraph &egraph)
+{
+    uint32_t total_removed = 0;
+    std::vector<int32_t> local_of;
+    while (true)
+    {
+        CycleAdjacency outgoing, incoming;
+        std::vector<uint8_t> canonical;
+        auto cyclic_components = findCyclicComponents(egraph, outgoing, incoming, canonical);
+        local_of.assign(egraph.getNumClasses(), -1);
+
+        uint32_t iter_removed = 0;
+        for (const auto &component : cyclic_components)
+        {
+            const uint32_t k = static_cast<uint32_t>(component.size());
+            if (k > 16)
+                continue;
+            for (uint32_t i = 0; i < k; ++i)
+                local_of[component[i]] = static_cast<int32_t>(i);
+
+            // Determine if each member has an external consumer.
+            // A member has an external consumer if either:
+            // 1. It has no incoming edges in the whole e-graph (it is a root).
+            // 2. Or some edge in incoming[c] originates from outside the component
+            //    in a class that has non-empty enodes.
+            std::vector<uint8_t> has_ext_consumer(k, 0);
+            for (uint32_t i = 0; i < k; ++i)
+            {
+                const uint32_t c = component[i];
+                if (egraph.root_class_id != EClassId{})
+                {
+                    if (egraph.findConst(egraph.root_class_id).value == c)
+                    {
+                        has_ext_consumer[i] = 1;
+                        continue;
+                    }
+                }
+                else if (incoming[c].empty())
+                {
+                    has_ext_consumer[i] = 1;
+                    continue;
+                }
+                for (const CycleEdge &edge : incoming[c])
+                {
+                    if (local_of[edge.from] < 0 && !egraph.getEClass(EClassId{edge.from}).enodes.empty())
+                    {
+                        has_ext_consumer[i] = 1;
+                        break;
+                    }
+                }
+            }
+
+            struct LocalENode
+            {
+                uint32_t internal_mask;
+            };
+            std::vector<std::vector<LocalENode>> alts_of(k);
+            size_t total_states = 1;
+            bool overflow = false;
+            for (uint32_t i = 0; i < k; ++i)
+            {
+                const EClass &cls = egraph.getEClass(EClassId{component[i]});
+                for (size_t a = 0; a < cls.enodes.size(); ++a)
+                {
+                    uint32_t mask = 0;
+                    for (EClassId child : egraph.getENode(cls.enodes[a]).getChildren())
+                    {
+                        const int32_t ch = local_of[egraph.findConst(child).value];
+                        if (ch >= 0)
+                            mask |= (1u << static_cast<uint32_t>(ch));
+                    }
+                    alts_of[i].push_back({mask});
+                }
+                total_states *= (alts_of[i].size() + 1);
+                if (total_states > 65536)
+                    overflow = true;
+            }
+
+            if (overflow)
+            {
+                for (uint32_t member : component)
+                    local_of[member] = -1;
+                continue;
+            }
+
+            std::vector<std::vector<uint8_t>> viable(k);
+            for (uint32_t i = 0; i < k; ++i)
+                viable[i].assign(alts_of[i].size(), 0);
+
+            std::vector<uint32_t> choice(k, 0); // 0 = unselected, a+1 = alt a
+            std::vector<uint32_t> limits(k);
+            for (uint32_t i = 0; i < k; ++i)
+                limits[i] = static_cast<uint32_t>(alts_of[i].size() + 1);
+
+            while (true)
+            {
+                uint32_t active_mask = 0;
+                uint32_t active_count = 0;
+                for (uint32_t i = 0; i < k; ++i)
+                {
+                    if (choice[i] > 0)
+                    {
+                        active_mask |= (1u << i);
+                        active_count++;
+                    }
+                }
+
+                if (active_mask > 0)
+                {
+                    bool valid = true;
+                    // Check 1: Closure under internal children
+                    for (uint32_t i = 0; i < k; ++i)
+                    {
+                        if (choice[i] == 0)
+                            continue;
+                        const uint32_t ch_mask = alts_of[i][choice[i] - 1].internal_mask;
+                        if ((ch_mask & ~active_mask) != 0)
+                        {
+                            valid = false;
+                            break;
+                        }
+                    }
+
+                    if (valid)
+                    {
+                        // Check 2 & 3: Acyclicity and Sources
+                        uint32_t in_deg[16] = {0};
+                        for (uint32_t i = 0; i < k; ++i)
+                        {
+                            if (choice[i] == 0)
+                                continue;
+                            const uint32_t ch_mask = alts_of[i][choice[i] - 1].internal_mask;
+                            for (uint32_t j = 0; j < k; ++j)
+                                if (ch_mask & (1u << j))
+                                    in_deg[j]++;
+                        }
+
+                        uint32_t q[16];
+                        uint32_t qhead = 0, qtail = 0;
+                        for (uint32_t i = 0; i < k; ++i)
+                        {
+                            if (choice[i] > 0 && in_deg[i] == 0)
+                            {
+                                if (!has_ext_consumer[i])
+                                {
+                                    valid = false;
+                                    break;
+                                }
+                                q[qtail++] = i;
+                            }
+                        }
+
+                        if (valid)
+                        {
+                            uint32_t visited = 0;
+                            while (qhead < qtail)
+                            {
+                                uint32_t u = q[qhead++];
+                                visited++;
+                                const uint32_t ch_mask = alts_of[u][choice[u] - 1].internal_mask;
+                                for (uint32_t v = 0; v < k; ++v)
+                                {
+                                    if (ch_mask & (1u << v))
+                                    {
+                                        if (--in_deg[v] == 0)
+                                            q[qtail++] = v;
+                                    }
+                                }
+                            }
+
+                            if (visited == active_count)
+                            {
+                                for (uint32_t i = 0; i < k; ++i)
+                                    if (choice[i] > 0)
+                                        viable[i][choice[i] - 1] = 1;
+                            }
+                        }
+                    }
+                }
+
+                uint32_t pos = 0;
+                while (pos < k)
+                {
+                    choice[pos]++;
+                    if (choice[pos] < limits[pos])
+                        break;
+                    choice[pos] = 0;
+                    pos++;
+                }
+                if (pos == k)
+                    break;
+            }
+
+            for (uint32_t i = 0; i < k; ++i)
+            {
+                EClass &eclass = egraph.getEClass(EClassId{component[i]});
+                std::vector<ENodeId> kept;
+                kept.reserve(eclass.enodes.size());
+                for (uint32_t j = 0; j < eclass.enodes.size(); ++j)
+                {
+                    if (j < viable[i].size() && !viable[i][j])
+                        ++iter_removed;
+                    else
+                        kept.push_back(eclass.enodes[j]);
+                }
+                eclass.enodes = std::move(kept);
+            }
+
+            for (uint32_t member : component)
+                local_of[member] = -1;
+        }
+
+        if (iter_removed == 0)
+            break;
+        total_removed += iter_removed;
+    }
+    return total_removed;
+}
+
 struct CycleStripPass
 {
     const char *name;
@@ -363,6 +589,8 @@ inline const std::vector<CycleStripPass> &cycleStripPasses()
 {
     static const std::vector<CycleStripPass> passes{
         {"dominated_child", "enode(s) whose child needs the enode's own class", &removeDominatedCycleENodes},
+        {"unviable_scc_enodes", "enode(s) that cannot participate in any acyclic selection of their component", &removeUnviableSCCENodes},
     };
     return passes;
 }
+

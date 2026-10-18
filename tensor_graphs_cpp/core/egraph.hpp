@@ -232,6 +232,7 @@ struct EGraph
     // assigned base IDs. The joint planner reconciles these before search.
     bool allow_base_equalities = false;
     std::unordered_map<BaseEClassId, BaseEClassId> base_equalities;
+    EClassId root_class_id = EClassId{};
 
     EGraph() = default;
     EGraph(EGraph &&) = default;
@@ -306,6 +307,7 @@ struct EGraph
             constantHashIndex = other.constantHashIndex;
             allow_base_equalities = other.allow_base_equalities;
             base_equalities = other.base_equalities;
+            root_class_id = other.root_class_id;
             baseEClassToEClass.clear();
             baseEClassIndexInitialized = false;
             if (other.shared_logical_map && other.logicalToEClass.empty())
@@ -1142,6 +1144,11 @@ struct EGraph
                 if (cls.base_eclass_id != BaseEClassId{})
                     baseEClassToEClass.emplace(cls.base_eclass_id, cls.id);
             }
+        }
+
+        if (root_class_id != EClassId{} && root_class_id.value < num_old_classes)
+        {
+            root_class_id = old_to_new_class[root_class_id.value];
         }
 
         // Rebuild logicalToEClass map if initialized

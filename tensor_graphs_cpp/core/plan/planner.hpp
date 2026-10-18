@@ -1730,6 +1730,7 @@ struct Planner
                 baseState.constantHashIndex[dataHash].push_back(e_class_id);
             }
         }
+        baseState.root_class_id = baseState.findConst(baseState.findEClassByLogicalId(rootId));
 
         std::unordered_map<EClassId, EClassId> contiguousInputs;
         for (LogicalId nodeId : topo)
@@ -3154,6 +3155,30 @@ struct Planner
                           << " after_prune=" << scatterAfter;
             }
 
+            bool any_unreachable_cleared = false;
+            const EClassId root = bucket_states[b].findConst(bucket_states[b].findEClassByLogicalId(rootId));
+            if (root != EClassId{})
+            {
+                bucket_states[b].root_class_id = root;
+                std::vector<EClassId> reachable_vec = plan::collectReachableCids(bucket_states[b], root);
+                std::unordered_set<EClassId> reachable_set(reachable_vec.begin(), reachable_vec.end());
+                for (size_t i = 0; i < bucket_states[b].getNumClasses(); ++i)
+                {
+                    EClassId cid{static_cast<uint32_t>(i)};
+                    if (bucket_states[b].findConst(cid) != cid)
+                        continue;
+                    if (reachable_set.find(cid) == reachable_set.end())
+                    {
+                        EClass &cls = bucket_states[b].getEClass(cid);
+                        if (!cls.enodes.empty())
+                        {
+                            cls.enodes.clear();
+                            any_unreachable_cleared = true;
+                        }
+                    }
+                }
+            }
+
             r.logs.resize(cycle_logs.size());
             r.components.push_back(countCyclicComponents(bucket_states[b]));
             if (cycle_diagnostics)
@@ -3175,7 +3200,7 @@ struct Planner
             }
 
             const uint32_t total_removed = std::accumulate(r.removed.begin(), r.removed.end(), 0u);
-            if (total_removed > 0 || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
+            if (total_removed > 0 || any_unreachable_cleared || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
             {
                 bucket_states[b].rebuild(true);
                 all_enode_infos[b] = worker_planner.computeENodeInfos(bucket_states[b]);

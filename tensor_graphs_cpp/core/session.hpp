@@ -385,8 +385,24 @@ struct Session
         LOG(INFO) << "Bucket execution times:";
         for (const CompiledGraph &g : cachedGraphs)
         {
-            LOG(INFO) << g.bucket << ": ";
             g.cost(true);
+            if (std::getenv("TG_PRINT_INSTRUCTIONS"))
+            {
+                std::unordered_map<std::string, std::pair<uint32_t, float>> k_summary;
+                for (const auto &inst : g.instructions)
+                {
+                    float c = g.nodeCosts.count(inst.eclass_id) ? g.nodeCosts.at(inst.eclass_id) : 0.0f;
+                    std::string kname = inst.debugOrigin.empty() ? ("kernel_" + std::to_string(inst.kernel_id.value)) : inst.debugOrigin;
+                    k_summary[kname].first++;
+                    k_summary[kname].second += c;
+                }
+                std::vector<std::pair<std::string, std::pair<uint32_t, float>>> sorted_k(k_summary.begin(), k_summary.end());
+                std::sort(sorted_k.begin(), sorted_k.end(), [](const auto &a, const auto &b) { return a.second.second > b.second.second; });
+                for (const auto &entry : sorted_k)
+                {
+                    LOG(INFO) << "  [inst summary] " << entry.first << ": count=" << entry.second.first << " total=" << entry.second.second << " ms";
+                }
+            }
             for (const auto &inst : g.instructions)
             {
                 if (inst.outBuffer.mem_space.type != HandleType::STORAGE && inst.outBuffer.offset >= 0)

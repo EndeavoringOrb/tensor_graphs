@@ -72,6 +72,7 @@ inline SearchState makeState(const json &problem)
         state.reachable_cids.emplace_back();
         state.bucket_root_ids.push_back(EClassId{bucket.at("root").get<uint32_t>()});
         auto &graph = state.bucket_egraphs.back();
+        graph.root_class_id = state.bucket_root_ids.back();
         const auto &nodes = bucket.at("nodes");
         for (const auto &node : nodes)
         {
@@ -175,6 +176,7 @@ inline json stripCycles(const json &problem, const std::string &pass_name)
         auto &nodes = out["buckets"][b]["nodes"];
         const MemSpace space{1, HandleType::CPP};
         EGraph graph;
+        graph.root_class_id = EClassId{out["buckets"][b]["root"].get<uint32_t>()};
         for (const auto &node : nodes)
         {
             const uint32_t pages = node.at("size_pages").get<uint32_t>();

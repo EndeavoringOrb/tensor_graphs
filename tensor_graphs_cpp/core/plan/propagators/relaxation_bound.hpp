@@ -56,7 +56,12 @@ class RelaxationBoundPropagator : public Propagator
                 notes[b] = "skipped (zero weight)";
                 return;
             }
-            rbs[b] = buildRelaxationBucket(state, b);
+            try {
+                rbs[b] = buildRelaxationBucket(state, b);
+            } catch (const std::exception &e) {
+                LOG(ERROR) << "[buildRelaxationBucket exception] bucket=" << b << ": " << e.what();
+                throw;
+            }
             if (!rbs[b].acyclic)
             {
                 notes[b] = "skipped (cyclic bucket graph)";
@@ -66,6 +71,38 @@ class RelaxationBoundPropagator : public Propagator
             {
                 infeasible[b] = 1;
                 return;
+            }
+            if (std::getenv("TG_DEBUG_BOUND"))
+            {
+                double sum_min_cpu = 0.0;
+                double sum_min_all = 0.0;
+                uint32_t n_with_opencl = 0;
+                for (const auto &rc : rbs[b].classes)
+                {
+                    double min_cpu = 1e9;
+                    double min_all = 1e9;
+                    bool has_opencl = false;
+                    for (const auto &alt : rc.alternatives)
+                    {
+                        if (alt.is_alias || alt.is_copy || alt.is_view || alt.is_source) continue;
+                        if (alt.duration > 0.0)
+                        {
+                            min_all = std::min(min_all, alt.duration);
+                            if (alt.engine_mask & 1)
+                                min_cpu = std::min(min_cpu, alt.duration);
+                            if (alt.engine_mask & 2)
+                                has_opencl = true;
+                        }
+                    }
+                    if (min_cpu < 1e8) sum_min_cpu += min_cpu;
+                    if (min_all < 1e8) sum_min_all += min_all;
+                    if (has_opencl) n_with_opencl++;
+                }
+                LOG(INFO) << "[debug bound stats] bucket=" << b
+                          << " sum_min_cpu=" << sum_min_cpu
+                          << " sum_min_all=" << sum_min_all
+                          << " n_with_opencl=" << n_with_opencl
+                          << " total_classes=" << rbs[b].classes.size();
             }
             active[b] = 1;
         });
@@ -104,18 +141,33 @@ class RelaxationBoundPropagator : public Propagator
         std::vector<double> load_value(nb, 0.0), interval_value(nb, 0.0);
         std::vector<std::vector<double>> load_lambda(nb);
         pool.parallel_for(static_cast<uint32_t>(reps.size()), [&](uint32_t k) {
-            const uint32_t r = reps[k];
-            RelaxationBoundComputer computer(rbs[r]);
+            try {
+                const uint32_t r = reps[k];
+                RelaxationBoundComputer computer(rbs[r]);
             load_value[r] = maximizeRelaxationBound(computer, rbs[r].engines.size(), &load_lambda[r]);
             chain[r] = computer.intervalChainLength();
+            if (std::getenv("TG_DEBUG_BOUND"))
+            {
+                LOG(INFO) << "[debug bound] bucket=" << r
+                          << " load_val=" << load_value[r]
+                          << " lambda=[" << (load_lambda[r].size() > 0 ? load_lambda[r][0] : 0)
+                          << ", " << (load_lambda[r].size() > 1 ? load_lambda[r][1] : 0) << "]"
+                          << " chain_len=" << chain[r];
+            }
             // Strides 1, 2, 4, ... (stopping once a stride falls clearly below
             // the best), each also with windows shifted by half a stride; the
             // best partition into windows from any of these runs is kept.
             std::vector<IntervalRun> runs;
-            for (size_t stride = 1; stride <= std::max<size_t>(1, chain[r] / 4); stride *= 2)
+            for (size_t stride = 1; stride <= std::max<size_t>(1, chain[r]); stride *= 2)
             {
                 const double v = computer.intervalBound(stride);
                 runs.push_back({computer.windowLastLinks(), computer.windowValues()});
+                if (std::getenv("TG_DEBUG_BOUND"))
+                {
+                    LOG(INFO) << "[debug bound] stride=" << stride << " v=" << v << " n_windows=" << computer.windowValues().size();
+                    for (size_t wi = 0; wi < std::min<size_t>(10, computer.windowValues().size()); ++wi)
+                        LOG(INFO) << "  w[" << wi << "]=" << computer.windowValues()[wi];
+                }
                 if (stride >= 2)
                 {
                     computer.intervalBound(stride, stride / 2);
@@ -134,6 +186,14 @@ class RelaxationBoundPropagator : public Propagator
             {
                 interval_value[r] = combined;
                 best_stride[r] = 0; // mixed strides
+            }
+            if (std::getenv("TG_DEBUG_BOUND"))
+            {
+                LOG(INFO) << "[debug bound] final interval_val=" << interval_value[r] << " combined=" << combined;
+            }
+            } catch (const std::exception &e) {
+                LOG(ERROR) << "[computer exception]: " << e.what();
+                throw;
             }
         });
 
