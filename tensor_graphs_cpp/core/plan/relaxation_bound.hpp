@@ -35,8 +35,15 @@ struct RelaxationAlternative
     bool is_view = false;
     bool is_source = false;  // INPUT or CACHE: finishes at time 0
     bool requires_cache = false; // filled by markCacheAlternatives
+    bool is_alias = false;
     std::vector<uint32_t> children; // local class indices, deduplicated
+    std::vector<uint32_t> orig_children; // original local class indices (< orig_class_count)
 };
+
+inline const std::vector<uint32_t> &childrenOf(const RelaxationAlternative &alt)
+{
+    return alt.orig_children.empty() ? alt.children : alt.orig_children;
+}
 
 struct RelaxationClass
 {
@@ -50,6 +57,8 @@ struct RelaxationBucket
 {
     uint32_t bucket_idx = 0;
     std::vector<RelaxationClass> classes;
+    uint32_t orig_class_count = 0;
+    std::vector<uint32_t> orig_class_of;
     std::vector<uint32_t> topo; // children before parents
     std::vector<uint32_t> topo_pos;
     uint32_t root = UINT32_MAX;
@@ -151,6 +160,259 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         }
     }
 
+    // Original class count before cycle unrolling.
+    const uint32_t orig_n = static_cast<uint32_t>(rb.classes.size());
+    rb.orig_class_count = orig_n;
+    rb.orig_class_of.resize(orig_n);
+    for (uint32_t u = 0; u < orig_n; ++u)
+        rb.orig_class_of[u] = u;
+
+    // Eliminate direct self-referential alternatives (u in alt.children).
+    for (uint32_t u = 0; u < orig_n; ++u)
+    {
+        auto &alts = rb.classes[u].alternatives;
+        alts.erase(std::remove_if(alts.begin(), alts.end(), [&](const RelaxationAlternative &alt) {
+            return std::find(alt.children.begin(), alt.children.end(), u) != alt.children.end();
+        }), alts.end());
+    }
+
+    // Build adjacency list among original classes.
+    std::vector<std::vector<uint32_t>> adj(orig_n);
+    for (uint32_t u = 0; u < orig_n; ++u)
+    {
+        for (const auto &alt : rb.classes[u].alternatives)
+        {
+            for (uint32_t ch : alt.children)
+            {
+                if (ch != u && std::find(adj[u].begin(), adj[u].end(), ch) == adj[u].end())
+                    adj[u].push_back(ch);
+            }
+        }
+    }
+
+    // Find SCCs with Tarjan's algorithm.
+    std::vector<int32_t> dfn(orig_n, -1);
+    std::vector<int32_t> low(orig_n, -1);
+    std::vector<uint8_t> in_stack(orig_n, 0);
+    std::vector<uint32_t> tarjan_stack;
+    int32_t timer = 0;
+    std::vector<std::vector<uint32_t>> sccs;
+
+    struct DFSFrame
+    {
+        uint32_t u;
+        size_t edge_idx;
+    };
+    std::vector<DFSFrame> call_stack;
+
+    for (uint32_t i = 0; i < orig_n; ++i)
+    {
+        if (dfn[i] != -1)
+            continue;
+        call_stack.push_back({i, 0});
+        dfn[i] = low[i] = timer++;
+        tarjan_stack.push_back(i);
+        in_stack[i] = 1;
+
+        while (!call_stack.empty())
+        {
+            auto &frame = call_stack.back();
+            uint32_t u = frame.u;
+            if (frame.edge_idx < adj[u].size())
+            {
+                uint32_t v = adj[u][frame.edge_idx++];
+                if (dfn[v] == -1)
+                {
+                    dfn[v] = low[v] = timer++;
+                    tarjan_stack.push_back(v);
+                    in_stack[v] = 1;
+                    call_stack.push_back({v, 0});
+                }
+                else if (in_stack[v])
+                {
+                    low[u] = std::min(low[u], dfn[v]);
+                }
+            }
+            else
+            {
+                call_stack.pop_back();
+                if (!call_stack.empty())
+                {
+                    uint32_t p = call_stack.back().u;
+                    low[p] = std::min(low[p], low[u]);
+                }
+                if (dfn[u] == low[u])
+                {
+                    std::vector<uint32_t> comp;
+                    while (true)
+                    {
+                        uint32_t w = tarjan_stack.back();
+                        tarjan_stack.pop_back();
+                        in_stack[w] = 0;
+                        comp.push_back(w);
+                        if (w == u)
+                            break;
+                    }
+                    if (comp.size() > 1)
+                        sccs.push_back(std::move(comp));
+                }
+            }
+        }
+    }
+
+    // Unroll cyclic components.
+    for (const auto &comp : sccs)
+    {
+        if (comp.size() > 6)
+        {
+            rb.acyclic = false;
+            return rb;
+        }
+    }
+
+    for (const auto &comp : sccs)
+    {
+        const uint32_t k = static_cast<uint32_t>(comp.size());
+        std::vector<uint8_t> in_comp(orig_n, 0);
+        for (uint32_t c : comp)
+            in_comp[c] = 1;
+
+        std::unordered_map<uint32_t, std::vector<uint32_t>> helper_classes;
+        for (uint32_t l = 0; l < k - 1; ++l)
+        {
+            for (uint32_t c : comp)
+            {
+                const uint32_t h_idx = static_cast<uint32_t>(rb.classes.size());
+                helper_classes[c].push_back(h_idx);
+                RelaxationClass rc;
+                rc.cid = rb.classes[c].cid;
+                rc.selected_var = kInvalidVarId;
+                rc.base = rb.classes[c].base;
+                rb.classes.push_back(std::move(rc));
+                rb.orig_class_of.push_back(c);
+            }
+        }
+
+        auto classAtLevel = [&](uint32_t c, uint32_t level) -> uint32_t {
+            if (level == k - 1)
+                return c;
+            return helper_classes[c][level];
+        };
+
+        for (uint32_t c : comp)
+        {
+            std::vector<RelaxationAlternative> external_alts, internal_alts;
+            for (auto &alt : rb.classes[c].alternatives)
+            {
+                bool is_internal = false;
+                for (uint32_t ch : alt.children)
+                {
+                    if (in_comp[ch])
+                    {
+                        is_internal = true;
+                        break;
+                    }
+                }
+                if (is_internal)
+                    internal_alts.push_back(std::move(alt));
+                else
+                    external_alts.push_back(std::move(alt));
+            }
+
+            // Level 0: external alternatives only
+            {
+                const uint32_t h0 = classAtLevel(c, 0);
+                for (const auto &orig_alt : external_alts)
+                {
+                    RelaxationAlternative alt = orig_alt;
+                    alt.orig_children = orig_alt.children;
+                    rb.classes[h0].alternatives.push_back(std::move(alt));
+                }
+            }
+
+            // Level l in [1, k-2]: alias to l-1, external alternatives, internal alts pointing to l-1
+            for (uint32_t l = 1; l < k - 1; ++l)
+            {
+                const uint32_t hl = classAtLevel(c, l);
+                RelaxationAlternative alias;
+                alias.value = -1;
+                alias.duration = 0.0;
+                alias.engine_mask = 0;
+                alias.sched_mask = 0;
+                alias.is_copy = true;
+                alias.is_view = true;
+                alias.is_source = false;
+                alias.requires_cache = false;
+                alias.is_alias = true;
+                alias.children = { classAtLevel(c, l - 1) };
+                alias.orig_children = { c };
+                rb.classes[hl].alternatives.push_back(std::move(alias));
+
+                for (const auto &orig_alt : external_alts)
+                {
+                    RelaxationAlternative alt = orig_alt;
+                    alt.orig_children = orig_alt.children;
+                    rb.classes[hl].alternatives.push_back(std::move(alt));
+                }
+
+                for (const auto &orig_alt : internal_alts)
+                {
+                    RelaxationAlternative alt = orig_alt;
+                    alt.orig_children = orig_alt.children;
+                    alt.children.clear();
+                    for (uint32_t ch : orig_alt.children)
+                    {
+                        if (in_comp[ch])
+                            alt.children.push_back(classAtLevel(ch, l - 1));
+                        else
+                            alt.children.push_back(ch);
+                    }
+                    rb.classes[hl].alternatives.push_back(std::move(alt));
+                }
+            }
+
+            // Level k - 1 (the original class c): alias to k-2, external alternatives, internal alts pointing to k-2
+            {
+                rb.classes[c].alternatives.clear();
+                RelaxationAlternative alias;
+                alias.value = -1;
+                alias.duration = 0.0;
+                alias.engine_mask = 0;
+                alias.sched_mask = 0;
+                alias.is_copy = true;
+                alias.is_view = true;
+                alias.is_source = false;
+                alias.requires_cache = false;
+                alias.is_alias = true;
+                alias.children = { classAtLevel(c, k - 2) };
+                alias.orig_children = { c };
+                rb.classes[c].alternatives.push_back(std::move(alias));
+
+                for (const auto &orig_alt : external_alts)
+                {
+                    RelaxationAlternative alt = orig_alt;
+                    alt.orig_children = orig_alt.children;
+                    rb.classes[c].alternatives.push_back(std::move(alt));
+                }
+
+                for (const auto &orig_alt : internal_alts)
+                {
+                    RelaxationAlternative alt = orig_alt;
+                    alt.orig_children = orig_alt.children;
+                    alt.children.clear();
+                    for (uint32_t ch : orig_alt.children)
+                    {
+                        if (in_comp[ch])
+                            alt.children.push_back(classAtLevel(ch, k - 2));
+                        else
+                            alt.children.push_back(ch);
+                    }
+                    rb.classes[c].alternatives.push_back(std::move(alt));
+                }
+            }
+        }
+    }
+
     // Children-first order; a cycle disables the relaxation for this bucket.
     const uint32_t n = static_cast<uint32_t>(rb.classes.size());
     std::vector<uint8_t> color(n, 0);
@@ -216,7 +478,7 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
     }
     rb.root_feasible = feasible[rb.root] != 0;
 
-    std::vector<uint32_t> parent(n);
+    std::vector<uint32_t> parent(orig_n);
     std::iota(parent.begin(), parent.end(), 0u);
     auto find = [&](uint32_t x) {
         while (parent[x] != x)
@@ -226,14 +488,15 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         }
         return x;
     };
-    for (uint32_t u = 0; u < n; ++u)
+    for (uint32_t u = 0; u < orig_n; ++u)
         for (const auto &alt : rb.classes[u].alternatives)
             if (alt.is_copy)
-                for (uint32_t child : alt.children)
-                    parent[find(child)] = find(u);
-    std::vector<uint32_t> group_of_rep(n, UINT32_MAX);
+                for (uint32_t child : childrenOf(alt))
+                    if (child < orig_n)
+                        parent[find(child)] = find(u);
+    std::vector<uint32_t> group_of_rep(orig_n, UINT32_MAX);
     rb.group.assign(n, 0);
-    for (uint32_t u = 0; u < n; ++u)
+    for (uint32_t u = 0; u < orig_n; ++u)
     {
         const uint32_t rep = find(u);
         if (group_of_rep[rep] == UINT32_MAX)
@@ -243,6 +506,10 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         }
         rb.group[u] = group_of_rep[rep];
         rb.group_members[rb.group[u]].push_back(u);
+    }
+    for (uint32_t h = orig_n; h < n; ++h)
+    {
+        rb.group[h] = rb.group[rb.orig_class_of[h]];
     }
     return rb;
 }
@@ -258,6 +525,7 @@ inline std::vector<uint64_t> relaxationSignature(const RelaxationBucket &rb)
         return u;
     };
     sig.push_back(rb.classes.size());
+    sig.push_back(rb.orig_class_count);
     sig.push_back(rb.root);
     sig.push_back(rb.acyclic ? 1 : 0);
     sig.push_back(rb.engines.size());
@@ -276,9 +544,12 @@ inline std::vector<uint64_t> relaxationSignature(const RelaxationBucket &rb)
             sig.push_back(bits(alt.duration));
             sig.push_back((static_cast<uint64_t>(alt.engine_mask) << 32) | alt.sched_mask);
             sig.push_back((alt.is_copy ? 1u : 0u) | (alt.is_view ? 2u : 0u) | (alt.is_source ? 4u : 0u) |
-                          (alt.requires_cache ? 8u : 0u));
+                          (alt.requires_cache ? 8u : 0u) | (alt.is_alias ? 16u : 0u));
             sig.push_back(alt.children.size());
             for (uint32_t ch : alt.children)
+                sig.push_back(ch);
+            sig.push_back(alt.orig_children.size());
+            for (uint32_t ch : alt.orig_children)
                 sig.push_back(ch);
         }
     }

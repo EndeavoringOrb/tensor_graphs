@@ -13,23 +13,42 @@ Task: follow `docs/agents/targets/prefill_decode_seq_len/target.md`. Runs are ap
 
 Calibration: P000 to P002 ran before automatic calibration existed (costs partly interpolated, `Qwen_OuterProd_NEON` unrecorded). Rerun the baseline with calibration before comparing.
 
-Accepted implementation: infrastructure only. N\* = undefined (N = 0 misses the target), frontier N_f = 0.
+Accepted implementation: cycle unrolling in relaxation bound and primal heuristic. N\* = undefined (N = 0 misses the target), frontier N_f = 0.
 
 | Run | Change | N | ok | normalized integral | final gap | gap target met | first incumbent s | eliminated bits | compile s | Verdict |
 |---|---|---|---|---|---|---|---|---|---|---|
 | P000_baseline_seq4 | — | 4 | no | — | 1 | no | none | — | 105.6 | failed: no feasible plan by the search deadline |
 | P001_baseline_seq1 | — | 1 | no* | 0.9978 | 0.9962 | no | 41.99 | 1080.9 | 105.8 | *check-harness bug (expected 2 graphs, 3 compiled); rechecked offline: 3/3 graphs correct |
 | P002_baseline_seq0 | — | 0 | no* | 0.9977 | 0.9973 | no | 14.18 | 1046.5 | 105.6 | *check-harness bug (N taken from the session); rechecked offline: 1/1 graph correct |
-| P003_calibrated_seq0 | automatic calibration | 0 | yes | 0.9977 | 0.9973 | no | 14.84 | 1046.3 | 105.6 | first valid baseline run (1 of 3 reference runs at N_f = 0); calibration: 137 configurations benchmarked in round 1, none pending in round 2 |
+| P003_calibrated_seq0 | automatic calibration | 0 | yes | 0.9977 | 0.9973 | no | 14.84 | 1046.3 | 105.6 | baseline reference 1 of 3 at N_f = 0 |
+| P004_calibrated_seq0 | baseline repeat | 0 | yes | 0.9977 | 0.9973 | no | 14.41 | 1046.3 | 105.6 | baseline reference 2 of 3 at N_f = 0 |
+| P005_calibrated_seq0 | baseline repeat | 0 | yes | 0.9977 | 0.9973 | no | 14.53 | 1046.3 | 105.6 | baseline reference 3 of 3 at N_f = 0 |
+| P006_cycle_unroll_seq0 | cycle unrolling | 0 | yes | 0.6373 | 0.6196 | no | 5.59 | 1185.6 | 105.2 | candidate 1 of 3 at N_f = 0 |
+| P007_cycle_unroll_seq0 | cycle unrolling repeat | 0 | yes | 0.6373 | 0.6196 | no | 5.57 | 1185.6 | 105.2 | candidate 2 of 3 at N_f = 0 |
+| P008_cycle_unroll_seq0 | cycle unrolling repeat | 0 | yes | 0.6373 | 0.6196 | no | 5.56 | 1185.7 | 105.2 | candidate 3 of 3 at N_f = 0 |
 
-Gate references at N_f = 0 (three runs of the accepted implementation, calibrated): P003 (normalized 0.9977); two more needed.
+Gate references at N_f = 0:
+- Baseline (P003, P004, P005):
+  - Median normalized integral: 0.99768276
+  - Spread (max - min): 0.00000973 (9.73e-6)
+  - Median final gap: 0.99734328
+  - Median first incumbent: 14.528 s
+- Candidate cycle unrolling (P006, P007, P008):
+  - Median normalized integral: 0.63729660
+  - Spread (max - min): 0.00006909 (6.91e-5)
+  - Improvement: 0.36038616 (>> baseline spread 9.73e-6)
+  - Median final gap: 0.61964081 (down from 0.99734328)
+  - Median first incumbent: 5.570 s (down from 14.528 s)
+  - Median first incumbent cost: 89.7981 ms (down from 562.592 ms)
+  - Final lower bound: 34.1555 ms (up from 1.4947 ms)
+  - Verdict: ACCEPTED as frontier improvement at N_f = 0.
 
 ## Resume checkpoint
 
-- Accepted implementation: infrastructure only (no optimization yet).
-- Working tree / build: see the latest run's patch.
+- Accepted implementation: cycle unrolling in relaxation bound and primal heuristic (committed).
+- Working tree / build: clean on branch `cleanup`.
 - Running processes: none.
-- Next step: run the accepted implementation three times at N_f = 0 with the fixed check (expect ok=true and a normalized integral of about 0.998). Those runs are the frontier reference. Then attack the gap at N = 0: the full bucket keeps 18 cyclic components after `dominated_child`, which switches off `RelaxationBound` (root bound 0.02 to 1.5 against an incumbent of 562). Inspect them with `TG_CYCLE_DIAGNOSTICS=1` from the repository root (diagnostics from another directory miss `benchmarks/records.bin` and plan a different graph), then make the relaxation and the root primal heuristic tolerate cycles.
+- Next step: diagnose and close the remaining gap at N = 0 (0.6196 -> < 0.05). Incumbent is 89.80 ms (evaluated at leaf matches simulation to 5 decimals). Root lower bound is 34.16 ms (load=34.19 ms, interval=11.80 ms). The CP-SAT search explores 33k iterations but prunes 0 nodes via lower bound because the bound is never strengthened beyond 34.16 ms. Investigate why interval bound is only 11.8 ms when critical path is ~89 ms, why relaxation lambda=[0.99, 0.01] places load on GPU without memory/transfer feasibility, and how to improve bound propagation or primal-guided branching during search.
 
 ## Runs
 
@@ -76,3 +95,54 @@ Gate references at N_f = 0 (three runs of the accepted implementation, calibrate
   `[SearchEngine] New best cost: 562.592 at iteration 9076 source=search event-epoch=1792276923.0560851 program-deadline=0`
 - First incumbent: 14.836914062 s, cost 562.592; best cost 562.592407.
 - Note (P003, N = 0): the first run with automatic calibration (`records.bin` backed up to `benchmarks/records.bin.20261017-before-auto-cal`). Calibration round 1 benchmarked 137 configurations, including the previously unrecorded `Qwen_OuterProd_NEON`; round 2 found none pending. The compile printed no missing-record warning. The check loaded the plan and matched transformers (max abs error 3.8e-5). Gap unchanged from P002 (0.9973; incumbent 562.59, bound 1.49), as expected: calibration fixes costs, not the search.
+
+### P004_calibrated_seq0
+- In progress: 2026-10-17T19:40:11.765695-04:00
+- Metadata `logs/targets/prefill_decode_seq_len/P004_calibrated_seq0.json`; log `logs/targets/prefill_decode_seq_len/P004_calibrated_seq0.log`; patch `logs/targets/prefill_decode_seq_len/P004_calibrated_seq0.patch`
+- Command: `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len 0 --run-dir logs/gemma_output_runs/P004_calibrated_seq0`
+- Completed: 2026-10-17T19:42:25.115838-04:00; exit 0; runner elapsed 133.313 s.
+  `[SearchEngine volume] iterations=227295 elapsed=104.0782961 total-domain-bits=351804.96059415169 remaining-domain-bits=350758.66632756399 log2-remaining-fraction=-1046.2942665877054 eliminated-bits=1046.2942665877054 remaining-nodes=224310 exhausted=false incomplete-branches=2973`
+  `[Program gap] primal-dual-integral=119.72160356342445 normalized=0.99768002969520375 final-gap=0.9973432808878987 final-incumbent=562.59240699999998 final-bound=1.49465 first-incumbent-elapsed=14.406033515930176 samples=415`
+  `[SearchEngine] New best cost: 562.592 at iteration 9076 source=search event-epoch=1792280427.6969168 program-deadline=0`
+- First incumbent: 14.406033516 s, cost 562.592; best cost 562.592407.
+
+### P005_calibrated_seq0
+- In progress: 2026-10-17T19:42:28.929347-04:00
+- Metadata `logs/targets/prefill_decode_seq_len/P005_calibrated_seq0.json`; log `logs/targets/prefill_decode_seq_len/P005_calibrated_seq0.log`; patch `logs/targets/prefill_decode_seq_len/P005_calibrated_seq0.patch`
+- Command: `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len 0 --run-dir logs/gemma_output_runs/P005_calibrated_seq0`
+- Completed: 2026-10-17T19:44:29.012476-04:00; exit 0; runner elapsed 120.047 s.
+  `[SearchEngine volume] iterations=226509 elapsed=104.08385869999999 total-domain-bits=351804.96059415169 remaining-domain-bits=350758.66632756399 log2-remaining-fraction=-1046.2942665877054 eliminated-bits=1046.2942665877054 remaining-nodes=223524 exhausted=false incomplete-branches=2973`
+  `[Program gap] primal-dual-integral=119.72193105029798 normalized=0.99768275875248313 final-gap=0.9973432808878987 final-incumbent=562.59240699999998 final-bound=1.49465 first-incumbent-elapsed=14.527688503265381 samples=416`
+  `[SearchEngine] New best cost: 562.592 at iteration 9076 source=search event-epoch=1792280564.8062317 program-deadline=0`
+- First incumbent: 14.527688503 s, cost 562.592; best cost 562.592407.
+
+### P006_cycle_unroll_seq0
+- In progress: 2026-10-17T20:10:28.480173-04:00
+- Metadata `logs/targets/prefill_decode_seq_len/P006_cycle_unroll_seq0.json`; log `logs/targets/prefill_decode_seq_len/P006_cycle_unroll_seq0.log`; patch `logs/targets/prefill_decode_seq_len/P006_cycle_unroll_seq0.patch`
+- Command: `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len 0 --run-dir logs/gemma_output_runs/P006_cycle_unroll_seq0`
+- Completed: 2026-10-17T20:12:36.212037-04:00; exit 0; runner elapsed 127.703 s.
+  `[SearchEngine volume] iterations=33665 elapsed=104.08484110000001 total-domain-bits=351804.96059415169 remaining-domain-bits=350619.33181455778 log2-remaining-fraction=-1185.6287795939134 eliminated-bits=1185.6287795939134 remaining-nodes=33666 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=76.4813036433966 normalized=0.63734419702830503 final-gap=0.61964080969214486 final-incumbent=89.798079999999999 final-bound=34.155524999999997 first-incumbent-elapsed=5.5852639675140381 samples=397`
+  `[SearchEngine] New best cost: 89.7981 at iteration 0 source=root-heuristic event-epoch=1792282235.5647409 program-deadline=1792282334.9795067`
+- First incumbent: 20.585234165 s, cost 89.7981; best cost 89.79808.
+
+### P007_cycle_unroll_seq0
+- In progress: 2026-10-17T20:14:46.785238-04:00
+- Metadata `logs/targets/prefill_decode_seq_len/P007_cycle_unroll_seq0.json`; log `logs/targets/prefill_decode_seq_len/P007_cycle_unroll_seq0.log`; patch `logs/targets/prefill_decode_seq_len/P007_cycle_unroll_seq0.patch`
+- Command: `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len 0 --run-dir logs/gemma_output_runs/P007_cycle_unroll_seq0`
+- Completed: 2026-10-17T20:16:46.686289-04:00; exit 0; runner elapsed 119.875 s.
+  `[SearchEngine volume] iterations=33741 elapsed=104.09065889999999 total-domain-bits=351804.96059415169 remaining-domain-bits=350619.32337680028 log2-remaining-fraction=-1185.6372173514101 eliminated-bits=1185.6372173514101 remaining-nodes=33742 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=76.475592230450729 normalized=0.6372966019204227 final-gap=0.61964080969214486 final-incumbent=89.798079999999999 final-bound=34.155524999999997 first-incumbent-elapsed=5.5702481269836426 samples=398`
+  `[SearchEngine] New best cost: 89.7981 at iteration 0 source=root-heuristic event-epoch=1792282494.2557721 program-deadline=1792282593.6855488`
+- First incumbent: 20.570223331 s, cost 89.7981; best cost 89.79808.
+
+### P008_cycle_unroll_seq0
+- In progress: 2026-10-17T20:17:01.229098-04:00
+- Metadata `logs/targets/prefill_decode_seq_len/P008_cycle_unroll_seq0.json`; log `logs/targets/prefill_decode_seq_len/P008_cycle_unroll_seq0.log`; patch `logs/targets/prefill_decode_seq_len/P008_cycle_unroll_seq0.patch`
+- Command: `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len 0 --run-dir logs/gemma_output_runs/P008_cycle_unroll_seq0`
+- Completed: 2026-10-17T20:19:00.696024-04:00; exit 0; runner elapsed 119.437 s.
+  `[SearchEngine volume] iterations=33898 elapsed=104.0874879 total-domain-bits=351804.96059415169 remaining-domain-bits=350619.30603039521 log2-remaining-fraction=-1185.654563756485 eliminated-bits=1185.654563756485 remaining-nodes=33899 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=76.473012885593988 normalized=0.63727510737994986 final-gap=0.61964080969214486 final-incumbent=89.798079999999999 final-bound=34.155524999999997 first-incumbent-elapsed=5.5634667873382568 samples=397`
+  `[SearchEngine] New best cost: 89.7981 at iteration 0 source=root-heuristic event-epoch=1792282628.6623824 program-deadline=1792282728.0989373`
+- First incumbent: 20.563445091 s, cost 89.7981; best cost 89.79808.
+- Note (P006-P008, candidate cycle unrolling, N = 0): with cycle unrolling in relaxation bound and primal heuristic, the full bucket (18 cyclic components) is unrolled into acyclic levels, enabling the LP relaxation bound and primal heuristic to run on the full bucket. Root heuristic delivers an incumbent of 89.7981 ms (vs baseline 562.59 ms) within 5.57s of search. Lower bound jumps from 1.49 ms to 34.16 ms. Gap drops from 99.73% to 61.96%. Normalized integral drops from 0.997683 to 0.637297. All 3 runs are consistent (spread 6.91e-5 vs baseline spread 9.73e-6). Accepted as frontier improvement at N_f = 0.

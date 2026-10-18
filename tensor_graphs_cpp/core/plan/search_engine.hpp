@@ -1272,12 +1272,16 @@ class SearchEngine
             const RelaxationBucket &rb = contexts[b].rb;
             const PrimalBucketPlan &bp = plan.buckets[b];
             for (uint32_t u = 0; u < rb.classes.size(); ++u)
+            {
+                if (rb.classes[u].selected_var == kInvalidVarId)
+                    continue;
                 if (!fixDomain(state, rb.classes[u].selected_var, bp.value[u]))
                 {
                     failure = "selection outside domain: " + state.var_infos[rb.classes[u].selected_var].name +
                               " value " + std::to_string(bp.value[u]);
                     return finish();
                 }
+            }
             // Ranks: keep fixed starts, give the others increasing ranks in
             // dispatch order inside their windows.
             std::unordered_set<int32_t> pinned;
