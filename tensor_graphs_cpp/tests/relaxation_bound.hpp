@@ -252,7 +252,7 @@ class RelaxationBoundRegression
     {
         using namespace incremental_propagator_test;
         SearchState state = makeState(spec);
-        RelaxationBucket rb = buildRelaxationBucket(state, 0);
+        RelaxationBucket rb = buildRelaxationBucket(state, 0, /*allow_checkpoints=*/false);
         require(rb.acyclic, "generated graph must be acyclic");
         Brute brute{spec, rb.engines, std::vector<int>(spec.size(), -1), {}};
         brute.enumerate({0});

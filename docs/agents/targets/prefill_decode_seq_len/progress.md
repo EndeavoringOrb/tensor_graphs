@@ -6,6 +6,8 @@ Task: follow `docs/agents/targets/prefill_decode_seq_len/target.md`. Runs are ap
 
 - Command: `.venv/Scripts/python.exe -m tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len <N> --run-dir logs/gemma_output_runs/<run_id>`
 - Build: `.venv/Scripts/python.exe build.py --targets bindings test --log-level INFO`
+- Evaluation requirement: 1 run per gate or frontier (due to low runtime variance, ~400ms spread at 120s scale).
+- Search margin: `SEARCH_MARGIN_SECONDS` default updated to 3.0 s (down from 15.0 s, saving ~12 s for branch-and-bound search; fine-tunable by agents).
 - Hardware: Snapdragon X Elite X1E78100 (Windows arm64), 31.5 GB RAM, OpenCL on. This file tracks the laptop; the Linux CUDA box (OpenCL off) needs its own baseline and table.
 - Base revision: `5ab39db2` (includes this target's infrastructure: dominated-child cycle stripping, `RemoveIdentityContiguous`, `run_graph_logits`). P000 to P002 ran on the uncommitted equivalent.
 
@@ -78,6 +80,10 @@ Gate references at N_f = 2:
 - Accepted implementation: storage_rep dependency propagation + unneeded storage dependency pruning in containment chain regions.
 - Target status: N* = 1 established. Frontier N_f = 2 (5 buckets: prefill [0, 1), decode [0, 1), prefill [0, 2), decode [1, 2), full [0, 2)).
 - Working tree / build: clean on branch `cleanup`.
+- Workflow enhancements:
+  - Build speedup: `build.py` activates the MSVC environment once at startup instead of running `vcvarsall.bat` 201+ times per build, cutting cold build times from minutes down to seconds and incremental builds to ~2s.
+  - Serialization: `RelaxationBucket` uses `BinaryWriter` / `BinaryReader` with versioning and egraph hashing. Checkpoints are cached in `checkpoints/` and can be evaluated directly in native C++ via `tensor_graphs_cpp/test.exe --eval-relaxation-bucket <path>` in ~2ms. `--ignore-checkpoints` / `TG_IGNORE_CHECKPOINTS=1` forces clean recomputation on benchmark runs.
+  - Contract & Margin: 1 run required per frontier/gate (low variance); `SEARCH_MARGIN_SECONDS = 3.0` (reclaims ~12s for search). Strict LF (`\n`) enforced repo-wide via `.gitattributes`.
 - Next step: diagnose lower bound at N = 2 (lower bound 3.99 ms vs makespan 9.48 ms; buckets 0, 1, 3 chain length collapsed to 1; bucket 2 bound 5.34 ms). Optimize lower bound across prefill/decode buckets at N = 2.
 
 ## Runs

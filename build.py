@@ -271,6 +271,7 @@ class PlatformInfo:
     cuda_lib_dir: str | None = None
     opencl_inc_dir: str | None = None
     opencl_lib_dir: str | None = None
+    vcvars_activated: bool = False
 
     @classmethod
     def detect(cls) -> "PlatformInfo":
@@ -478,6 +479,31 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                     check=False,
                 )
             platform_info.compiler = CompilerInfo.detect()
+
+
+def activate_vcvars(platform_info: PlatformInfo, use_cuda: bool = False) -> None:
+    """Activates Visual Studio environment variables in os.environ once at startup,
+    avoiding the massive overhead of invoking vcvarsall.bat on every compilation command."""
+    if not platform_info.is_windows:
+        return
+    if platform_info.vcvars_activated:
+        return
+    if not platform_info.vcvars_path or not Path(platform_info.vcvars_path).exists():
+        return
+
+    target_arm64 = platform_info.is_arm64
+    arch = "arm64" if (target_arm64 and not use_cuda) else "amd64"
+    console.print(f"[dim]Activating MSVC build environment ({arch})...[/dim]")
+    try:
+        cmd = f'"{platform_info.vcvars_path}" {arch} && set'
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=True, check=True)
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                os.environ[k] = v
+        platform_info.vcvars_activated = True
+    except Exception as e:
+        console.print(f"[yellow]Warning: Failed to activate MSVC environment once: {e}[/yellow]")
 
 
 @dataclass
@@ -782,16 +808,10 @@ class Toolchain:
     def __init__(self, config: BuildConfig, platform_info: PlatformInfo):
         self.config = config
         self.platform = platform_info
+        activate_vcvars(self.platform, self.config.use_cuda)
 
     def get_cxx_binary(self) -> str:
-        compiler_path = self.platform.compiler.path
-        if (
-            self.platform.is_windows
-            and " " in compiler_path
-            and not compiler_path.startswith('"')
-        ):
-            return f'"{compiler_path}"'
-        return compiler_path
+        return self.platform.compiler.path.strip('"')
 
     def get_nvcc_binary(self) -> str:
         return "nvcc"
@@ -945,10 +965,12 @@ class Toolchain:
         return flags
 
     def run_cmd(self, cmd: list[str], label: str) -> subprocess.CompletedProcess:
-        cmd_str = " ".join(cmd)
+        clean_cmd = [arg.strip('"') for arg in cmd]
+        cmd_str = subprocess.list2cmdline(clean_cmd)
 
         if (
-            self.platform.is_windows
+            not self.platform.vcvars_activated
+            and self.platform.is_windows
             and self.platform.compiler.kind in ("clang", "msvc")
             and self.platform.vcvars_path
             and Path(self.platform.vcvars_path).exists()
@@ -968,12 +990,13 @@ class Toolchain:
 
             GENERATED_DIR.mkdir(parents=True, exist_ok=True)
             response_path = GENERATED_DIR / f"command-{uuid.uuid4().hex}.rsp"
-            response_args = [argument.replace("\\", "/") for argument in cmd[1:]]
+            response_args = [argument.replace("\\", "/") for argument in clean_cmd[1:]]
             response_path.write_text(subprocess.list2cmdline(response_args), encoding="utf-8")
-            compiler_path = cmd[0].strip('"')
+            compiler_path = clean_cmd[0]
             compiler_cmd = subprocess.list2cmdline([compiler_path, f"@{response_path.as_posix()}"])
             if (
-                self.platform.compiler.kind in ("clang", "msvc")
+                not self.platform.vcvars_activated
+                and self.platform.compiler.kind in ("clang", "msvc")
                 and self.platform.vcvars_path
                 and Path(self.platform.vcvars_path).exists()
             ):

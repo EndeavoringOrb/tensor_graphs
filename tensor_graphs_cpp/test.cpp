@@ -41,6 +41,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--relaxation-bound"}, "Run randomized relaxation lower-bound tests against brute force.");
     parser.add_flag({"--all-records"}, "Enable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
+    parser.add_option({"--eval-relaxation-bucket"}, "Evaluate RelaxationBoundComputer on a RelaxationBucket checkpoint file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
     parser.add_flag({"--view-reg"}, "Run only view and bufferize regression tests.");
@@ -94,6 +95,45 @@ int main(int argc, char *argv[])
         try { RelaxationBoundRegression::run(); }
         catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
         return 0;
+    }
+    std::string eval_rb_path = parser.get_option("--eval-relaxation-bucket");
+    if (!eval_rb_path.empty())
+    {
+        try
+        {
+            plan::RelaxationBucket rb;
+            auto t0 = std::chrono::high_resolution_clock::now();
+            if (!plan::loadRelaxationBucket(eval_rb_path, rb))
+            {
+                std::cerr << "Failed to load relaxation bucket from: " << eval_rb_path << "\n";
+                return 1;
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            plan::RelaxationBoundComputer rbc(rb);
+            double max_bnd = plan::maximizeRelaxationBound(rbc, rb.engines.size());
+            double best_ib = 0.0;
+            for (uint32_t stride : {1u, 2u, 4u, 8u, 16u})
+            {
+                double ib = rbc.intervalBound(stride);
+                if (ib > best_ib)
+                    best_ib = ib;
+            }
+            auto t2 = std::chrono::high_resolution_clock::now();
+            double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            double eval_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            std::cout << "[EvalRelaxationBucket] Loaded: " << eval_rb_path << "\n"
+                      << "  Classes: " << rb.classes.size() << ", Groups: " << rb.group_members.size() << "\n"
+                      << "  Load time: " << load_ms << " ms\n"
+                      << "  Relaxation bound: " << max_bnd << "\n"
+                      << "  Interval bound: " << best_ib << "\n"
+                      << "  Eval time: " << eval_ms << " ms\n";
+            return 0;
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << error.what() << std::endl;
+            return 1;
+        }
     }
     if (parser.get_flag("--write-after-read-cache"))
     {

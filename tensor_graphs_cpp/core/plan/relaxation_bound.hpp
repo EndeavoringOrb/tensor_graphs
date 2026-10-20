@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -21,6 +23,7 @@
 #include "core/common/thread_pool.hpp"
 #include "core/logging.hpp"
 #include "core/plan/search_state.hpp"
+#include "core/serialization.hpp"
 
 namespace plan
 {
@@ -83,15 +86,192 @@ inline uint32_t relaxationEngineIndex(RelaxationBucket &rb, const Engine &engine
     return static_cast<uint32_t>(rb.engines.size() - 1);
 }
 
+inline void tg_serialize(BinaryWriter &bw, const RelaxationAlternative &alt)
+{
+    bw.write(alt.value);
+    bw.write(alt.duration);
+    bw.write(alt.engine_mask);
+    bw.write(alt.sched_mask);
+    bw.write(alt.is_copy);
+    bw.write(alt.is_storage_copy);
+    bw.write(alt.is_view);
+    bw.write(alt.is_source);
+    bw.write(alt.requires_cache);
+    bw.write(alt.is_alias);
+    bw.write(alt.children);
+    bw.write(alt.orig_children);
+}
+
+inline void tg_deserialize(BinaryReader &br, RelaxationAlternative &alt)
+{
+    br.read(alt.value);
+    br.read(alt.duration);
+    br.read(alt.engine_mask);
+    br.read(alt.sched_mask);
+    br.read(alt.is_copy);
+    br.read(alt.is_storage_copy);
+    br.read(alt.is_view);
+    br.read(alt.is_source);
+    br.read(alt.requires_cache);
+    br.read(alt.is_alias);
+    br.read(alt.children);
+    br.read(alt.orig_children);
+}
+
+inline void tg_serialize(BinaryWriter &bw, const RelaxationClass &rc)
+{
+    bw.write(rc.cid);
+    bw.write(rc.selected_var);
+    bw.write(rc.base);
+    bw.write(rc.alternatives);
+}
+
+inline void tg_deserialize(BinaryReader &br, RelaxationClass &rc)
+{
+    br.read(rc.cid);
+    br.read(rc.selected_var);
+    br.read(rc.base);
+    br.read(rc.alternatives);
+}
+
+inline void tg_serialize(BinaryWriter &bw, const RelaxationBucket &rb)
+{
+    const uint32_t magic = 0x54475242; // 'TGRB'
+    const uint32_t version = 1;
+    bw.write(magic);
+    bw.write(version);
+    bw.write(rb.bucket_idx);
+    bw.write(rb.orig_class_count);
+    bw.write(rb.root);
+    bw.write(rb.acyclic);
+    bw.write(rb.root_feasible);
+    bw.write(rb.engines);
+    bw.write(rb.classes);
+    bw.write(rb.orig_class_of);
+    bw.write(rb.topo);
+    bw.write(rb.topo_pos);
+    bw.write(rb.group);
+    bw.write(rb.group_members);
+    bw.write(rb.storage_rep);
+}
+
+inline void tg_deserialize(BinaryReader &br, RelaxationBucket &rb)
+{
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    br.read(magic);
+    if (magic != 0x54475242)
+        throw std::runtime_error("Invalid magic number in RelaxationBucket checkpoint");
+    br.read(version);
+    if (version != 1)
+        throw std::runtime_error("Unsupported version in RelaxationBucket checkpoint");
+    br.read(rb.bucket_idx);
+    br.read(rb.orig_class_count);
+    br.read(rb.root);
+    br.read(rb.acyclic);
+    br.read(rb.root_feasible);
+    br.read(rb.engines);
+    br.read(rb.classes);
+    br.read(rb.orig_class_of);
+    br.read(rb.topo);
+    br.read(rb.topo_pos);
+    br.read(rb.group);
+    br.read(rb.group_members);
+    br.read(rb.storage_rep);
+}
+
+inline bool saveRelaxationBucket(const RelaxationBucket &rb, const std::string &path)
+{
+    try
+    {
+        std::ofstream out(path, std::ios::binary);
+        if (!out.is_open())
+            return false;
+        BinaryWriter bw(out);
+        bw.write(rb);
+        return out.good();
+    }
+    catch (const std::exception &e)
+    {
+        LOG(WARNING) << "Failed to save RelaxationBucket to " << path << ": " << e.what();
+        return false;
+    }
+}
+
+inline bool loadRelaxationBucket(const std::string &path, RelaxationBucket &rb)
+{
+    try
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in.is_open())
+            return false;
+        BinaryReader br(in);
+        br.read(rb);
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        LOG(WARNING) << "Failed to load RelaxationBucket from " << path << ": " << e.what();
+        return false;
+    }
+}
+
+inline uint64_t hashBucketEGraph(const EGraph &egraph, const SearchState &state, uint32_t b)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](uint64_t v) {
+        h ^= v;
+        h *= 0x100000001b3ull;
+    };
+    mix(state.buckets.size());
+    mix(b);
+    mix(egraph.classes.size());
+    mix(egraph.enodes.size());
+    mix(egraph.root_class_id.value);
+    for (const auto &enode : egraph.enodes)
+    {
+        mix(static_cast<uint64_t>(enode.getOpType()));
+        mix(enode.getKernelId().value);
+        for (const auto &ch : enode.getChildren())
+            mix(ch.value);
+    }
+    return h;
+}
+
 // Durations and engines mirror SearchEngine::evaluateMakespan and
 // MakespanSimulator: INPUT/CACHE finish at 0 without an engine, views take no
 // engine time, an infinite cost simulates as 1, and an empty engine list runs
 // on CPU engine 0.
-inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t b)
+inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t b, bool allow_checkpoints = true)
 {
+    const bool ignore_checkpoints = !allow_checkpoints ||
+                                    (std::getenv("TG_IGNORE_CHECKPOINTS") != nullptr &&
+                                     std::string(std::getenv("TG_IGNORE_CHECKPOINTS")) != "0");
+    std::string cp_dir = "checkpoints";
+    if (const char *dir_env = std::getenv("TG_CHECKPOINT_DIR"))
+        cp_dir = dir_env;
+
+    const EGraph &egraph = state.bucket_egraphs.at(b);
+    const uint64_t eg_hash = hashBucketEGraph(egraph, state, b);
+    char hash_buf[32];
+    std::snprintf(hash_buf, sizeof(hash_buf), "%016llx", static_cast<unsigned long long>(eg_hash));
+    const std::string cp_file = cp_dir + "/relaxation_bucket_nb" + std::to_string(state.buckets.size()) +
+                                "_b" + std::to_string(b) + "_" + hash_buf + ".bin";
+    const std::string cp_latest = cp_dir + "/relaxation_bucket_latest.bin";
+
+    if (!ignore_checkpoints && std::filesystem::exists(cp_file))
+    {
+        RelaxationBucket cached_rb;
+        if (loadRelaxationBucket(cp_file, cached_rb))
+        {
+            LOG(INFO) << "[RelaxationBucket] Loaded checkpoint from " << cp_file
+                      << " (classes=" << cached_rb.classes.size() << ")";
+            return cached_rb;
+        }
+    }
+
     RelaxationBucket rb;
     rb.bucket_idx = b;
-    const EGraph &egraph = state.bucket_egraphs.at(b);
     const auto &infos = state.bucket_enode_infos.at(b);
     std::unordered_map<EClassId, uint32_t> local;
     for (EClassId cid : state.reachable_cids.at(b))
@@ -605,6 +785,13 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
     {
         LOG(INFO) << "[debug storage copies] count=" << n_storage_copies << " total_dur=" << sum_storage_copy_dur;
         LOG(INFO) << "[debug step 1] buildRelaxationBucket done n=" << n << " groups=" << rb.group_members.size();
+    }
+    if (!ignore_checkpoints && rb.classes.size() >= 10)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(cp_dir, ec);
+        saveRelaxationBucket(rb, cp_file);
+        saveRelaxationBucket(rb, cp_latest);
     }
     return rb;
 }

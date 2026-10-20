@@ -130,12 +130,12 @@ def main():
     }
     record_path = directory / (run_id + ".json")
     record_path.write_text(json.dumps(record, indent=2))
-    with document.open("a", encoding="utf-8") as file:
+    with document.open("a", encoding="utf-8", newline="\n") as file:
         file.write(f"\n### {run_id}\n- In progress: {record['start']}\n"
                    f"- Metadata `{log_dir}/{record_path.name}`; log `{log_dir}/{log_path.name}`; patch `{log_dir}/{run_id}.patch`\n"
                    f"- Command: `{' '.join(record['command'])}`\n")
     start = time.monotonic()
-    with log_path.open("w", encoding="utf-8") as log:
+    with log_path.open("w", encoding="utf-8", newline="\n") as log:
         try:
             result = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
             exit_status = result.returncode
@@ -146,7 +146,7 @@ def main():
     record.update(status="complete", exit_status=exit_status, end=datetime.datetime.now().astimezone().isoformat(),
                   runner_elapsed=time.monotonic() - start, **parseMetrics(output, timeout))
     record_path.write_text(json.dumps(record, indent=2))
-    with document.open("a", encoding="utf-8") as file:
+    with document.open("a", encoding="utf-8", newline="\n") as file:
         file.write(f"- Completed: {record['end']}; exit {exit_status}; runner elapsed {record['runner_elapsed']:.3f} s.\n")
         for line in record["volume_reports"] + record["program_evaluation"] + record["overshoot"] + record["gap_report"]:
             file.write(f"  `{line}`\n")

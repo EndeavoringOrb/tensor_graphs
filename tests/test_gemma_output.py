@@ -15,7 +15,8 @@ MODEL_PATH = PROJECT_ROOT / "models" / "google" / "gemma-3-270m"
 # prefill+decode with --timeout: seconds between the search deadline and the
 # compile budget, kept for extraction, compiling and writing the plan
 # (agent-tunable; docs/agents/targets/prefill_decode_seq_len/target.md).
-SEARCH_MARGIN_SECONDS = 15.0
+# Extraction and plan writing takes ~1.2s; 3.0s margin leaves an extra ~12s for search.
+SEARCH_MARGIN_SECONDS = 3.0
 PLAN_NAME = "plan.bin"
 RUNS_DIR = PROJECT_ROOT / "logs" / "gemma_output_runs"
 BENCH_EXE = PROJECT_ROOT / "tensor_graphs_cpp" / ("bench.exe" if sys.platform == "win32" else "bench")
@@ -355,6 +356,8 @@ def superviseLogits(args):
         raise SystemExit(f"Run directory {run_dir} already exists; every run starts from an empty directory")
     run_dir.mkdir(parents=True)
     common = ["--config", args.config, "--seq-len", str(args.seq_len), "--run-dir", str(run_dir)]
+    if args.ignore_checkpoints:
+        common.append("--ignore-checkpoints")
     buckets = len(expectedGraphRanges(args.seq_len))
     summary = {"config": args.config, "seq_len": args.seq_len, "buckets": buckets,
                "budget": args.timeout, "search_margin": SEARCH_MARGIN_SECONDS}
@@ -468,8 +471,12 @@ def main():
     parser.add_argument("--run-dir", help="prefill+decode with --timeout: fresh directory for the plan and results")
     parser.add_argument("--check-timeout", type=float, default=3600.0,
                         help="prefill+decode with --timeout: limit for the logits check process")
+    parser.add_argument("--ignore-checkpoints", action="store_true",
+                        help="Ignore dumped checkpoints and recompute from scratch (used for final benchmarking)")
     parser.add_argument("--phase", choices=["calibrate", "compile", "check"], help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.ignore_checkpoints:
+        os.environ["TG_IGNORE_CHECKPOINTS"] = "1"
     if args.seq_len < 0:
         parser.error("--seq-len must be non-negative")
     if args.phase:
