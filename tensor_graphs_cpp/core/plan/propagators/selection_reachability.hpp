@@ -89,6 +89,63 @@ class SelectionReachabilityPropagator : public Propagator
         return false;
     }
 
+    // While the root heuristic validates a complete plan (every selection is
+    // fixed before propagation), one search from the root over the selected
+    // alternatives per selection revision decides reachability: a selected
+    // class it misses is a conflict, nothing is left to prune. The
+    // incremental structure is not touched, so it stays at the state the
+    // validation restores. Returns false (no shortcut) when a selection of
+    // the bucket is still open.
+    std::vector<uint64_t> verified_revision_;
+    bool completePlanCheck(SearchState &state, uint32_t b, bool &consistent)
+    {
+        if (!state.completing_plan)
+            return false;
+        if (verified_revision_.size() < state.buckets.size())
+            verified_revision_.resize(state.buckets.size(), UINT64_MAX);
+        if (verified_revision_[b] == state.getSelectionRevision())
+        {
+            consistent = true;
+            return true;
+        }
+        for (const auto &pair : state.selected_vars[b])
+            if (!state.domains[pair.second].isFixed())
+                return false;
+        const EGraph &egraph = state.bucket_egraphs[b];
+        std::unordered_set<EClassId> reached;
+        std::vector<EClassId> frontier;
+        const EClassId root = egraph.findConst(state.bucket_root_ids[b]);
+        reached.insert(root);
+        frontier.push_back(root);
+        for (size_t head = 0; head < frontier.size(); ++head)
+        {
+            const auto it = state.selected_vars[b].find(frontier[head]);
+            if (it == state.selected_vars[b].end())
+                continue;
+            const int32_t value = state.domains[it->second].fixedValue();
+            if (value <= 0)
+                continue;
+            const EClass &cls = egraph.getEClass(frontier[head]);
+            for (EClassId ch : egraph.getENode(cls.enodes[static_cast<size_t>(value - 1)]).getChildren())
+            {
+                const EClassId canon = egraph.findConst(ch);
+                if (reached.insert(canon).second)
+                    frontier.push_back(canon);
+            }
+        }
+        for (const auto &pair : state.selected_vars[b])
+            if (state.domains[pair.second].fixedValue() > 0 && !reached.count(pair.first))
+            {
+                conflict_reason_ = "complete plan selects a class unreachable from the root: " +
+                                   state.var_infos[pair.second].name;
+                consistent = false;
+                return true;
+            }
+        consistent = true;
+        verified_revision_[b] = state.getSelectionRevision();
+        return true;
+    }
+
   public:
     explicit SelectionReachabilityPropagator(bool is_dag = false) : is_dag_(is_dag) {}
 
@@ -114,6 +171,9 @@ class SelectionReachabilityPropagator : public Propagator
         {
             if (state.var_infos[changed].type != VarType::SELECTED)
                 return true;
+            bool consistent = true;
+            if (completePlanCheck(state, state.var_infos[changed].bucket_idx, consistent))
+                return consistent;
             std::vector<VarId> unreachable;
             auto &forced_parents = state.pending_parent_selections;
             state.updateSelectionReachability(changed, unreachable, is_dag_, &forced_parents);

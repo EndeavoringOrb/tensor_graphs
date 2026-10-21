@@ -2,6 +2,7 @@
 #pragma once
 
 #include <chrono>
+#include <memory>
 #include <sstream>
 #include <thread>
 
@@ -22,6 +23,13 @@ class RelaxationBoundPropagator : public Propagator
 {
     bool computed_ = false;
     std::string conflict_;
+    // Kept after the root computation so refine() can tighten the bounds.
+    std::vector<RelaxationBucket> rbs_;
+    std::vector<std::unique_ptr<RelaxationBoundComputer>> computers_; // per representative bucket
+    std::vector<uint32_t> rep_, reps_;
+    std::vector<char> active_;
+    std::vector<double> load_value_, interval_value_;
+    std::vector<std::vector<double>> load_lambda_;
 
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
@@ -41,14 +49,15 @@ class RelaxationBoundPropagator : public Propagator
         conflict_.clear();
         const auto start = std::chrono::steady_clock::now();
         const uint32_t nb = static_cast<uint32_t>(state.buckets.size());
-        std::vector<double> bounds(nb, 0.0);
         std::vector<std::string> notes(nb);
         std::vector<char> infeasible(nb, 0);
         auto &pool = ThreadPool::get();
 
         // 1. Relaxations of the weighted buckets.
-        std::vector<RelaxationBucket> rbs(nb);
-        std::vector<char> active(nb, 0);
+        rbs_.assign(nb, RelaxationBucket{});
+        std::vector<RelaxationBucket> &rbs = rbs_;
+        active_.assign(nb, 0);
+        std::vector<char> &active = active_;
         pool.parallel_for(nb, [&](uint32_t b) {
             const float weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
             if (!(weight > 0.0f))
@@ -114,7 +123,9 @@ class RelaxationBoundPropagator : public Propagator
             if (active[b])
                 signature[b] = relaxationSignature(rbs[b]);
         });
-        std::vector<uint32_t> rep(nb, UINT32_MAX), reps;
+        rep_.assign(nb, UINT32_MAX);
+        reps_.clear();
+        std::vector<uint32_t> &rep = rep_, &reps = reps_;
         for (uint32_t b = 0; b < nb; ++b)
         {
             if (!active[b])
@@ -132,65 +143,48 @@ class RelaxationBoundPropagator : public Propagator
             }
         }
 
-        // 3. Per distinct relaxation (in parallel): load bound, and interval
-        // bound over a geometric family of window strides, from every link
-        // upwards, doubling, until a stride falls clearly below the best
-        // value (coarser windows then only lose) or the windows cover a
-        // quarter of the chain. Every stride gives a valid bound.
+        // 3. Per distinct relaxation (in parallel): the load bound. The
+        // interval bound (computeIntervals) comes after the root heuristic.
         std::vector<size_t> chain(nb, 0), best_stride(nb, 0);
-        std::vector<double> load_value(nb, 0.0), interval_value(nb, 0.0);
-        std::vector<std::vector<double>> load_lambda(nb);
+        load_value_.assign(nb, 0.0);
+        interval_value_.assign(nb, 0.0);
+        load_lambda_.assign(nb, {});
+        computers_.clear();
+        computers_.resize(nb);
+        std::vector<double> &load_value = load_value_, &interval_value = interval_value_;
+        std::vector<std::vector<double>> &load_lambda = load_lambda_;
         pool.parallel_for(static_cast<uint32_t>(reps.size()), [&](uint32_t k) {
             try {
                 const uint32_t r = reps[k];
-                RelaxationBoundComputer computer(rbs[r]);
+                const auto stage_start = std::chrono::steady_clock::now();
+                auto stage = [&]() {
+                    return std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
+                };
+                computers_[r] = std::make_unique<RelaxationBoundComputer>(rbs[r]);
+                RelaxationBoundComputer &computer = *computers_[r];
+                const double prepared_at = stage();
+                if (computer.degenerate())
+                {
+                    LOG(INFO) << "[RelaxationBound] bucket=" << r << " degenerate region decomposition (chain "
+                              << computer.intervalChainLength() << "): no bound";
+                    return;
+                }
             load_value[r] = maximizeRelaxationBound(computer, rbs[r].engines.size(), &load_lambda[r]);
+            // Threshold splits (not nested) at the best weighting; refine()
+            // nests them later. When the load evaluation is slow (large
+            // regions), they wait for refine() so the heuristic starts
+            // sooner.
+            if (!load_lambda[r].empty() && stage() - prepared_at <= kRootSplitSeconds)
+            {
+                load_value[r] = std::max(load_value[r], computer.evaluateSplit(load_lambda[r], 0, kSplitCandidates,
+                                                                                std::chrono::steady_clock::time_point::max()));
+                // Then a case split on the class the region decomposition
+                // hides most (docs/core/relaxation_bound.md, "Global split").
+                load_value[r] = std::max(load_value[r], computer.evaluateGlobalSplit(load_lambda[r], kGlobalCandidates));
+            }
             chain[r] = computer.intervalChainLength();
-            if (std::getenv("TG_DEBUG_BOUND"))
-            {
-                LOG(INFO) << "[debug bound] bucket=" << r
-                          << " load_val=" << load_value[r]
-                          << " lambda=[" << (load_lambda[r].size() > 0 ? load_lambda[r][0] : 0)
-                          << ", " << (load_lambda[r].size() > 1 ? load_lambda[r][1] : 0) << "]"
-                          << " chain_len=" << chain[r];
-            }
-            // Strides 1, 2, 4, ... (stopping once a stride falls clearly below
-            // the best), each also with windows shifted by half a stride; the
-            // best partition into windows from any of these runs is kept.
-            std::vector<IntervalRun> runs;
-            for (size_t stride = 1; stride <= std::max<size_t>(1, chain[r]); stride *= 2)
-            {
-                const double v = computer.intervalBound(stride);
-                runs.push_back({computer.windowLastLinks(), computer.windowValues()});
-                if (std::getenv("TG_DEBUG_BOUND"))
-                {
-                    LOG(INFO) << "[debug bound] stride=" << stride << " v=" << v << " n_windows=" << computer.windowValues().size();
-                    for (size_t wi = 0; wi < std::min<size_t>(10, computer.windowValues().size()); ++wi)
-                        LOG(INFO) << "  w[" << wi << "]=" << computer.windowValues()[wi];
-                }
-                if (stride >= 2)
-                {
-                    computer.intervalBound(stride, stride / 2);
-                    runs.push_back({computer.windowLastLinks(), computer.windowValues()});
-                }
-                if (v > interval_value[r])
-                {
-                    interval_value[r] = v;
-                    best_stride[r] = stride;
-                }
-                else if (v < 0.99 * interval_value[r])
-                    break;
-            }
-            const double combined = bestWindowPartition(chain[r], runs);
-            if (combined > interval_value[r])
-            {
-                interval_value[r] = combined;
-                best_stride[r] = 0; // mixed strides
-            }
-            if (std::getenv("TG_DEBUG_BOUND"))
-            {
-                LOG(INFO) << "[debug bound] final interval_val=" << interval_value[r] << " combined=" << combined;
-            }
+            LOG(INFO) << "[RelaxationBound timing] bucket=" << r << " prepare=" << prepared_at << "s load+splits="
+                      << stage() - prepared_at << "s";
             } catch (const std::exception &e) {
                 LOG(ERROR) << "[computer exception]: " << e.what();
                 throw;
@@ -203,38 +197,186 @@ class RelaxationBoundPropagator : public Propagator
             if (!active[b])
                 continue;
             const uint32_t r = rep[b];
-            const double value = std::max(load_value[r], interval_value[r]);
-            // Float simulation of n operations can undershoot the exact
-            // engine load by a relative n * 2^-24; keep the bound below it.
-            const double n = static_cast<double>(rbs[r].classes.size()) + 64.0;
-            bounds[b] = std::max(0.0, value * (1.0 - n * 1.2e-7) - 1e-7);
             std::ostringstream os;
-            os << "load=" << load_value[r] << " interval=" << interval_value[r] << " stride=" << best_stride[r]
-               << " chain=" << chain[r] << " same-as=" << r << " lambda=[";
+            os << "load=" << load_value[r] << " chain=" << chain[r] << " same-as=" << r << " lambda=[";
             for (size_t e = 0; e < load_lambda[r].size(); ++e)
                 os << (e ? "," : "") << load_lambda[r][e];
             os << "]";
             notes[b] = os.str();
         }
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        state.bucket_relaxation_lower_bounds.assign(nb, 0.0f);
         for (uint32_t b = 0; b < nb; ++b)
-        {
             if (infeasible[b])
             {
                 conflict_ = "bucket " + std::to_string(b) + " root has no feasible alternative";
                 return false;
             }
-            // Round toward zero so the stored float never exceeds the bound.
-            float stored = static_cast<float>(bounds[b]);
-            if (static_cast<double>(stored) > bounds[b])
-                stored = std::nextafter(stored, 0.0f);
-            state.bucket_relaxation_lower_bounds[b] = stored;
+        state.bucket_relaxation_lower_bounds.assign(nb, 0.0f);
+        storeBounds(state);
+        for (uint32_t b = 0; b < nb; ++b)
             state.updateLowerBoundBucket(b);
-            LOG(INFO) << "[RelaxationBound] bucket=" << b << " bound=" << stored << " " << notes[b];
-        }
+        for (uint32_t b = 0; b < nb; ++b)
+            LOG(INFO) << "[RelaxationBound] bucket=" << b << " bound=" << state.bucket_relaxation_lower_bounds[b] << " "
+                      << notes[b];
         LOG(INFO) << "[RelaxationBound] total lower bound=" << state.lower_bound << " elapsed=" << elapsed << "s";
         return true;
+    }
+
+    // Interval bound (docs/core/relaxation_bound.md, "Interval bound") of
+    // every representative, over a geometric family of window strides from
+    // every link upwards, doubling until a stride does not improve the best
+    // value (coarser windows cost about twice as much and rarely gain), and
+    // the best partition into windows from any of these runs (each stride
+    // also with windows shifted by half a stride). Every stride gives a
+    // valid bound. Run after the root heuristic: it can take seconds; no
+    // further stride starts after `deadline`.
+    // Returns whether any bucket bound rose.
+    bool computeIntervals(SearchState &state, std::chrono::steady_clock::time_point deadline)
+    {
+        if (!computed_ || !conflict_.empty() || intervals_done_)
+            return false;
+        intervals_done_ = true;
+        const auto start = std::chrono::steady_clock::now();
+        const std::vector<float> before = state.bucket_relaxation_lower_bounds;
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(reps_.size()), [&](uint32_t k) {
+            const uint32_t r = reps_[k];
+            if (!computers_[r] || !computers_[r]->ready())
+                return;
+            RelaxationBoundComputer &computer = *computers_[r];
+            const size_t chain = computer.intervalChainLength();
+            std::vector<IntervalRun> runs;
+            double best = 0.0;
+            for (size_t stride = 1; stride <= std::max<size_t>(1, chain); stride *= 2)
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                    break;
+                const double v = computer.intervalBound(stride, 0, deadline);
+                runs.push_back({computer.windowLastLinks(), computer.windowValues()});
+                if (stride >= 2)
+                {
+                    computer.intervalBound(stride, stride / 2, deadline);
+                    runs.push_back({computer.windowLastLinks(), computer.windowValues()});
+                }
+                if (v > best)
+                    best = v;
+                else
+                    break;
+            }
+            interval_value_[r] = std::max(best, bestWindowPartition(chain, runs));
+        });
+        storeBounds(state);
+        for (uint32_t r : reps_)
+            LOG(INFO) << "[RelaxationBound] intervals bucket=" << r << " interval=" << interval_value_[r]
+                      << " load=" << load_value_[r];
+        LOG(INFO) << "[RelaxationBound] intervals elapsed="
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "s";
+        return state.bucket_relaxation_lower_bounds != before;
+    }
+
+    // Flexible interval windows (every window spanning at most
+    // kFlexibleLength chain links, best partition) of every representative,
+    // (before computeIntervals, which it usually dominates and which is
+    // slower). Returns whether any bucket bound rose.
+    bool computeFlexibleIntervals(SearchState &state, std::chrono::steady_clock::time_point deadline,
+                                  size_t long_len = 0)
+    {
+        if (!computed_ || !conflict_.empty())
+            return false;
+        const auto start = std::chrono::steady_clock::now();
+        const std::vector<float> before = state.bucket_relaxation_lower_bounds;
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(reps_.size()), [&](uint32_t k) {
+            const uint32_t r = reps_[k];
+            if (!computers_[r] || !computers_[r]->ready())
+                return;
+            interval_value_[r] = std::max(interval_value_[r],
+                                          computers_[r]->flexibleIntervalBound(kFlexibleLength, deadline, long_len));
+        });
+        storeBounds(state);
+        LOG(INFO) << "[RelaxationBound] flexible windows (long " << long_len << ") elapsed="
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "s";
+        return state.bucket_relaxation_lower_bounds != before;
+    }
+
+    // Nests every representative's threshold splits `depth` levels deep
+    // (until `deadline`) and raises the stored relaxation bounds. They hold
+    // for every plan of the root domains, so the whole tree; the caller
+    // folds them into node bounds (the state's own bucket bounds may be
+    // stale until the next propagation). Returns whether any bound rose.
+    bool refine(SearchState &state, int depth, std::chrono::steady_clock::time_point deadline)
+    {
+        if (!computed_ || !conflict_.empty())
+            return false;
+        const std::vector<float> before = state.bucket_relaxation_lower_bounds;
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(reps_.size()), [&](uint32_t k) {
+            const uint32_t r = reps_[k];
+            if (!computers_[r] || !computers_[r]->ready() || load_lambda_[r].empty())
+                return;
+            load_value_[r] = std::max(load_value_[r], computers_[r]->evaluateSplit(load_lambda_[r], depth,
+                                                                                   kSplitCandidates, deadline));
+            load_value_[r] = std::max(load_value_[r], computers_[r]->evaluateGlobalSplit(load_lambda_[r],
+                                                                                         kGlobalCandidates, deadline));
+        });
+        storeBounds(state);
+        return state.bucket_relaxation_lower_bounds != before;
+    }
+
+    // The computer of bucket b's representative relaxation (its flexible
+    // partition is set once computeFlexibleIntervals ran), or null.
+    RelaxationBoundComputer *computerFor(uint32_t b) const
+    {
+        if (b >= rep_.size() || !active_[b] || rep_[b] == UINT32_MAX || !computers_[rep_[b]] ||
+            !computers_[rep_[b]]->ready())
+            return nullptr;
+        return computers_[rep_[b]].get();
+    }
+    const RelaxationBucket &relaxationOf(uint32_t b) const { return rbs_[rep_[b]]; }
+
+  private:
+    bool intervals_done_ = false;
+    static constexpr size_t kSplitCandidates = 4;
+    static constexpr double kRootSplitSeconds = 1.0;
+    static constexpr size_t kFlexibleLength = 8;
+    static constexpr size_t kGlobalCandidates = 8;
+
+    // Original classes with an alternative of positive duration.
+    static size_t positiveClasses(const RelaxationBucket &rb)
+    {
+        const size_t n = rb.orig_class_count ? rb.orig_class_count : rb.classes.size();
+        size_t count = 0;
+        for (size_t u = 0; u < n; ++u)
+        {
+            bool positive = false;
+            for (const auto &alt : rb.classes[u].alternatives)
+                positive = positive || alt.duration > 0.0;
+            count += positive;
+        }
+        return count;
+    }
+
+    // Stores max(load, interval) of each bucket's representative, below the
+    // float margin and never below the bound already stored.
+    void storeBounds(SearchState &state) const
+    {
+        const uint32_t nb = static_cast<uint32_t>(state.buckets.size());
+        state.bucket_relaxation_lower_bounds.resize(nb, 0.0f);
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            if (!active_[b])
+                continue;
+            const uint32_t r = rep_[b];
+            const double value = std::max(load_value_[r], interval_value_[r]);
+            // Float simulation can undershoot the exact makespan by a
+            // relative n * 2^-24, n the operations of positive duration on
+            // the chain that ends it, at most the original classes with such
+            // an alternative (a plan selects each once); keep below it.
+            const double n = static_cast<double>(positiveClasses(rbs_[r])) + 64.0;
+            const double bound = std::max(0.0, value * (1.0 - n * 1.2e-7) - 1e-7);
+            // Round toward zero so the stored float never exceeds the bound.
+            float stored = static_cast<float>(bound);
+            if (static_cast<double>(stored) > bound)
+                stored = std::nextafter(stored, 0.0f);
+            state.bucket_relaxation_lower_bounds[b] = std::max(state.bucket_relaxation_lower_bounds[b], stored);
+        }
     }
 };
 

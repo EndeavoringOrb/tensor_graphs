@@ -971,6 +971,22 @@ struct Planner
         const uint32_t num_classes = static_cast<uint32_t>(egraph.getNumClasses());
         const uint32_t num_enodes = static_cast<uint32_t>(egraph.getNumENodes());
 
+        // Storage sizes, computed once per class and per enode (the fixed
+        // point below re-evaluates enodes many times).
+        std::vector<float> class_bytes(num_classes, 0.0f);
+        for (uint32_t c = 0; c < num_classes; ++c)
+        {
+            if (egraph.findConst(EClassId{c}).value != c)
+                continue;
+            const EClass &cls = egraph.getEClass(EClassId{c});
+            class_bytes[c] = static_cast<float>(getStorageSpanBytes(cls.shape, cls.strides, cls.dtype));
+        }
+        std::vector<float> enode_bytes(num_enodes, 0.0f);
+        for (uint32_t e = 0; e < num_enodes; ++e)
+        {
+            const ENode &enode = egraph.getENode(ENodeId{e});
+            enode_bytes[e] = static_cast<float>(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()));
+        }
         std::vector<float> eclass_dp_cost(num_classes, TGConstants::INF);
         std::vector<float> eclass_dp_cp_cost(num_classes, TGConstants::INF);
         std::vector<float> eclass_dp_mem(num_classes, TGConstants::INF);
@@ -1052,8 +1068,7 @@ struct Planner
                 float sum_child_sizes = 0.0f;
                 for (EClassId child : child_classes)
                 {
-                    const EClass &child_class = egraph.getEClass(child);
-                    const float child_size = static_cast<float>(getStorageSpanBytes(child_class.shape, child_class.strides, child_class.dtype));
+                    const float child_size = class_bytes[child.value];
                     child_mems.push_back({eclass_dp_mem[child.value], child_size});
                     sum_child_sizes += child_size;
                 }
@@ -1069,7 +1084,7 @@ struct Planner
                     accumulated_outputs += child_mem.output;
                 }
 
-                const float output_size = static_cast<float>(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()));
+                const float output_size = enode_bytes[i];
                 bool can_be_inplace = enodeInfos[i].is_view;
                 if (!can_be_inplace && enode.getKernelId().value != 0 &&
                     KernelRegistry::get().hasKernel(enode.getKernelId()))
@@ -1081,7 +1096,7 @@ struct Planner
                             continue;
                         EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
                         const EClass &child_class = egraph.getEClass(child);
-                        const float input_size = static_cast<float>(getStorageSpanBytes(child_class.shape, child_class.strides, child_class.dtype));
+                        const float input_size = class_bytes[child.value];
                         if (child_class.mem_space == enode.getMemSpace() && output_size <= input_size)
                         {
                             can_be_inplace = true;
@@ -1094,7 +1109,7 @@ struct Planner
             }
             else
             {
-                total_mem = static_cast<float>(getStorageSpanBytes(enode.getShape(), enode.getStrides(), enode.getDType()));
+                total_mem = enode_bytes[i];
             }
 
             const float total_cost = cost + sum_child_cost;
@@ -2791,14 +2806,19 @@ struct Planner
         } cost_memo_scope(*this);
 
         LOG(INFO) << "[Planner.planAll] Planning " << buckets.size() << " bucket(s) with weights:";
+        // A bucket identical to an earlier one takes its saturated and reduced
+        // e-graph instead of building the same one again.
+        std::vector<uint32_t> identical_to(buckets.size());
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
+            identical_to[b] = b;
             std::string duplicates;
             for (uint32_t prior = 0; prior < b; ++prior)
             {
                 if (buckets[b] == buckets[prior])
                 {
                     duplicates = ", identical to bucket " + std::to_string(prior);
+                    identical_to[b] = identical_to[prior];
                     break;
                 }
             }
@@ -2881,7 +2901,7 @@ struct Planner
                         worker_planner.cost_memo_ = cost_memo_;
                         for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
                         {
-                            if (b == full_idx)
+                            if (b == full_idx || identical_to[b] != b)
                                 continue;
                             bucket_states[b] = worker_planner.saturateBucket(
                                 rootId, graph, buckets[b], settings.saturate_partial_buckets, repo, &full_state);
@@ -2907,6 +2927,9 @@ struct Planner
                     std::rethrow_exception(error);
         }
 
+        for (uint32_t b = 0; b < bucket_states.size(); ++b)
+            if (identical_to[b] != b && b != full_idx)
+                bucket_states[b] = bucket_states[identical_to[b]];
         for (uint32_t b = 0; b < bucket_states.size(); ++b)
             egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
                                                       "bucket=" + std::to_string(b) + " stage=saturated");
@@ -3218,6 +3241,19 @@ struct Planner
             const uint32_t nb = static_cast<uint32_t>(buckets.size());
             if (nb > 0)
                 reduceBucket(0, *this);
+            // Buckets identical to bucket 0 take its result now; the others
+            // after the parallel reduction.
+            auto copyReduced = [&](uint32_t b) {
+                const uint32_t from = identical_to[b];
+                bucket_states[b] = bucket_states[from];
+                all_enode_infos[b] = all_enode_infos[from];
+                cycle_reports[b].components = cycle_reports[from].components;
+                cycle_reports[b].removed = cycle_reports[from].removed;
+                cycle_reports[b].logs.resize(cycle_reports[from].logs.size());
+            };
+            for (uint32_t b = 1; b < nb; ++b)
+                if (identical_to[b] == 0)
+                    copyReduced(b);
             const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), std::max(nb, 1u)));
             std::atomic<uint32_t> next_bucket{1};
             std::vector<std::thread> threads;
@@ -3233,7 +3269,8 @@ struct Planner
                         Planner worker_planner(costModel, settings);
                         worker_planner.cost_memo_ = cost_memo_;
                         for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
-                            reduceBucket(b, worker_planner);
+                            if (identical_to[b] == b)
+                                reduceBucket(b, worker_planner);
                     }
                     catch (...)
                     {
@@ -3249,6 +3286,9 @@ struct Planner
             for (auto &error : errors)
                 if (error)
                     std::rethrow_exception(error);
+            for (uint32_t b = 1; b < nb; ++b)
+                if (identical_to[b] != b && identical_to[b] != 0)
+                    copyReduced(b);
         }
 
         if (std::getenv("TG_DEBUG_ROOTS"))

@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <functional>
+#include <map>
+#include <tuple>
 #include <cstdint>
 #include <array>
 #include <iomanip>
@@ -21,6 +24,7 @@
 #include "core/plan/domain.hpp"
 #include "core/plan/primal_heuristic.hpp"
 #include "core/plan/propagator.hpp"
+#include "core/plan/propagators/relaxation_bound.hpp"
 #include "core/plan/search_node.hpp"
 #include "core/plan/search_state.hpp"
 #include "core/plan/selector.hpp"
@@ -224,7 +228,8 @@ class SearchEngine
 #endif
                 return false;
             }
-            all_nodes[nid]->lower_bound = state.lower_bound;
+            // A node's box lies inside its parent's: keep the larger bound.
+            all_nodes[nid]->lower_bound = std::max(all_nodes[nid]->lower_bound, state.lower_bound);
             all_nodes[nid]->trail_marker = state.getTrailMarker();
             if (measure_search_volume)
                 all_nodes[nid]->log2_volume = state.domainLog2Volume();
@@ -855,6 +860,7 @@ class SearchEngine
         reportScheduleDiagnostics();
         root_node->lower_bound = state.lower_bound;
         root_node->priority = root_node->lower_bound;
+        root_bucket_lower_bounds_ = state.bucket_lower_bounds;
         root_node->trail_marker = state.getTrailMarker();
         if (measure_search_volume)
             root_node->log2_volume = state.domainLog2Volume();
@@ -872,7 +878,13 @@ class SearchEngine
 #endif
         root_lower_bound = root_node->lower_bound;
         sampleSearchGap(0, "root", true);
-        runRootPrimalHeuristic(program_deadline > 0.0 ? program_deadline : search_deadline);
+        // First incumbent, then the interval bounds, then the heuristic's
+        // improvement moves, then deeper bound refinement.
+        const double phase_deadline = program_deadline > 0.0 ? program_deadline : search_deadline;
+        runRootPrimalHeuristic(
+            phase_deadline, [&]() { refineRootBound(*root_node, phase_deadline, -2, -2); },
+            [&]() { refineRootBound(*root_node, phase_deadline, -1, -1); });
+        refineRootBound(*root_node, phase_deadline, 0, kMaxRefineDepth);
         // With an incumbent from the root heuristic, the remaining search is
         // proof work: refresh and split the largest open regions first.
         if (incumbent_best_cost < TGConstants::INF)
@@ -1115,7 +1127,7 @@ class SearchEngine
             state.setDomain(decision.left_delta.first, decision.left_delta.second);
             std::string left_conflict;
             bool left_ok = runPropagators(decision.left_delta.first, &left_conflict);
-            const float left_lb = state.lower_bound;
+            const float left_lb = std::max(state.lower_bound, node->lower_bound);
             if (left_ok && left_lb < incumbent_best_cost)
             {
                 uint32_t left_id = static_cast<uint32_t>(all_nodes.size());
@@ -1320,9 +1332,9 @@ class SearchEngine
         propagated_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - try_start).count();
         // Complete what propagation left open (typically memory offsets when no
         // static layout applies), propagating after each choice. Offsets try
-        // the brancher's preferred placement, then the end of the domain (space
-        // past every other buffer), then its start; other variables take the
-        // smallest value.
+        // the brancher's preferred placement, then the space past every other
+        // buffer of the memory space, then the end and the start of the
+        // domain; other variables take the smallest value.
         HeuristicBrancher placement;
         for (VarId v = 0; v < state.numVars(); ++v)
         {
@@ -1338,9 +1350,10 @@ class SearchEngine
             std::vector<int32_t> values;
             if (info.type == VarType::OFFSET)
             {
-                for (int32_t candidate :
-                     {placement.preferredOffset(state, info.bucket_idx, info.eclass_id, d), d.getMax(), d.getMin()})
-                    if (std::find(values.begin(), values.end(), candidate) == values.end())
+                const int32_t preferred = placement.preferredOffset(state, info.bucket_idx, info.eclass_id, d);
+                const int32_t past = placement.offsetPastAllocations(state, info.bucket_idx, info.eclass_id);
+                for (int32_t candidate : {preferred, past, d.getMax(), d.getMin()})
+                    if (d.contains(candidate) && std::find(values.begin(), values.end(), candidate) == values.end())
                         values.push_back(candidate);
             }
             else
@@ -1371,7 +1384,69 @@ class SearchEngine
         return finish();
     }
 
-    void runRootPrimalHeuristic(double program_deadline)
+    // Computes the relaxation's interval bound, then nests its threshold
+    // splits one level deeper at a time (docs/core/relaxation_bound.md,
+    // "Case splits"), raising the root node's bound after each level. It spends at most half the time
+    // left before `deadline_epoch` (5 s without a deadline): the search
+    // below the root cannot raise these bounds, deeper splits can.
+    void refineRootBound(SearchNode &root, double deadline_epoch, int first_depth, int last_depth)
+    {
+        RelaxationBoundPropagator *relaxation = nullptr;
+        for (auto &propagator : propagators)
+            if (auto *candidate = dynamic_cast<RelaxationBoundPropagator *>(propagator.get()))
+                relaxation = candidate;
+        if (!relaxation)
+            return;
+        const double now_epoch =
+            std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const double budget = deadline_epoch > 0.0 ? 0.5 * (deadline_epoch - now_epoch) : 5.0;
+        if (!(budget > 0.0))
+            return;
+        const auto start = std::chrono::steady_clock::now();
+        const auto deadline = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                          std::chrono::duration<double>(budget));
+        // Level -2 is the interval bound over flexible windows, level -1 adds
+        // long windows (kLongWindowLinks) ending at its partition's
+        // boundaries, level 0 the stride windows (all deferred from root
+        // propagation so the heuristic starts sooner), then nested splits.
+        for (int depth = first_depth; depth <= last_depth && std::chrono::steady_clock::now() < deadline; ++depth)
+        {
+            const bool raised = depth == -2   ? relaxation->computeFlexibleIntervals(state, deadline)
+                                : depth == -1 ? relaxation->computeFlexibleIntervals(state, deadline, kLongWindowLinks)
+                                : depth == 0  ? relaxation->computeIntervals(state, deadline)
+                                              : relaxation->refine(state, depth, deadline);
+            if (!raised)
+                continue;
+            // The root's bucket bounds from root propagation, raised by the
+            // refined relaxation bounds (the state's own bucket bounds can be
+            // stale after the heuristic restored the root).
+            float bound = 0.0f;
+            for (size_t b = 0; b < root_bucket_lower_bounds_.size(); ++b)
+            {
+                const float weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
+                if (weight > 0.0f)
+                    bound += weight * std::max(root_bucket_lower_bounds_[b], state.bucket_relaxation_lower_bounds[b]);
+            }
+            if (bound > root.lower_bound)
+            {
+                root.lower_bound = bound;
+                root_lower_bound = bound;
+                sampleSearchGap(0, "sample", true);
+            }
+            LOG(INFO) << "[RelaxationBound refine] depth=" << depth << " bound=" << root.lower_bound << " elapsed="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "s";
+        }
+    }
+    static constexpr int kMaxRefineDepth = 6;
+    static constexpr size_t kLongWindowLinks = 24;
+    std::vector<float> root_bucket_lower_bounds_;
+
+    // `after_first` runs once the first plan is validated (or none was),
+    // before the improvement moves; `after_windows` after the first window
+    // moves, which then run again on the partition it leaves (the bound's
+    // long windows).
+    void runRootPrimalHeuristic(double program_deadline, const std::function<void()> &after_first,
+                                const std::function<void()> &after_windows)
     {
         const auto start = std::chrono::steady_clock::now();
         std::vector<PrimalBucketContext> contexts;
@@ -1380,6 +1455,8 @@ class SearchEngine
         if (plans.empty())
         {
             LOG(INFO) << "[PrimalHeuristic] no consistent plan (build " << build_seconds << "s)";
+            after_first();
+            after_windows();
             return;
         }
         auto describe = [](const PrimalPlan &plan) {
@@ -1402,21 +1479,111 @@ class SearchEngine
         {
             const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
             // Leave time to validate the result afterwards (tryPlan takes
-            // about 3.5x the plan build in practice).
-            const double reserve = 4.0 * build_seconds + 10.0;
+            // about 3.5x the plan build in practice, at most ~15 s so far;
+            // the build includes the estimates' relaxation evaluations).
+            const double reserve = std::min(4.0 * build_seconds + 10.0, 20.0);
             ls_deadline = ls_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                          std::chrono::duration<double>(std::max(0.0, program_deadline - reserve - now)));
         }
         uint64_t evaluations = 0;
-        for (size_t i = 0; i < plans.size(); ++i)
         {
-            const double initial = plans[i].cost;
-            improvePrimalPlan(state, contexts, plans[i], ls_deadline, evaluations);
+            // One round of tasks: the best starts (plans are sorted by
+            // predicted cost), as many as threads per weighted bucket.
+            std::vector<double> initial;
+            std::vector<PrimalPlan *> starts;
+            size_t weighted = 0;
+            for (uint32_t b = 0; b < state.buckets.size(); ++b)
+                weighted += !(b < state.bucket_weights.size()) || state.bucket_weights[b] > 0.0f;
+            const size_t threads = std::max(1u, std::min(std::thread::hardware_concurrency(), 16u));
+            const size_t limit = std::max<size_t>(1, threads / std::max<size_t>(1, weighted));
+            for (PrimalPlan &plan : plans)
+            {
+                initial.push_back(plan.cost);
+                if (starts.size() < limit)
+                    starts.push_back(&plan);
+            }
+            improvePrimalPlans(state, contexts, starts, ls_deadline, evaluations);
             const double ls_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ls_start).count();
-            LOG(INFO) << "[PrimalHeuristic] local search lambda=[" << describe(plans[i]) << "] " << initial << " -> "
-                      << plans[i].cost << " (" << evaluations << " schedules, " << ls_seconds << "s)";
+            for (size_t i = 0; i < plans.size(); ++i)
+                LOG(INFO) << "[PrimalHeuristic] local search lambda=[" << describe(plans[i]) << "] " << initial[i]
+                          << " -> " << plans[i].cost;
+            LOG(INFO) << "[PrimalHeuristic] local search " << starts.size() << " of " << plans.size() << " start(s): " << evaluations
+                      << " schedules, " << ls_seconds << "s";
         }
-        // Cache-set moves on the best local optimum.
+        // Validate in cost order (improved plans first, then the initial
+        // ones) until one is accepted, so the first incumbent comes early.
+        auto validate = [&](const std::vector<const PrimalPlan *> &order) {
+            for (const PrimalPlan *plan : order)
+            {
+                if (!(plan->cost < incumbent_best_cost - 1e-6))
+                    continue;
+                failure.clear();
+                const float cost = tryPlan(*plan, contexts, 0, program_deadline, failure);
+                LOG(INFO) << "[PrimalHeuristic] validate predicted=" << plan->cost << " evaluated="
+                          << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
+                          << " lambda=[" << describe(*plan) << "]" << (failure.empty() ? "" : " failure=" + failure);
+                if (std::isfinite(cost))
+                    return;
+            }
+        };
+        {
+            std::vector<const PrimalPlan *> order;
+            for (const PrimalPlan &plan : plans)
+                order.push_back(&plan);
+            std::stable_sort(order.begin(), order.end(),
+                             [](const PrimalPlan *a, const PrimalPlan *b) { return a->cost < b->cost; });
+            for (const PrimalPlan &plan : initial_plans)
+                order.push_back(&plan);
+            validate(order);
+        }
+        after_first();
+        // Window moves on the best local optimum, then local search again.
+        {
+            size_t best = 0;
+            for (size_t i = 1; i < plans.size(); ++i)
+                if (plans[i].cost < plans[best].cost)
+                    best = i;
+            const double initial = plans[best].cost;
+            const auto wm_start = std::chrono::steady_clock::now();
+            // The bound's flexible partition (same relaxation construction).
+            RelaxationBoundPropagator *relaxation = nullptr;
+            for (auto &propagator : propagators)
+                if (auto *candidate = dynamic_cast<RelaxationBoundPropagator *>(propagator.get()))
+                    relaxation = candidate;
+            auto partitioned = [&](uint32_t b) -> RelaxationBoundComputer * {
+                if (!relaxation)
+                    return nullptr;
+                RelaxationBoundComputer *computer = relaxation->computerFor(b);
+                if (!computer)
+                    return nullptr;
+                const RelaxationBucket &theirs = relaxation->relaxationOf(b);
+                const RelaxationBucket &ours = contexts[b].rb;
+                bool same = theirs.classes.size() == ours.classes.size();
+                for (size_t u = 0; same && u < ours.classes.size(); ++u)
+                    same = theirs.classes[u].cid == ours.classes[u].cid &&
+                           theirs.classes[u].alternatives.size() == ours.classes[u].alternatives.size();
+                return same ? computer : nullptr;
+            };
+            if (improveByWindows(state, contexts, plans[best], ls_deadline, evaluations, partitioned))
+                improvePrimalPlan(state, contexts, plans[best], ls_deadline, evaluations);
+            LOG(INFO) << "[PrimalHeuristic] window moves " << initial << " -> " << plans[best].cost << " ("
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - wm_start).count() << "s)";
+            if (plans[best].cost < std::min<double>(initial, incumbent_best_cost) * (1.0 - 1e-3))
+                validate({&plans[best]});
+            // Again on the partition with the long windows.
+            after_windows();
+            const double before_long = plans[best].cost;
+            const auto lw_start = std::chrono::steady_clock::now();
+            if (improveByWindows(state, contexts, plans[best], ls_deadline, evaluations, partitioned))
+                improvePrimalPlan(state, contexts, plans[best], ls_deadline, evaluations);
+            LOG(INFO) << "[PrimalHeuristic] long window moves " << before_long << " -> " << plans[best].cost << " ("
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - lw_start).count() << "s)";
+            if (plans[best].cost < std::min<double>(before_long, incumbent_best_cost) * (1.0 - 1e-3))
+                validate({&plans[best]});
+        }
+        // Then cache-set moves on the best local optimum (they rarely pay
+        // much: capped at 10 s), validated (as expensive as the first
+        // validation) only if they predict at least 0.1% better.
         {
             size_t best = 0;
             for (size_t i = 1; i < plans.size(); ++i)
@@ -1425,34 +1592,15 @@ class SearchEngine
             const double initial = plans[best].cost;
             uint32_t dropped = 0;
             const auto cs_start = std::chrono::steady_clock::now();
-            // Cache-set moves rarely pay much; cap them at 30 s.
-            const auto cs_deadline = std::min(ls_deadline, cs_start + std::chrono::seconds(30));
+            const auto cs_deadline = std::min(ls_deadline, cs_start + std::chrono::seconds(10));
             uint32_t added = 0;
             addCacheBases(state, contexts, plans[best], cs_deadline, evaluations, added);
             improveCacheSet(state, contexts, plans[best], cs_deadline, evaluations, dropped);
             const double cs_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - cs_start).count();
             LOG(INFO) << "[PrimalHeuristic] cache-set moves " << initial << " -> " << plans[best].cost
                       << " added=" << added << " dropped=" << dropped << " (" << cs_seconds << "s)";
-        }
-        // Validate in cost order (improved plans first, then the initial ones).
-        std::vector<const PrimalPlan *> order;
-        for (const PrimalPlan &plan : plans)
-            order.push_back(&plan);
-        std::stable_sort(order.begin(), order.end(),
-                         [](const PrimalPlan *a, const PrimalPlan *b) { return a->cost < b->cost; });
-        for (const PrimalPlan &plan : initial_plans)
-            order.push_back(&plan);
-        for (const PrimalPlan *plan : order)
-        {
-            if (!(plan->cost < incumbent_best_cost - 1e-6))
-                continue;
-            failure.clear();
-            const float cost = tryPlan(*plan, contexts, 0, program_deadline, failure);
-            LOG(INFO) << "[PrimalHeuristic] validate predicted=" << plan->cost << " evaluated="
-                      << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
-                      << " lambda=[" << describe(*plan) << "]" << (failure.empty() ? "" : " failure=" + failure);
-            if (std::isfinite(cost))
-                break;
+            if (plans[best].cost < std::min<double>(initial, incumbent_best_cost) * (1.0 - 1e-3))
+                validate({&plans[best]});
         }
         LOG(INFO) << "[PrimalHeuristic] total "
                   << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "s";

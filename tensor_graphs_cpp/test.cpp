@@ -110,7 +110,60 @@ int main(int argc, char *argv[])
             }
             auto t1 = std::chrono::high_resolution_clock::now();
             plan::RelaxationBoundComputer rbc(rb);
-            double max_bnd = plan::maximizeRelaxationBound(rbc, rb.engines.size());
+            std::vector<double> best_lambda;
+            double max_bnd = plan::maximizeRelaxationBound(rbc, rb.engines.size(), &best_lambda);
+            {
+                auto env_or = [](const char *name, int fallback) {
+                    const char *v = std::getenv(name);
+                    return v ? std::atoi(v) : fallback;
+                };
+                const auto p0 = std::chrono::high_resolution_clock::now();
+                const double probed = rbc.evaluateProbed(best_lambda, env_or("TG_PROBE_DEPTH", 2),
+                                                         static_cast<size_t>(env_or("TG_PROBE_CANDIDATES", 8)),
+                                                         static_cast<size_t>(env_or("TG_PROBE_MIN_NODES", 64)),
+                                                         static_cast<size_t>(env_or("TG_PROBE_WITH", 4)));
+                const auto p1 = std::chrono::high_resolution_clock::now();
+                std::cout << "  Probed load bound at the best lambda: " << probed << " ("
+                          << std::chrono::duration<double, std::milli>(p1 - p0).count() << " ms)\n";
+                if (const char *global = std::getenv("TG_GLOBAL_SPLIT"))
+                {
+                    const auto g0 = std::chrono::high_resolution_clock::now();
+                    const double split = rbc.evaluateGlobalSplit(best_lambda, static_cast<size_t>(std::atol(global)));
+                    const auto g1 = std::chrono::high_resolution_clock::now();
+                    std::cout << "  Global split load bound at the best lambda: " << split << " ("
+                              << std::chrono::duration<double, std::milli>(g1 - g0).count() << " ms)\n";
+                }
+                if (const char *grid = std::getenv("TG_PROBE_LAMBDAS"))
+                {
+                    std::stringstream list(grid);
+                    std::string item;
+                    while (std::getline(list, item, ','))
+                    {
+                        const double l0 = std::stod(item);
+                        std::vector<double> lambda(rb.engines.size(), (1.0 - l0) / std::max<size_t>(1, rb.engines.size() - 1));
+                        lambda[0] = l0;
+                        std::cout << "  lambda0=" << l0 << " plain=" << rbc.evaluate(lambda) << " probed="
+                                  << rbc.evaluateProbed(lambda, env_or("TG_PROBE_DEPTH", 2),
+                                                        static_cast<size_t>(env_or("TG_PROBE_CANDIDATES", 8)),
+                                                        static_cast<size_t>(env_or("TG_PROBE_MIN_NODES", 64)),
+                                                        static_cast<size_t>(env_or("TG_PROBE_WITH", 4)))
+                                  << "\n";
+                    }
+                }
+            }
+            if (std::getenv("TG_NO_STAGE"))
+                rbc.setExactWindowStage(false);
+            if (const char *nodes = std::getenv("TG_EXACT_NODES"))
+                rbc.setExactWindowNodes(static_cast<uint64_t>(std::atoll(nodes)));
+            if (const char *flex = std::getenv("TG_FLEX_WINDOWS"))
+            {
+                const auto f0 = std::chrono::high_resolution_clock::now();
+                const size_t long_len = std::getenv("TG_FLEX_LONG") ? static_cast<size_t>(std::atol(std::getenv("TG_FLEX_LONG"))) : 0;
+                const double v = rbc.flexibleIntervalBound(static_cast<size_t>(std::atol(flex)), std::chrono::steady_clock::time_point::max(), long_len);
+                const auto f1 = std::chrono::high_resolution_clock::now();
+                std::cout << "  Flexible interval bound (max_len " << flex << "): " << v << " ("
+                          << std::chrono::duration<double, std::milli>(f1 - f0).count() << " ms)\n";
+            }
             double best_ib = 0.0;
             for (uint32_t stride : {1u, 2u, 4u, 8u, 16u})
             {

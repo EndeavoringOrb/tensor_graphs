@@ -306,6 +306,33 @@ class CycleAvoidancePropagator : public Propagator
         return true;
     }
 
+
+    // While the root heuristic validates a complete plan (every selection is
+    // fixed before propagation), nothing is left to prune: one cycle check
+    // of the selected graph per selection revision replaces the per-variable
+    // ancestor searches (quadratic over a plan). Returns false (no
+    // shortcut) when a selection of the bucket is still open.
+    std::vector<uint64_t> verified_revision_;
+    bool completePlanCheck(SearchState &state, uint32_t b, bool &consistent)
+    {
+        if (!state.completing_plan)
+            return false;
+        if (verified_revision_.size() < state.buckets.size())
+            verified_revision_.resize(state.buckets.size(), UINT64_MAX);
+        if (verified_revision_[b] == state.getSelectionRevision())
+        {
+            consistent = true;
+            return true;
+        }
+        for (const auto &pair : state.selected_vars[b])
+            if (!state.domains[pair.second].isFixed())
+                return false;
+        consistent = checkCycles(state, b);
+        if (consistent)
+            verified_revision_[b] = state.getSelectionRevision();
+        return true;
+    }
+
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
 
@@ -323,6 +350,9 @@ class CycleAvoidancePropagator : public Propagator
 
             uint32_t b = state.var_infos[changed].bucket_idx;
             EClassId cid = state.var_infos[changed].eclass_id;
+            bool consistent = true;
+            if (completePlanCheck(state, b, consistent))
+                return consistent;
             const Domain &dom = state.domains[changed];
 
             if (dom.isEmpty())

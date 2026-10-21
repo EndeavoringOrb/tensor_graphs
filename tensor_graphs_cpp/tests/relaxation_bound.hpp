@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <random>
 
 #include "core/plan/relaxation_bound.hpp"
@@ -33,6 +34,8 @@ class RelaxationBoundRegression
         std::vector<int> choice;
         std::vector<std::vector<double>> plan_loads;
         double min_makespan = std::numeric_limits<double>::infinity();
+        // Cyclic specs: any child id; selections with a cycle are no plans.
+        bool allow_cycles = false;
 
         double duration(const AlternativeSpec &alt) const
         {
@@ -102,8 +105,30 @@ class RelaxationBoundRegression
                 engine_free = saved;
             }
         }
+        bool selectionCyclic() const
+        {
+            std::vector<uint8_t> state(spec.size(), 0);
+            std::function<bool(uint32_t)> visit = [&](uint32_t u) {
+                if (state[u] == 1)
+                    return true;
+                if (state[u] == 2)
+                    return false;
+                state[u] = 1;
+                for (uint32_t ch : spec[u][static_cast<size_t>(choice[u])].children)
+                    if (visit(ch))
+                        return true;
+                state[u] = 2;
+                return false;
+            };
+            for (uint32_t u = 0; u < spec.size(); ++u)
+                if (choice[u] >= 0 && visit(u))
+                    return true;
+            return false;
+        }
         void record()
         {
+            if (allow_cycles && selectionCyclic())
+                return;
             std::vector<uint32_t> active;
             for (uint32_t u = 0; u < spec.size(); ++u)
                 if (choice[u] >= 0)
@@ -152,8 +177,8 @@ class RelaxationBoundRegression
                 bool ok = true;
                 for (uint32_t ch : spec[u][a].children)
                 {
-                    if (ch <= u)
-                        ok = false; // generators only create edges to larger ids
+                    if (ch <= u && !allow_cycles)
+                        ok = false; // acyclic generators only create edges to larger ids
                     if (choice[ch] < 0)
                         next.push_back(ch);
                 }
@@ -248,13 +273,133 @@ class RelaxationBoundRegression
         return spec;
     }
 
+    // Logits-style sharing: a concat of chunks, each computed on the CPU from
+    // its own transpose (or a cheaper one reading a shared contiguous Q) or
+    // copied from a GPU chunk that reads the shared, expensive GPU copy of Q.
+    static GraphSpec chunkedGraph(std::mt19937 &rng)
+    {
+        std::uniform_int_distribution<int> pick(0, 99);
+        auto cost = [&]() { return static_cast<float>(1 + pick(rng) % 16) / 4.0f; };
+        const uint32_t m = 2 + static_cast<uint32_t>(pick(rng) % 2);
+        // ids: 0 root, 1 Q, 2 G (GPU copy of Q), then per chunk C, T, D, input last.
+        const uint32_t n = 3 + 3 * m + 1;
+        const uint32_t input = n - 1;
+        GraphSpec spec(n);
+        spec[input].push_back(AlternativeSpec({}, {}, 0.0f, false, OpType::INPUT));
+        spec[1].push_back(AlternativeSpec({input}, {cpu()}, 2.0f * cost()));
+        spec[2].push_back(AlternativeSpec({1}, {cpu()}, 2.0f * cost(), false, OpType::COPY_TO));
+        std::vector<uint32_t> chunks;
+        for (uint32_t i = 0; i < m; ++i)
+        {
+            const uint32_t c = 3 + 3 * i, t = c + 1, d = c + 2;
+            chunks.push_back(c);
+            spec[c].push_back(AlternativeSpec({t}, {cpu()}, cost()));
+            spec[c].push_back(AlternativeSpec({d}, {cpu()}, cost() / 8.0f, false, OpType::COPY_TO));
+            if (pick(rng) < 40)
+                spec[c].push_back(AlternativeSpec({input}, {cpu()}, 4.0f * cost()));
+            spec[t].push_back(AlternativeSpec({input}, {cpu()}, cost()));
+            spec[t].push_back(AlternativeSpec({1}, {cpu()}, cost() / 2.0f));
+            if (pick(rng) < 30)
+                spec[t].push_back(AlternativeSpec({1}, {}, 0.0f, true, OpType::SLICE));
+            spec[d].push_back(AlternativeSpec({2}, {gpu()}, cost() / 4.0f));
+        }
+        spec[0].push_back(AlternativeSpec(chunks, {cpu()}, cost() / 8.0f));
+        if (pick(rng) < 50)
+            spec[0].push_back(AlternativeSpec({input}, {cpu()}, 6.0f * cost()));
+        return spec;
+    }
+
+    // Two-form tensors per layer, as in incremental decode: a full tensor F
+    // (from the previous full one, or scattered from the part), a part P (from
+    // the previous part, or a slice of F) and a GPU copy G of F (computed from
+    // the previous G, or copied). F, P and G form a cycle per layer.
+    static GraphSpec cyclicGraph(std::mt19937 &rng)
+    {
+        std::uniform_int_distribution<int> pick(0, 99);
+        auto cost = [&]() { return static_cast<float>(1 + pick(rng) % 16) / 4.0f; };
+        const uint32_t layers = 1 + static_cast<uint32_t>(pick(rng) % 2);
+        // ids: 0 root, per layer l (1-based): F, P, G at 1 + 3 (l - 1); input last.
+        const uint32_t n = 1 + 3 * layers + 1;
+        const uint32_t input = n - 1;
+        GraphSpec spec(n);
+        auto f = [&](uint32_t l) { return l == 0 ? input : 1 + 3 * (l - 1); };
+        auto p = [&](uint32_t l) { return l == 0 ? input : 2 + 3 * (l - 1); };
+        auto g = [&](uint32_t l) { return l == 0 ? input : 3 + 3 * (l - 1); };
+        spec[input].push_back(AlternativeSpec({}, {}, 0.0f, false, OpType::INPUT));
+        for (uint32_t l = 1; l <= layers; ++l)
+        {
+            spec[f(l)].push_back(AlternativeSpec({f(l - 1)}, {cpu()}, 2.0f * cost()));
+            spec[f(l)].push_back(AlternativeSpec({p(l)}, {cpu()}, cost() / 4.0f));
+            spec[f(l)].push_back(AlternativeSpec({g(l)}, {cpu()}, cost() / 4.0f, false, OpType::COPY_TO));
+            spec[p(l)].push_back(AlternativeSpec({p(l - 1)}, {pick(rng) < 50 ? cpu() : gpu()}, cost()));
+            spec[p(l)].push_back(AlternativeSpec({f(l)}, {}, 0.0f, true, OpType::SLICE));
+            spec[g(l)].push_back(AlternativeSpec({g(l - 1)}, {gpu()}, 2.0f * cost()));
+            spec[g(l)].push_back(AlternativeSpec({f(l)}, {gpu()}, cost() / 4.0f, false, OpType::COPY_TO));
+        }
+        spec[0].push_back(AlternativeSpec({p(layers)}, {cpu()}, cost()));
+        spec[0].push_back(AlternativeSpec({g(layers)}, {gpu()}, cost()));
+        if (pick(rng) < 30)
+            spec[0].push_back(AlternativeSpec({f(layers), p(layers)}, {cpu()}, cost() / 2.0f));
+        return spec;
+    }
+
+    // Small graphs whose alternatives may read any non-root class, so cyclic
+    // components of every shape appear (entered through any member, shared
+    // with acyclic parts of the graph, with several components per graph).
+    static GraphSpec randomCyclicGraph(std::mt19937 &rng)
+    {
+        std::uniform_int_distribution<int> nodes_dist(4, 7), alts_dist(1, 3), pick(0, 99);
+        const uint32_t n = static_cast<uint32_t>(nodes_dist(rng));
+        const uint32_t input = n - 1;
+        GraphSpec spec(n);
+        spec[input].push_back(AlternativeSpec({}, {}, 0.0f, false, OpType::INPUT));
+        std::uniform_int_distribution<uint32_t> child_dist(1, n - 1);
+        for (uint32_t u = 0; u + 1 < n; ++u)
+        {
+            const int alts = alts_dist(rng);
+            for (int a = 0; a < alts; ++a)
+            {
+                AlternativeSpec alt;
+                const int kind = pick(rng);
+                const int num_children = kind < 45 ? 1 : 1 + pick(rng) % 3;
+                for (int c = 0; c < num_children; ++c)
+                {
+                    uint32_t ch = child_dist(rng);
+                    if (ch == u)
+                        ch = input;
+                    alt.children.push_back(ch);
+                }
+                if (kind < 20)
+                    alt.op_type = OpType::COPY_TO;
+                else if (kind < 35)
+                {
+                    alt.is_view = true;
+                    alt.op_type = OpType::SLICE;
+                }
+                // Free ops (not views) derive members of a component from
+                // each other at no cost, as in a slice and its scatter back.
+                alt.cost = alt.is_view || (kind >= 35 && kind < 45) ? 0.0f : static_cast<float>(pick(rng) % 33) / 4.0f;
+                if (!alt.is_view)
+                    alt.engines = {pick(rng) < 50 ? cpu() : gpu()};
+                spec[u].push_back(alt);
+            }
+        }
+        return spec;
+    }
+
     static void checkGraph(const GraphSpec &spec, uint32_t trial, size_t &bound_checks, size_t &positive)
     {
         using namespace incremental_propagator_test;
         SearchState state = makeState(spec);
         RelaxationBucket rb = buildRelaxationBucket(state, 0, /*allow_checkpoints=*/false);
-        require(rb.acyclic, "generated graph must be acyclic");
+        require(rb.acyclic, "generated graph must be acyclic (cycles unrolled)");
+        bool cyclic = false;
+        for (uint32_t u = 0; u < spec.size(); ++u)
+            for (const auto &alt : spec[u])
+                for (uint32_t ch : alt.children)
+                    cyclic = cyclic || ch <= u;
         Brute brute{spec, rb.engines, std::vector<int>(spec.size(), -1), {}};
+        brute.allow_cycles = cyclic;
         brute.enumerate({0});
         if (!rb.root_feasible)
         {
@@ -299,6 +444,30 @@ class RelaxationBoundRegression
             positive += bound > 1e-9;
             require(bound <= truth + 1e-9, "trial " + std::to_string(trial) + ": bound " + std::to_string(bound) +
                                                " exceeds weighted optimum " + std::to_string(truth));
+            // Case splits (probes and threshold splits) on every region.
+            const double probed = computer.evaluateProbed(lambda, 2, 6, 1, 8);
+            ++probe_checks;
+            probe_stronger += probed > bound + 1e-9;
+            require(probed <= truth + 1e-9, "trial " + std::to_string(trial) + ": probed bound " +
+                                                std::to_string(probed) + " exceeds weighted optimum " +
+                                                std::to_string(truth));
+            // Global case splits on the classes hidden by the region decomposition.
+            const double global = computer.evaluateGlobalSplit(lambda, 8);
+            ++global_checks;
+            global_stronger += global > bound + 1e-9;
+            require(global <= truth + 1e-9, "trial " + std::to_string(trial) + ": global split bound " +
+                                                std::to_string(global) + " exceeds weighted optimum " +
+                                                std::to_string(truth));
+            // Nested threshold splits, refined level by level like the search does.
+            for (int depth = 0; depth <= 2; ++depth)
+            {
+                const double split = computer.evaluateSplit(lambda, depth, 4, std::chrono::steady_clock::time_point::max());
+                ++split_checks;
+                split_stronger += split > bound + 1e-9;
+                require(split <= truth + 1e-9, "trial " + std::to_string(trial) + ": depth-" + std::to_string(depth) +
+                                                   " split bound " + std::to_string(split) +
+                                                   " exceeds weighted optimum " + std::to_string(truth));
+            }
         }
         double minmax = std::numeric_limits<double>::infinity();
         for (const auto &loads : brute.plan_loads)
@@ -324,7 +493,42 @@ class RelaxationBoundRegression
                     "trial " + std::to_string(trial) + ": best window partition " + std::to_string(combined) +
                         " exceeds the minimum makespan " + std::to_string(brute.min_makespan));
         }
+        // The exact window enumeration's pruning keeps its values: with
+        // budgets both finish, flexible values with and without it agree.
+        computer.setExactWindowNodes(5000000);
+        for (size_t max_len : {size_t(2), size_t(8)})
+        {
+            const double pruned = computer.flexibleIntervalBound(max_len, std::chrono::steady_clock::time_point::max());
+            computer.setExactWindowPruning(false);
+            const double plain = computer.flexibleIntervalBound(max_len, std::chrono::steady_clock::time_point::max());
+            computer.setExactWindowPruning(true);
+            ++pruning_checks;
+            require(std::abs(pruned - plain) <= 1e-9,
+                    "trial " + std::to_string(trial) + ": exact windows with pruning give " + std::to_string(pruned) +
+                        ", without " + std::to_string(plain) + " (max_len " + std::to_string(max_len) + ")");
+        }
         computer.setExactWindowNodes(20000);
+        // Long windows at the partition's boundaries (cut DP values) too.
+        for (const auto &[max_len, long_len] : {std::pair<size_t, size_t>{1, 4}, std::pair<size_t, size_t>{2, 8}})
+        {
+            const double flexible =
+                computer.flexibleIntervalBound(max_len, std::chrono::steady_clock::time_point::max(), long_len);
+            ++flexible_checks;
+            require(flexible <= brute.min_makespan + 1e-9,
+                    "trial " + std::to_string(trial) + ": flexible interval bound " + std::to_string(flexible) +
+                        " with long windows (" + std::to_string(max_len) + ", " + std::to_string(long_len) +
+                        ") exceeds the minimum makespan " + std::to_string(brute.min_makespan));
+        }
+        // Flexible windows (every short window, best partition) must be valid.
+        for (size_t max_len : {size_t(1), size_t(3), size_t(8)})
+        {
+            const double flexible = computer.flexibleIntervalBound(max_len, std::chrono::steady_clock::time_point::max());
+            ++flexible_checks;
+            require(flexible <= brute.min_makespan + 1e-9,
+                    "trial " + std::to_string(trial) + ": flexible interval bound " + std::to_string(flexible) +
+                        " (max_len " + std::to_string(max_len) + ") exceeds the minimum makespan " +
+                        std::to_string(brute.min_makespan));
+        }
         // Every chain stride gives its own windows; each must be valid.
         for (size_t stride : {size_t(1), size_t(2), size_t(3)})
         {
@@ -354,22 +558,39 @@ class RelaxationBoundRegression
     }
     static inline size_t interval_checks = 0, interval_positive = 0, interval_stronger = 0;
     static inline size_t cut_checks = 0, cut_tight = 0, dyadic_checks = 0;
+    static inline size_t probe_checks = 0, probe_stronger = 0, split_checks = 0, split_stronger = 0;
+    static inline size_t global_checks = 0, global_stronger = 0, flexible_checks = 0, pruning_checks = 0;
 
   public:
     static void run()
     {
         std::mt19937 rng(20261012);
         size_t checks = 0, positive = 0;
+        // Own generator, so the other families keep their graphs.
+        std::mt19937 cyclic_rng(20261021);
+        for (uint32_t trial = 0; trial < 2000; ++trial)
+            checkGraph(randomCyclicGraph(cyclic_rng), 400000 + trial, checks, positive);
         for (uint32_t trial = 0; trial < 4000; ++trial)
             checkGraph(randomGraph(rng), trial, checks, positive);
         for (uint32_t trial = 0; trial < 2000; ++trial)
             checkGraph(layeredGraph(rng), 100000 + trial, checks, positive);
+        for (uint32_t trial = 0; trial < 2000; ++trial)
+            checkGraph(cyclicGraph(rng), 300000 + trial, checks, positive);
+        const size_t probe_stronger_before = probe_stronger;
+        for (uint32_t trial = 0; trial < 2000; ++trial)
+            checkGraph(chunkedGraph(rng), 200000 + trial, checks, positive);
+        require(probe_stronger > probe_stronger_before, "case splits never tighten chunked graphs; the test is not "
+                                                        "exercising them");
         require(positive > checks / 4, "bound is almost always zero; the test is not exercising it");
         require(interval_stronger > interval_checks / 20, "interval bound rarely beats the load bound; the test is "
                                                           "not exercising it");
         std::cout << "Relaxation bound regression passed (" << checks << " weighted checks, " << positive
                   << " positive; " << interval_checks << " interval checks, " << interval_positive << " positive, "
                   << interval_stronger << " above the load bound; " << cut_checks << " cut-DP checks, " << cut_tight
-                  << " reaching the exact window values; " << dyadic_checks << " window partitions)" << std::endl;
+                  << " reaching the exact window values; " << dyadic_checks << " window partitions; " << probe_checks
+                  << " probed checks, " << probe_stronger << " above the load bound; " << split_checks
+                  << " nested split checks, " << split_stronger << " above the load bound; " << global_checks
+                  << " global split checks, " << global_stronger << " above the load bound; " << flexible_checks
+                  << " flexible window checks; " << pruning_checks << " exact pruning checks)" << std::endl;
     }
 };

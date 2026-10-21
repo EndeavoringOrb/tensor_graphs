@@ -1,0 +1,12 @@
+{
+  "name": "cyclic component forms one group with its cheapest outside production",
+  "description": "x1 and x2 each derive from the other for free (like a slice of a larger tensor and its scatter back), so they form one cyclic component and one group: every plan needing out holds x1 or x2. x1 costs 3 from the input, x2 costs 5. A cycle-free plan produces some member from outside the component, so the group is worth its cheapest outside production, 3; out adds 1. The optimum is 4 (x1 from the input). Charging the group its most expensive outside production (x2's 5) would claim 6, and treating x2 as necessary on its own would claim at least 6.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["x1"], "cost": 1, "engines": [0]}]},
+    "x1": {"alternatives": [{"children": ["x2"], "cost": 0, "engines": [0]}, {"children": ["inp"], "cost": 3, "engines": [0]}]},
+    "x2": {"alternatives": [{"children": ["x1"], "cost": 0, "engines": [0]}, {"children": ["inp"], "cost": 5, "engines": [0]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 4
+}

@@ -9,12 +9,14 @@
 // evaluates it with the normal leaf evaluation before accepting it.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <cmath>
 #include <exception>
 #include <functional>
 #include <limits>
+#include <tuple>
 #include <mutex>
 #include <queue>
 #include <sstream>
@@ -24,6 +26,7 @@
 #include <vector>
 
 #include "core/plan/propagators/base.hpp"
+#include "core/common/thread_pool.hpp"
 #include "core/plan/relaxation_bound.hpp"
 
 namespace plan
@@ -64,12 +67,10 @@ inline void markCacheAlternatives(const SearchState &state, RelaxationBucket &rb
                 alt.requires_cache = false;
                 continue;
             }
+            // A class without a base has no cache variable: its cache-only
+            // alternatives are marked too and never usable (no base is ever
+            // cached), as CacheRequirementPropagator rejects them.
             const ENode &enode = egraph.getENode(cls.enodes.at(static_cast<size_t>(alt.value - 1)));
-            if (rc.base == BaseEClassId{})
-            {
-                alt.requires_cache = false;
-                continue;
-            }
             if (enode.getOpType() == OpType::CACHE || enode.getOpType() == OpType::SCATTER)
             {
                 alt.requires_cache = true;
@@ -100,7 +101,8 @@ inline void markCacheAlternatives(const SearchState &state, RelaxationBucket &rb
 
 // Simulated dispatch order: repeatedly dispatch the ready operation that can
 // start earliest (ties: longest remaining path), mirroring MakespanSimulator.
-inline double listSchedule(const RelaxationBucket &rb, PrimalBucketPlan &plan)
+inline double listSchedule(const RelaxationBucket &rb, PrimalBucketPlan &plan,
+                           std::vector<double> *finish_out = nullptr)
 {
     const uint32_t n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
     std::vector<uint32_t> remaining(n, 0);
@@ -282,6 +284,8 @@ inline double listSchedule(const RelaxationBucket &rb, PrimalBucketPlan &plan)
     }
     if (plan.order.size() != active.size())
         return std::numeric_limits<double>::infinity();
+    if (finish_out)
+        *finish_out = std::move(finish);
     plan.makespan = makespan;
     return makespan;
 }
@@ -349,6 +353,24 @@ inline void extractSelection(const RelaxationBucket &rb, const std::vector<doubl
 {
     const uint32_t n = static_cast<uint32_t>(rb.classes.size());
     plan.value.assign(n, 0);
+    // A class can be produced when one of its alternatives is allowed (cache
+    // alternatives need an allowed base) and all its children can be.
+    auto allowed = [&](uint32_t u, const RelaxationAlternative &alt) {
+        return !alt.requires_cache || allowed_cache.count(rb.classes[u].base) > 0;
+    };
+    std::vector<uint8_t> producible(n, 0);
+    for (uint32_t u : rb.topo)
+        for (const auto &alt : rb.classes[u].alternatives)
+        {
+            bool ok = allowed(u, alt);
+            for (uint32_t ch : alt.children)
+                ok = ok && producible[ch];
+            if (ok)
+            {
+                producible[u] = 1;
+                break;
+            }
+        }
     std::vector<uint8_t> active(n, 0);
     active[rb.root] = 1;
     for (auto it = rb.topo.rbegin(); it != rb.topo.rend(); ++it)
@@ -361,7 +383,10 @@ inline void extractSelection(const RelaxationBucket &rb, const std::vector<doubl
         const RelaxationAlternative *chosen = nullptr;
         for (const auto &alt : rc.alternatives)
         {
-            if (alt.requires_cache && !allowed_cache.count(rc.base))
+            bool ok = allowed(u, alt);
+            for (uint32_t ch : alt.children)
+                ok = ok && producible[ch];
+            if (!ok)
                 continue;
             double scale = 0.0;
             for (uint32_t e = 0; e < lambda.size(); ++e)
@@ -388,105 +413,108 @@ inline void extractSelection(const RelaxationBucket &rb, const std::vector<doubl
 
 // Selection for a zero-weight bucket: its cost does not count, but every
 // class whose base the weighted buckets cache must be selected here too.
-// Parents first, each active class picks the alternative whose children can
-// still reach the most inactive targets (ties: cheaper estimate).
+// Bottom-up, every class keeps the alternative whose children's kept
+// selections cover the most target value (ties: the cheaper estimate), so
+// a class's coverage is exactly what following the kept alternatives
+// selects; then the kept alternatives are followed from the root. Targets
+// are worth `target_value` (1 when absent): the cache savings of their
+// base, so a route to one expensive cached tensor beats one to several
+// cheap ones.
 inline void extractCovering(const RelaxationBucket &rb, const std::vector<double> &lambda,
                             const std::vector<double> &estimates, const std::unordered_set<BaseEClassId> &allowed_cache,
-                            const std::unordered_set<BaseEClassId> &targets, PrimalBucketPlan &plan)
+                            const std::unordered_set<BaseEClassId> &targets, PrimalBucketPlan &plan,
+                            const std::unordered_map<BaseEClassId, double> *target_value = nullptr)
 {
     const uint32_t n = static_cast<uint32_t>(rb.classes.size());
     const uint32_t orig_n = rb.orig_class_count ? rb.orig_class_count : n;
     std::vector<int32_t> target_index(n, -1);
+    std::vector<double> value_of;
     uint32_t nt = 0;
     for (uint32_t u = 0; u < orig_n; ++u)
         if (targets.count(rb.classes[u].base))
+        {
             target_index[u] = static_cast<int32_t>(nt++);
-    const size_t words = (nt + 63) / 64;
-    std::vector<uint64_t> reach(static_cast<size_t>(n) * std::max<size_t>(words, 1), 0);
-    auto row = [&](uint32_t u) { return &reach[static_cast<size_t>(u) * std::max<size_t>(words, 1)]; };
+            double v = 1.0;
+            if (target_value)
+            {
+                const auto it = target_value->find(rb.classes[u].base);
+                v = it != target_value->end() ? it->second : 0.0;
+            }
+            value_of.push_back(v);
+        }
+    const size_t words = std::max<size_t>((nt + 63) / 64, 1);
+    std::vector<uint64_t> cover(static_cast<size_t>(n) * words, 0);
+    auto row = [&](uint32_t u) { return &cover[static_cast<size_t>(u) * words]; };
+    auto valueOf = [&](const std::vector<uint64_t> &bits) {
+        double v = 0.0;
+        for (size_t w = 0; w < words; ++w)
+            for (uint64_t b = bits[w]; b; b &= b - 1)
+                v += value_of[w * 64 + static_cast<size_t>(__builtin_ctzll(b))];
+        return v;
+    };
+    std::vector<int32_t> kept(n, -1);
+    std::vector<uint64_t> bits(words), best_bits(words);
     for (uint32_t u : rb.topo)
     {
-        uint64_t *ru = row(u);
-        for (const auto &alt : rb.classes[u].alternatives)
-            for (uint32_t ch : alt.children)
-            {
-                const uint64_t *rc = row(ch);
-                for (size_t w = 0; w < words; ++w)
-                    ru[w] |= rc[w];
-                if (target_index[ch] >= 0)
-                    ru[target_index[ch] >> 6] |= 1ull << (target_index[ch] & 63);
-            }
-    }
-    std::vector<uint64_t> covered(std::max<size_t>(words, 1), 0);
-    plan.value.assign(n, 0);
-    std::vector<uint8_t> active(n, 0);
-    active[rb.root] = 1;
-    if (target_index[rb.root] >= 0)
-        covered[target_index[rb.root] >> 6] |= 1ull << (target_index[rb.root] & 63);
-    std::vector<uint64_t> alt_reach(std::max<size_t>(words, 1));
-    for (auto it = rb.topo.rbegin(); it != rb.topo.rend(); ++it)
-    {
-        const uint32_t u = *it;
-        if (!active[u])
-            continue;
         const RelaxationClass &rc = rb.classes[u];
-        const RelaxationAlternative *chosen = nullptr;
-        int64_t best_reach = -1;
-        double best_cost = std::numeric_limits<double>::infinity();
-        // Reading the class's own cached value keeps it selected at no cost.
-        // Cached bases below it that nothing else reaches then become
-        // violations and leave the cache set, instead of this class being
-        // recomputed just to keep them selected.
-        for (const auto &alt : rc.alternatives)
-            if (alt.requires_cache && alt.is_source && allowed_cache.count(rc.base))
-                chosen = &alt;
-        for (const auto &alt : rc.alternatives)
+        double best_value = -1.0, best_cost = std::numeric_limits<double>::infinity();
+        for (uint32_t a = 0; a < rc.alternatives.size(); ++a)
         {
-            if (chosen)
-                break;
+            const auto &alt = rc.alternatives[a];
             if (alt.requires_cache && !allowed_cache.count(rc.base))
                 continue;
-            std::fill(alt_reach.begin(), alt_reach.end(), 0);
+            bool usable = true;
+            std::fill(bits.begin(), bits.end(), 0);
             for (uint32_t ch : alt.children)
             {
+                usable = usable && kept[ch] >= 0;
                 const uint64_t *r = row(ch);
                 for (size_t w = 0; w < words; ++w)
-                    alt_reach[w] |= r[w];
-                if (target_index[ch] >= 0)
-                    alt_reach[target_index[ch] >> 6] |= 1ull << (target_index[ch] & 63);
+                    bits[w] |= r[w];
             }
-            int64_t count = 0;
-            for (size_t w = 0; w < words; ++w)
-                count += __builtin_popcountll(alt_reach[w] & ~covered[w]);
+            if (!usable)
+                continue;
+            const double v = valueOf(bits);
             double scale = 0.0;
             for (uint32_t e = 0; e < lambda.size(); ++e)
                 if (alt.engine_mask & (1u << e))
                     scale += lambda[e];
             double cost = alt.duration * scale;
             for (uint32_t ch : alt.children)
-                if (!active[ch])
-                    cost += estimates[ch];
-            if (count > best_reach || (count == best_reach && cost < best_cost - 1e-12))
+                cost += estimates[ch];
+            if (v > best_value + 1e-12 || (std::abs(v - best_value) <= 1e-12 && cost < best_cost - 1e-12))
             {
-                best_reach = count;
+                best_value = v;
                 best_cost = cost;
-                chosen = &alt;
+                kept[u] = static_cast<int32_t>(a);
+                best_bits = bits;
             }
         }
-        if (!chosen)
-            Error::throw_err("Primal heuristic: no usable alternative for an active class");
-        plan.value[u] = chosen->value;
-        for (uint32_t ch : chosen->children)
-        {
+        if (kept[u] < 0)
+            continue; // not producible
+        uint64_t *ru = row(u);
+        std::copy(best_bits.begin(), best_bits.end(), ru);
+        if (target_index[u] >= 0)
+            ru[target_index[u] >> 6] |= 1ull << (target_index[u] & 63);
+    }
+    if (kept[rb.root] < 0)
+        Error::throw_err("Primal heuristic: the covering bucket's root cannot be produced");
+    plan.value.assign(n, 0);
+    std::vector<uint8_t> active(n, 0);
+    active[rb.root] = 1;
+    for (auto it = rb.topo.rbegin(); it != rb.topo.rend(); ++it)
+    {
+        const uint32_t u = *it;
+        if (!active[u])
+            continue;
+        const RelaxationAlternative &alt = rb.classes[u].alternatives[static_cast<size_t>(kept[u])];
+        plan.value[u] = alt.value;
+        for (uint32_t ch : alt.children)
             active[ch] = 1;
-            if (target_index[ch] >= 0)
-                covered[target_index[ch] >> 6] |= 1ull << (target_index[ch] & 63);
-        }
     }
     resolveAliases(rb, plan);
 }
 
-// Summed weighted work of a selection's chosen alternatives.
 inline double selectionWork(const RelaxationBucket &rb, const std::vector<double> &lambda, const PrimalBucketPlan &plan)
 {
     double work = 0.0;
@@ -550,7 +578,12 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
     });
     for (uint32_t b = 0; b < nb; ++b)
         if (!contexts[b].computer || !contexts[b].computer->ready())
+        {
+            LOG(INFO) << "[PrimalHeuristic] bucket " << b << " relaxation unusable: acyclic=" << contexts[b].rb.acyclic
+                      << " root_feasible=" << contexts[b].rb.root_feasible
+                      << " computer=" << (contexts[b].computer ? "not ready" : "none");
             usable = false;
+        }
     std::vector<PrimalPlan> plans;
     if (!usable)
         return plans;
@@ -598,17 +631,47 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
     // leaves a cached base unselected takes the covering selection only when
     // it costs at most 3x its own selection, or always. Local search starts
     // from both; the better result is validated.
+    // Two kinds of class estimates: region values of the relaxation, and
+    // the cheap from-scratch costs (cheapEstimates). Region values treat
+    // work below a class's region as paid, which suits a plan that shares
+    // it (decode with cached weights) and misleads one that must produce it
+    // itself (an incremental step whose cache cannot hold it); cheap
+    // estimates price everything. Starts with region estimates stop after
+    // kRegionStartSeconds of building (they evaluate the relaxation).
     struct Start
     {
         std::vector<double> global_lambda;
         double cover_limit;
+        bool cheap;
     };
     std::vector<Start> starts;
-    for (const auto &global_lambda : weightings)
-        for (double cover_limit : {3.0, std::numeric_limits<double>::infinity()})
-            starts.push_back({global_lambda, cover_limit});
+    for (bool cheap : {true, false})
+        for (const auto &global_lambda : weightings)
+            for (double cover_limit : {3.0, std::numeric_limits<double>::infinity()})
+                starts.push_back({global_lambda, cover_limit, cheap});
+    // Buckets with the same relaxation share estimates.
+    std::vector<uint32_t> same_as(nb);
+    {
+        std::vector<std::vector<uint64_t>> signatures(nb);
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            signatures[b] = relaxationSignature(contexts[b].rb);
+            same_as[b] = b;
+            for (uint32_t c = 0; c < b; ++c)
+                if (same_as[c] == c && signatures[c] == signatures[b])
+                {
+                    same_as[b] = c;
+                    break;
+                }
+        }
+    }
+    constexpr double kRegionStartSeconds = 3.0;
+    const auto build_start = std::chrono::steady_clock::now();
     for (const Start &start_policy : starts)
     {
+        if (!start_policy.cheap &&
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count() > kRegionStartSeconds)
+            break;
         const auto &global_lambda = start_policy.global_lambda;
         const double cover_limit = start_policy.cover_limit;
         std::vector<std::vector<double>> lambda(nb), estimates(nb);
@@ -623,9 +686,19 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
             }
         }
         parallel([&](uint32_t b) {
-            contexts[b].computer->evaluate(lambda[b]);
-            contexts[b].computer->regionEstimates(estimates[b]);
+            if (same_as[b] != b)
+                return;
+            if (start_policy.cheap)
+                contexts[b].computer->cheapEstimates(lambda[b], estimates[b]);
+            else
+            {
+                contexts[b].computer->evaluate(lambda[b]);
+                contexts[b].computer->regionEstimates(estimates[b]);
+            }
         });
+        for (uint32_t b = 0; b < nb; ++b)
+            if (same_as[b] != b)
+                estimates[b] = estimates[same_as[b]];
         std::unordered_set<BaseEClassId> allowed = cache_possible;
         PrimalPlan plan;
         plan.buckets.resize(nb);
@@ -660,6 +733,13 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
             for (const auto &[base, var] : cache_var)
                 if (state.domains[var].isFixed() && state.domains[var].fixedValue() == 1)
                     used.insert(base);
+            // A cached base is worth its size: large cached tensors (weight
+            // transforms, copies of the embedding) are the expensive ones to
+            // produce. (Estimates price many of them at 0: a free view of a
+            // class below its region.)
+            std::unordered_map<BaseEClassId, double> saving;
+            for (const BaseEClassId &base : used)
+                saving[base] = static_cast<double>(state.var_infos[cache_var.at(base)].size_bytes);
             // Every bucket must select the cached bases. Unweighted buckets
             // cover them. A weighted bucket whose own selection left one out
             // takes the covering selection unless it costs over 3x as much
@@ -670,7 +750,7 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
                 const uint32_t orig_n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
                 if (!weighted(b))
                 {
-                    extractCovering(rb, lambda[b], estimates[b], used, used, plan.buckets[b]);
+                    extractCovering(rb, lambda[b], estimates[b], used, used, plan.buckets[b], &saving);
                     return;
                 }
                 bool missing = false;
@@ -679,7 +759,7 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
                 if (!missing)
                     return;
                 PrimalBucketPlan covering;
-                extractCovering(rb, lambda[b], estimates[b], used, used, covering);
+                extractCovering(rb, lambda[b], estimates[b], used, used, covering, &saving);
                 if (selectionWork(rb, lambda[b], covering) <= cover_limit * selectionWork(rb, lambda[b], plan.buckets[b]))
                     plan.buckets[b] = std::move(covering);
             });
@@ -882,6 +962,10 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
             return false;
         return !alt.requires_cache || cached.count(rb.classes[u].base) > 0;
     };
+    // Classes whose completion is in progress (the moved class and the
+    // chain of newly activated classes above the current one): a child among
+    // them would close a cycle (e.g. a COPY_TO back to the moved class).
+    std::vector<uint8_t> completing(n, 0);
     auto greedyAlt = [&](uint32_t u) -> int32_t {
         const auto &alts = rb.classes[u].alternatives;
         int32_t best = -1;
@@ -889,6 +973,11 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
         for (uint32_t a = 0; a < alts.size(); ++a)
         {
             if (!usable(u, alts[a]))
+                continue;
+            bool closes_cycle = false;
+            for (uint32_t ch : childrenOf(alts[a]))
+                closes_cycle |= ch < n && completing[ch];
+            if (closes_cycle)
                 continue;
             double scale = 0.0;
             for (size_t e = 0; e < ne; ++e)
@@ -939,9 +1028,11 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
         }
         alt_of[c] = a;
         addLoad(c, a, 1.0);
+        completing[c] = 1;
         for (uint32_t ch : childrenOf(rb.classes[c].alternatives[static_cast<size_t>(a)]))
             if (ch < n)
                 incRef(ch);
+        completing[c] = 0;
     };
     decRef = [&](uint32_t c) {
         touch(c);
@@ -1007,9 +1098,11 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
                 addLoad(u, current, -1.0);
                 alt_of[u] = static_cast<int32_t>(a);
                 addLoad(u, static_cast<int32_t>(a), 1.0);
+                completing[u] = 1;
                 for (uint32_t ch : childrenOf(rb.classes[u].alternatives[a]))
                     if (ch < n)
                         incRef(ch);
+                completing[u] = 0;
                 for (uint32_t ch : childrenOf(rb.classes[u].alternatives[static_cast<size_t>(current)]))
                     if (ch < n)
                         decRef(ch);
@@ -1041,31 +1134,39 @@ inline bool improveBucketLocalSearch(const RelaxationBucket &rb, const std::vect
     return improved_any;
 }
 
-// Improves every weighted bucket in parallel until convergence or deadline.
-inline bool improvePrimalPlan(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
-                              PrimalPlan &plan, std::chrono::steady_clock::time_point deadline,
-                              uint64_t &evaluations, const std::unordered_set<BaseEClassId> *releasable = nullptr,
-                              std::unordered_map<BaseEClassId, uint32_t> *blocked = nullptr)
+// Improves every weighted bucket of every plan in parallel (one task per plan
+// and bucket) until convergence or deadline. Returns, per plan, whether any
+// bucket improved.
+inline std::vector<uint8_t> improvePrimalPlans(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
+                                               const std::vector<PrimalPlan *> &plans,
+                                               std::chrono::steady_clock::time_point deadline, uint64_t &evaluations,
+                                               const std::unordered_set<BaseEClassId> *releasable = nullptr,
+                                               std::unordered_map<BaseEClassId, uint32_t> *blocked = nullptr)
 {
     const uint32_t nb = static_cast<uint32_t>(contexts.size());
-    std::vector<uint8_t> improved(nb, 0);
-    std::vector<uint64_t> evals(nb, 0);
-    std::vector<std::unordered_map<BaseEClassId, uint32_t>> bucket_blocked(nb);
+    const size_t np = plans.size();
+    const size_t tasks = np * nb;
+    std::vector<uint8_t> improved(tasks, 0);
+    std::vector<uint64_t> evals(tasks, 0);
+    std::vector<std::unordered_map<BaseEClassId, uint32_t>> task_blocked(tasks);
     const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 16u));
+    std::atomic<size_t> next_task{0};
     std::vector<std::thread> threads;
     std::vector<std::exception_ptr> errors(hw);
     for (unsigned t = 0; t < hw; ++t)
         threads.emplace_back([&, t]() {
             try
             {
-                for (uint32_t b = t; b < nb; b += hw)
+                for (size_t task = next_task++; task < tasks; task = next_task++)
                 {
+                    PrimalPlan &plan = *plans[task / nb];
+                    const uint32_t b = static_cast<uint32_t>(task % nb);
                     const float w = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
                     if (!(w > 0.0f))
                         continue;
-                    improved[b] = improveBucketLocalSearch(contexts[b].rb, plan.bucket_lambda[b], plan.estimates[b],
-                                                           plan.cached, plan.buckets[b], deadline, evals[b],
-                                                           releasable, blocked ? &bucket_blocked[b] : nullptr);
+                    improved[task] = improveBucketLocalSearch(contexts[b].rb, plan.bucket_lambda[b], plan.estimates[b],
+                                                              plan.cached, plan.buckets[b], deadline, evals[task],
+                                                              releasable, blocked ? &task_blocked[task] : nullptr);
                 }
             }
             catch (...)
@@ -1078,20 +1179,33 @@ inline bool improvePrimalPlan(const SearchState &state, const std::vector<Primal
     for (auto &error : errors)
         if (error)
             std::rethrow_exception(error);
-    double total = 0.0;
-    bool any = false;
-    for (uint32_t b = 0; b < nb; ++b)
+    std::vector<uint8_t> any(np, 0);
+    for (size_t i = 0; i < np; ++i)
     {
-        const double w = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
-        total += w * plan.buckets[b].makespan;
-        any |= improved[b] != 0;
-        evaluations += evals[b];
-        if (blocked)
-            for (const auto &[base, count] : bucket_blocked[b])
-                (*blocked)[base] += count;
+        PrimalPlan &plan = *plans[i];
+        double total = 0.0;
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            const size_t task = i * nb + b;
+            const double w = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
+            total += w * plan.buckets[b].makespan;
+            any[i] |= improved[task];
+            evaluations += evals[task];
+            if (blocked)
+                for (const auto &[base, count] : task_blocked[task])
+                    (*blocked)[base] += count;
+        }
+        plan.cost = total;
     }
-    plan.cost = total;
     return any;
+}
+
+inline bool improvePrimalPlan(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
+                              PrimalPlan &plan, std::chrono::steady_clock::time_point deadline,
+                              uint64_t &evaluations, const std::unordered_set<BaseEClassId> *releasable = nullptr,
+                              std::unordered_map<BaseEClassId, uint32_t> *blocked = nullptr)
+{
+    return improvePrimalPlans(state, contexts, {&plan}, deadline, evaluations, releasable, blocked)[0] != 0;
 }
 
 // Cache-set moves. A cached base must stay selected in every bucket, which
@@ -1142,6 +1256,298 @@ inline bool activateClass(const RelaxationBucket &rb, const std::vector<double> 
         if (ch < n && !activateClass(rb, lambda, estimates, cached, bp, ch))
             return false;
     return true;
+}
+
+// Applies a window selection (classes of `rb`, alternative indices) to the
+// buckets of `group` (weighted buckets with that relaxation) in `trial`,
+// adjusting the cache set: classes the selection needs and does not select
+// are activated greedily, and may use the cache-only alternative of any base
+// that can be cached (the base joins the cache set); classes nothing needs
+// any more are dropped, and cached bases no bucket reads from the cache any
+// more leave the cache set. Zero-weight buckets then cover the new cache set
+// (extractCovering). False when the result is inconsistent (a bucket leaves
+// a cached base unselected or reads an uncached base from the cache) or
+// exceeds a memory cap. Leaves the makespans of changed buckets to the
+// caller (`changed`).
+inline bool spliceWindowSelection(const SearchState &state, const std::vector<PrimalBucketContext> &contexts,
+                                  const std::vector<uint32_t> &group,
+                                  const std::vector<RelaxationBoundComputer::WindowChoice> &selection,
+                                  PrimalPlan &trial, std::vector<uint8_t> &changed)
+{
+    auto cacheable = [&](BaseEClassId base) {
+        if (base == BaseEClassId{})
+            return false;
+        auto var = state.cached_vars.find(base);
+        return var != state.cached_vars.end() && state.domains[var->second].contains(1);
+    };
+    // Cache set the closure may use: current bases plus every cacheable one.
+    std::unordered_set<BaseEClassId> usable = trial.cached;
+    bool any_change = false;
+    for (uint32_t b : group)
+    {
+        const RelaxationBucket &rb = contexts[b].rb;
+        const uint32_t n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
+        auto origOf = [&](uint32_t u) { return u < n ? u : rb.orig_class_of[u]; };
+        for (uint32_t u = 0; u < n; ++u)
+            if (cacheable(rb.classes[u].base))
+                usable.insert(rb.classes[u].base);
+        PrimalBucketPlan &bp = trial.buckets[b];
+        bool bucket_change = false;
+        for (const auto &entry : selection)
+        {
+            const uint32_t u = entry.cls;
+            const uint32_t uo = origOf(u);
+            // Among equivalent alternatives, the one whose children the
+            // bucket computes already (else the cheapest to add).
+            uint32_t a = entry.alts.front();
+            double least = std::numeric_limits<double>::infinity();
+            for (uint32_t candidate : entry.alts)
+            {
+                double extra = 0.0;
+                for (uint32_t ch : childrenOf(rb.classes[u].alternatives[candidate]))
+                    if (ch < n && bp.value[ch] <= 0)
+                        extra += trial.estimates[b][ch];
+                if (extra < least - 1e-12)
+                {
+                    least = extra;
+                    a = candidate;
+                }
+            }
+            const RelaxationAlternative &alt = rb.classes[u].alternatives[a];
+            if (alt.is_alias)
+                continue;
+            if (alt.requires_cache && !usable.count(rb.classes[uo].base))
+                return false;
+            bucket_change |= bp.value[uo] != alt.value;
+            bp.value[uo] = alt.value;
+        }
+        if (!bucket_change)
+            continue;
+        any_change = true;
+        changed[b] = 1;
+        // Close the selection from the root: chosen alternatives' children
+        // are activated (greedily when unselected); unreached classes drop.
+        std::vector<uint8_t> reached(n, 0);
+        std::vector<uint32_t> stack{rb.root};
+        reached[rb.root] = 1;
+        while (!stack.empty())
+        {
+            const uint32_t u = stack.back();
+            stack.pop_back();
+            if (bp.value[u] <= 0 &&
+                !activateClass(rb, trial.bucket_lambda[b], trial.estimates[b], usable, bp, u))
+                return false;
+            const RelaxationAlternative *chosen = nullptr;
+            for (const auto &alt : rb.classes[u].alternatives)
+                if (alt.value == bp.value[u] && !alt.is_alias)
+                    chosen = &alt;
+            if (!chosen)
+                return false;
+            for (uint32_t ch : childrenOf(*chosen))
+                if (ch < n && !reached[ch])
+                {
+                    reached[ch] = 1;
+                    stack.push_back(ch);
+                }
+        }
+        for (uint32_t u = 0; u < n; ++u)
+            if (!reached[u])
+                bp.value[u] = 0;
+    }
+    if (!any_change)
+        return false;
+    // The new cache set: bases some bucket reads from the cache.
+    std::unordered_set<BaseEClassId> cached;
+    for (uint32_t b = 0; b < contexts.size(); ++b)
+    {
+        const RelaxationBucket &rb = contexts[b].rb;
+        const uint32_t n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
+        for (uint32_t u = 0; u < n; ++u)
+        {
+            const int32_t v = trial.buckets[b].value[u];
+            if (v <= 0)
+                continue;
+            for (const auto &alt : rb.classes[u].alternatives)
+                if (alt.value == v && !alt.is_alias && alt.requires_cache)
+                    cached.insert(rb.classes[u].base);
+        }
+    }
+    // Bases cached before and still read keep their place; bases nothing
+    // reads from the cache any more are released.
+    const std::unordered_set<BaseEClassId> plan_cached = trial.cached;
+    trial.cached = std::move(cached);
+    // Memory caps.
+    std::unordered_map<MemSpace, uint64_t> bytes;
+    for (BaseEClassId base : trial.cached)
+    {
+        auto var = state.cached_vars.find(base);
+        if (var == state.cached_vars.end())
+            return false;
+        const VarInfo &info = state.var_infos[var->second];
+        bytes[info.mem_space] += info.size_bytes;
+        if (bytes[info.mem_space] > state.getMemoryCap(info.mem_space))
+            return false;
+    }
+    // Every bucket selects every cached base, reachably from its root.
+    // Zero-weight buckets take a new covering selection when the cache set
+    // changed; weighted ones must select them already.
+    std::unordered_map<BaseEClassId, double> saving;
+    for (const BaseEClassId &base : trial.cached)
+        saving[base] = static_cast<double>(state.var_infos[state.cached_vars.at(base)].size_bytes);
+    for (uint32_t b = 0; b < contexts.size(); ++b)
+    {
+        const RelaxationBucket &rb = contexts[b].rb;
+        const uint32_t n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
+        const double weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
+        if (!(weight > 0.0) && trial.cached != plan_cached)
+        {
+            extractCovering(rb, trial.bucket_lambda[b], trial.estimates[b], trial.cached, trial.cached,
+                            trial.buckets[b], &saving);
+            changed[b] = 1;
+        }
+        std::unordered_set<BaseEClassId> selected;
+        for (uint32_t u = 0; u < n; ++u)
+        {
+            const int32_t v = trial.buckets[b].value[u];
+            if (v <= 0)
+                continue;
+            selected.insert(rb.classes[u].base);
+            for (const auto &alt : rb.classes[u].alternatives)
+                if (alt.value == v && !alt.is_alias && alt.requires_cache && !trial.cached.count(rb.classes[u].base))
+                    return false;
+        }
+        for (uint32_t u = 0; u < n; ++u)
+            if (trial.cached.count(rb.classes[u].base) && !selected.count(rb.classes[u].base))
+                return false;
+    }
+    return true;
+}
+
+// Window moves: the relaxation's flexible interval partition splits a
+// weighted bucket into windows along its chain of necessary tensors. For each
+// window, the best selection a bounded search finds for the window's value
+// (fastest max(chain, engine loads) inside the window) replaces the plan's
+// choices there, in every weighted bucket with that relaxation at once, with
+// the cache set adjusted to it (spliceWindowSelection). The move is kept if
+// the weighted list-scheduled makespan decreases. This changes many classes
+// together (e.g. a layer's norm and copies, or how a matmul is split), which
+// single-class switches cannot.
+// `partitioned(b)` may supply a computer over the same relaxation whose
+// flexible partition is already computed (the bound's); otherwise the
+// bucket's own computer computes one.
+inline bool improveByWindows(const SearchState &state, std::vector<PrimalBucketContext> &contexts, PrimalPlan &plan,
+                             std::chrono::steady_clock::time_point deadline, uint64_t &evaluations,
+                             const std::function<RelaxationBoundComputer *(uint32_t)> &partitioned)
+{
+    // Search budget per window by how far the plan's time across it exceeds
+    // the window's bound; windows the plan already meets are skipped.
+    constexpr uint64_t kWindowSearchNodes = 200000, kLongSearchNodes = 2000000;
+    constexpr double kTightExcess = 1e-6, kLargeExcess = 0.06;
+    constexpr int kWindowSearchSeconds = 2; // per window (large windows' nodes are slow)
+    // Weighted buckets grouped by the computer holding their partition
+    // (buckets sharing a relaxation share it).
+    std::vector<std::pair<RelaxationBoundComputer *, std::vector<uint32_t>>> groups;
+    for (uint32_t b = 0; b < contexts.size(); ++b)
+    {
+        const double weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
+        if (!(weight > 0.0) || !contexts[b].computer || !contexts[b].computer->ready())
+            continue;
+        RelaxationBoundComputer *computer = partitioned ? partitioned(b) : nullptr;
+        if (!computer || computer->lastPartition().empty())
+        {
+            computer = contexts[b].computer.get();
+            computer->flexibleIntervalBound(8, deadline);
+        }
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const auto &g) { return g.first == computer; });
+        if (it == groups.end())
+            groups.push_back({computer, {b}});
+        else
+            it->second.push_back(b);
+    }
+    bool any = false;
+    for (const auto &entry : groups)
+    {
+        RelaxationBoundComputer *computer = entry.first;
+        const std::vector<uint32_t> &group = entry.second;
+        const auto partition = computer->lastPartition();
+        const auto values = computer->lastPartitionValues();
+        // The plan's time across each window: from the first finish of a
+        // member of the link before it to that of its closing link.
+        std::vector<uint64_t> budget(partition.size(), kWindowSearchNodes);
+        {
+            const uint32_t b = group.front();
+            const RelaxationBucket &rb = contexts[b].rb;
+            const uint32_t n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
+            PrimalBucketPlan scheduled = plan.buckets[b];
+            std::vector<double> finish;
+            listSchedule(rb, scheduled, &finish);
+            const size_t k = computer->intervalChainLength();
+            auto reached = [&](size_t link) {
+                if (link == k)
+                    return scheduled.makespan;
+                double t = std::numeric_limits<double>::infinity();
+                for (uint32_t m : computer->chainLinkMembers(link))
+                {
+                    const uint32_t mo = m < n ? m : rb.orig_class_of[m];
+                    if (scheduled.value[mo] > 0)
+                        t = std::min(t, finish[mo]);
+                }
+                return t;
+            };
+            if (values.size() == partition.size() && !finish.empty())
+                for (size_t w = 0; w < partition.size(); ++w)
+                {
+                    const double span = reached(partition[w].second) -
+                                        (partition[w].first == 0 ? 0.0 : reached(partition[w].first - 1));
+                    const double excess = span - values[w];
+                    budget[w] = !(excess > kTightExcess)  ? 0
+                                : excess > kLargeExcess ? kLongSearchNodes
+                                                        : kWindowSearchNodes;
+                }
+        }
+        std::vector<std::vector<std::vector<RelaxationBoundComputer::WindowChoice>>> per_window(partition.size());
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(partition.size()), [&](uint32_t w) {
+            if (budget[w] == 0 || std::chrono::steady_clock::now() >= deadline)
+                return;
+            per_window[w] = computer->windowSelections(
+                partition[w].first, partition[w].second, 1, budget[w],
+                std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(kWindowSearchSeconds)));
+        });
+        std::vector<std::vector<RelaxationBoundComputer::WindowChoice>> selections;
+        for (auto &found : per_window)
+            for (auto &selection : found)
+                selections.push_back(std::move(selection));
+        for (const auto &selection : selections)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
+            if (selection.empty())
+                continue;
+            PrimalPlan trial = plan;
+            std::vector<uint8_t> changed(contexts.size(), 0);
+            if (!spliceWindowSelection(state, contexts, group, selection, trial, changed))
+                continue;
+            double total = 0.0;
+            for (uint32_t b = 0; b < contexts.size(); ++b)
+            {
+                if (changed[b])
+                {
+                    ++evaluations;
+                    listSchedule(contexts[b].rb, trial.buckets[b]);
+                }
+                const double w = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
+                if (w > 0.0)
+                    total += w * trial.buckets[b].makespan;
+            }
+            trial.cost = total;
+            if (trial.cost < plan.cost - 1e-9)
+            {
+                plan = std::move(trial);
+                any = true;
+            }
+        }
+    }
+    return any;
 }
 
 // Cache-set additions: a base whose cache-only alternative (an in-place

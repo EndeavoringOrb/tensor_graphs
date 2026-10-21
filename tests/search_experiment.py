@@ -10,7 +10,8 @@ Usage (from the repository root):
 Every run writes logs/<record>_improvements/<run_id>.{log,json,patch} (refusing to
 overwrite) and appends an in-progress entry, then a completion entry, to the
 record document (docs/agents/targets/gap_integral/progress.md for --record gap,
-docs/agents/targets/<name>/progress.md for --record <name>). The patch
+docs/agents/targets/<name>/progress.md for --record <name>, progress_<machine>.md for
+--record <name>:<machine>). The patch
 captures the uncommitted state of tensor_graphs_cpp, tests and docs/core,
 including untracked files, relative to HEAD.
 """
@@ -39,12 +40,17 @@ PATCH_PATHS = ["tensor_graphs_cpp", "tests", "docs/core"]
 
 
 def recordPaths(record_name):
-    """Legacy records above, or any docs/agents/targets/<name>/ (logs in logs/targets/<name>)."""
+    """Legacy records above, or any docs/agents/targets/<name>/ (logs in logs/targets/<name>).
+
+    `<name>:<machine>` records into docs/agents/targets/<name>/progress_<machine>.md, for targets
+    that keep one progress document per machine."""
     if record_name in RECORDS:
         return RECORDS[record_name]
-    if record_name.startswith("_") or not (TARGETS_DIR / record_name / "progress.md").is_file():
+    name, _, machine = record_name.partition(":")
+    document = f"progress_{machine}.md" if machine else "progress.md"
+    if name.startswith("_") or not (TARGETS_DIR / name / document).is_file():
         return None
-    return f"logs/targets/{record_name}", f"docs/agents/targets/{record_name}/progress.md"
+    return f"logs/targets/{name}", f"docs/agents/targets/{name}/{document}"
 
 
 def capturePatch():

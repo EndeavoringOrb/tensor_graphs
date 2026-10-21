@@ -881,6 +881,14 @@ struct FusionRule : public Rule
             for (const auto &list : pattern_set->multiNodePatternsByOp)
                 for (const auto &pattern : list)
                     pattern_set->max_pattern_depth = std::max(pattern_set->max_pattern_depth, pattern.depth);
+            // Every rule clone shares these patterns across the saturation
+            // threads: resolve the candidate kernels here, before the set is
+            // shared, instead of lazily (a lazy fill raced and handed out
+            // garbage kernel ids).
+            for (const auto *lists : {&pattern_set->singleNodePatternsByOp, &pattern_set->multiNodePatternsByOp})
+                for (const auto &list : *lists)
+                    for (const auto &pattern : list)
+                        pattern.getCandidateKernelIds();
             return pattern_set;
         }();
         return shared_set;
@@ -4373,6 +4381,7 @@ struct ConsumerWeightReuseRule : public Rule
         // The COPY_TO index belongs to the egraph it was built on.
         copy->scanned_enodes = 0;
         copy->copy_enodes.clear();
+        copy->copies_by_name.clear();
         return copy;
     }
 
@@ -4390,6 +4399,12 @@ struct ConsumerWeightReuseRule : public Rule
     // instead of every class.
     size_t scanned_enodes = 0;
     std::vector<uint32_t> copy_enodes;
+    // COPY_TO enodes out of STORAGE by the names of the INPUTs their child
+    // class held when indexed: the candidates for a weight's earlier copies.
+    // The child may later gain names through merges, so a lookup also scans
+    // the storage copies indexed without a name, and verifies every
+    // candidate as before.
+    std::unordered_map<std::string, std::vector<uint32_t>> copies_by_name;
 
     void refreshCopyIndex(const EGraph &egraph)
     {
@@ -4398,10 +4413,37 @@ struct ConsumerWeightReuseRule : public Rule
         {
             scanned_enodes = 0;
             copy_enodes.clear();
+            copies_by_name.clear();
         }
         for (; scanned_enodes < total_enodes; ++scanned_enodes)
-            if (egraph.getENode(ENodeId{static_cast<uint32_t>(scanned_enodes)}).getOpType() == OpType::COPY_TO)
-                copy_enodes.push_back(static_cast<uint32_t>(scanned_enodes));
+        {
+            const ENode &enode = egraph.getENode(ENodeId{static_cast<uint32_t>(scanned_enodes)});
+            if (enode.getOpType() != OpType::COPY_TO)
+                continue;
+            const uint32_t e = static_cast<uint32_t>(scanned_enodes);
+            copy_enodes.push_back(e);
+            // Only a copy out of STORAGE can name a weight (merged classes
+            // share their memory space).
+            if (enode.getChildren().empty())
+                continue;
+            const EClass &child = egraph.getEClass(egraph.findConst(enode.getChildren()[0]));
+            if (child.mem_space.type != HandleType::STORAGE)
+                continue;
+            bool named = false;
+            for (ENodeId sEid : child.enodes)
+            {
+                const ENode &sNode = egraph.getENode(sEid);
+                if (sNode.getOpType() == OpType::INPUT && !sNode.getOpName().empty())
+                {
+                    auto &list = copies_by_name[sNode.getOpName()];
+                    if (list.empty() || list.back() != e)
+                        list.push_back(e);
+                    named = true;
+                }
+            }
+            if (!named)
+                copies_by_name[std::string()].push_back(e);
+        }
     }
 
     // Smallest canonical class below childCanon holding the same storage
@@ -4411,7 +4453,13 @@ struct ConsumerWeightReuseRule : public Rule
     {
         bool found = false;
         const EClass &c1 = egraph.getEClass(childCanon);
-        for (uint32_t e : copy_enodes)
+        static const std::vector<uint32_t> none;
+        const auto named_it = copies_by_name.find(tensor_name);
+        const auto unnamed_it = copies_by_name.find(std::string());
+        const std::vector<uint32_t> &named = named_it != copies_by_name.end() ? named_it->second : none;
+        const std::vector<uint32_t> &unnamed = unnamed_it != copies_by_name.end() ? unnamed_it->second : none;
+        for (const std::vector<uint32_t> *list : {&named, &unnamed})
+        for (uint32_t e : *list)
         {
             const EClassId otherCanon = egraph.findConst(egraph.getENodeEClass(ENodeId{e}));
             if (otherCanon.value >= childCanon.value || (found && otherCanon.value >= out.value))

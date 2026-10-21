@@ -399,15 +399,36 @@ struct SelectionReachability
                 continue;
             const uint32_t prev_level = node.level;
             const uint32_t prev_incoming = node.next_incoming;
-            while (node.level < infinity)
+            while (node.next_incoming < node.incoming.size() &&
+                   !supportsLevel(node.incoming[node.next_incoming], node.level))
+                ++node.next_incoming;
+            if (node.next_incoming == node.incoming.size())
             {
-                while (node.next_incoming < node.incoming.size() &&
-                       !supportsLevel(node.incoming[node.next_incoming], node.level))
-                    ++node.next_incoming;
-                if (node.next_incoming < node.incoming.size())
-                    break;
-                ++node.level;
+                // No support left at this level: the next supported level is
+                // the smallest parent level + 1 above it (raising the level
+                // one step at a time and rescanning finds the same level,
+                // but costs O(levels * incoming) for an unreachable node).
+                uint32_t next_level = infinity;
+                for (uint32_t edge_id : node.incoming)
+                {
+                    const Edge &edge = edges[edge_id];
+                    // A self-edge never supports a level (level + 1 != level).
+                    if (!edge.active || edge.from == idx || nodes[edge.from].level >= infinity)
+                        continue;
+                    const uint32_t candidate = nodes[edge.from].level + 1;
+                    if (candidate > node.level)
+                        next_level = std::min(next_level, candidate);
+                }
+                node.level = next_level;
                 node.next_incoming = 0;
+                if (node.level < infinity)
+                {
+                    while (node.next_incoming < node.incoming.size() &&
+                           !supportsLevel(node.incoming[node.next_incoming], node.level))
+                        ++node.next_incoming;
+                    if (node.next_incoming == node.incoming.size())
+                        Error::throw_err("SelectionReachability::update: no support at the computed level");
+                }
             }
             if (node.level == prev_level && node.next_incoming == prev_incoming)
                 continue;

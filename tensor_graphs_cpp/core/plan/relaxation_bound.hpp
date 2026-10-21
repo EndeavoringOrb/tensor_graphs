@@ -7,6 +7,8 @@
 // heuristic. See docs/core/relaxation_bound.md.
 
 #include <algorithm>
+#include <atomic>
+#include <tuple>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -499,10 +501,13 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         }
     }
 
-    // Unroll cyclic components.
+    // Unroll cyclic components: a component of k classes becomes k levels
+    // (k^2 classes; a cycle-free selection inside it is a path of at most k
+    // classes), so components above kMaxUnrolledComponent are not unrolled.
+    constexpr size_t kMaxUnrolledComponent = 16;
     for (const auto &comp : sccs)
     {
-        if (comp.size() > 6)
+        if (comp.size() > kMaxUnrolledComponent)
         {
             rb.acyclic = false;
             return rb;
@@ -754,6 +759,14 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
             }
         }
     }
+    // The classes of a cyclic component can each be derived from the others
+    // (copies, views, a slice of a larger tensor and its scatter back), so
+    // every plan that needs one of them holds one of them: they form one
+    // group, like copies. A cycle-free plan still produces some member
+    // through an alternative from outside the component.
+    for (const auto &comp : sccs)
+        for (uint32_t c : comp)
+            parent[find(c)] = find(comp.front());
     rb.storage_rep = storage_rep;
     std::vector<uint32_t> group_of_rep(orig_n, UINT32_MAX);
     rb.group.assign(n, 0);
@@ -771,6 +784,33 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
     for (uint32_t h = orig_n; h < n; ++h)
     {
         rb.group[h] = rb.group[rb.orig_class_of[h]];
+    }
+    // A group's members are the classes that can be active: those an
+    // alternative below the root reaches, level copies of unrolled cycles
+    // included (when a cycle is entered through another member, only lower
+    // levels of a class may be reachable). Containment of groups and
+    // charging look at members.
+    {
+        std::vector<uint8_t> reached(n, 0);
+        std::vector<uint32_t> stack{rb.root};
+        reached[rb.root] = 1;
+        while (!stack.empty())
+        {
+            const uint32_t u = stack.back();
+            stack.pop_back();
+            for (const auto &alt : rb.classes[u].alternatives)
+                for (uint32_t ch : alt.children)
+                    if (!reached[ch])
+                    {
+                        reached[ch] = 1;
+                        stack.push_back(ch);
+                    }
+        }
+        for (auto &members : rb.group_members)
+            members.clear();
+        for (uint32_t u = 0; u < n; ++u)
+            if (reached[u])
+                rb.group_members[rb.group[u]].push_back(u);
     }
     uint32_t n_storage_copies = 0;
     double sum_storage_copy_dur = 0.0;
@@ -865,10 +905,19 @@ class RelaxationBoundComputer
         if (!rb.acyclic || !rb.root_feasible)
             return;
         prepare();
+        for (const Region &region : regions_)
+            degenerate_ = degenerate_ || region.nodes.size() > kMaxRegionClasses;
         ready_ = true;
     }
 
     bool ready() const { return ready_; }
+    // The region decomposition found (almost) no chain of necessary groups
+    // (a region above kMaxRegionClasses classes, e.g. when routes through
+    // other tensors avoid every link): the load recursion would take minutes,
+    // so the bound functions prove nothing (return 0) and evaluate() only
+    // fills cheap estimates for the primal heuristic.
+    bool degenerate() const { return degenerate_; }
+    static constexpr size_t kMaxRegionClasses = 32768;
     size_t numRegions() const { return regions_.size(); }
     size_t numIntervals() const { return intervals_.size(); }
     // Per-window values of the last interval bound, in chain order; the last
@@ -897,17 +946,257 @@ class RelaxationBoundComputer
     // Search-node budget of the exact window enumeration (tests set 0 to
     // exercise the cut DP).
     void setExactWindowNodes(uint64_t nodes) { exact_window_nodes_ = nodes; }
+    // Tests: the exact window enumeration without its pruning (chain and
+    // load bounds, left-out classes, duplicate alternatives) must give the
+    // same values.
+    void setExactWindowPruning(bool enabled) { exact_window_pruning_ = enabled; }
+    void setExactWindowStage(bool enabled) { exact_window_stage_ = enabled; }
 
-    // Interval bound with windows at every `stride`-th chain link.
-    double intervalBound(size_t stride, size_t phase = 0)
+    // Interval bound over flexible windows (docs/core/relaxation_bound.md,
+    // "Flexible windows"): every window between chain links a < b with
+    // b - a <= max_len (and from every link to the root) is valued like a
+    // stride window, and a DP keeps the best partition of the chain into
+    // consecutive windows. Windows that follow a model's blocks also count
+    // the parallel branches (work after link a and below link b that no
+    // finer window holds), which uniform strides rarely align with.
+    static constexpr size_t kFlexibleMaxClasses = 512;
+    double flexibleIntervalBound(size_t max_len, std::chrono::steady_clock::time_point deadline, size_t long_len = 0)
     {
         if (!ready_)
             Error::throw_err("Interval bound evaluated on an unprepared bucket");
-        buildIntervals(stride, phase);
-        return evaluateIntervals();
+        if (degenerate_)
+        {
+            last_partition_.clear();
+            last_partition_values_.clear();
+            return 0.0;
+        }
+        const size_t k = ichain_.size();
+        last_partition_.clear();
+        if (k == 0)
+            return 0.0;
+        // value[a + 1][b - a - 1]: window after link a (a = -1: from the
+        // start) up to link b (b = k: the root).
+        std::vector<std::vector<double>> value(k + 1);
+        // Exact window values in parallel (read-only); windows whose
+        // enumeration does not finish are valued afterwards.
+        std::vector<std::vector<Region>> pending(k + 1);
+        std::vector<std::vector<size_t>> pending_slot(k + 1);
+        std::atomic<bool> late{false};
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(k + 1), [&](uint32_t a1) {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                late = true;
+                return;
+            }
+            WindowScratch ws;
+            std::vector<Region> scratch;
+            prepareWindowStart(a1, ws);
+            for (size_t b = a1; b <= std::min(k, a1 + max_len - 1); ++b)
+            {
+                double v = 0.0;
+                if (buildWindow(a1, b, ws, scratch) && !scratch[0].zero_value)
+                {
+                    v = exactWindow(scratch[0], exact_window_nodes_);
+                    if (!(v > 0.0))
+                    {
+                        pending_slot[a1].push_back(value[a1].size());
+                        pending[a1].push_back(std::move(scratch[0]));
+                    }
+                }
+                value[a1].push_back(v);
+            }
+        });
+        if (late)
+            return 0.0; // nothing proven: callers keep their bound
+        // The rest in parallel too, each thread with its own weight table.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(k + 1), [&](uint32_t a1) {
+            std::vector<double> local;
+            thread_weights_ = &local;
+            for (size_t p = 0; p < pending[a1].size(); ++p)
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    late = true;
+                    break;
+                }
+                value[a1][pending_slot[a1][p]] = windowValue(pending[a1][p]);
+            }
+            thread_weights_ = nullptr;
+        });
+        if (late)
+            return 0.0;
+        // best[a1]: largest sum of windows covering the chain up to link
+        // a1 - 1; from[a1] the window that reaches it.
+        const double none_value = -std::numeric_limits<double>::infinity();
+        auto bestPartition = [&]() {
+            std::vector<double> best(k + 1, none_value);
+            std::vector<size_t> from(k + 1, SIZE_MAX);
+            best[0] = 0.0;
+            double total = 0.0;
+            size_t total_from = SIZE_MAX;
+            for (size_t a1 = 0; a1 <= k; ++a1)
+            {
+                if (best[a1] == none_value)
+                    continue;
+                for (size_t j = 0; j < value[a1].size(); ++j)
+                {
+                    const size_t b = a1 + j;
+                    const double v = best[a1] + value[a1][j];
+                    if (b == k)
+                    {
+                        if (v > total || total_from == SIZE_MAX)
+                        {
+                            total = std::max(total, v);
+                            total_from = a1;
+                        }
+                    }
+                    else if (v > best[b + 1])
+                    {
+                        best[b + 1] = v;
+                        from[b + 1] = a1;
+                    }
+                }
+            }
+            last_partition_.clear();
+            last_partition_values_.clear();
+            for (size_t a1 = total_from, b = k; a1 != SIZE_MAX;)
+            {
+                last_partition_.push_back({a1, b});
+                last_partition_values_.push_back(value[a1][b - a1]);
+                if (a1 == 0)
+                    break;
+                b = a1 - 1;
+                a1 = from[a1];
+            }
+            std::reverse(last_partition_.begin(), last_partition_.end());
+            std::reverse(last_partition_values_.begin(), last_partition_values_.end());
+            return total;
+        };
+        double total = bestPartition();
+        // Long windows (more than max_len links, up to long_len) ending
+        // where the partition has a boundary: they hold parallel branches
+        // that fork before a short window and join at its end. Valued by the
+        // cut DP alone (their exact enumeration rarely finishes).
+        if (long_len > max_len)
+        {
+            std::vector<std::pair<size_t, size_t>> candidates;
+            for (const auto &[pa1, pb] : last_partition_)
+                for (size_t len = max_len + 1; len <= long_len && len <= pb + 1; ++len)
+                    candidates.push_back({pb + 1 - len, pb});
+            std::vector<double> long_value(candidates.size(), 0.0);
+            ThreadPool::get().parallel_for(static_cast<uint32_t>(candidates.size()), [&](uint32_t c) {
+                if (late || std::chrono::steady_clock::now() >= deadline)
+                {
+                    late = true;
+                    return;
+                }
+                WindowScratch ws;
+                std::vector<Region> scratch;
+                const auto [a1, b] = candidates[c];
+                prepareWindowStart(a1, ws);
+                if (!buildWindow(a1, b, ws, scratch) || scratch[0].zero_value ||
+                    scratch[0].nodes.size() > kCutDpMaxClasses)
+                    return;
+                long_value[c] = cutDpWindow(scratch[0], criticalPathRegion(scratch[0]), kCutDpStates, kCutDpPoints);
+            });
+            if (late)
+                return total; // the short windows' partition stands
+            for (size_t c = 0; c < candidates.size(); ++c)
+            {
+                const auto [a1, b] = candidates[c];
+                if (value[a1].size() <= b - a1)
+                    value[a1].resize(b - a1 + 1, 0.0);
+                value[a1][b - a1] = std::max(value[a1][b - a1], long_value[c]);
+            }
+            total = bestPartition();
+        }
+        return total;
     }
 
-    double evaluateIntervals()
+    // Windows (a + 1, b) of the partition chosen by the last
+    // flexibleIntervalBound, in chain order.
+    const std::vector<std::pair<size_t, size_t>> &lastPartition() const { return last_partition_; }
+    // Their values, and the members of chain link i (local classes).
+    const std::vector<double> &lastPartitionValues() const { return last_partition_values_; }
+    const std::vector<uint32_t> &chainLinkMembers(size_t i) const { return rb_.group_members[ichain_[i]]; }
+
+    // The `count` best selections, by the window relaxation's value, of
+    // window (a1, b) that a search of `budget` nodes finds (best first; not
+    // proven optimal when the search does not finish), then those of them a
+    // local search on the window value improves; empty when the window is
+    // too large. Each entry is a class and its alternative indices: the
+    // chosen one first, then those equal to it inside the window (they
+    // differ only in children that add nothing there). Classes that add
+    // nothing to the window are left out. Used by the primal heuristic.
+    struct WindowChoice
+    {
+        uint32_t cls;
+        std::vector<uint32_t> alts;
+    };
+    std::vector<std::vector<WindowChoice>> windowSelections(size_t a1, size_t b, size_t count, uint64_t budget,
+                                                            std::chrono::steady_clock::time_point stop)
+    {
+        std::vector<std::vector<WindowChoice>> out;
+        WindowScratch ws;
+        std::vector<Region> scratch;
+        prepareWindowStart(a1, ws);
+        if (!buildWindow(a1, b, ws, scratch))
+            return out;
+        // Two searches of half the budget: shortest chains first, least
+        // work first; the better selections are kept.
+        std::vector<std::pair<double, std::vector<int32_t>>> top, by_work;
+        std::vector<std::vector<std::vector<uint32_t>>> equivalents;
+        const auto half = std::chrono::steady_clock::now() + (stop - std::chrono::steady_clock::now()) / 2;
+        exactWindow(scratch[0], budget / 2, nullptr, &top, count, &equivalents, false, half);
+        exactWindow(scratch[0], budget / 2, nullptr, &by_work, count, nullptr, true, stop);
+        top.insert(top.end(), by_work.begin(), by_work.end());
+        std::stable_sort(top.begin(), top.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
+        if (top.size() > count)
+            top.resize(count);
+        // Each also polished by local search on the window value (listed
+        // after the found ones when it changes them).
+        for (size_t t = 0, found = top.size(); t < found; ++t)
+        {
+            std::vector<int32_t> polished = top[t].second;
+            const double value = improveWindowChoice(scratch[0], polished, top[t].first);
+            if (value < top[t].first - 1e-12)
+                top.push_back({value, std::move(polished)});
+        }
+        const Region &region = scratch[0];
+        for (const auto &[value, choice] : top)
+        {
+            out.emplace_back();
+            for (uint32_t i = 0; i < region.nodes.size(); ++i)
+            {
+                if (choice[i] < 0)
+                    continue;
+                WindowChoice entry{region.nodes[i], {region.alts[i][static_cast<size_t>(choice[i])].alt_index}};
+                for (const auto &group : equivalents[i])
+                    if (std::find(group.begin(), group.end(), static_cast<uint32_t>(choice[i])) != group.end())
+                        for (uint32_t a : group)
+                            if (a != static_cast<uint32_t>(choice[i]))
+                                entry.alts.push_back(region.alts[i][a].alt_index);
+                out.back().push_back(std::move(entry));
+            }
+        }
+        return out;
+    }
+
+    // Interval bound with windows at every `stride`-th chain link.
+    // Past `deadline` the remaining windows count 0 and the bound is 0
+    // (nothing proven by this call; the window values stay valid).
+    double intervalBound(size_t stride, size_t phase = 0,
+                         std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max())
+    {
+        if (!ready_)
+            Error::throw_err("Interval bound evaluated on an unprepared bucket");
+        if (degenerate_)
+            return 0.0;
+        buildIntervals(stride, phase);
+        return evaluateIntervals(deadline);
+    }
+
+    double evaluateIntervals(std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max())
     {
         if (!ready_)
             Error::throw_err("Interval bound evaluated on an unprepared bucket");
@@ -918,10 +1207,12 @@ class RelaxationBoundComputer
         double total = 0.0;
         std::vector<double> lambda(ne);
         window_values_.clear();
+        bool late = false;
         for (Region &region : intervals_)
         {
             window_values_.push_back(0.0);
-            if (region.zero_value)
+            late = late || std::chrono::steady_clock::now() >= deadline;
+            if (region.zero_value || late)
                 continue;
             std::vector<double> cp_nodes, path;
             const double cp = criticalPathRegion(region, cp_nodes);
@@ -981,7 +1272,7 @@ class RelaxationBoundComputer
         // so windows are processed in parallel.
         ThreadPool::get().parallel_for(static_cast<uint32_t>(intervals_.size()), [&](uint32_t w) {
             const Region &region = intervals_[w];
-            if (region.zero_value)
+            if (region.zero_value || late || std::chrono::steady_clock::now() >= deadline)
                 return;
             const double exact = exactWindow(region, exact_window_nodes_);
             const double proven = std::max(window_values_[w], exact);
@@ -992,18 +1283,49 @@ class RelaxationBoundComputer
         });
         for (double v : window_values_)
             total += v;
-        return total;
+        return late || std::chrono::steady_clock::now() >= deadline ? 0.0 : total;
     }
 
     // After evaluate(): each class's bound within its own region, i.e. its
     // cost excluding the shared history below the region (0 outside regions).
     void regionEstimates(std::vector<double> &estimates) const
     {
+        if (degenerate_)
+        {
+            estimates = cheap_estimates_;
+            return;
+        }
         estimates.assign(rb_.classes.size(), 0.0);
         for (const Region &region : regions_)
             if (!region.zero_value)
                 for (size_t i = 0; i < region.nodes.size(); ++i)
                     estimates[region.nodes[i]] = region.L[i];
+    }
+
+    // Least weighted cost (weights at `lambda`) to produce each class from
+    // scratch, shared classes counted per use: an estimate, not a bound.
+    // The primal heuristic starts from these too (they price work below
+    // other regions, which region values treat as already paid).
+    void cheapEstimates(const std::vector<double> &lambda, std::vector<double> &estimates)
+    {
+        if (!ready_)
+            Error::throw_err("Cheap estimates on an unprepared bucket");
+        if (lambda.size() != rb_.engines.size())
+            Error::throw_err("Cheap estimates: lambda has the wrong number of engines");
+        alt_weight_.resize(alt_offset_.back());
+        for (uint32_t u = 0; u < rb_.classes.size(); ++u)
+        {
+            const auto &alts = rb_.classes[u].alternatives;
+            for (uint32_t a = 0; a < alts.size(); ++a)
+            {
+                double scale = 0.0;
+                for (uint32_t e = 0; e < lambda.size(); ++e)
+                    if (alts[a].engine_mask & (1u << e))
+                        scale += lambda[e];
+                alt_weight_[alt_offset_[u] + a] = alts[a].duration * scale;
+            }
+        }
+        fillCheapEstimates(estimates);
     }
 
     double evaluate(const std::vector<double> &lambda)
@@ -1025,6 +1347,11 @@ class RelaxationBoundComputer
                 alt_weight_[alt_offset_[u] + a] = alts[a].duration * scale;
             }
         }
+        if (degenerate_)
+        {
+            fillCheapEstimates(cheap_estimates_);
+            return 0.0;
+        }
         double total = 0.0;
         for (size_t ri = 0; ri < regions_.size(); ++ri)
         {
@@ -1041,13 +1368,194 @@ class RelaxationBoundComputer
         return total;
     }
 
+    // Global case split (docs/core/relaxation_bound.md, "Global split") at
+    // `lambda` over the `candidates` classes whose bound most exceeds their
+    // region's value. A plan either selects x, and then x's region costs at
+    // least L(x) (x is active and its claims lie in the region) with every
+    // other region unchanged, or avoids x, and then is a plan of every
+    // region with x forbidden (infeasibility carried to later regions
+    // through the children below them). The bound is the best over x of the
+    // smaller branch; the plain load bound if no candidate helps. Region
+    // values proven by threshold splits at the same lambda (evaluateSplit)
+    // hold for every plan, so both branches keep them as floors.
+    // Candidates stop at `deadline` (each finished one is valid by itself).
+    double evaluateGlobalSplit(const std::vector<double> &lambda, size_t candidates,
+                               std::chrono::steady_clock::time_point deadline =
+                                   std::chrono::steady_clock::time_point::max())
+    {
+        if (degenerate_)
+            return 0.0;
+        evaluate(lambda);
+        const bool floors = lambda == split_lambda_;
+        const uint32_t n = static_cast<uint32_t>(rb_.classes.size());
+        const uint32_t orig_n = rb_.orig_class_count ? rb_.orig_class_count : n;
+        auto origOf = [&](uint32_t u) { return u < orig_n ? u : rb_.orig_class_of[u]; };
+        // Every copy of a class (cycle unrolling makes level copies) with
+        // its region and position, and each region's value.
+        std::vector<double> value(regions_.size(), 0.0);
+        std::vector<std::vector<std::pair<uint32_t, uint32_t>>> copies(orig_n); // (region, node)
+        for (uint32_t ri = 0; ri < regions_.size(); ++ri)
+        {
+            const Region &region = regions_[ri];
+            if (region.zero_value)
+                continue;
+            value[ri] = std::max(regionValue(region), floors ? split_value_[ri] : 0.0);
+            for (uint32_t i = 0; i < region.nodes.size(); ++i)
+                copies[origOf(region.nodes[i])].push_back({ri, i});
+        }
+        double plain = 0.0;
+        for (double v : value)
+            plain += v;
+        // Selecting class x (any copy) raises the copy's region to at least
+        // its L: the gain is the smallest raise over the copies (0 if a copy
+        // lies outside every evaluated region).
+        std::vector<std::pair<double, uint32_t>> ranked;
+        std::vector<uint8_t> in_region(n, 0);
+        for (const auto &list : copies)
+            for (const auto &[ri, i] : list)
+                in_region[regions_[ri].nodes[i]] = 1;
+        for (uint32_t x = 0; x < orig_n; ++x)
+        {
+            if (copies[x].empty())
+                continue;
+            double gain = std::numeric_limits<double>::infinity();
+            for (const auto &[ri, i] : copies[x])
+                gain = std::min(gain, std::max(0.0, regions_[ri].L[i] - value[ri]));
+            for (uint32_t u = orig_n; u < n; ++u)
+                if (origOf(u) == x && !in_region[u])
+                    gain = 0.0;
+            if (!in_region[x])
+                gain = 0.0;
+            if (gain > 1e-9 * std::max(1.0, plain))
+                ranked.push_back({gain, x});
+        }
+        std::sort(ranked.rbegin(), ranked.rend());
+        if (ranked.size() > candidates)
+            ranked.resize(candidates);
+        double best = plain;
+        std::vector<double> L;
+        std::vector<Claims> support;
+        for (const auto &[gain, x] : ranked)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
+            const double used = plain + gain;
+            if (!(used > best))
+                continue; // min(avoided, used) cannot beat best
+            // Avoided: forbid every copy of x and carry infeasibility region
+            // by region (children below a region come from earlier ones).
+            std::vector<uint8_t> infeasible(n, 0);
+            double avoided = 0.0;
+            for (uint32_t ri = 0; ri < regions_.size() && std::isfinite(avoided); ++ri)
+            {
+                const Region &region = regions_[ri];
+                if (region.zero_value)
+                    continue;
+                std::vector<uint8_t> forbid(region.nodes.size(), 0);
+                for (uint32_t i = 0; i < region.nodes.size(); ++i)
+                    forbid[i] = origOf(region.nodes[i]) == x ? 1 : 0;
+                const std::vector<uint64_t> zero(region.support_words, 0);
+                avoided += std::max(value[ri], evaluateCore(region, &forbid, &zero, L, support, nullptr, &infeasible));
+                for (uint32_t i = 0; i < region.nodes.size(); ++i)
+                {
+                    bool feasible = false;
+                    if (!forbid[i])
+                        for (const AltInfo &info : region.alts[i])
+                        {
+                            bool usable = true;
+                            for (uint32_t k : info.all_kids)
+                                usable = usable && !infeasible[region.nodes[k]];
+                            for (uint32_t c : info.below)
+                                usable = usable && !infeasible[c];
+                            feasible = feasible || usable;
+                        }
+                    if (!feasible)
+                        infeasible[region.nodes[i]] = 1;
+                }
+            }
+            if (std::getenv("TG_DEBUG_PROBE"))
+                LOG(INFO) << "[global split] x=" << x << " copies=" << copies[x].size() << " used=" << used
+                          << " avoided=" << avoided;
+            best = std::max(best, std::min(avoided, used));
+        }
+        return best;
+    }
+
+    // Load bound at `lambda` where every region of at least `min_nodes`
+    // classes also takes its best nested case split (probeRegion) over its
+    // `candidates` largest shared classes, then its best threshold split.
+    double evaluateProbed(const std::vector<double> &lambda, int depth, size_t candidates, size_t min_nodes,
+                          size_t with_candidates)
+    {
+        if (degenerate_)
+            return 0.0;
+        evaluate(lambda); // fills the weights and every region's L
+        double total = 0.0;
+        for (const Region &region : regions_)
+        {
+            if (region.zero_value)
+                continue;
+            double value = regionValue(region);
+            if (region.nodes.size() >= min_nodes)
+            {
+                std::vector<uint8_t> forbid(region.nodes.size(), 0);
+                std::vector<uint64_t> zero(region.support_words, 0);
+                const double probed = probeRegion(region, forbid, zero, depth, probeCandidates(region, candidates));
+                if (std::isfinite(probed))
+                    value = std::max(value, probed);
+                value = std::max(value, bestThresholdRegion(region, value, 40, with_candidates, 0, kNoDeadline));
+            }
+            total += value;
+        }
+        return total;
+    }
+
+    // Load bound at `lambda` with every region raised by its best threshold
+    // split, nested `depth` deep with `with_candidates` sharing candidates
+    // per round (docs/core/relaxation_bound.md, "Case splits"). Region values
+    // proven by earlier calls at the same lambda are kept and only higher
+    // thresholds are tested. Past `deadline` regions keep what is proven.
+    double evaluateSplit(const std::vector<double> &lambda, int depth, size_t with_candidates,
+                         std::chrono::steady_clock::time_point deadline)
+    {
+        if (degenerate_)
+            return 0.0;
+        evaluate(lambda); // fills the weights and every region's L
+        if (lambda != split_lambda_)
+        {
+            split_lambda_ = lambda;
+            split_value_.assign(regions_.size(), 0.0);
+        }
+        double total = 0.0;
+        for (size_t ri = 0; ri < regions_.size(); ++ri)
+        {
+            const Region &region = regions_[ri];
+            if (region.zero_value)
+                continue;
+            double value = std::max(regionValue(region), split_value_[ri]);
+            if (std::chrono::steady_clock::now() < deadline)
+                value = std::max(value, bestThresholdRegion(region, value, 40, with_candidates, depth, deadline));
+            split_value_[ri] = value;
+            if (std::getenv("TG_DEBUG_PROBE") && region.nodes.size() >= 64)
+                LOG(INFO) << "[RelaxationBound split] depth=" << depth << " nodes=" << region.nodes.size()
+                          << " plain=" << regionValue(region) << " split=" << value;
+            total += value;
+        }
+        return total;
+    }
+
   private:
+    // Claims of a class: (region node, fraction of its own weight), sorted by
+    // node. See evaluateCore.
+    using Claims = std::vector<std::pair<uint32_t, double>>;
+
     struct AltInfo
     {
         uint32_t alt_index = 0;
         std::vector<uint32_t> kids;   // region-local indices of positive children
         std::vector<uint32_t> extras; // region-local groups with positive production cost
         std::vector<uint32_t> all_kids; // region-local indices of every child in the region
+        std::vector<uint32_t> below;    // bucket class indices of the children below the region
         bool weighted = true;           // interval regions: the alternative runs inside the window
     };
     struct Region
@@ -1062,12 +1570,38 @@ class RelaxationBoundComputer
         std::vector<std::vector<uint32_t>> group_members; // region-local
         std::vector<std::vector<std::pair<uint32_t, uint32_t>>> group_production; // (global class, alt)
         std::vector<double> L;
+        std::vector<Claims> tsupport; // claims of the last evaluate()
         std::vector<double> mp;
     };
 
+    static constexpr std::chrono::steady_clock::time_point kNoDeadline = std::chrono::steady_clock::time_point::max();
+
     const RelaxationBucket &rb_;
     bool ready_ = false;
+    std::vector<double> split_lambda_;
+    std::vector<double> split_value_; // per region, proven at split_lambda_
+    // From alt_weight_ (children first).
+    void fillCheapEstimates(std::vector<double> &estimates) const
+    {
+        estimates.assign(rb_.classes.size(), 0.0);
+        for (uint32_t u : rb_.topo)
+        {
+            double best = std::numeric_limits<double>::infinity();
+            const auto &alts = rb_.classes[u].alternatives;
+            for (uint32_t a = 0; a < alts.size(); ++a)
+            {
+                double cost = alt_weight_[alt_offset_[u] + a];
+                for (uint32_t ch : alts[a].children)
+                    cost += estimates[ch];
+                best = std::min(best, cost);
+            }
+            estimates[u] = std::isfinite(best) ? best : 0.0;
+        }
+    }
+
     std::vector<Region> regions_;
+    bool degenerate_ = false;
+    std::vector<double> cheap_estimates_;
     std::vector<Region> intervals_;
     std::vector<double> window_values_;
     std::vector<size_t> window_last_link_;
@@ -1078,7 +1612,14 @@ class RelaxationBoundComputer
     std::vector<uint32_t> alt_offset_;
     std::vector<double> alt_weight_;
 
-    double weight(uint32_t u, uint32_t a) const { return alt_weight_[alt_offset_[u] + a]; }
+    // Per-alternative weights. A thread valuing windows in parallel sets
+    // its own table (thread_weights_); everything else uses alt_weight_.
+    static inline thread_local std::vector<double> *thread_weights_ = nullptr;
+    std::vector<double> &weights() { return thread_weights_ ? *thread_weights_ : alt_weight_; }
+    double weight(uint32_t u, uint32_t a) const
+    {
+        return (thread_weights_ ? *thread_weights_ : alt_weight_)[alt_offset_[u] + a];
+    }
 
     void prepare()
     {
@@ -1253,20 +1794,40 @@ class RelaxationBoundComputer
             necessary.push_back({count, g});
         }
         std::sort(necessary.begin(), necessary.end());
-        std::vector<uint32_t> chain;
-        for (const auto &[count, g] : necessary)
+        // Longest containment chain (each group's members lie below the next
+        // one, with a different descendant set), by DP over the groups in
+        // order of size: one group that nothing larger contains (a greedy
+        // pass would stop there) only ends the chains through it.
+        const size_t nn = necessary.size();
+        std::vector<uint32_t> longest(nn, 1), prev(nn, UINT32_MAX);
+        for (size_t j = 0; j < nn; ++j)
         {
-            if (!chain.empty())
+            const uint32_t g = necessary[j].second;
+            for (size_t i = 0; i < j; ++i)
             {
-                const uint32_t last = chain.back();
-                bool contains = true;
-                for (uint32_t m : rb_.group_members[last])
-                    if (!testBit(necessary_desc[g].data(), m))
-                        contains = false;
-                if (!contains || necessary_desc[g] == necessary_desc[last])
+                if (longest[i] + 1 <= longest[j])
                     continue;
+                const uint32_t h = necessary[i].second;
+                bool contains = necessary_desc[g] != necessary_desc[h];
+                for (uint32_t m : rb_.group_members[h])
+                    contains = contains && testBit(necessary_desc[g].data(), m);
+                if (contains)
+                {
+                    longest[j] = longest[i] + 1;
+                    prev[j] = static_cast<uint32_t>(i);
+                }
             }
-            chain.push_back(g);
+        }
+        std::vector<uint32_t> chain;
+        if (nn > 0)
+        {
+            size_t end = 0;
+            for (size_t j = 1; j < nn; ++j)
+                if (longest[j] > longest[end])
+                    end = j;
+            for (uint32_t j = static_cast<uint32_t>(end); j != UINT32_MAX; j = prev[j])
+                chain.push_back(necessary[j].second);
+            std::reverse(chain.begin(), chain.end());
         }
         if (std::getenv("TG_DEBUG_BOUND"))
         {
@@ -1525,7 +2086,7 @@ class RelaxationBoundComputer
                     for (uint32_t e = 0; e < lambda.size(); ++e)
                         if (alts[a].engine_mask & (1u << e))
                             scale += lambda[e];
-                alt_weight_[alt_offset_[u] + a] = alts[a].duration * scale;
+                weights()[alt_offset_[u] + a] = alts[a].duration * scale;
             }
         }
     }
@@ -1679,7 +2240,12 @@ class RelaxationBoundComputer
                                   << " in_local_grp=" << (local_group.count(rb_.group[ch]) ? (int)local_group.at(rb_.group[ch]) : -1);
                     }
                     if (it == local.end())
-                        continue; // below the region: counted by an earlier region
+                    {
+                        // Below the region: counted by an earlier region.
+                        if (std::find(info.below.begin(), info.below.end(), ch) == info.below.end())
+                            info.below.push_back(ch);
+                        continue;
+                    }
                     const uint32_t li = it->second;
                     if (std::find(info.all_kids.begin(), info.all_kids.end(), li) == info.all_kids.end())
                         info.all_kids.push_back(li);
@@ -1778,12 +2344,276 @@ class RelaxationBoundComputer
         out.push_back(std::move(region));
     }
 
-    double evaluateRegion(Region &region)
+    std::vector<std::pair<size_t, size_t>> last_partition_;
+    std::vector<double> last_partition_values_;
+
+    // Per window start: alternatives running after the opening link
+    // (weighted) and the classes with a member of the opening link below
+    // them.
+    struct WindowScratch
+    {
+        std::vector<uint8_t> weighted;
+        std::vector<uint64_t> below_prev;
+        bool from_start = true;
+    };
+
+    void prepareWindowStart(size_t a1, WindowScratch &ws) const
     {
         using namespace relaxation_detail;
+        const uint32_t n = static_cast<uint32_t>(rb_.classes.size());
+        ws.weighted.assign(alt_offset_.back(), 1);
+        ws.below_prev.assign(wc_, 0);
+        ws.from_start = a1 == 0;
+        if (ws.from_start)
+            return;
+        const uint32_t prev = ichain_[a1 - 1];
+        for (uint32_t u = 0; u < n; ++u)
+        {
+            const uint8_t after = testBit(&gnd_[static_cast<size_t>(u) * wg_], prev) ? 1 : 0;
+            for (uint32_t a = 0; a < rb_.classes[u].alternatives.size(); ++a)
+                ws.weighted[alt_offset_[u] + a] = after;
+            const uint64_t *du = &desc_[static_cast<size_t>(u) * wc_];
+            for (uint32_t m : rb_.group_members[prev])
+                if (testBit(du, m))
+                {
+                    setBit(ws.below_prev.data(), u);
+                    break;
+                }
+        }
+    }
+
+    // Builds window (a1, b) into out[0]; false when it exceeds
+    // kFlexibleMaxClasses (it is then worth 0).
+    bool buildWindow(size_t a1, size_t b, const WindowScratch &ws, std::vector<Region> &out)
+    {
+        const size_t k = ichain_.size();
+        const bool final_region = b == k;
+        const uint64_t *top = final_region ? &desc_[static_cast<size_t>(rb_.root) * wc_] : ichain_desc_[b].data();
+        std::vector<uint64_t> region_bits(wc_);
+        size_t size = 0;
+        for (size_t w = 0; w < wc_; ++w)
+        {
+            region_bits[w] = ws.from_start ? top[w] : (top[w] & ws.below_prev[w]);
+            size += static_cast<size_t>(__builtin_popcountll(region_bits[w]));
+        }
+        if (size > kFlexibleMaxClasses)
+            return false;
+        out.clear();
+        const std::vector<uint64_t> none(wc_, 0);
+        buildRegion(out, region_bits, none, final_region ? std::vector<uint32_t>{rb_.root} : rb_.group_members[ichain_[b]],
+                    &ws.weighted);
+        return true;
+    }
+
+    // Local search on a window selection (primal use; the window value is
+    // the exact enumeration's: max(chain, engine loads, one-machine values)
+    // of the classes below the target). Single-class switches; classes a
+    // switch newly needs take their least-work alternative (recursively),
+    // classes no longer needed drop; a switch is kept when the value drops.
+    // Returns the final value.
+    double improveWindowChoice(const Region &region, std::vector<int32_t> &choice, double value) const
+    {
+        const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        const size_t ne = rb_.engines.size();
+        uint32_t target = UINT32_MAX;
+        for (uint32_t t : region.targets)
+            if (choice[t] >= 0 && (target == UINT32_MAX || t > target))
+                target = t;
+        if (target == UINT32_MAX)
+            return value;
+        auto own = [&](uint32_t i, int32_t a) {
+            const AltInfo &info = region.alts[i][static_cast<size_t>(a)];
+            const auto &alt = rb_.classes[region.nodes[i]].alternatives[info.alt_index];
+            return info.weighted && alt.engine_mask ? alt.duration : 0.0;
+        };
+        auto mask = [&](uint32_t i, int32_t a) {
+            return rb_.classes[region.nodes[i]].alternatives[region.alts[i][static_cast<size_t>(a)].alt_index].engine_mask;
+        };
+        // Classes that add nothing for any selection stay unchosen (the
+        // plan keeps its own choice there), as in the exact enumeration.
+        std::vector<uint8_t> nil(rn, 0);
+        for (uint32_t i = 0; i < rn; ++i) // children first
+        {
+            bool all_nil = !region.alts[i].empty() &&
+                           std::find(region.targets.begin(), region.targets.end(), i) == region.targets.end();
+            for (size_t a = 0; a < region.alts[i].size() && all_nil; ++a)
+            {
+                all_nil = own(i, static_cast<int32_t>(a)) == 0.0;
+                for (uint32_t k : region.alts[i][a].all_kids)
+                    all_nil = all_nil && nil[k];
+            }
+            nil[i] = all_nil;
+        }
+        std::vector<double> least_work(rn, 0.0);
+        std::vector<int32_t> least_alt(rn, -1);
+        for (uint32_t i = 0; i < rn; ++i) // children first
+        {
+            double v = std::numeric_limits<double>::infinity();
+            for (size_t a = 0; a < region.alts[i].size(); ++a)
+            {
+                double w = own(i, static_cast<int32_t>(a));
+                for (uint32_t k : region.alts[i][a].all_kids)
+                    w += least_work[k];
+                if (w < v)
+                {
+                    v = w;
+                    least_alt[i] = static_cast<int32_t>(a);
+                }
+            }
+            least_work[i] = std::isfinite(v) ? v : 0.0;
+        }
+        std::vector<double> finish(rn), tail(rn), loads(ne);
+        std::vector<uint8_t> reached(rn);
+        // Completes `c` from the target (least-work alternatives for classes
+        // without one), drops what is not reached; returns its value.
+        auto settle = [&](std::vector<int32_t> &c) {
+            std::fill(reached.begin(), reached.end(), 0);
+            reached[target] = 1;
+            for (uint32_t i = target + 1; i-- > 0;) // parents first
+            {
+                if (!reached[i] || nil[i])
+                {
+                    c[i] = -1;
+                    continue;
+                }
+                if (c[i] < 0)
+                    c[i] = least_alt[i];
+                if (c[i] < 0)
+                    return std::numeric_limits<double>::infinity();
+                for (uint32_t k : region.alts[i][static_cast<size_t>(c[i])].all_kids)
+                    reached[k] = 1;
+            }
+            for (uint32_t i = target + 1; i < rn; ++i)
+                c[i] = -1;
+            std::fill(loads.begin(), loads.end(), 0.0);
+            double chain = 0.0;
+            for (uint32_t i = 0; i <= target; ++i) // children first
+            {
+                if (c[i] < 0)
+                    continue;
+                double below = 0.0;
+                for (uint32_t k : region.alts[i][static_cast<size_t>(c[i])].all_kids)
+                    below = std::max(below, finish[k]);
+                const double d = own(i, c[i]);
+                finish[i] = below + d;
+                for (size_t e = 0; e < ne; ++e)
+                    if (d > 0.0 && (mask(i, c[i]) & (1u << e)))
+                        loads[e] += d;
+                chain = std::max(chain, finish[i]);
+            }
+            std::fill(tail.begin(), tail.end(), -1.0);
+            tail[target] = 0.0;
+            for (uint32_t i = target + 1; i-- > 0;)
+            {
+                if (c[i] < 0 || tail[i] < 0.0)
+                    continue;
+                const double up = tail[i] + own(i, c[i]);
+                for (uint32_t k : region.alts[i][static_cast<size_t>(c[i])].all_kids)
+                    tail[k] = std::max(tail[k], up);
+            }
+            double v = chain;
+            for (size_t e = 0; e < ne; ++e)
+            {
+                double head = std::numeric_limits<double>::infinity(), last = head;
+                for (uint32_t i = 0; i <= target; ++i)
+                {
+                    if (c[i] < 0 || tail[i] < 0.0)
+                        continue;
+                    const double d = own(i, c[i]);
+                    if (!(d > 0.0) || !(mask(i, c[i]) & (1u << e)))
+                        continue;
+                    head = std::min(head, finish[i] - d);
+                    last = std::min(last, tail[i]);
+                }
+                v = std::max(v, loads[e] > 0.0 && std::isfinite(head) ? head + loads[e] + last : loads[e]);
+            }
+            return v;
+        };
+        std::vector<int32_t> trial;
+        for (bool improved = true; improved;)
+        {
+            improved = false;
+            for (uint32_t i = 0; i <= target && !improved; ++i)
+            {
+                if (choice[i] < 0)
+                    continue;
+                for (size_t a = 0; a < region.alts[i].size(); ++a)
+                {
+                    if (static_cast<int32_t>(a) == choice[i])
+                        continue;
+                    trial = choice;
+                    trial[i] = static_cast<int32_t>(a);
+                    // Classes only the old alternative needed choose afresh.
+                    for (uint32_t k = 0; k < i; ++k)
+                        trial[k] = choice[k];
+                    const double v = settle(trial);
+                    if (v < value - 1e-12)
+                    {
+                        choice.swap(trial);
+                        value = v;
+                        improved = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return value;
+    }
+
+    // Value of one interval window: the exact window value when the
+    // enumeration finishes, otherwise the best of its critical path, the
+    // lambda / mu path-weighted values and the cut DP.
+    double windowValue(Region &region)
+    {
         if (region.zero_value)
             return 0.0;
+        const double exact = exactWindow(region, exact_window_nodes_);
+        if (exact > 0.0)
+            return exact;
+        const size_t ne = rb_.engines.size();
+        if (ne == 0)
+            return 0.0;
+        weights().resize(alt_offset_.back());
+        std::vector<double> lambda(ne), cp_nodes, path;
+        const double cp = criticalPathRegion(region, cp_nodes);
+        static const double kMu[] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.9};
+        double best = cp;
+        for (double l0 : {0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0})
+        {
+            if (ne == 1)
+                lambda[0] = 1.0;
+            else
+            {
+                lambda[0] = l0;
+                for (size_t e = 1; e < ne; ++e)
+                    lambda[e] = (1.0 - l0) / static_cast<double>(ne - 1);
+            }
+            fillRegionWeights(region, lambda);
+            best = std::max(best, evaluateRegion(region));
+            for (double mu : kMu)
+                if (mu > 0.0)
+                    best = std::max(best, evaluateRegionPath(region, mu, cp_nodes, path));
+        }
+        return region.nodes.size() > kCutDpMaxClasses ? best : cutDpWindow(region, best, kCutDpStates, kCutDpPoints);
+    }
+
+    // Value of a region after evaluate(): its cheapest target.
+    static double regionValue(const Region &region)
+    {
+        double value = std::numeric_limits<double>::infinity();
+        for (uint32_t t : region.targets)
+            value = std::min(value, region.L[t]);
+        return std::isfinite(value) ? value : 0.0;
+    }
+
+    double evaluateRegion(Region &region)
+    {
+        if (region.zero_value)
+            return 0.0;
+        // The interval bound's path recursion reads the groups' cheapest
+        // production.
         const uint32_t lgn = static_cast<uint32_t>(region.group_members.size());
+        region.mp.assign(lgn, 0.0);
         for (uint32_t lg = 0; lg < lgn; ++lg)
         {
             double best = std::numeric_limits<double>::infinity();
@@ -1791,134 +2621,406 @@ class RelaxationBoundComputer
                 best = std::min(best, weight(m, a));
             region.mp[lg] = std::isfinite(best) ? best : 0.0;
         }
-        const size_t ws = region.support_words;
-        std::vector<uint64_t> cover(ws);
+        const double value = evaluateCore(region, nullptr, nullptr, region.L, region.tsupport);
+        return std::isfinite(value) ? value : 0.0;
+    }
+
+    // The region recursion restricted to a branch of case splits
+    // (docs/core/relaxation_bound.md, "Probing"): plans that select no class
+    // of `forbid` (alternatives with a forbidden or infeasible child are
+    // skipped), counting only classes outside `zero` (they take L = 0 and
+    // are removed from every support). Fills L and the trimmed supports per
+    // region node and returns the region value, +inf when no target is
+    // feasible.
+    double evaluateRegionMasked(const Region &region, const std::vector<uint8_t> &forbid,
+                                const std::vector<uint64_t> &zero, std::vector<double> &L,
+                                std::vector<Claims> &support, std::vector<double> *overlap_loss = nullptr) const
+    {
+        return evaluateCore(region, &forbid, &zero, L, support, overlap_loss);
+    }
+
+    // The region recursion (class docs above) with fractional supports.
+    // Every counted class c gets L(c) and claims phi_c (a fraction in [0, 1]
+    // of each region class's own weight) with the invariant
+    //   L(c) <= sum_x phi_c(x) * w_plan(x)  for every plan of the branch with
+    //   c active (w_plan(x) = duration of x's selected alternative, 0 when x
+    //   is inactive).
+    // For an alternative a, children are packed greedily (every child tried
+    // first): an anchor k is taken at the largest alpha <= 1 that keeps the
+    // cover (the sum of the claims taken so far) at most 1 on every class,
+    // adding alpha * L(k); the unclaimed fraction g of a child's own weight
+    // adds g times its cheapest weight; a charged group G (an active member
+    // produces it) adds gamma * mp(G) for the fraction gamma free on all its
+    // members. L(c) = min over usable alternatives of w(a) + the best
+    // packing. For a plan selecting a, the packing's claims are at most 1 per
+    // class, so w(a) plus the packing is at most sum_x phi(x) w_plan(x).
+    // phi_c is 1 on c plus the componentwise maximum over alternatives of
+    // their packings scaled to what they must justify (L(c) - w(a), nothing
+    // when w(a) >= L(c)). Set supports are the special case phi in {0, 1};
+    // fractions let a class shared by several children (a slab or a GPU copy
+    // each child needs only a little of) count for all of them.
+    // With `overlap_loss`, the class that limited an anchor's alpha
+    // accumulates the value that anchor lost.
+    double evaluateCore(const Region &region, const std::vector<uint8_t> *forbid, const std::vector<uint64_t> *zero,
+                        std::vector<double> &L, std::vector<Claims> &support,
+                        std::vector<double> *overlap_loss = nullptr,
+                        const std::vector<uint8_t> *infeasible_below = nullptr) const
+    {
+        using namespace relaxation_detail;
+        constexpr double kEps = 1e-12;
         const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
-        std::vector<uint32_t> order;
-        std::vector<double> region_min_weight(rn, 0.0);
+        const uint32_t lgn = static_cast<uint32_t>(region.group_members.size());
+        auto zeroed = [&](uint32_t i) { return zero && testBit(zero->data(), i); };
+        std::vector<double> mp(lgn, 0.0);
+        for (uint32_t lg = 0; lg < lgn; ++lg)
+        {
+            double best = std::numeric_limits<double>::infinity();
+            for (const auto &[m, a] : region.group_production[lg])
+                best = std::min(best, weight(m, a));
+            mp[lg] = std::isfinite(best) ? best : 0.0;
+        }
+        std::vector<double> min_weight(rn, 0.0);
         for (uint32_t i = 0; i < rn; ++i)
         {
-            if (!region.pos[i]) continue;
-            const uint32_t u = region.nodes[i];
             double mw = std::numeric_limits<double>::infinity();
             for (const AltInfo &info : region.alts[i])
-                mw = std::min(mw, weight(u, info.alt_index));
-            region_min_weight[i] = std::isfinite(mw) ? mw : 0.0;
+                mw = std::min(mw, weight(region.nodes[i], info.alt_index));
+            min_weight[i] = std::isfinite(mw) ? mw : 0.0;
         }
-
+        std::vector<uint8_t> feasible(rn, 0);
+        // Dense scratch: the cover of the current packing, the claims of the
+        // best packing of the current alternative, and the class's claims.
+        std::vector<double> cover(rn, 0.0), packed(rn, 0.0), best_packed(rn, 0.0), merged(rn, 0.0);
+        std::vector<uint32_t> cover_touched, packed_touched, best_touched, merged_touched;
+        std::vector<uint32_t> order;
+        L.assign(rn, 0.0);
+        support.assign(rn, Claims{});
+        if (overlap_loss)
+            overlap_loss->assign(rn, 0.0);
+        auto touch = [](std::vector<double> &dense, std::vector<uint32_t> &touched, uint32_t x, double add) {
+            if (dense[x] == 0.0)
+                touched.push_back(x);
+            dense[x] += add;
+        };
+        auto clear = [](std::vector<double> &dense, std::vector<uint32_t> &touched) {
+            for (uint32_t x : touched)
+                dense[x] = 0.0;
+            touched.clear();
+        };
         for (uint32_t i = 0; i < rn; ++i)
         {
-            if (!region.pos[i])
-            {
-                region.L[i] = 0.0;
+            if (forbid && (*forbid)[i])
                 continue;
-            }
             const uint32_t u = region.nodes[i];
+            // Every class not zeroed is counted; one with a free usable
+            // alternative and no positive children gets L = 0 by itself.
+            const bool counted = !zeroed(i);
             double best = std::numeric_limits<double>::infinity();
+            clear(merged, merged_touched);
+            // Usable alternatives' weights and packings, to scale afterwards.
+            struct AltPacking
+            {
+                double w = 0.0;
+                double value = 0.0;
+                Claims claims;
+            };
+            std::vector<AltPacking> packings;
             for (const AltInfo &info : region.alts[i])
             {
+                bool usable = true;
+                for (uint32_t k : info.all_kids)
+                    usable = usable && feasible[k];
+                if (infeasible_below)
+                    for (uint32_t c : info.below)
+                        usable = usable && !(*infeasible_below)[c];
+                if (!usable)
+                    continue;
+                feasible[i] = 1;
+                if (!counted)
+                    continue;
                 double cand = 0.0;
-                if (!info.kids.empty() || !info.extras.empty())
+                clear(best_packed, best_touched);
+                order.clear();
+                for (uint32_t k : info.all_kids)
+                    if (L[k] > 0.0 || min_weight[k] > 0.0)
+                        order.push_back(k);
+                if (!order.empty() || !info.extras.empty())
                 {
-                    order = info.kids;
-                    std::sort(order.begin(), order.end(),
-                              [&](uint32_t x, uint32_t y) { return region.L[x] > region.L[y]; });
+                    std::sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) { return L[x] > L[y]; });
                     const size_t tries = std::max<size_t>(1, order.size());
                     cand = -1.0;
                     for (size_t first = 0; first < tries; ++first)
                     {
-                        std::fill(cover.begin(), cover.end(), 0);
+                        clear(cover, cover_touched);
                         double sum = 0.0;
                         for (size_t step = 0; step < order.size(); ++step)
                         {
                             const uint32_t k = order[step == 0 ? first : (step <= first ? step - 1 : step)];
-                            const uint64_t *sk = &region.support[static_cast<size_t>(k) * ws];
-                            bool overlap = false;
-                            for (size_t w = 0; w < ws && !overlap; ++w)
-                                overlap = (cover[w] & sk[w]) != 0;
-                            if (overlap)
-                            {
-                                if (!testBit(cover.data(), k))
-                                {
-                                    sum += region_min_weight[k];
-                                    setBit(cover.data(), k);
-                                }
+                            if (zeroed(k))
                                 continue;
+                            double alpha = 1.0;
+                            uint32_t limiter = UINT32_MAX;
+                            for (const auto &[x, f] : support[k])
+                            {
+                                const double room = std::max(0.0, 1.0 - cover[x]) / f;
+                                if (room < alpha)
+                                {
+                                    alpha = room;
+                                    limiter = x;
+                                }
                             }
-                            sum += region.L[k];
-                            for (size_t w = 0; w < ws; ++w)
-                                cover[w] |= sk[w];
+                            if (alpha > kEps)
+                            {
+                                sum += alpha * L[k];
+                                for (const auto &[x, f] : support[k])
+                                    touch(cover, cover_touched, x, alpha * f);
+                            }
+                            else
+                                alpha = 0.0;
+                            if (overlap_loss && first == 0 && limiter != UINT32_MAX && alpha < 1.0)
+                                (*overlap_loss)[limiter] += (1.0 - alpha) * L[k];
+                            // The fraction of k's own weight still free.
+                            const double g = std::max(0.0, 1.0 - cover[k]);
+                            if (g > kEps && min_weight[k] > 0.0)
+                            {
+                                sum += g * min_weight[k];
+                                touch(cover, cover_touched, k, g);
+                            }
                         }
                         for (uint32_t lg : info.extras)
                         {
-                            bool overlap = false;
+                            double gamma = 1.0;
                             for (uint32_t m : region.group_members[lg])
-                                if (testBit(cover.data(), m))
-                                {
-                                    overlap = true;
-                                    break;
-                                }
-                            if (!overlap)
-                                sum += region.mp[lg];
+                                gamma = zeroed(m) ? 0.0 : std::min(gamma, std::max(0.0, 1.0 - cover[m]));
+                            if (gamma > kEps && mp[lg] > 0.0)
+                            {
+                                sum += gamma * mp[lg];
+                                for (uint32_t m : region.group_members[lg])
+                                    touch(cover, cover_touched, m, gamma);
+                            }
                         }
-                        cand = std::max(cand, sum);
+                        if (sum > cand)
+                        {
+                            cand = sum;
+                            clear(best_packed, best_touched);
+                            for (uint32_t x : cover_touched)
+                                touch(best_packed, best_touched, x, cover[x]);
+                        }
                     }
                 }
-                best = std::min(best, weight(u, info.alt_index) + cand);
+                const double w = weight(u, info.alt_index);
+                best = std::min(best, w + cand);
+                AltPacking packing;
+                packing.w = w;
+                packing.value = std::max(cand, 0.0);
+                for (uint32_t x : best_touched)
+                    packing.claims.push_back({x, best_packed[x]});
+                packings.push_back(std::move(packing));
             }
-            region.L[i] = std::isfinite(best) ? best : 0.0;
-            if (std::getenv("TG_DEBUG_BOUND") && &region == &regions_.back())
+            if (!counted || !feasible[i])
+                continue;
+            L[i] = best;
+            if (!(best > 0.0))
+                continue; // L = 0 needs no claims
+            touch(merged, merged_touched, i, 1.0);
+            for (const AltPacking &packing : packings)
             {
-                if (region.L[i] < 2.0 || u == 3660 || u == 1)
+                const double need = best - packing.w;
+                if (!(need > 0.0) || !(packing.value > 0.0))
+                    continue;
+                // Scale the packing to what this alternative must justify;
+                // keep all of it when float error makes it barely enough.
+                const double scale = need >= packing.value * (1.0 - 1e-9) ? 1.0 : need / packing.value;
+                for (const auto &[x, f] : packing.claims)
                 {
-                    LOG(INFO) << "[debug eval u=" << u << "] i=" << i << " pos=" << (int)region.pos[i] << " L=" << region.L[i]
-                              << " alts=" << region.alts[i].size();
-                    for (size_t a = 0; a < region.alts[i].size(); ++a)
+                    const double claim = std::min(1.0, f * scale);
+                    if (claim > merged[x])
                     {
-                        const auto &info = region.alts[i][a];
-                        LOG(INFO) << "  u=" << u << " alt " << a << " alt_idx=" << info.alt_index << " w=" << weight(u, info.alt_index)
-                                  << " kids=" << info.kids.size() << " all_kids=" << info.all_kids.size()
-                                  << " extras=" << info.extras.size();
-                        for (uint32_t k : info.kids)
-                            LOG(INFO) << "    kid k=" << k << " u=" << region.nodes[k] << " L=" << region.L[k] << " pos=" << (int)region.pos[k];
-                        for (uint32_t ak : info.all_kids)
-                            LOG(INFO) << "    all_kid ak=" << ak << " u=" << region.nodes[ak] << " L=" << region.L[ak] << " pos=" << (int)region.pos[ak];
-                        for (uint32_t lg : info.extras)
-                            LOG(INFO) << "    extra lg=" << lg << " mp=" << region.mp[lg];
+                        if (merged[x] == 0.0)
+                            merged_touched.push_back(x);
+                        merged[x] = claim;
                     }
                 }
             }
-        }
-        if (std::getenv("TG_DEBUG_BOUND") && &region == &regions_.back())
-        {
-            LOG(INFO) << "[debug final region] rn=" << rn << " targets=" << region.targets.size();
-            for (uint32_t t : region.targets)
-            {
-                uint32_t u = region.nodes[t];
-                LOG(INFO) << "  final target t=" << t << " u=" << u << " pos=" << (int)region.pos[t]
-                          << " L=" << region.L[t] << " alts=" << region.alts[t].size();
-                for (size_t a = 0; a < region.alts[t].size(); ++a)
-                {
-                    const auto &info = region.alts[t][a];
-                    double w = weight(u, info.alt_index);
-                    LOG(INFO) << "    alt a=" << a << " alt_idx=" << info.alt_index
-                              << " w=" << w << " kids=" << info.kids.size() << " extras=" << info.extras.size();
-                    for (uint32_t k : info.kids)
-                    {
-                        LOG(INFO) << "      kid k=" << k << " u=" << region.nodes[k] << " L=" << region.L[k]
-                                  << " pos=" << (int)region.pos[k];
-                    }
-                    for (uint32_t lg : info.extras)
-                    {
-                        LOG(INFO) << "      extra lg=" << lg << " mp=" << region.mp[lg];
-                    }
-                }
-            }
+            std::sort(merged_touched.begin(), merged_touched.end());
+            Claims &claims = support[i];
+            for (uint32_t x : merged_touched)
+                if (merged[x] > 0.0 && !zeroed(x))
+                    claims.push_back({x, merged[x]});
         }
         double value = std::numeric_limits<double>::infinity();
         for (uint32_t t : region.targets)
-            value = std::min(value, region.L[t]);
-        return std::isfinite(value) ? value : 0.0;
+            if (feasible[t])
+                value = std::min(value, L[t]);
+        return value;
+    }
+
+    // Marks every class claimed by `claims` in `zero`.
+    static void zeroClaims(const Claims &claims, std::vector<uint64_t> &zero)
+    {
+        for (const auto &[x, f] : claims)
+            relaxation_detail::setBit(zero.data(), x);
+    }
+
+    // Best case split over `candidates`, nested `depth` deep: every plan of
+    // the branch (forbid, zero) either selects x, and then counts at least
+    // L(x) on S(x) plus the branch value with S(x) zeroed (disjoint classes),
+    // or avoids x, and then is a plan of the branch with x forbidden.
+    double probeRegion(const Region &region, std::vector<uint8_t> &forbid, std::vector<uint64_t> &zero, int depth,
+                       const std::vector<uint32_t> &candidates) const
+    {
+        std::vector<double> L;
+        std::vector<Claims> support;
+        const double base = evaluateRegionMasked(region, forbid, zero, L, support);
+        if (depth <= 0 || !std::isfinite(base))
+            return base;
+        const size_t ws = region.support_words;
+        double best = base;
+        for (uint32_t x : candidates)
+        {
+            if (forbid[x] || relaxation_detail::testBit(zero.data(), x) || !(L[x] > 0.0))
+                continue;
+            forbid[x] = 1;
+            const double without = probeRegion(region, forbid, zero, depth - 1, candidates);
+            forbid[x] = 0;
+            if (!(without > best))
+                continue; // min(without, with) cannot beat best
+            const std::vector<uint64_t> saved = zero;
+            zeroClaims(support[x], zero);
+            const double with = L[x] + probeRegion(region, forbid, zero, depth - 1, candidates);
+            zero = saved;
+            best = std::max(best, std::min(without, with));
+        }
+        return best;
+    }
+
+    // Threshold split (docs/core/relaxation_bound.md, "Threshold split"): a
+    // plan of the branch that avoids F_j and selects a class x with
+    // L_{F_j}(x) >= theta counts at least theta on S(x), inside the region.
+    // So with F_0 = {} and F_{j+1} = F_j plus every class whose L under F_j
+    // reaches theta, every plan either counts theta or avoids the final F,
+    // and the region value is at least min(theta, value under the final F).
+    double thresholdRegion(const Region &region, double theta, size_t max_with, int depth,
+                           std::chrono::steady_clock::time_point deadline) const
+    {
+        std::vector<uint8_t> forbid(region.nodes.size(), 0);
+        const std::vector<uint64_t> zero(region.support_words, 0);
+        return thresholdBranch(region, theta, max_with, depth, forbid, zero, deadline);
+    }
+
+    // The threshold split inside the branch (forbid, zero); `forbid` is
+    // extended in place. A class's "with" test L(x) + (rest with S(x)
+    // zeroed) uses a nested split `depth` levels deep: any valid bound of
+    // that branch may stand for the rest. Past `deadline` it returns -inf
+    // (nothing proven).
+    double thresholdBranch(const Region &region, double theta, size_t max_with, int depth,
+                           std::vector<uint8_t> &forbid, const std::vector<uint64_t> &zero,
+                           std::chrono::steady_clock::time_point deadline) const
+    {
+        std::vector<double> L;
+        std::vector<Claims> support;
+        std::vector<double> Lz;
+        std::vector<Claims> support_z;
+        const size_t ws = region.support_words;
+        std::vector<double> loss;
+        while (true)
+        {
+            if (deadline != kNoDeadline && std::chrono::steady_clock::now() >= deadline)
+                return -std::numeric_limits<double>::infinity();
+            const double value = evaluateRegionMasked(region, forbid, zero, L, support, &loss);
+            if (!(value < theta))
+                return theta;
+            bool added = false;
+            std::vector<uint32_t> lighter;
+            for (uint32_t i = 0; i < region.nodes.size(); ++i)
+            {
+                if (forbid[i] || relaxation_detail::testBit(zero.data(), i))
+                    continue;
+                if (L[i] >= theta)
+                {
+                    forbid[i] = 1;
+                    added = true;
+                }
+                else if (loss[i] > 0.0 && L[i] > 0.0)
+                    lighter.push_back(i);
+            }
+            // A selected x also counts the rest of the region with S(x)
+            // zeroed (disjoint classes, same branch). Try the classes whose
+            // sharing lost the most value first.
+            std::sort(lighter.begin(), lighter.end(), [&](uint32_t a, uint32_t b) { return loss[a] > loss[b]; });
+            if (lighter.size() > max_with)
+                lighter.resize(max_with);
+            for (uint32_t x : lighter)
+            {
+                std::vector<uint64_t> with_zero(zero);
+                zeroClaims(support[x], with_zero);
+                double rest;
+                if (depth > 0)
+                {
+                    std::vector<uint8_t> inner(forbid);
+                    rest = thresholdBranch(region, theta - L[x], max_with, depth - 1, inner, with_zero, deadline);
+                }
+                else
+                    rest = evaluateRegionMasked(region, forbid, with_zero, Lz, support_z);
+                if (L[x] + rest >= theta)
+                {
+                    forbid[x] = 1;
+                    added = true;
+                }
+            }
+            if (!added)
+                return value;
+        }
+    }
+
+    // Largest threshold split value found by doubling then bisection from
+    // `base` (every tested theta gives a valid bound; the best is kept).
+    double bestThresholdRegion(const Region &region, double base, int steps, size_t with_candidates, int depth,
+                               std::chrono::steady_clock::time_point deadline) const
+    {
+        if (!(base > 0.0))
+            return base;
+        double best = base;
+        double lo = base, hi = 0.0;
+        for (int s = 0; s < steps; ++s)
+        {
+            const double theta = hi > 0.0 ? 0.5 * (lo + hi) : 2.0 * lo;
+            const double v = thresholdRegion(region, theta, with_candidates, depth, deadline);
+            if (v == -std::numeric_limits<double>::infinity())
+                break; // deadline
+            best = std::max(best, v);
+            if (v >= theta)
+                lo = theta;
+            else
+                hi = theta;
+            if (hi > 0.0 && hi - lo <= 1e-3 * hi)
+                break;
+        }
+        return best;
+    }
+
+    // Probe candidates: counted classes with at least two parents in the
+    // region (sharing is what makes supports overlap), largest L first.
+    std::vector<uint32_t> probeCandidates(const Region &region, size_t count) const
+    {
+        const uint32_t rn = static_cast<uint32_t>(region.nodes.size());
+        std::vector<uint32_t> parents(rn, 0), last_parent(rn, UINT32_MAX);
+        for (uint32_t i = 0; i < rn; ++i)
+            for (const AltInfo &info : region.alts[i])
+                for (uint32_t k : info.all_kids)
+                    if (last_parent[k] != i)
+                    {
+                        last_parent[k] = i;
+                        ++parents[k];
+                    }
+        std::vector<uint32_t> out;
+        for (uint32_t i = 0; i < rn; ++i)
+            if (region.pos[i] && parents[i] >= 2 && region.L[i] > 0.0)
+                out.push_back(i);
+        std::sort(out.begin(), out.end(), [&](uint32_t a, uint32_t b) { return region.L[a] > region.L[b]; });
+        if (out.size() > count)
+            out.resize(count);
+        return out;
     }
 
     // Cut-DP window bound (docs/core/relaxation_bound.md, "Cut DP").
@@ -2004,6 +3106,12 @@ class RelaxationBoundComputer
             }
         };
         using Point = std::vector<double>;
+        // A point: engine loads, then per engine the shortest head and the
+        // shortest tail of its operations so far (infinite before the
+        // first; one-machine value head + load + tail, see exactWindow),
+        // then the tail into each required class.
+        const size_t so = 3 * ne;
+        const bool stage_ = exact_window_stage_;
         auto addPoint = [&](std::vector<Point> &set, Point p) {
             for (const Point &q : set)
             {
@@ -2067,7 +3175,12 @@ class RelaxationBoundComputer
             std::unordered_map<std::vector<uint32_t>, std::vector<Point>, KeyHash> states, next;
             for (uint32_t t : region.targets)
                 if (std::isfinite(head[t]))
-                    addPoint(states[std::vector<uint32_t>{t}], Point(ne + 1, 0.0));
+                {
+                    Point start(so + 1, 0.0);
+                    for (size_t e = ne; e < so; ++e)
+                        start[e] = inf; // no operation on the engine yet
+                    addPoint(states[std::vector<uint32_t>{t}], std::move(start));
+                }
             std::vector<double> kid_tail;
             for (uint32_t i = rn; i-- > 0;)
             {
@@ -2098,12 +3211,17 @@ class RelaxationBoundComputer
                         auto &dst = next[key];
                         for (const Point &p : points)
                         {
-                            const double tail_i = p[ne + base.size()]; // i is the last key entry
+                            const double tail_i = p[so + base.size()]; // i is the last key entry
                             if (tail_i + alt_head > T)
                                 continue;
-                            Point q(ne + key.size());
+                            Point q(so + key.size());
                             for (size_t e = 0; e < ne; ++e)
-                                q[e] = p[e] + ((d > 0.0 && (mask & (1u << e))) ? d : 0.0);
+                            {
+                                const bool on = d > 0.0 && (mask & (1u << e));
+                                q[e] = p[e] + (on ? d : 0.0);
+                                q[ne + e] = on && stage_ ? std::min(p[ne + e], alt_head - d) : p[ne + e];
+                                q[2 * ne + e] = on && stage_ ? std::min(p[2 * ne + e], tail_i) : p[2 * ne + e];
+                            }
                             size_t bi = 0;
                             for (size_t x = 0; x < key.size(); ++x)
                             {
@@ -2111,10 +3229,10 @@ class RelaxationBoundComputer
                                 while (bi < base.size() && base[bi] < key[x])
                                     ++bi;
                                 if (bi < base.size() && base[bi] == key[x])
-                                    tail = p[ne + bi];
+                                    tail = p[so + bi];
                                 if (std::find(kids.begin(), kids.end(), key[x]) != kids.end())
                                     tail = std::max(tail, tail_i + d);
-                                q[ne + x] = tail;
+                                q[so + x] = tail;
                             }
                             addPoint(dst, std::move(q));
                         }
@@ -2130,7 +3248,14 @@ class RelaxationBoundComputer
             auto it = states.find(std::vector<uint32_t>{});
             if (it != states.end())
                 for (const Point &p : it->second)
-                    best = std::min(best, *std::max_element(p.begin(), p.begin() + static_cast<std::ptrdiff_t>(ne)));
+                {
+                    double v = 0.0;
+                    for (size_t e = 0; e < ne; ++e)
+                        v = std::max(v, p[e] > 0.0 && std::isfinite(p[ne + e]) && std::isfinite(p[2 * ne + e])
+                                            ? p[ne + e] + p[e] + p[2 * ne + e]
+                                            : p[e]);
+                    best = std::min(best, v);
+                }
             return best;
         };
         bool gave_up = false;
@@ -2166,6 +3291,8 @@ class RelaxationBoundComputer
 
     // Enumeration budget (search nodes) for the exact window value.
     uint64_t exact_window_nodes_ = 20000;
+    bool exact_window_pruning_ = true;
+    bool exact_window_stage_ = true;
     // Cut DP limits: states per class step and Pareto points per state.
     static constexpr size_t kCutDpStates = 5000;
     static constexpr size_t kCutDpPoints = 16;
@@ -2177,7 +3304,20 @@ class RelaxationBoundComputer
     // each class counted once. Every plan's window is at least this long (the
     // chain and each engine's load fit inside it). Returns 0 when the budget
     // runs out, which is always valid.
-    double exactWindow(const Region &region, uint64_t budget) const
+    // With `top`, also keeps the `top_count` best complete selections
+    // (value, choice), cheapest first.
+    // With `equivalents`, also gives for every class the alternatives
+    // merged into each one tried (the tried one first).
+    // `by_work` tries alternatives with the least total work below first
+    // instead of the shortest chain (finds load-bound selections sooner;
+    // the value does not depend on it).
+    // `stop` ends the enumeration like the budget (checked every 4096
+    // nodes).
+    double exactWindow(const Region &region, uint64_t budget, std::vector<int32_t> *best_choice = nullptr,
+                       std::vector<std::pair<double, std::vector<int32_t>>> *top = nullptr, size_t top_count = 0,
+                       std::vector<std::vector<std::vector<uint32_t>>> *equivalents = nullptr,
+                       bool by_work = false,
+                       std::chrono::steady_clock::time_point stop = std::chrono::steady_clock::time_point::max()) const
     {
         if (region.zero_value)
             return 0.0;
@@ -2193,24 +3333,172 @@ class RelaxationBoundComputer
             const auto &alt = rb_.classes[region.nodes[i]].alternatives[info.alt_index];
             return info.weighted && alt.engine_mask ? alt.duration : 0.0;
         };
+        // Classes whose every alternative (and child) adds nothing can be
+        // left out: dropped from children lists, never chosen. Alternatives
+        // then identical (own duration, engines, effective children) are
+        // tried once.
+        std::vector<uint8_t> nil(rn, 0);
+        std::vector<std::vector<std::vector<uint32_t>>> eff_kids(rn);
+        if (equivalents)
+            equivalents->assign(rn, {});
+        std::vector<std::vector<uint32_t>> alive(rn);
+        for (uint32_t i = 0; i < rn; ++i) // children first
+        {
+            bool all_nil = true;
+            eff_kids[i].resize(region.alts[i].size());
+            std::vector<std::tuple<double, uint32_t, std::vector<uint32_t>>> keys;
+            for (size_t a = 0; a < region.alts[i].size(); ++a)
+            {
+                for (uint32_t k : region.alts[i][a].all_kids)
+                    if (!nil[k] || !exact_window_pruning_)
+                        eff_kids[i][a].push_back(k);
+                std::sort(eff_kids[i][a].begin(), eff_kids[i][a].end());
+                const double d = ownDuration(i, static_cast<int32_t>(a));
+                all_nil = all_nil && d == 0.0 && eff_kids[i][a].empty();
+                const uint32_t mask =
+                    d > 0.0 ? rb_.classes[region.nodes[i]].alternatives[region.alts[i][a].alt_index].engine_mask : 0;
+                std::tuple<double, uint32_t, std::vector<uint32_t>> key{d, mask, eff_kids[i][a]};
+                const auto same = std::find(keys.begin(), keys.end(), key);
+                if (exact_window_pruning_ && same != keys.end())
+                {
+                    if (equivalents)
+                        (*equivalents)[i][static_cast<size_t>(same - keys.begin())].push_back(static_cast<uint32_t>(a));
+                    continue;
+                }
+                keys.push_back(std::move(key));
+                alive[i].push_back(static_cast<uint32_t>(a));
+                if (equivalents)
+                    (*equivalents)[i].push_back({static_cast<uint32_t>(a)});
+            }
+            nil[i] = all_nil && !region.alts[i].empty() &&
+                     std::find(region.targets.begin(), region.targets.end(), i) == region.targets.end();
+        }
         auto chainOf = [&](uint32_t target) {
             for (uint32_t i = 0; i < rn; ++i) // children first
             {
                 if (choice[i] < 0)
                     continue;
                 double below = 0.0;
-                for (uint32_t k : region.alts[i][static_cast<size_t>(choice[i])].all_kids)
+                for (uint32_t k : eff_kids[i][static_cast<size_t>(choice[i])])
                     below = std::max(below, finish[k]);
                 finish[i] = below + ownDuration(i, choice[i]);
             }
             return finish[target];
         };
+        // One-machine value of a complete selection: an engine's operations
+        // run one at a time inside the window, the first no earlier than the
+        // shortest chain below any of them (head) and the last followed by
+        // the shortest chain from any of them up to the target (tail), so
+        // the window is at least min head + load + min tail on each engine.
+        // Uses finish times from chainOf.
+        std::vector<double> stage_tail(rn, 0.0);
+        auto stageValue = [&](uint32_t target) {
+            if (!exact_window_stage_)
+                return 0.0;
+            std::fill(stage_tail.begin(), stage_tail.end(), -1.0);
+            stage_tail[target] = 0.0;
+            for (uint32_t i = target + 1; i-- > 0;) // parents first
+            {
+                if (choice[i] < 0 || stage_tail[i] < 0.0)
+                    continue;
+                const double up = stage_tail[i] + ownDuration(i, choice[i]);
+                for (uint32_t k : eff_kids[i][static_cast<size_t>(choice[i])])
+                    stage_tail[k] = std::max(stage_tail[k], up);
+            }
+            double value = 0.0;
+            for (size_t e = 0; e < ne; ++e)
+            {
+                double load = 0.0, head = std::numeric_limits<double>::infinity(),
+                       tail = std::numeric_limits<double>::infinity();
+                for (uint32_t i = 0; i <= target; ++i)
+                {
+                    if (choice[i] < 0 || stage_tail[i] < 0.0)
+                        continue;
+                    const double d = ownDuration(i, choice[i]);
+                    const uint32_t mask =
+                        rb_.classes[region.nodes[i]].alternatives[region.alts[i][static_cast<size_t>(choice[i])].alt_index]
+                            .engine_mask;
+                    if (!(d > 0.0) || !(mask & (1u << e)))
+                        continue;
+                    load += d;
+                    head = std::min(head, finish[i] - d);
+                    tail = std::min(tail, stage_tail[i]);
+                }
+                if (load > 0.0)
+                    value = std::max(value, head + load + tail);
+            }
+            return value;
+        };
+        // Lower bound on the target's chain under any completion of the
+        // partial selection: chosen classes use their alternative, the
+        // others the best alternative over the same bounds of its children.
+        std::vector<double> chain_lb(rn, 0.0);
+        auto chainBound = [&](uint32_t target) {
+            for (uint32_t i = 0; i <= target; ++i) // children first
+            {
+                auto through = [&](size_t a) {
+                    double below = 0.0;
+                    for (uint32_t k : eff_kids[i][a])
+                        below = std::max(below, chain_lb[k]);
+                    return below + ownDuration(i, static_cast<int32_t>(a));
+                };
+                if (choice[i] >= 0)
+                    chain_lb[i] = through(static_cast<size_t>(choice[i]));
+                else
+                {
+                    double v = std::numeric_limits<double>::infinity();
+                    for (uint32_t a : alive[i])
+                        v = std::min(v, through(a));
+                    chain_lb[i] = std::isfinite(v) ? v : 0.0;
+                }
+            }
+            return chain_lb[target];
+        };
+        // Alternatives tried cheapest first (own duration plus the unchosen
+        // bound of their children).
+        chainBound(rn - 1);
+        // Least total work below each class (shared classes counted per
+        // use: an ordering key only).
+        std::vector<double> least_work(rn, 0.0);
+        if (by_work)
+            for (uint32_t i = 0; i < rn; ++i) // children first
+            {
+                double v = std::numeric_limits<double>::infinity();
+                for (uint32_t a : alive[i])
+                {
+                    double w = ownDuration(i, static_cast<int32_t>(a));
+                    for (uint32_t k : eff_kids[i][a])
+                        w += least_work[k];
+                    v = std::min(v, w);
+                }
+                least_work[i] = std::isfinite(v) ? v : 0.0;
+            }
+        std::vector<std::vector<uint32_t>> alt_order(rn);
+        for (uint32_t i = 0; i < rn; ++i)
+        {
+            std::vector<std::pair<double, uint32_t>> keyed;
+            for (uint32_t a : alive[i])
+            {
+                double below = 0.0;
+                for (uint32_t k : eff_kids[i][a])
+                    below = by_work ? below + least_work[k] : std::max(below, chain_lb[k]);
+                keyed.push_back({below + ownDuration(i, static_cast<int32_t>(a)), static_cast<uint32_t>(a)});
+            }
+            std::stable_sort(keyed.begin(), keyed.end());
+            for (const auto &[key, a] : keyed)
+                alt_order[i].push_back(a);
+        }
+        std::vector<double> extra(ne), least(ne), path_load(static_cast<size_t>(rn) * ne, 0.0);
+        std::vector<uint64_t> seen(rn, 0);
+        uint64_t stamp = 0;
         // Depth-first over pending classes; loads only grow, so a partial
-        // selection whose maximum load reaches the best value is pruned.
+        // selection whose maximum load or chain bound reaches the best value
+        // is pruned.
         auto dfs = [&](auto &&self, uint32_t target, std::vector<uint32_t> pending) -> void {
             if (exhausted)
                 return;
-            if (++visited > budget)
+            if (++visited > budget ||
+                ((visited & 4095) == 0 && std::chrono::steady_clock::now() >= stop))
             {
                 exhausted = true;
                 return;
@@ -2218,19 +3506,119 @@ class RelaxationBoundComputer
             double max_load = 0.0;
             for (double l : loads)
                 max_load = std::max(max_load, l);
-            if (max_load >= best)
+            const double cutoff = top && top->size() < top_count ? std::numeric_limits<double>::infinity()
+                                  : top ? top->back().first : best;
+            if (max_load >= cutoff ||
+                (exact_window_pruning_ && std::isfinite(cutoff) && chainBound(target) >= cutoff))
                 return;
             while (!pending.empty() && choice[pending.back()] >= 0)
                 pending.pop_back();
+            // Every pending class takes an alternative that keeps each of
+            // its engines below the cutoff: on each engine it then adds at
+            // least the minimum, over those alternatives, of its duration
+            // there (0 for alternatives elsewhere).
+            if (exact_window_pruning_ && std::isfinite(cutoff) && !pending.empty())
+            {
+                std::fill(extra.begin(), extra.end(), 0.0);
+                ++stamp;
+                for (uint32_t i : pending)
+                {
+                    if (choice[i] >= 0 || seen[i] == stamp)
+                        continue;
+                    seen[i] = stamp;
+                    std::fill(least.begin(), least.end(), std::numeric_limits<double>::infinity());
+                    bool feasible = false;
+                    for (uint32_t a : alive[i])
+                    {
+                        const double d = ownDuration(i, static_cast<int32_t>(a));
+                        const uint32_t mask =
+                            rb_.classes[region.nodes[i]].alternatives[region.alts[i][a].alt_index].engine_mask;
+                        bool fits = true;
+                        for (size_t e = 0; e < ne && fits; ++e)
+                            fits = !(mask & (1u << e)) || loads[e] + d < cutoff;
+                        if (!fits)
+                            continue;
+                        feasible = true;
+                        for (size_t e = 0; e < ne; ++e)
+                            least[e] = std::min(least[e], (mask & (1u << e)) ? d : 0.0);
+                    }
+                    if (!feasible)
+                        return;
+                    for (size_t e = 0; e < ne; ++e)
+                        extra[e] += least[e];
+                }
+                for (size_t e = 0; e < ne; ++e)
+                    if (loads[e] + extra[e] >= cutoff)
+                        return;
+                // Along any one route below a pending class the loads add
+                // up: path_load[i * ne + e] bounds what class i still adds
+                // on engine e through its heaviest child (classes chosen
+                // already count no own duration).
+                for (uint32_t i = 0; i <= target; ++i) // children first
+                {
+                    double *pl = &path_load[static_cast<size_t>(i) * ne];
+                    if (choice[i] >= 0)
+                    {
+                        std::fill(pl, pl + ne, 0.0);
+                        for (uint32_t k : eff_kids[i][static_cast<size_t>(choice[i])])
+                            for (size_t e = 0; e < ne; ++e)
+                                pl[e] = std::max(pl[e], path_load[static_cast<size_t>(k) * ne + e]);
+                        continue;
+                    }
+                    std::fill(pl, pl + ne, std::numeric_limits<double>::infinity());
+                    bool feasible = false;
+                    for (uint32_t a : alive[i])
+                    {
+                        const double d = ownDuration(i, static_cast<int32_t>(a));
+                        const uint32_t mask =
+                            rb_.classes[region.nodes[i]].alternatives[region.alts[i][a].alt_index].engine_mask;
+                        bool fits = true;
+                        for (size_t e = 0; e < ne && fits; ++e)
+                            fits = !(mask & (1u << e)) || loads[e] + d < cutoff;
+                        if (!fits)
+                            continue;
+                        feasible = true;
+                        for (size_t e = 0; e < ne; ++e)
+                        {
+                            double below = 0.0;
+                            for (uint32_t k : eff_kids[i][a])
+                                below = std::max(below, path_load[static_cast<size_t>(k) * ne + e]);
+                            pl[e] = std::min(pl[e], below + ((mask & (1u << e)) ? d : 0.0));
+                        }
+                    }
+                    if (!feasible) // infinite: no completion through i fits
+                        std::fill(pl, pl + ne, std::numeric_limits<double>::infinity());
+                }
+                for (uint32_t i : pending)
+                    for (size_t e = 0; e < ne; ++e)
+                        if (choice[i] < 0 && loads[e] + path_load[static_cast<size_t>(i) * ne + e] >= cutoff)
+                            return;
+            }
             if (pending.empty())
             {
-                best = std::min(best, std::max(max_load, chainOf(target)));
+                const double v = std::max({max_load, chainOf(target), stageValue(target)});
+                if (v < best)
+                {
+                    best = v;
+                    if (best_choice)
+                        *best_choice = choice;
+                }
+                if (top && (top->size() < top_count || v < top->back().first))
+                {
+                    top->insert(std::upper_bound(top->begin(), top->end(), v,
+                                                 [](double x, const auto &e) { return x < e.first; }),
+                                {v, choice});
+                    if (top->size() > top_count)
+                        top->pop_back();
+                }
                 return;
             }
             const uint32_t i = pending.back();
             pending.pop_back();
-            for (size_t a = 0; a < region.alts[i].size() && !exhausted; ++a)
+            for (const uint32_t a : alt_order[i])
             {
+                if (exhausted)
+                    break;
                 const AltInfo &info = region.alts[i][a];
                 const auto &alt = rb_.classes[region.nodes[i]].alternatives[info.alt_index];
                 const double d = ownDuration(i, static_cast<int32_t>(a));
@@ -2239,7 +3627,7 @@ class RelaxationBoundComputer
                     if (alt.engine_mask & (1u << e))
                         loads[e] += d;
                 std::vector<uint32_t> next = pending;
-                for (uint32_t k : info.all_kids)
+                for (uint32_t k : eff_kids[i][a])
                     if (choice[k] < 0)
                         next.push_back(k);
                 self(self, target, std::move(next));

@@ -563,6 +563,11 @@ class HeuristicBrancher : public Brancher
                     EClassId base_ch = (ch_sel_v != kInvalidVarId) ? offset_base_cids[canon_ch.value] : canon_ch;
                     if (base_ch != r_cid && offset_eclass_end[base_ch.value] != std::numeric_limits<int32_t>::max())
                         offset_eclass_end[base_ch.value] = std::max(offset_eclass_end[base_ch.value], r_finish);
+                    // A view child has its own offset record: it occupies its
+                    // base's storage until its last reader too.
+                    if (canon_ch != base_ch && canon_ch != r_cid &&
+                        offset_eclass_end[canon_ch.value] != std::numeric_limits<int32_t>::max())
+                        offset_eclass_end[canon_ch.value] = std::max(offset_eclass_end[canon_ch.value], r_finish);
                 }
             }
 
@@ -657,6 +662,35 @@ class HeuristicBrancher : public Brancher
                 std::chrono::steady_clock::now() - pref_start).count());
 #endif
         return result;
+    }
+
+    // First offset past every fixed allocation and preallocated buffer of
+    // `cid`'s memory space in bucket `b`, regardless of lifetimes. Reads the
+    // records cached by the preferredOffset call for the same state.
+    int32_t offsetPastAllocations(const SearchState &state, uint32_t b, EClassId cid) const
+    {
+        if (cached_preferred_offset_bucket != b ||
+            cached_preferred_offset_selection_revision != state.getSelectionRevision() ||
+            cached_preferred_offset_schedule_revision != state.getScheduleRevision())
+            Error::throw_err("[HeuristicBrancher.offsetPastAllocations] call preferredOffset on this state first");
+        const MemSpace mem_space = eclass_mem_spaces_[b][cid.value];
+        uint64_t end = 0;
+        auto obs_it = preallocated_obstacles_by_space_.find(mem_space);
+        if (obs_it != preallocated_obstacles_by_space_.end())
+            for (const Obstacle &obs : obs_it->second)
+                end = std::max<uint64_t>(end, obs.end);
+        for (const auto &[fixed_offset, other_offset_var] : state.getFixedOffsetVars(b))
+        {
+            if (other_offset_var >= offset_records_.size())
+                Error::throw_err("[HeuristicBrancher.offsetPastAllocations] fixed offset var outside the record cache");
+            const OffsetRecord &rec = offset_records_[other_offset_var];
+            if (rec.cid == cid || !rec.active || !(rec.mem_space == mem_space))
+                continue;
+            end = std::max<uint64_t>(end, static_cast<uint64_t>(fixed_offset) + rec.pages);
+        }
+        if (end > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+            Error::throw_err("[HeuristicBrancher.offsetPastAllocations] offset exceeds int32 range");
+        return static_cast<int32_t>(end);
     }
 
   private:

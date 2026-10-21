@@ -1,0 +1,96 @@
+{
+  "name": "threshold split over a route shared by two chunks",
+  "description": "out either concatenates c1 and c2 (0.5 on engine 0) or reads the input directly (9 on engine 0), so the chunks are not necessary and share one bound region. Each chunk either runs privately (4 on engine 0) or runs on engine 1 for 0.25 after the shared g (6 on engine 0). Both chunks through g: g ends at 6, the chunks at 6.25 and 6.5, out at 7; private chunks put 8.5 on engine 0, a mix 10.5. The optimum is 7. The plain load bound credits only one chunk (both supports hold g). Forbidding g without charging the plans that use it would claim 8.5; the threshold split must count g's support plus the rest with it zeroed (6 + 0.5 + 0.25 + 0.25 at lambda = (1, 0)).",
+  "root": "out",
+  "nodes": {
+    "out": {
+      "alternatives": [
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "cost": 0.5,
+          "engines": [
+            0
+          ]
+        },
+        {
+          "children": [
+            "inp"
+          ],
+          "cost": 9,
+          "engines": [
+            0
+          ]
+        }
+      ]
+    },
+    "c1": {
+      "alternatives": [
+        {
+          "children": [
+            "inp"
+          ],
+          "cost": 4,
+          "engines": [
+            0
+          ]
+        },
+        {
+          "children": [
+            "g"
+          ],
+          "cost": 0.25,
+          "engines": [
+            1
+          ]
+        }
+      ]
+    },
+    "c2": {
+      "alternatives": [
+        {
+          "children": [
+            "inp"
+          ],
+          "cost": 4,
+          "engines": [
+            0
+          ]
+        },
+        {
+          "children": [
+            "g"
+          ],
+          "cost": 0.25,
+          "engines": [
+            1
+          ]
+        }
+      ]
+    },
+    "g": {
+      "alternatives": [
+        {
+          "children": [
+            "inp"
+          ],
+          "cost": 6,
+          "engines": [
+            0
+          ]
+        }
+      ]
+    },
+    "inp": {
+      "alternatives": [
+        {
+          "op": "input",
+          "cost": 0
+        }
+      ]
+    }
+  },
+  "expected_optimum": 7
+}

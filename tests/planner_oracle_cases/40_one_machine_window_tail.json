@@ -1,0 +1,14 @@
+{
+  "name": "one-machine window value uses the shortest tail",
+  "description": "a, b and d run on engine 0 (2 each) and all must precede out (engine 1, 1); a reaches out through c (engine 1, 2). Engine 0 works 6 inside the window and its last operation is followed by at least out (1), so the window is at least 0 + 6 + 1 = 7 (max(chain 5, loads 6) gives only 6). The optimum is 7: a first, then c alongside b and d, then out. Taking the longest tail after an engine-0 operation (a's 3) instead of the shortest would claim 9.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["c", "b", "d"], "cost": 1, "engines": [1]}]},
+    "c": {"alternatives": [{"children": ["a"], "cost": 2, "engines": [1]}]},
+    "a": {"alternatives": [{"children": ["inp"], "cost": 2, "engines": [0]}]},
+    "b": {"alternatives": [{"children": ["inp"], "cost": 2, "engines": [0]}]},
+    "d": {"alternatives": [{"children": ["inp"], "cost": 2, "engines": [0]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 7
+}
