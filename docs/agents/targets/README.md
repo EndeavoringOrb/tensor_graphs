@@ -28,6 +28,7 @@ Run every build, test and evaluation through the runner so each run gets a log, 
 |---|---|---|
 | [gap_integral](gap_integral/target.md) | Lower normalized primal-dual gap integral on Gemma decode planning | `tests.test_gemma_output --config decode --optimal --timeout 600` |
 | [prefill_decode_seq_len](prefill_decode_seq_len/target.md) | Largest sequence length N whose 2N+1 prefill+decode buckets are planned to within 5% of optimal in 120 s | `tests.test_gemma_output --config prefill+decode --optimal --timeout 120 --seq-len N` |
+| [prefill_decode_incumbent_seq_len](prefill_decode_incumbent_seq_len/target.md) | Largest sequence length N whose 2N+1 prefill+decode buckets get a valid, correct first plan within 30 s (goal N = 32768) | `tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len N` |
 | [search_volume](search_volume/target.md) | Eliminate at least half of the search's domain bits (`remaining-domain-bits <= total-domain-bits / 2`) on Gemma full and decode planning | `tests.test_gemma_output --config full\|decode --optimal --timeout 60` |
 | [inference_speed](inference_speed/target.md) | Higher prefill and decode tokens per second, matching the transformers reference | `tests.inference_benchmark --run-dir logs/inference_runs/<run_id>` |
 | [saturation_seq_len](saturation_seq_len/target.md) | Largest sequence length whose 2N+1 buckets saturate with exact gold equivalence in under 30 s | `tests/verify_saturation.py --seq-len N` |
