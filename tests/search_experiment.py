@@ -36,7 +36,7 @@ RECORDS = {
 RECORDS.update({"gap_integral": RECORDS["gap"], "search_volume": RECORDS["search"],
                 "inference_speed": RECORDS["inference"]})
 TARGETS_DIR = ROOT / "docs" / "agents" / "targets"
-PATCH_PATHS = ["tensor_graphs_cpp", "tests", "docs/core"]
+PATCH_PATHS = ["tensor_graphs_cpp", "tests", "docs/core", "build.py", "kernel_linter.py"]
 
 
 def recordPaths(record_name):
@@ -72,7 +72,7 @@ def parseMetrics(output, timeout):
         "incumbent_events": re.findall(r"\[SearchEngine\] New best cost:.*", output),
         "oracle_verdict": re.findall(r"\d+/\d+ cases passed", output),
         "inference_lines": re.findall(r"\[Inference (?:compile\] supervisor|case|failure|summary)\].*", output),
-        "gemma_lines": re.findall(r"\[Gemma (?:compile\] supervisor|logits\] ok|failure|prefill\+decode)\].*", output),
+        "gemma_lines": re.findall(r"\[Gemma (?:compile\] supervisor|logits\] ok|failure\]|prefill\+decode\]).*", output),
     }
     if metrics["gap_report"]:
         metrics["gap"] = {key: (None if value == "none" else float(value))
@@ -81,19 +81,26 @@ def parseMetrics(output, timeout):
     for line in metrics["incumbent_events"]:
         event = re.search(r"cost: ([0-9.eE+\-]+).*event-epoch=([0-9.eE+\-]+) program-deadline=([0-9.eE+\-]+)", line)
         if event and timeout:
-            if float(event[3]) > 0:
-                elapsed = float(event[2]) - float(event[3]) + timeout
-            else:
-                # Without TG_PROGRAM_DEADLINE (search-deadline compiles) the
-                # supervisor's gap report has the time since its start.
-                elapsed = metrics.get("gap", {}).get("first-incumbent-elapsed")
-                if elapsed is None:
+            elapsed = metrics.get("gap", {}).get("first-incumbent-elapsed")
+            # The supervisor measures from process launch. A search
+            # deadline excludes extraction time and is not its origin.
+            if elapsed is None:
+                if metrics["gemma_lines"]:
+                    # Killed compiles may lack a supervisor gap summary.
+                    # Retain the cost and raw event without inventing an origin.
+                    elapsed = None
+                elif float(event[3]) > 0:
+                    elapsed = float(event[2]) - float(event[3]) + timeout
+                else:
                     raise ValueError("Incumbent event without a program deadline and no [Program gap] report")
             first = {"cost": float(event[1]), "program_elapsed": elapsed}
             break
     metrics["first_incumbent"] = first
     costs = re.findall(r"best=([0-9.eE+\-]+)", output)
     metrics["best_incumbent_cost"] = float(costs[-1]) if costs and first else (first["cost"] if first else None)
+    final_cost = metrics.get("gap", {}).get("final-incumbent")
+    if final_cost is not None:
+        metrics["best_incumbent_cost"] = final_cost
     if metrics["volume_reports"]:
         fields = dict(re.findall(r"([\w-]+)=([^ ]+)", metrics["volume_reports"][-1]))
         total, remaining = float(fields["total-domain-bits"]), float(fields["remaining-domain-bits"])
@@ -124,7 +131,7 @@ def main():
     timeout = float(arguments[arguments.index("--timeout") + 1]) if "--timeout" in arguments else None
     record = {
         "id": run_id,
-        "command": arguments if native else [".venv/Scripts/python.exe", *arguments],
+        "command": command,
         "cwd": str(ROOT),
         "start": datetime.datetime.now().astimezone().isoformat(),
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip(),
@@ -151,6 +158,11 @@ def main():
     output = log_path.read_text(encoding="utf-8", errors="replace")
     record.update(status="complete", exit_status=exit_status, end=datetime.datetime.now().astimezone().isoformat(),
                   runner_elapsed=time.monotonic() - start, **parseMetrics(output, timeout))
+    if sys.platform == "linux":
+        import resource
+        # Largest single child-process RSS, including calibration/checks;
+        # this is not the sum of simultaneously resident worker processes.
+        record["child_peak_rss_kib"] = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     record_path.write_text(json.dumps(record, indent=2))
     with document.open("a", encoding="utf-8", newline="\n") as file:
         file.write(f"- Completed: {record['end']}; exit {exit_status}; runner elapsed {record['runner_elapsed']:.3f} s.\n")
@@ -162,9 +174,12 @@ def main():
             if not record["volume_reports"] or not record["gap_report"]:
                 file.write("- Missing volume or gap report: FAILED evaluation.\n")
             first = record["first_incumbent"]
-            file.write("- First incumbent: " + (f"{first['program_elapsed']:.9f} s, cost {first['cost']}" if first
-                                               else "none within budget (+infinity)")
-                       + f"; best cost {record['best_incumbent_cost']}.\n")
+            first_text = "none within budget (+infinity)"
+            if first:
+                first_text = (f"{first['program_elapsed']:.9f} s, cost {first['cost']}"
+                              if first["program_elapsed"] is not None else
+                              f"elapsed unavailable, cost {first['cost']} (no supervisor gap summary)")
+            file.write(f"- First incumbent: {first_text}; best cost {record['best_incumbent_cost']}.\n")
         if record["oracle_verdict"]:
             file.write(f"- Oracle verdict: {record['oracle_verdict'][-1]}.\n")
         for line in record["inference_lines"]:

@@ -35,7 +35,18 @@ class StartRankWindowPropagator : public Propagator
         return bits;
     }
 
-    bool applyBucket(SearchState &state, uint32_t b, std::vector<VarId> &worklist, size_t &narrowed)
+    // A bucket's windows depend only on its own selection and start
+    // domains, and narrowing touches only its own starts, so every bucket's
+    // windows are computed in parallel from the entry domains and applied
+    // afterwards in bucket order, exactly as a sequential pass would.
+    struct BucketWindows
+    {
+        bool consistent = true;
+        std::vector<std::pair<VarId, Domain>> narrowed;
+        std::vector<std::string> messages;
+    };
+
+    static void computeBucket(const SearchState &state, uint32_t b, BucketWindows &out)
     {
         const EGraph &egraph = state.bucket_egraphs[b];
         const std::vector<EClassId> &cids = state.reachable_cids[b];
@@ -94,8 +105,8 @@ class StartRankWindowPropagator : public Propagator
                     order.push_back(p);
         if (order.size() != n)
         {
-            LOG(INFO) << "[StartRankWindow] bucket=" << b << " skipped: possible-selection graph is cyclic";
-            return true;
+            out.messages.push_back("bucket=" + std::to_string(b) + " skipped: possible-selection graph is cyclic");
+            return;
         }
 
         // Persistent sources: possibly selected classes whose remaining
@@ -240,7 +251,10 @@ class StartRankWindowPropagator : public Propagator
         {
             const Domain &dom = state.domains[st_v];
             if (dom.isEmpty())
-                return false;
+            {
+                out.consistent = false;
+                return;
+            }
             min_start = std::min<int64_t>(min_start, dom.getMin());
         }
         const bool downward_closed = b < state.start_domains_downward_closed_at_entry.size() &&
@@ -248,8 +262,8 @@ class StartRankWindowPropagator : public Propagator
         if (downward_closed)
             min_start = 0;
         if (!downward_closed)
-            LOG(INFO) << "[StartRankWindow] bucket=" << b
-                      << " start domains are not downward closed from 0; upper rank windows skipped";
+            out.messages.push_back("bucket=" + std::to_string(b) +
+                                   " start domains are not downward closed from 0; upper rank windows skipped");
         // Canonical form: sources at fixed ranks 0..S-1 in children-first
         // order (unselected sources leave holes), then the other active
         // classes densely in their original relative order.
@@ -307,11 +321,7 @@ class StartRankWindowPropagator : public Propagator
                 const int32_t rank = static_cast<int32_t>(
                     std::find(source_order.begin(), source_order.end(), i) - source_order.begin());
                 if (!state.domains[source_st_v].isFixed())
-                {
-                    state.setDomain(source_st_v, Domain::makeFixed(rank));
-                    worklist.push_back(source_st_v);
-                    ++narrowed;
-                }
+                    out.narrowed.emplace_back(source_st_v, Domain::makeFixed(rank));
                 continue;
             }
             const int64_t lo = min_start + (source_prefix ? prefix + lower_non_source[i] : lower[i]);
@@ -327,17 +337,16 @@ class StartRankWindowPropagator : public Propagator
             {
                 if (sel.contains(0))
                     continue; // cannot be selected; still a valid unselected class
-                LOG(INFO) << "[StartRankWindow] conflict bucket=" << b << " cid=" << cid.value << " window=[" << lo
-                          << "," << hi << "] domain=" << state.domains[st_v].toString();
-                return false;
+                out.messages.push_back("conflict bucket=" + std::to_string(b) + " cid=" + std::to_string(cid.value) +
+                                       " window=[" + std::to_string(lo) + "," + std::to_string(hi) +
+                                       "] domain=" + state.domains[st_v].toString());
+                out.consistent = false;
+                return;
             }
             if (next.size() == state.domains[st_v].size())
                 continue;
-            state.setDomain(st_v, next);
-            worklist.push_back(st_v);
-            ++narrowed;
+            out.narrowed.emplace_back(st_v, next);
         }
-        return true;
     }
 
   public:
@@ -357,12 +366,22 @@ class StartRankWindowPropagator : public Propagator
         if (applied_)
             return true;
         applied_ = true;
+        std::vector<BucketWindows> windows(state.buckets.size());
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()),
+                                       [&](uint32_t b) { computeBucket(state, b, windows[b]); });
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
         {
             const double before = startBits(state, b);
-            size_t narrowed = 0;
-            if (!applyBucket(state, b, worklist, narrowed))
+            for (const std::string &message : windows[b].messages)
+                LOG(INFO) << "[StartRankWindow] " << message;
+            if (!windows[b].consistent)
                 return false;
+            for (const auto &[st_v, next] : windows[b].narrowed)
+            {
+                state.setDomain(st_v, next);
+                worklist.push_back(st_v);
+            }
+            const size_t narrowed = windows[b].narrowed.size();
             const double after = startBits(state, b);
             LOG(INFO) << "[StartRankWindow] bucket=" << b << " narrowed=" << narrowed << " start-bits " << before
                       << " -> " << after;

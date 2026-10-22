@@ -400,7 +400,18 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
                               const std::string &contentHash = "")
 {
     EClassId cls = targetEClass;
-    std::string origin = debugOrigin.empty() ? toString(loc) : debugOrigin;
+    // The debug origin is not part of an enode's identity: format it only
+    // when a node is added or a nested call needs it.
+    std::string origin_storage;
+    bool origin_built = false;
+    auto origin = [&]() -> const std::string & {
+        if (!origin_built)
+        {
+            origin_storage = debugOrigin.empty() ? toString(loc) : debugOrigin;
+            origin_built = true;
+        }
+        return origin_storage;
+    };
 
     struct MatchedKernel
     {
@@ -556,25 +567,35 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
                     EClassId contiguous_class = addOpToEGraph(
                         egraph, OpType::CONTIGUOUS, {source_class}, srcShape,
                         calcContiguousStrides(srcShape), srcDType, srcMem, EClassId(), loc,
-                        origin.empty() ? "addOpToEGraph.make_contiguous" : (origin + " -> make_contiguous"));
+                        origin().empty() ? "addOpToEGraph.make_contiguous" : (origin() + " -> make_contiguous"));
                     adapted_children[input_idx] = contiguous_class;
                 }
             }
 
-            ENode n(matched.uid, op, kernel.opName, adapted_children, shape,
-                    kernel.is_view ? strides : calcContiguousStrides(shape), dtype, mem_space, matched.engines,
-                    contentHash, 0, origin);
-            n.setSig(EGraph::computeSignature(n));
+            // Probe with a reused node; copy it only when it is added.
+            thread_local ENode probe(KernelId{0}, OpType::INPUT, "", {}, {}, {}, DType::FLOAT32, MemSpace{}, {});
+            thread_local std::vector<uint64_t> contiguous_strides;
+            if (!kernel.is_view)
+                contiguous_strides = calcContiguousStrides(shape);
+            probe.assignFields(matched.uid, op, kernel.opName, adapted_children, shape,
+                               kernel.is_view ? strides : contiguous_strides, dtype, mem_space, matched.engines,
+                               contentHash);
+            probe.setSig(EGraph::computeSignature(probe));
+            auto addedNode = [&]() {
+                ENode n = probe;
+                n.setDebugOrigin(origin());
+                return n;
+            };
             if (cls == EClassId())
-                cls = egraph.lookupENode(n);
+                cls = egraph.lookupENode(probe);
             if (cls == EClassId())
             {
                 cls = egraph.addEClass(shape, strides, dtype, mem_space);
-                cls = egraph.addENode(cls, std::move(n));
+                cls = egraph.addENode(cls, addedNode());
             }
             else if (targetEClass != EClassId())
             {
-                cls = egraph.addENode(cls, std::move(n));
+                cls = egraph.addENode(cls, addedNode());
             }
         }
     }
@@ -679,6 +700,9 @@ struct FusionRule : public Rule
         bool is_single_node = false;
         // Levels from the root to its deepest variable.
         uint32_t depth = 0;
+        // Bit of this pattern in an enode's completed-application mask
+        // (unique among the patterns with the same root op).
+        uint32_t slot = 0;
         // Pattern node id -> index into `variables`, or -1.
         std::vector<int32_t> varIndex;
         mutable std::vector<KernelId> candidateKernelIds;
@@ -723,6 +747,8 @@ struct FusionRule : public Rule
         std::array<std::vector<Pattern>, kNumOpTypes> singleNodePatternsByOp;
         std::array<std::vector<Pattern>, kNumOpTypes> multiNodePatternsByOp;
         uint32_t max_pattern_depth = 0;
+        // 64-bit words per enode in a completed-application mask.
+        uint32_t completion_words = 1;
     };
     // Immutable after construction and shared by clones, so the Pattern
     // addresses in completed_applications stay valid across clones.
@@ -749,37 +775,50 @@ struct FusionRule : public Rule
     {
         uint32_t root_idx;
         const Pattern *pattern;
-
-        bool operator==(const ApplicationKey &other) const
-        {
-            return root_idx == other.root_idx && pattern == other.pattern;
-        }
     };
 
-    struct ApplicationHash
-    {
-        size_t operator()(const ApplicationKey &key) const
-        {
-            return (static_cast<size_t>(key.root_idx) * 0x9E3779B97F4A7C15ULL) ^
-                   reinterpret_cast<uintptr_t>(key.pattern);
-        }
-    };
-
-    std::shared_ptr<const std::unordered_set<ApplicationKey, ApplicationHash>> base_completed_applications;
-    std::unordered_set<ApplicationKey, ApplicationHash> local_completed_applications;
+    // Completed (root enode, pattern) applications as per-enode bitmasks of
+    // pattern slots: `completion_words` words per enode. The base set is
+    // shared by clones (frozen after full saturation); local holds the rest.
+    std::shared_ptr<const std::vector<uint64_t>> base_completed_applications;
+    std::vector<uint64_t> local_completed_applications;
+    size_t local_completed_count = 0;
     uint64_t application_cache_hits = 0;
+
+    static bool maskHas(const std::vector<uint64_t> &mask, size_t word, uint64_t bit)
+    {
+        return word < mask.size() && (mask[word] & bit) != 0;
+    }
 
     bool hasCompleted(const ApplicationKey &key) const
     {
-        if (base_completed_applications && base_completed_applications->count(key))
+        const size_t word = static_cast<size_t>(key.root_idx) * patterns->completion_words + key.pattern->slot / 64;
+        const uint64_t bit = 1ULL << (key.pattern->slot % 64);
+        if (base_completed_applications && maskHas(*base_completed_applications, word, bit))
             return true;
-        return local_completed_applications.count(key) > 0;
+        return maskHas(local_completed_applications, word, bit);
+    }
+
+    void markCompleted(const ApplicationKey &key)
+    {
+        const size_t word = static_cast<size_t>(key.root_idx) * patterns->completion_words + key.pattern->slot / 64;
+        const uint64_t bit = 1ULL << (key.pattern->slot % 64);
+        if (word >= local_completed_applications.size())
+            local_completed_applications.resize(std::max(word + 1, local_completed_applications.size() * 2), 0);
+        if ((local_completed_applications[word] & bit) == 0)
+        {
+            local_completed_applications[word] |= bit;
+            ++local_completed_count;
+        }
     }
 
     size_t numCompletedApplications() const
     {
-        return (base_completed_applications ? base_completed_applications->size() : 0) +
-               local_completed_applications.size();
+        size_t base = 0;
+        if (base_completed_applications)
+            for (uint64_t word : *base_completed_applications)
+                base += static_cast<size_t>(__builtin_popcountll(word));
+        return base + local_completed_count;
     }
 
     bool isCompleted(uint32_t eNodeIdx, const Pattern &pattern, const std::vector<EClassId> &inputs, const EGraph &egraph) const
@@ -881,6 +920,16 @@ struct FusionRule : public Rule
             for (const auto &list : pattern_set->multiNodePatternsByOp)
                 for (const auto &pattern : list)
                     pattern_set->max_pattern_depth = std::max(pattern_set->max_pattern_depth, pattern.depth);
+            uint32_t max_slots = 1;
+            for (size_t op = 0; op < PatternSet::kNumOpTypes; ++op)
+            {
+                uint32_t slot = 0;
+                for (auto *list : {&singleNodePatternsByOp[op], &multiNodePatternsByOp[op]})
+                    for (auto &pattern : *list)
+                        pattern.slot = slot++;
+                max_slots = std::max(max_slots, slot);
+            }
+            pattern_set->completion_words = (max_slots + 63) / 64;
             // Every rule clone shares these patterns across the saturation
             // threads: resolve the candidate kernels here, before the set is
             // shared, instead of lazily (a lazy fill raced and handed out
@@ -903,11 +952,12 @@ struct FusionRule : public Rule
     void clearVisited() override
     {
         single_node_visited.clear();
-        if (!base_completed_applications && !local_completed_applications.empty())
+        if (!base_completed_applications && local_completed_count > 0)
         {
-            base_completed_applications = std::make_shared<std::unordered_set<ApplicationKey, ApplicationHash>>(
-                std::move(local_completed_applications));
+            base_completed_applications =
+                std::make_shared<const std::vector<uint64_t>>(std::move(local_completed_applications));
             local_completed_applications.clear();
+            local_completed_count = 0;
         }
     }
 
@@ -1199,7 +1249,7 @@ struct FusionRule : public Rule
                     }
                 materializeFusedCandidates(ctx, *selected, inputs, ENodeId{eNodeIdx});
             }
-            local_completed_applications.insert(std::move(application_key));
+            markCompleted(application_key);
         }
     }
 

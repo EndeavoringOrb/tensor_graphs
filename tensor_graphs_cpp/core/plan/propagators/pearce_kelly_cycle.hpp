@@ -21,8 +21,8 @@ class PearceKellyCyclePropagator : public Propagator
         if (parents_initialized)
             return;
         bucket_parents.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
+        // Buckets are independent: each fills only its own map.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
             for (const auto &pair : state.selected_vars[b])
             {
                 EClassId p_cid = pair.first;
@@ -37,59 +37,53 @@ class PearceKellyCyclePropagator : public Propagator
                     }
                 }
             }
-        }
+        });
         parents_initialized = true;
     }
 
-    bool checkIncrementalCycle(SearchState &state, uint32_t b, EClassId cid, uint32_t en_idx)
+    // Marks cid and every class reachable from it upward along parent edges
+    // whose parent selection is fixed to the edge's alternative. Choosing an
+    // alternative of cid closes a cycle exactly when one of its children is
+    // marked (cid itself included: a direct self-cycle). The walk does not
+    // depend on which alternative is tested, so a class's alternatives share
+    // one walk.
+    std::vector<uint32_t> ancestor_stamp_;
+    uint32_t ancestor_epoch_ = 0;
+    std::vector<EClassId> ancestor_frontier_;
+    void markFixedAncestors(const SearchState &state, uint32_t b, EClassId cid)
     {
         ensureParents(state);
-        const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
-        if (en_idx >= cls.enodes.size())
-            return false;
-        const ENode &enode = state.bucket_egraphs[b].getENode(cls.enodes[en_idx]);
-
-        std::unordered_set<EClassId> targets;
-        for (EClassId ch : enode.getChildren())
+        const size_t num_classes = state.bucket_egraphs[b].classes.size();
+        if (ancestor_stamp_.size() < num_classes)
+            ancestor_stamp_.resize(num_classes, 0);
+        if (++ancestor_epoch_ == 0)
         {
-            EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
-            if (canon_ch == cid)
-                return false; // Direct self-cycle
-            targets.insert(canon_ch);
+            std::fill(ancestor_stamp_.begin(), ancestor_stamp_.end(), 0);
+            ancestor_epoch_ = 1;
         }
-        if (targets.empty())
-            return true;
-
-        std::vector<EClassId> frontier = {cid};
-        std::unordered_set<EClassId> visited = {cid};
-
-        for (size_t head = 0; head < frontier.size(); ++head)
+        ancestor_frontier_.clear();
+        ancestor_frontier_.push_back(cid);
+        ancestor_stamp_[cid.value] = ancestor_epoch_;
+        for (size_t head = 0; head < ancestor_frontier_.size(); ++head)
         {
-            EClassId curr = frontier[head];
-            auto it = bucket_parents[b].find(curr);
+            auto it = bucket_parents[b].find(ancestor_frontier_[head]);
             if (it == bucket_parents[b].end())
                 continue;
-
             for (const auto &p_info : it->second)
             {
-                EClassId p_cid = p_info.parent_cid;
-                auto sel_it = state.selected_vars[b].find(p_cid);
+                auto sel_it = state.selected_vars[b].find(p_info.parent_cid);
                 if (sel_it == state.selected_vars[b].end())
                     continue;
                 const Domain &p_sel_dom = state.domains[sel_it->second];
                 if (!p_sel_dom.isFixed() || p_sel_dom.fixedValue() != static_cast<int32_t>(p_info.en_idx + 1))
                     continue;
-
-                if (targets.count(p_cid))
-                    return false;
-
-                if (visited.insert(p_cid).second)
+                if (ancestor_stamp_[p_info.parent_cid.value] != ancestor_epoch_)
                 {
-                    frontier.push_back(p_cid);
+                    ancestor_stamp_[p_info.parent_cid.value] = ancestor_epoch_;
+                    ancestor_frontier_.push_back(p_info.parent_cid);
                 }
             }
         }
-        return true;
     }
 
     bool checkCycles(SearchState &state, uint32_t b)
@@ -155,17 +149,19 @@ class PearceKellyCyclePropagator : public Propagator
         const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
         bool modified = false;
 
+        markFixedAncestors(state, b, cid);
         for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
         {
             int32_t val = static_cast<int32_t>(en_idx + 1);
-            if (dom.contains(val))
-            {
-                if (!checkIncrementalCycle(state, b, cid, en_idx))
+            if (!dom.contains(val))
+                continue;
+            for (EClassId ch : state.bucket_egraphs[b].getENode(cls.enodes[en_idx]).getChildren())
+                if (ancestor_stamp_[state.bucket_egraphs[b].findConst(ch).value] == ancestor_epoch_)
                 {
                     dom.remove(val);
                     modified = true;
+                    break;
                 }
-            }
         }
 
         if (modified)

@@ -59,6 +59,13 @@ class SearchEngine
     std::vector<VarId> prop_worklist;
     std::vector<uint32_t> prop_queued_epoch;
     uint32_t current_prop_epoch = 1;
+    struct DeferredCall
+    {
+        VarId changed = kInvalidVarId;
+        bool pending = false;
+    };
+    std::vector<DeferredCall> deferred_calls_;
+    std::vector<size_t> pending_deferred_slots_;
     std::vector<uint32_t> restore_current_path;
     std::vector<uint32_t> restore_target_path;
 
@@ -317,13 +324,13 @@ class SearchEngine
         size_t worklist_scan = prop_worklist.size();
 
         size_t worklist_head = 0;
-        struct DeferredCall
-        {
-            VarId changed = kInvalidVarId;
-            bool pending = false;
-        };
         const size_t batch_slots = state.buckets.size() + 1;
-        std::vector<DeferredCall> deferred_calls(propagators.size() * batch_slots);
+        const size_t needed_slots = propagators.size() * batch_slots;
+        if (deferred_calls_.size() < needed_slots)
+            deferred_calls_.resize(needed_slots);
+        for (size_t slot : pending_deferred_slots_)
+            deferred_calls_[slot].pending = false;
+        pending_deferred_slots_.clear();
         size_t deferred_count = 0;
         VarId active_changed = kInvalidVarId;
         auto preservePendingWork = [&]() {
@@ -331,9 +338,12 @@ class SearchEngine
                 state.schedulePropagation(active_changed);
             for (size_t i = worklist_head; i < prop_worklist.size(); ++i)
                 state.schedulePropagation(prop_worklist[i]);
-            for (const auto &call : deferred_calls)
+            for (size_t slot : pending_deferred_slots_)
+            {
+                const auto &call = deferred_calls_[slot];
                 if (call.pending && call.changed != kInvalidVarId)
                     state.schedulePropagation(call.changed);
+            }
         };
         while (worklist_head < prop_worklist.size() || deferred_count != 0)
         {
@@ -344,12 +354,12 @@ class SearchEngine
             {
                 // Memory batches can shrink domains. Finish them (and their
                 // consequences) before computing bucket bounds.
-                size_t chosen_slot = deferred_calls.size();
-                for (size_t slot = 0; slot < deferred_calls.size(); ++slot)
+                size_t chosen_slot = deferred_calls_.size();
+                for (size_t slot : pending_deferred_slots_)
                 {
-                    if (!deferred_calls[slot].pending)
+                    if (!deferred_calls_[slot].pending)
                         continue;
-                    if (chosen_slot == deferred_calls.size())
+                    if (chosen_slot == deferred_calls_.size())
                         chosen_slot = slot;
                     if (propagators[slot / batch_slots]->changesDomains())
                     {
@@ -358,8 +368,8 @@ class SearchEngine
                     }
                 }
                 deferred_prop_idx = chosen_slot / batch_slots;
-                next_changed = deferred_calls[chosen_slot].changed;
-                deferred_calls[chosen_slot].pending = false;
+                next_changed = deferred_calls_[chosen_slot].changed;
+                deferred_calls_[chosen_slot].pending = false;
                 --deferred_count;
             }
             else
@@ -473,10 +483,12 @@ class SearchEngine
                                                        ? state.buckets.size() : state.var_infos.at(next_changed).bucket_idx;
                         if (bucket_slot >= batch_slots)
                             Error::throw_err("Invalid deferred propagation bucket");
-                        auto &call = deferred_calls[prop_idx * batch_slots + bucket_slot];
+                        const size_t slot = prop_idx * batch_slots + bucket_slot;
+                        auto &call = deferred_calls_[slot];
                         if (!call.pending)
                         {
                             call = {next_changed, true};
+                            pending_deferred_slots_.push_back(slot);
                             ++deferred_count;
                         }
                         continue;
@@ -830,6 +842,9 @@ class SearchEngine
 
         std::string initial_conflict;
         state.recordStartDomainShapeAtEntry();
+        for (auto &propagator : propagators)
+            if (auto *relaxation = dynamic_cast<RelaxationBoundPropagator *>(propagator.get()))
+                relaxation->deferRootBound();
         const auto root_propagation_start = std::chrono::steady_clock::now();
         const bool root_consistent = runPropagators(kInvalidVarId, &initial_conflict);
         LOG(INFO) << "[SearchEngine] root propagation took "
@@ -881,9 +896,23 @@ class SearchEngine
         // First incumbent, then the interval bounds, then the heuristic's
         // improvement moves, then deeper bound refinement.
         const double phase_deadline = program_deadline > 0.0 ? program_deadline : search_deadline;
+        bool deferred_root_consistent = true;
         runRootPrimalHeuristic(
-            phase_deadline, [&]() { refineRootBound(*root_node, phase_deadline, -2, -2); },
+            phase_deadline, [&]() {
+                deferred_root_consistent = computeDeferredRootBound(*root_node, phase_deadline);
+                if (deferred_root_consistent)
+                    refineRootBound(*root_node, phase_deadline, -2, -2);
+            },
             [&]() { refineRootBound(*root_node, phase_deadline, -1, -1); });
+        if (!deferred_root_consistent)
+        {
+            if (incumbent_best_cost < TGConstants::INF)
+                Error::throw_err("Deferred root relaxation contradicted a validated incumbent");
+            sampleSearchGap(0, "final", true);
+            if (measure_search_volume)
+                reportSearchVolume(0, search_start_time);
+            return false;
+        }
         refineRootBound(*root_node, phase_deadline, 0, kMaxRefineDepth);
         // With an incumbent from the root heuristic, the remaining search is
         // proof work: refresh and split the largest open regions first.
@@ -929,7 +958,7 @@ class SearchEngine
                                  std::to_string(iterations) + " iterations");
             if (search_deadline_text && incumbent_best_cost < TGConstants::INF &&
                 std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() >=
-                    search_deadline)
+                    search_deadline - 0.5)
             {
                 LOG(INFO) << "[SearchEngine] Search deadline reached with incumbent best cost: "
                           << incumbent_best_cost << " at iteration " << iterations;
@@ -1252,6 +1281,73 @@ class SearchEngine
         return true;
     }
 
+    // Propose a disjoint allocation for each selected storage owner. Views
+    // retain their owner's offset. This is only a primal proposal: the full
+    // propagator pipeline still validates it before it can become a leaf.
+    bool proposeDisjointOffsets()
+    {
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            std::unordered_map<EClassId, uint32_t> selections;
+            for (const auto &[cid, var] : state.selected_vars[b])
+            {
+                const Domain &domain = state.domains[var];
+                if (!domain.isFixed())
+                    continue;
+                if (domain.fixedValue() > 0)
+                    selections.emplace(cid, static_cast<uint32_t>(domain.fixedValue() - 1));
+            }
+            std::unordered_map<MemSpace, uint64_t> ends;
+            for (const auto &[base, buffer] : state.preallocated_buffers)
+                if (buffer.offset >= 0)
+                    ends[buffer.mem_space] = std::max<uint64_t>(
+                        ends[buffer.mem_space], state.bytesToPages(buffer.offset + buffer.size, buffer.mem_space));
+            std::vector<std::pair<VarId, EClassId>> owners;
+            std::vector<std::pair<VarId, VarId>> views;
+            for (const auto &[cid, var] : state.offset_vars[b])
+            {
+                if (!selections.count(cid))
+                    continue;
+                const EClassId owner = resolve_view_alias(cid, state.bucket_egraphs[b], selections,
+                                                         state.bucket_enode_infos[b]);
+                if (owner != cid)
+                {
+                    auto it = state.offset_vars[b].find(owner);
+                    if (it == state.offset_vars[b].end())
+                        return false;
+                    views.emplace_back(var, it->second);
+                    continue;
+                }
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                const Domain &domain = state.domains[var];
+                if (domain.isFixed())
+                    ends[cls.mem_space] = std::max<uint64_t>(
+                        ends[cls.mem_space], static_cast<uint64_t>(domain.fixedValue()) +
+                            state.bytesToPages(getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.mem_space));
+                else
+                    owners.emplace_back(var, cid);
+            }
+            std::sort(owners.begin(), owners.end());
+            for (const auto &[var, cid] : owners)
+            {
+                const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
+                uint64_t &end = ends[cls.mem_space];
+                end = std::max<uint64_t>(end, state.domains[var].getMin());
+                if (end > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) ||
+                    !fixDomain(state, var, static_cast<int32_t>(end)))
+                    return false;
+                end += state.bytesToPages(getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.mem_space);
+            }
+            for (const auto &[var, owner_var] : views)
+            {
+                if (!state.domains[owner_var].isFixed() ||
+                    !fixDomain(state, var, state.domains[owner_var].fixedValue()))
+                    return false;
+            }
+        }
+        return true;
+    }
+
     // Applies a complete plan below the current node, propagates it with every
     // propagator and evaluates it as a normal leaf. The state is restored to
     // the current node afterwards. Returns the leaf cost, or INF with a reason.
@@ -1330,6 +1426,18 @@ class SearchEngine
             return finish();
         }
         propagated_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - try_start).count();
+        // Shared cache offsets and inactive classes are now fixed. Reserve
+        // them before proposing disjoint offsets for the remaining owners.
+        const size_t allocation_marker = state.getTrailMarker();
+        const bool disjoint_proposed = proposeDisjointOffsets();
+        const bool disjoint_valid = disjoint_proposed && runPropagators(kInvalidVarId, &conflict);
+        LOG(INFO) << "[PrimalHeuristic allocation] disjoint-proposed=" << disjoint_proposed
+                  << " validated=" << disjoint_valid;
+        if (!disjoint_valid)
+        {
+            state.backtrackTo(allocation_marker);
+            brancher->onRestore();
+        }
         // Complete what propagation left open (typically memory offsets when no
         // static layout applies), propagating after each choice. Offsets try
         // the brancher's preferred placement, then the space past every other
@@ -1351,17 +1459,23 @@ class SearchEngine
             if (info.type == VarType::OFFSET)
             {
                 const int32_t preferred = placement.preferredOffset(state, info.bucket_idx, info.eclass_id, d);
-                const int32_t past = placement.offsetPastAllocations(state, info.bucket_idx, info.eclass_id);
-                for (int32_t candidate : {preferred, past, d.getMax(), d.getMin()})
-                    if (d.contains(candidate) && std::find(values.begin(), values.end(), candidate) == values.end())
-                        values.push_back(candidate);
+                if (d.contains(preferred))
+                    values.push_back(preferred);
+                else
+                {
+                    const int32_t past = placement.offsetPastAllocations(state, info.bucket_idx, info.eclass_id);
+                    for (int32_t candidate : {past, d.getMax(), d.getMin()})
+                        if (d.contains(candidate) && std::find(values.begin(), values.end(), candidate) == values.end())
+                            values.push_back(candidate);
+                }
             }
             else
                 values.push_back(d.getMin());
             bool placed = false;
             ++completed;
-            for (int32_t value : values)
+            for (size_t val_idx = 0; val_idx < values.size(); ++val_idx)
             {
+                const int32_t value = values[val_idx];
                 const size_t choice_marker = state.getTrailMarker();
                 if (fixDomain(state, v, value) && runPropagators(v, &conflict))
                 {
@@ -1371,6 +1485,13 @@ class SearchEngine
                 ++fallbacks;
                 state.backtrackTo(choice_marker);
                 brancher->onRestore();
+                if (val_idx == 0 && values.size() == 1 && info.type == VarType::OFFSET)
+                {
+                    const int32_t past = placement.offsetPastAllocations(state, info.bucket_idx, info.eclass_id);
+                    for (int32_t candidate : {past, d.getMax(), d.getMin()})
+                        if (d.contains(candidate) && std::find(values.begin(), values.end(), candidate) == values.end())
+                            values.push_back(candidate);
+                }
             }
             if (!placed)
             {
@@ -1382,6 +1503,42 @@ class SearchEngine
         if (cost < incumbent_best_cost)
             recordIncumbent(cost, iterations, program_deadline, "root-heuristic");
         return finish();
+    }
+
+    bool computeDeferredRootBound(SearchNode &root, double deadline_epoch)
+    {
+        if (state.completing_plan || state.getTrailMarker() != root.trail_marker)
+            Error::throw_err("Deferred root bound requires restored root domains");
+        auto deadline = std::chrono::steady_clock::time_point::max();
+        if (deadline_epoch > 0.0)
+        {
+            const double now = std::chrono::duration<double>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            deadline = std::chrono::steady_clock::now() +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(std::max(0.0, 0.5 * (deadline_epoch - now))));
+        }
+        for (auto &propagator : propagators)
+            if (auto *relaxation = dynamic_cast<RelaxationBoundPropagator *>(propagator.get()))
+                if (!relaxation->computeRootBound(state, deadline))
+                {
+                    LOG(INFO) << "[SearchEngine] Deferred root relaxation conflict: " << relaxation->conflictReason();
+                    return false;
+                }
+        // Trial validation leaves per-domain bound caches at the trial.
+        // Only the saved root bounds and the root relaxation are valid here.
+        float bound = 0.0f;
+        for (size_t b = 0; b < root_bucket_lower_bounds_.size(); ++b)
+        {
+            const float weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
+            if (weight > 0.0f)
+                bound += weight * std::max(root_bucket_lower_bounds_[b], state.bucket_relaxation_lower_bounds[b]);
+        }
+        root.lower_bound = std::max(root.lower_bound, bound);
+        root.priority = root.lower_bound;
+        root_lower_bound = root.lower_bound;
+        sampleSearchGap(0, "sample", true);
+        return true;
     }
 
     // Computes the relaxation's interval bound, then nests its threshold
@@ -1450,7 +1607,47 @@ class SearchEngine
     {
         const auto start = std::chrono::steady_clock::now();
         std::vector<PrimalBucketContext> contexts;
-        std::vector<PrimalPlan> plans = buildRootPrimalPlans(state, contexts);
+        // The relaxations take most of a second to free at large bucket
+        // counts and nothing reads them after the heuristic, so they are
+        // freed off the critical path (extraction and plan writing follow).
+        struct BackgroundFree
+        {
+            std::vector<PrimalBucketContext> &contexts;
+            ~BackgroundFree() { std::thread([doomed = std::move(contexts)]() mutable {}).detach(); }
+        } background_free{contexts};
+        // Plans already given to tryPlan. Validating one again gives the same
+        // result at best (the incumbent only falls), so it is skipped.
+        std::vector<PrimalPlan> tried_storage;
+        auto samePlan = [](const PrimalPlan &a, const PrimalPlan &b) {
+            if (a.buckets.size() != b.buckets.size() || a.cached != b.cached)
+                return false;
+            for (size_t i = 0; i < a.buckets.size(); ++i)
+                if (a.buckets[i].value != b.buckets[i].value || a.buckets[i].order != b.buckets[i].order)
+                    return false;
+            return true;
+        };
+        auto wasTried = [&](const PrimalPlan &plan) {
+            for (const PrimalPlan &tried : tried_storage)
+                if (samePlan(tried, plan))
+                    return true;
+            return false;
+        };
+        // Construct and validate starts lazily. Once one is accepted, spend
+        // the remaining budget improving it and proving bounds rather than
+        // constructing every possible engine weighting first.
+        std::vector<PrimalPlan> plans = buildRootPrimalPlans(state, contexts, [&](const PrimalPlan &plan) {
+            // A start the heuristic itself prices at infinity (it uses a
+            // disallowed cache) would be rejected; skip its validation.
+            if (!std::isfinite(plan.cost))
+                return false;
+            tried_storage.push_back(plan);
+            std::string failure;
+            const float cost = tryPlan(plan, contexts, 0, program_deadline, failure);
+            LOG(INFO) << "[PrimalHeuristic] early validate predicted=" << plan.cost << " evaluated="
+                      << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
+                      << (failure.empty() ? "" : " failure=" + failure);
+            return std::isfinite(cost);
+        });
         const double build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         if (plans.empty())
         {
@@ -1469,10 +1666,32 @@ class SearchEngine
         LOG(INFO) << "[PrimalHeuristic] " << plans.size() << " initial plan(s), best predicted=" << plans.front().cost
                   << " lambda=[" << describe(plans.front()) << "] cached=" << plans.front().cached.size()
                   << " build=" << build_seconds << "s";
+        auto validate = [&](const std::vector<const PrimalPlan *> &order) {
+            for (const PrimalPlan *plan : order)
+            {
+                // Past the program deadline with an incumbent, stop: the
+                // remaining time belongs to extraction and plan writing.
+                if (incumbent_best_cost < TGConstants::INF && program_deadline > 0.0 &&
+                    std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() >=
+                        program_deadline)
+                    return;
+                if (!(plan->cost < incumbent_best_cost - 1e-6) || wasTried(*plan))
+                    continue;
+                tried_storage.push_back(*plan);
+                failure.clear();
+                const float cost = tryPlan(*plan, contexts, 0, program_deadline, failure);
+                LOG(INFO) << "[PrimalHeuristic] validate predicted=" << plan->cost << " evaluated="
+                          << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
+                          << " lambda=[" << describe(*plan) << "]" << (failure.empty() ? "" : " failure=" + failure);
+                if (std::isfinite(cost))
+                    return;
+            }
+        };
+        // Starts were already validated during construction; improve them
+        // without repeating a rejected or already accepted validation.
         const std::vector<PrimalPlan> initial_plans = plans;
         // Local search from every initial plan until no move improves (cheap),
-        // bounded by the program deadline; then validate the best results in
-        // order until one is accepted (validation is the expensive step).
+        // bounded by the program deadline; validate improvements afterwards.
         const auto ls_start = std::chrono::steady_clock::now();
         auto ls_deadline = std::chrono::steady_clock::time_point::max();
         if (program_deadline > 0.0)
@@ -1512,20 +1731,6 @@ class SearchEngine
         }
         // Validate in cost order (improved plans first, then the initial
         // ones) until one is accepted, so the first incumbent comes early.
-        auto validate = [&](const std::vector<const PrimalPlan *> &order) {
-            for (const PrimalPlan *plan : order)
-            {
-                if (!(plan->cost < incumbent_best_cost - 1e-6))
-                    continue;
-                failure.clear();
-                const float cost = tryPlan(*plan, contexts, 0, program_deadline, failure);
-                LOG(INFO) << "[PrimalHeuristic] validate predicted=" << plan->cost << " evaluated="
-                          << (std::isfinite(cost) ? std::to_string(cost) : std::string("rejected"))
-                          << " lambda=[" << describe(*plan) << "]" << (failure.empty() ? "" : " failure=" + failure);
-                if (std::isfinite(cost))
-                    return;
-            }
-        };
         {
             std::vector<const PrimalPlan *> order;
             for (const PrimalPlan &plan : plans)

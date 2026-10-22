@@ -22,6 +22,8 @@ namespace plan
 class RelaxationBoundPropagator : public Propagator
 {
     bool computed_ = false;
+    bool deferred_ = false;
+    std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
     std::string conflict_;
     // Kept after the root computation so refine() can tighten the bounds.
     std::vector<RelaxationBucket> rbs_;
@@ -32,10 +34,24 @@ class RelaxationBoundPropagator : public Propagator
     std::vector<std::vector<double>> load_lambda_;
 
   public:
+    // SearchEngine defers this root-only computation while it tries primal
+    // plans. Computing it on a fixed trial plan would not bound the root.
+    void deferRootBound() { deferred_ = true; }
+    bool computeRootBound(SearchState &state, std::chrono::steady_clock::time_point deadline)
+    {
+        if (state.completing_plan)
+            Error::throw_err("Root relaxation requested while completing a trial plan");
+        if (std::chrono::steady_clock::now() >= deadline)
+            return true;
+        deadline_ = deadline;
+        deferred_ = false;
+        std::vector<VarId> changed;
+        return propagate(state, kInvalidVarId, changed);
+    }
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
     PropagationBatch propagationBatch(const SearchState &, VarId) const override
     {
-        return computed_ ? PropagationBatch::SKIP : PropagationBatch::GLOBAL;
+        return computed_ || deferred_ ? PropagationBatch::SKIP : PropagationBatch::GLOBAL;
     }
     bool changesDomains() const override { return false; }
     std::string name() const override { return "RelaxationBoundPropagator"; }
@@ -43,7 +59,7 @@ class RelaxationBoundPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId, std::vector<VarId> &) override
     {
-        if (computed_)
+        if (computed_ || deferred_)
             return true;
         computed_ = true;
         conflict_.clear();
@@ -59,6 +75,8 @@ class RelaxationBoundPropagator : public Propagator
         active_.assign(nb, 0);
         std::vector<char> &active = active_;
         pool.parallel_for(nb, [&](uint32_t b) {
+            if (std::chrono::steady_clock::now() >= deadline_)
+                return;
             const float weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
             if (!(weight > 0.0f))
             {
@@ -156,20 +174,27 @@ class RelaxationBoundPropagator : public Propagator
         pool.parallel_for(static_cast<uint32_t>(reps.size()), [&](uint32_t k) {
             try {
                 const uint32_t r = reps[k];
+                if (std::chrono::steady_clock::now() >= deadline_)
+                    return;
                 const auto stage_start = std::chrono::steady_clock::now();
                 auto stage = [&]() {
                     return std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
                 };
-                computers_[r] = std::make_unique<RelaxationBoundComputer>(rbs[r]);
+                computers_[r] = std::make_unique<RelaxationBoundComputer>(rbs[r], deadline_);
                 RelaxationBoundComputer &computer = *computers_[r];
                 const double prepared_at = stage();
+                if (!computer.ready())
+                {
+                    LOG(INFO) << "[RelaxationBound] bucket=" << r << " preparation deadline reached";
+                    return;
+                }
                 if (computer.degenerate())
                 {
                     LOG(INFO) << "[RelaxationBound] bucket=" << r << " degenerate region decomposition (chain "
                               << computer.intervalChainLength() << "): no bound";
                     return;
                 }
-            load_value[r] = maximizeRelaxationBound(computer, rbs[r].engines.size(), &load_lambda[r]);
+            load_value[r] = maximizeRelaxationBound(computer, rbs[r].engines.size(), &load_lambda[r], deadline_);
             // Threshold splits (not nested) at the best weighting; refine()
             // nests them later. When the load evaluation is slow (large
             // regions), they wait for refine() so the heuristic starts
@@ -177,10 +202,11 @@ class RelaxationBoundPropagator : public Propagator
             if (!load_lambda[r].empty() && stage() - prepared_at <= kRootSplitSeconds)
             {
                 load_value[r] = std::max(load_value[r], computer.evaluateSplit(load_lambda[r], 0, kSplitCandidates,
-                                                                                std::chrono::steady_clock::time_point::max()));
+                                                                                deadline_));
                 // Then a case split on the class the region decomposition
                 // hides most (docs/core/relaxation_bound.md, "Global split").
-                load_value[r] = std::max(load_value[r], computer.evaluateGlobalSplit(load_lambda[r], kGlobalCandidates));
+                load_value[r] = std::max(load_value[r], computer.evaluateGlobalSplit(load_lambda[r], kGlobalCandidates,
+                                                                                  deadline_));
             }
             chain[r] = computer.intervalChainLength();
             LOG(INFO) << "[RelaxationBound timing] bucket=" << r << " prepare=" << prepared_at << "s load+splits="

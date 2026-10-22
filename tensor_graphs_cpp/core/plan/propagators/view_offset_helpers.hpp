@@ -13,8 +13,8 @@ struct ViewOffsetHelpers
     {
         bucket_view_users.clear();
         bucket_view_users.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
+        // Buckets are independent: each fills only its own map.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
             for (const auto &pair : state.selected_vars[b])
             {
                 EClassId v_cid = pair.first;
@@ -41,7 +41,7 @@ struct ViewOffsetHelpers
                     }
                 }
             }
-        }
+        });
     }
 
     static bool getConfirmedViewBase(const SearchState &state, uint32_t b, EClassId cid, EClassId &out_base_cid)

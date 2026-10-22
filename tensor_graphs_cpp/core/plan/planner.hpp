@@ -6,6 +6,7 @@
 #include <set>
 #include "core/common/sampling_profiler.hpp"
 #include <chrono>
+#include <iomanip>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "core/common/constants.hpp"
+#include "core/common/malloc_tuning.hpp"
 #include "core/cost_model.hpp"
 #include "core/debug.hpp"
 #include "core/egraph.hpp"
@@ -748,7 +750,7 @@ struct Planner
             {
                 for (uint32_t eNodeIdx : filtered_base_enodes)
                     run_node(eNodeIdx);
-                for (uint32_t eNodeIdx = ctx.base_enode_watermark; eNodeIdx < sweep_enodes_bound; ++eNodeIdx)
+                for (uint32_t eNodeIdx = ctx.base_enode_watermark; eNodeIdx < egraph.getNumENodes(); ++eNodeIdx)
                 {
                     if (eNodeIdx >= last_sweep_enodes_bound || (eNodeIdx < ctx.sweep_filter->size() && (*ctx.sweep_filter)[eNodeIdx]))
                         run_node(eNodeIdx);
@@ -756,10 +758,10 @@ struct Planner
             }
             else
             {
-                for (uint32_t eNodeIdx = 0; eNodeIdx < sweep_enodes_bound; ++eNodeIdx)
+                for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getNumENodes(); ++eNodeIdx)
                     run_node(eNodeIdx);
             }
-            last_sweep_enodes_bound = sweep_enodes_bound;
+            last_sweep_enodes_bound = egraph.getNumENodes();
             sweep_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sweep_start).count();
             if (nMatches == preMatches)
             {
@@ -1018,75 +1020,51 @@ struct Planner
 
         }
 
-        // Least fixed point of the cost/critical-path/memory equations (values
-        // only decrease from INF, so cycles without a leaf stay INF). An enode
-        // is re-evaluated only when one of its child classes improved.
-        struct ChildMem
+        // Least fixed point of the cost/critical-path/memory equations (cycles
+        // without a leaf stay INF), by Knuth's generalization of Dijkstra: each
+        // equation is superior (an enode's value is at least each child's,
+        // costs being non-negative), so the class with the smallest tentative
+        // value is final. Every enode is evaluated once per equation, from its
+        // children's final values, which is the value the fixed point assigns
+        // it; sums run over the children in their original order.
+        std::vector<uint32_t> owner_of(num_enodes, UINT32_MAX);
+        std::vector<uint32_t> distinct_children(num_enodes, 0);
+        std::vector<std::vector<uint32_t>> class_users(num_classes);
+        std::vector<uint8_t> can_be_inplace(num_enodes, 0);
         {
-            float peak;
-            float output;
-        };
-        std::vector<EClassId> child_classes;
-        std::vector<ChildMem> child_mems;
-        uint32_t changed_class = 0;
-        auto evaluate = [&](uint32_t i) -> bool {
-
-            const ENode &enode = egraph.getENode(ENodeId{i});
-            const float cost = enodeInfos[i].cost;
-            if (cost == TGConstants::INF || std::isnan(cost))
+            std::vector<uint32_t> distinct;
+            for (uint32_t i = 0; i < num_enodes; ++i)
             {
-                return false;
-            }
-
-            child_classes.clear();
-            for (EClassId child : enode.getChildren())
-                child_classes.push_back(egraph.findConst(child));
-
-            float sum_child_cost = 0.0f;
-            float max_child_cp_cost = 0.0f;
-            bool all_children_ready = true;
-            for (EClassId child : child_classes)
-            {
-                if (child.value >= num_classes || eclass_dp_cost[child.value] == TGConstants::INF ||
-                    eclass_dp_mem[child.value] == TGConstants::INF)
+                const float cost = enodeInfos[i].cost;
+                if (cost == TGConstants::INF || std::isnan(cost))
+                    continue;
+                if (cost < 0.0f)
+                    Error::throw_err("[Planner.computeENodeHeuristicCosts] negative cost for enode " +
+                                     std::to_string(i));
+                const ENode &enode = egraph.getENode(ENodeId{i});
+                const uint32_t owner = egraph.findConst(egraph.getENodeEClass(ENodeId{i})).value;
+                if (owner >= num_classes)
+                    continue;
+                distinct.clear();
+                bool children_known = true;
+                for (EClassId child : enode.getChildren())
                 {
-                    all_children_ready = false;
-                    break;
+                    const uint32_t c = egraph.findConst(child).value;
+                    if (c >= num_classes)
+                        children_known = false;
+                    distinct.push_back(c);
                 }
-                sum_child_cost += eclass_dp_cost[child.value];
-                max_child_cp_cost = std::max(max_child_cp_cost, eclass_dp_cp_cost[child.value]);
-            }
-            if (!all_children_ready)
-            {
-                return false;
-            }
+                if (!children_known)
+                    continue; // never ready, as a child outside the graph has no value
+                std::sort(distinct.begin(), distinct.end());
+                distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+                owner_of[i] = owner;
+                distinct_children[i] = static_cast<uint32_t>(distinct.size());
+                for (uint32_t c : distinct)
+                    class_users[c].push_back(i);
 
-            float total_mem = 0.0f;
-            if (!child_classes.empty())
-            {
-                child_mems.clear();
-                float sum_child_sizes = 0.0f;
-                for (EClassId child : child_classes)
-                {
-                    const float child_size = class_bytes[child.value];
-                    child_mems.push_back({eclass_dp_mem[child.value], child_size});
-                    sum_child_sizes += child_size;
-                }
-                std::sort(child_mems.begin(), child_mems.end(), [](const ChildMem &a, const ChildMem &b) {
-                    return (a.peak - a.output) > (b.peak - b.output);
-                });
-
-                float peak_child_eval = 0.0f;
-                float accumulated_outputs = 0.0f;
-                for (const ChildMem &child_mem : child_mems)
-                {
-                    peak_child_eval = std::max(peak_child_eval, accumulated_outputs + child_mem.peak);
-                    accumulated_outputs += child_mem.output;
-                }
-
-                const float output_size = enode_bytes[i];
-                bool can_be_inplace = enodeInfos[i].is_view;
-                if (!can_be_inplace && enode.getKernelId().value != 0 &&
+                bool inplace = enodeInfos[i].is_view;
+                if (!inplace && !enode.getChildren().empty() && enode.getKernelId().value != 0 &&
                     KernelRegistry::get().hasKernel(enode.getKernelId()))
                 {
                     const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
@@ -1096,133 +1074,102 @@ struct Planner
                             continue;
                         EClassId child = egraph.findConst(enode.getChildren()[inplace_idx]);
                         const EClass &child_class = egraph.getEClass(child);
-                        const float input_size = class_bytes[child.value];
-                        if (child_class.mem_space == enode.getMemSpace() && output_size <= input_size)
+                        if (child_class.mem_space == enode.getMemSpace() && enode_bytes[i] <= class_bytes[child.value])
                         {
-                            can_be_inplace = true;
+                            inplace = true;
                             break;
                         }
                     }
                 }
-                const float op_memory = sum_child_sizes + (can_be_inplace ? 0.0f : output_size);
-                total_mem = std::max(peak_child_eval, op_memory);
+                can_be_inplace[i] = inplace;
             }
-            else
+        }
+        auto solveLeastFixedPoint = [&](std::vector<float> &class_value, auto &&enode_value, auto &&store) {
+            std::vector<uint32_t> pending = distinct_children;
+            std::vector<uint8_t> finalized(num_classes, 0);
+            using Item = std::pair<float, uint32_t>;
+            std::priority_queue<Item, std::vector<Item>, std::greater<Item>> heap;
+            for (uint32_t c = 0; c < num_classes; ++c)
+                if (class_value[c] < TGConstants::INF)
+                    heap.push({class_value[c], c});
+            auto relax = [&](uint32_t i) {
+                const float value = enode_value(i);
+                store(i, value);
+                const uint32_t owner = owner_of[i];
+                if (value < class_value[owner])
+                {
+                    class_value[owner] = value;
+                    heap.push({value, owner});
+                }
+            };
+            for (uint32_t i = 0; i < num_enodes; ++i)
+                if (owner_of[i] != UINT32_MAX && distinct_children[i] == 0)
+                    relax(i);
+            while (!heap.empty())
             {
-                total_mem = enode_bytes[i];
+                const auto [value, c] = heap.top();
+                heap.pop();
+                if (finalized[c] || value > class_value[c])
+                    continue;
+                finalized[c] = 1;
+                for (uint32_t user : class_users[c])
+                    if (--pending[user] == 0)
+                        relax(user);
             }
-
-            const float total_cost = cost + sum_child_cost;
-            const float total_cp_cost = cost + max_child_cp_cost;
-            EClassId parent = egraph.findConst(egraph.getENodeEClass(ENodeId{i}));
-            if (parent.value >= num_classes)
-                return false;
-
-            if (total_cost < enodeInfos[i].dp_cost)
-            {
-                enodeInfos[i].dp_cost = total_cost;
-            }
-            if (total_cp_cost < enodeInfos[i].dp_cp_cost)
-            {
-                enodeInfos[i].dp_cp_cost = total_cp_cost;
-            }
-            if (total_mem < enodeInfos[i].dp_mem)
-            {
-                enodeInfos[i].dp_mem = total_mem;
-            }
-            bool parent_changed = false;
-            if (total_cost < eclass_dp_cost[parent.value])
-            {
-                eclass_dp_cost[parent.value] = total_cost;
-                parent_changed = true;
-            }
-            if (total_cp_cost < eclass_dp_cp_cost[parent.value])
-            {
-                eclass_dp_cp_cost[parent.value] = total_cp_cost;
-                parent_changed = true;
-            }
-            if (total_mem < eclass_dp_mem[parent.value])
-            {
-                eclass_dp_mem[parent.value] = total_mem;
-                parent_changed = true;
-            }
-            if (parent_changed)
-                changed_class = parent.value;
-            return parent_changed;
-
         };
-        // FIFO worklist seeded in topological order of the enodes' classes
-        // (children first; classes on cycles last), so acyclic parts settle in
-        // one pass. A LIFO order can re-evaluate exponentially often.
-        std::vector<std::vector<uint32_t>> class_users(num_classes);
-        std::vector<uint32_t> pending_children(num_classes, 0);
-        for (uint32_t i = 0; i < num_enodes; ++i)
+        solveLeastFixedPoint(
+            eclass_dp_cost,
+            [&](uint32_t i) {
+                float total = enodeInfos[i].cost;
+                float sum_child_cost = 0.0f;
+                for (EClassId child : egraph.getENode(ENodeId{i}).getChildren())
+                    sum_child_cost += eclass_dp_cost[egraph.findConst(child).value];
+                return total + sum_child_cost;
+            },
+            [&](uint32_t i, float value) { enodeInfos[i].dp_cost = std::min(enodeInfos[i].dp_cost, value); });
+        solveLeastFixedPoint(
+            eclass_dp_cp_cost,
+            [&](uint32_t i) {
+                float max_child_cp_cost = 0.0f;
+                for (EClassId child : egraph.getENode(ENodeId{i}).getChildren())
+                    max_child_cp_cost = std::max(max_child_cp_cost, eclass_dp_cp_cost[egraph.findConst(child).value]);
+                return enodeInfos[i].cost + max_child_cp_cost;
+            },
+            [&](uint32_t i, float value) { enodeInfos[i].dp_cp_cost = std::min(enodeInfos[i].dp_cp_cost, value); });
+        struct ChildMem
         {
-            const float cost = enodeInfos[i].cost;
-            if (cost == TGConstants::INF || std::isnan(cost))
-                continue;
-            const uint32_t owner = egraph.findConst(egraph.getENodeEClass(ENodeId{i})).value;
-            for (EClassId child : egraph.getENode(ENodeId{i}).getChildren())
-            {
-                const uint32_t c = egraph.findConst(child).value;
-                if (c >= num_classes || (!class_users[c].empty() && class_users[c].back() == i))
-                    continue;
-                class_users[c].push_back(i);
-                if (owner < num_classes)
-                    ++pending_children[owner];
-            }
-        }
-        std::vector<uint32_t> class_order;
-        class_order.reserve(num_classes);
-        std::vector<uint8_t> ordered(num_classes, 0);
-        for (uint32_t c = 0; c < num_classes; ++c)
-            if (pending_children[c] == 0)
-            {
-                ordered[c] = 1;
-                class_order.push_back(c);
-            }
-        for (size_t head = 0; head < class_order.size(); ++head)
-            for (uint32_t user : class_users[class_order[head]])
-            {
-                const uint32_t owner = egraph.findConst(egraph.getENodeEClass(ENodeId{user})).value;
-                if (owner < num_classes && !ordered[owner] && --pending_children[owner] == 0)
+            float peak;
+            float output;
+        };
+        std::vector<ChildMem> child_mems;
+        solveLeastFixedPoint(
+            eclass_dp_mem,
+            [&](uint32_t i) {
+                const auto &children = egraph.getENode(ENodeId{i}).getChildren();
+                if (children.empty())
+                    return enode_bytes[i];
+                child_mems.clear();
+                float sum_child_sizes = 0.0f;
+                for (EClassId child : children)
                 {
-                    ordered[owner] = 1;
-                    class_order.push_back(owner);
+                    const uint32_t c = egraph.findConst(child).value;
+                    child_mems.push_back({eclass_dp_mem[c], class_bytes[c]});
+                    sum_child_sizes += class_bytes[c];
                 }
-            }
-        for (uint32_t c = 0; c < num_classes; ++c)
-            if (!ordered[c])
-                class_order.push_back(c);
-        std::deque<uint32_t> work;
-        std::vector<uint8_t> queued(num_enodes, 0);
-        for (uint32_t c : class_order)
-        {
-            if (egraph.findConst(EClassId{c}).value != c)
-                continue;
-            for (ENodeId e : egraph.getEClass(EClassId{c}).enodes)
-            {
-                const float cost = e.value < enodeInfos.size() ? enodeInfos[e.value].cost : TGConstants::INF;
-                if (cost == TGConstants::INF || std::isnan(cost) || queued[e.value])
-                    continue;
-                queued[e.value] = 1;
-                work.push_back(e.value);
-            }
-        }
-        while (!work.empty())
-        {
-            const uint32_t i = work.front();
-            work.pop_front();
-            queued[i] = 0;
-            if (!evaluate(i))
-                continue;
-            for (uint32_t user : class_users[changed_class])
-                if (!queued[user])
+                std::sort(child_mems.begin(), child_mems.end(), [](const ChildMem &a, const ChildMem &b) {
+                    return (a.peak - a.output) > (b.peak - b.output);
+                });
+                float peak_child_eval = 0.0f;
+                float accumulated_outputs = 0.0f;
+                for (const ChildMem &child_mem : child_mems)
                 {
-                    queued[user] = 1;
-                    work.push_back(user);
+                    peak_child_eval = std::max(peak_child_eval, accumulated_outputs + child_mem.peak);
+                    accumulated_outputs += child_mem.output;
                 }
-        }
+                const float op_memory = sum_child_sizes + (can_be_inplace[i] ? 0.0f : enode_bytes[i]);
+                return std::max(peak_child_eval, op_memory);
+            },
+            [&](uint32_t i, float value) { enodeInfos[i].dp_mem = std::min(enodeInfos[i].dp_mem, value); });
 
         struct OptimisticSummary
         {
@@ -1618,11 +1565,19 @@ struct Planner
         return cost;
     }
 
-    std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph)
+    std::vector<ENodeInfo> computeENodeInfos(const EGraph &egraph, bool compute_heuristics = true)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getNumENodes());
 
-        for (uint32_t i = 0; i < egraph.getNumENodes(); ++i)
+        // Enodes are independent; planAll's cost memo is shared under a lock
+        // (reduction workers already query it concurrently). Without the memo,
+        // or with a cost-call observer (expects calls in order), stay serial.
+        const uint32_t num_enodes = static_cast<uint32_t>(egraph.getNumENodes());
+        const uint32_t num_chunks = (!cost_memo_ || costModel.callObserver)
+                                        ? 1u
+                                        : std::min<uint32_t>(64u, std::max(1u, num_enodes / 4096));
+        auto computeChunk = [&](uint32_t chunk) {
+        for (uint32_t i = chunk * num_enodes / num_chunks; i < (chunk + 1) * num_enodes / num_chunks; ++i)
         {
             const ENode &enode = egraph.getENode(ENodeId{i});
             ENodeInfo info;
@@ -1691,10 +1646,16 @@ struct Planner
 
             enodeInfos[i] = info;
         }
+        };
+        if (num_chunks == 1)
+            computeChunk(0);
+        else
+            ThreadPool::get().parallel_for(num_chunks, computeChunk);
 
         applyDominationRules(egraph, enodeInfos);
 
-        computeENodeHeuristicCosts(egraph, enodeInfos);
+        if (compute_heuristics)
+            computeENodeHeuristicCosts(egraph, enodeInfos);
 
         return enodeInfos;
     }
@@ -1995,7 +1956,8 @@ struct Planner
 
     EGraph saturateBucket(const LogicalId rootId, const Graph &graph, const Bucket &bucket,
                           bool doSaturate = true,
-                          TGStore *repo = nullptr, const EGraph *startingState = nullptr)
+                          TGStore *repo = nullptr, const EGraph *startingState = nullptr,
+                          const std::vector<const Bucket *> *bucket_group = nullptr)
     {
         using BucketClock = std::chrono::steady_clock;
         const auto bucket_start = BucketClock::now();
@@ -2026,6 +1988,8 @@ struct Planner
             cached_topo_graph_ = &graph;
         }
         const std::vector<LogicalId> &topo = cached_topo_;
+        const std::vector<const Bucket *> single_bucket{&bucket};
+        const std::vector<const Bucket *> &group = bucket_group ? *bucket_group : single_bucket;
         bool base_state_has_base_ids = false;
 
         if (startingState)
@@ -2078,7 +2042,10 @@ struct Planner
         logicalDirty.assign(max_logical_id + 1, 0);
         for (LogicalId nodeId : topo)
         {
-            bool dirty = bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty();
+            bool dirty = false;
+            for (const Bucket *group_bucket : group)
+                dirty = dirty || (group_bucket->inputDirtyRegions.count(nodeId) &&
+                                  !group_bucket->inputDirtyRegions.at(nodeId).empty());
             if (!dirty)
             {
                 for (LogicalId child : graph.getNode(nodeId).child_ids)
@@ -2112,39 +2079,54 @@ struct Planner
         };
 
         bool hasPartialInputRegion = false;
-        for (const auto &inputPair : bucket.inputDirtyRegions)
+        for (const Bucket *group_bucket : group)
         {
-            if (!graph.hasNode(inputPair.first))
-                continue;
-            const auto &shape = graph.getNode(inputPair.first).getShape();
-            for (const Region &region : inputPair.second)
+            for (const auto &inputPair : group_bucket->inputDirtyRegions)
             {
-                if (!isFullRegion(region, shape))
+                if (!graph.hasNode(inputPair.first))
+                    continue;
+                const auto &shape = graph.getNode(inputPair.first).getShape();
+                for (const Region &region : inputPair.second)
                 {
-                    hasPartialInputRegion = true;
-                    break;
+                    if (!isFullRegion(region, shape))
+                    {
+                        hasPartialInputRegion = true;
+                        break;
+                    }
                 }
+                if (hasPartialInputRegion)
+                    break;
             }
             if (hasPartialInputRegion)
                 break;
         }
         bool hasPartialOutputRegion = false;
         const auto &outputShape = graph.getNode(rootId).getShape();
-        for (const Region &region : bucket.outputNeededRegion)
+        for (const Bucket *group_bucket : group)
         {
-            if (!isFullRegion(region, outputShape))
+            for (const Region &region : group_bucket->outputNeededRegion)
             {
-                hasPartialOutputRegion = true;
-                break;
+                if (!isFullRegion(region, outputShape))
+                {
+                    hasPartialOutputRegion = true;
+                    break;
+                }
             }
+            if (hasPartialOutputRegion)
+                break;
         }
 
         auto inject_start = BucketClock::now();
-        const bool dirtyInjected = hasPartialInputRegion &&
-                                   injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions);
-        const bool neededInjected = hasPartialOutputRegion &&
-                                    injectOutputPartialPaths(egraph, graph, rootId,
-                                                            bucket.outputNeededRegion);
+        bool dirtyInjected = false;
+        bool neededInjected = false;
+        for (const Bucket *group_bucket : group)
+        {
+            dirtyInjected = (hasPartialInputRegion &&
+                             injectInputPartialPaths(egraph, graph, group_bucket->inputDirtyRegions)) || dirtyInjected;
+            neededInjected = (hasPartialOutputRegion &&
+                             injectOutputPartialPaths(egraph, graph, rootId,
+                                                      group_bucket->outputNeededRegion)) || neededInjected;
+        }
         if (report_timing)
             report_bucket_timing("injected partial paths", "dirty=" + std::string(dirtyInjected ? "true" : "false") +
                                                                  ", needed=" +
@@ -2192,8 +2174,18 @@ struct Planner
             else
             {
                 if (dirtyInjected || neededInjected)
-                    regions = computeBucketRegions(graph, rootId, bucket, topo, repo, regionFacts_,
-                                                   &settings.padded_inputs);
+                {
+                    regions.facts = regionFacts_;
+                    for (const Bucket *group_bucket : group)
+                    {
+                        const BucketRegions current_regions = computeBucketRegions(
+                            graph, rootId, *group_bucket, topo, repo, regionFacts_, &settings.padded_inputs);
+                        for (const auto &[id, dirty_regions] : current_regions.dirty)
+                            regions.dirty[id] = bucket_regions::unite(regions.dirtyOf(id), dirty_regions);
+                        for (const auto &[id, needed_regions] : current_regions.needed)
+                            regions.needed[id] = bucket_regions::unite(regions.neededOf(id), needed_regions);
+                    }
+                }
                 if (std::getenv("TG_DEBUG_ROOTS"))
                     LOG(INFO) << "[debug regions] root dirty=" << encodeRegionList(regions.dirtyOf(rootId))
                               << " needed=" << encodeRegionList(regions.neededOf(rootId))
@@ -2520,6 +2512,10 @@ struct Planner
                                      const std::vector<ENodeInfo> &enodeInfos)
     {
         CompiledGraph compiled;
+        std::unordered_map<BufferId, const ParallelBuffer *> buf_map;
+        buf_map.reserve(extraction.buffers.size());
+        for (const ParallelBuffer &buf : extraction.buffers)
+            buf_map[buf.id] = &buf;
 
         for (EClassId eclass_id : extraction.order)
         {
@@ -2588,22 +2584,21 @@ struct Planner
             inst.inBuffers.resize(inst.children.size());
 
             auto out_buf_it = extraction.eclass_to_buf.find(eclass_id);
-            BufferId out_buf_id =
-                (out_buf_it != extraction.eclass_to_buf.end()) ? out_buf_it->second : BufferId{UINT32_MAX};
-
-            for (uint32_t i = 0; i < extraction.buffers.size(); i++)
+            if (out_buf_it != extraction.eclass_to_buf.end())
             {
-                if (out_buf_id.value != UINT32_MAX && extraction.buffers[i].id == out_buf_id)
+                auto it = buf_map.find(out_buf_it->second);
+                if (it != buf_map.end())
+                    inst.outBuffer = *it->second;
+            }
+
+            for (uint32_t j = 0; j < inst.children.size(); j++)
+            {
+                auto in_buf_it = extraction.eclass_to_buf.find(inst.children[j]);
+                if (in_buf_it != extraction.eclass_to_buf.end())
                 {
-                    inst.outBuffer = extraction.buffers[i];
-                }
-                for (uint32_t j = 0; j < inst.children.size(); j++)
-                {
-                    auto in_buf_it = extraction.eclass_to_buf.find(inst.children[j]);
-                    if (in_buf_it != extraction.eclass_to_buf.end() && extraction.buffers[i].id == in_buf_it->second)
-                    {
-                        inst.inBuffers[j] = extraction.buffers[i];
-                    }
+                    auto it = buf_map.find(in_buf_it->second);
+                    if (it != buf_map.end())
+                        inst.inBuffers[j] = *it->second;
                 }
             }
 
@@ -2746,6 +2741,26 @@ struct Planner
             compiled.nodeCosts[cid] = en_cost;
         }
 
+        // Views of classes the plan never reads (saturation alternatives that
+        // were not selected) are not stored: every lookup is by an
+        // instruction's output or child, a constant, or a logical id.
+        std::unordered_map<BufferId, uint64_t> buffer_offsets;
+        for (const auto &buf : extraction.buffers)
+            buffer_offsets.emplace(buf.id, buf.offset >= 0 ? static_cast<uint64_t>(buf.offset) : 0ULL);
+        auto addView = [&](EClassId cid) {
+            if (compiled.nodeViews.count(cid))
+                return;
+            const EClass &cls = egraph.getEClass(cid);
+            uint64_t offset = 0;
+            auto out_buf_it = extraction.eclass_to_buf.find(cid);
+            if (out_buf_it != extraction.eclass_to_buf.end())
+            {
+                auto offset_it = buffer_offsets.find(out_buf_it->second);
+                if (offset_it != buffer_offsets.end())
+                    offset = offset_it->second;
+            }
+            compiled.nodeViews[cid] = TensorView(cls.shape, offset, cls.strides, cls.dtype);
+        };
         for (size_t i = 0; i < egraph.getNumClasses(); ++i)
         {
             EClassId cid{static_cast<uint32_t>(i)};
@@ -2759,32 +2774,27 @@ struct Planner
                 {
                     compiled.eclass_to_logical[cls.id] = cls.logical_id;
                 }
+                addView(cls.id);
             }
 
             if (cls.base_eclass_id != BaseEClassId{})
             {
                 Debug::BaseRefVerifier::get().registerBase(cls.id, cls.base_eclass_id);
             }
-
-            if (!compiled.nodeViews.count(cls.id))
-            {
-                uint64_t offset = 0;
-                auto out_buf_it = extraction.eclass_to_buf.find(cls.id);
-                if (out_buf_it != extraction.eclass_to_buf.end())
-                {
-                    BufferId buf_id = out_buf_it->second;
-                    for (const auto &buf : extraction.buffers)
-                    {
-                        if (buf.id == buf_id)
-                        {
-                            offset = buf.offset >= 0 ? static_cast<uint64_t>(buf.offset) : 0ULL;
-                            break;
-                        }
-                    }
-                }
-                compiled.nodeViews[cls.id] =
-                    TensorView(cls.shape, offset, cls.strides, cls.dtype);
-            }
+        }
+        for (const auto &[cid, logical_id] : compiled.eclass_to_logical)
+            if (egraph.findConst(cid) == cid)
+                addView(cid);
+        for (const auto &[cid, data] : compiled.constantStaging)
+            if (egraph.findConst(cid) == cid)
+                addView(cid);
+        for (const OpInstruction &inst : compiled.instructions)
+        {
+            if (egraph.findConst(inst.eclass_id) == inst.eclass_id)
+                addView(inst.eclass_id);
+            for (EClassId child : inst.children)
+                if (egraph.findConst(child) == child)
+                    addView(child);
         }
 
         return compiled;
@@ -2805,13 +2815,19 @@ struct Planner
             ~CostMemoScope() { planner.cost_memo_.reset(); }
         } cost_memo_scope(*this);
 
+#if defined(__GLIBC__)
+        if (!tg_malloc_tuning::kApplied)
+            Error::throw_err("[Planner.planAll] glibc rejected the allocator settings in malloc_tuning.hpp");
+#endif
         LOG(INFO) << "[Planner.planAll] Planning " << buckets.size() << " bucket(s) with weights:";
         // A bucket identical to an earlier one takes its saturated and reduced
         // e-graph instead of building the same one again.
         std::vector<uint32_t> identical_to(buckets.size());
+        std::vector<uint32_t> shared_state_to(buckets.size());
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
             identical_to[b] = b;
+            shared_state_to[b] = b;
             std::string duplicates;
             for (uint32_t prior = 0; prior < b; ++prior)
             {
@@ -2832,6 +2848,9 @@ struct Planner
         auto planAllSeconds = [&]() {
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_all_start).count();
         };
+        LOG(INFO) << "[Planner.planAll timeline] start epoch=" << std::fixed << std::setprecision(3)
+                  << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+                  << std::defaultfloat;
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph temp_graph = graph;
         initBaseEGraph(rootId, temp_graph, topo, repo, false);
@@ -2848,6 +2867,7 @@ struct Planner
 
         EGraph full_state = saturateBucket(rootId, graph, buckets[full_idx], doSaturate, repo);
         fullSaturationState_ = &full_state;
+        LOG(INFO) << "[Planner.planAll timeline] full saturation done at " << planAllSeconds() << "s";
         const RegionFacts region_facts = computeRegionFacts(graph, topo, repo);
         regionFacts_ = &region_facts;
         struct FullStateScope
@@ -2864,78 +2884,147 @@ struct Planner
         std::vector<EGraph> bucket_states(buckets.size());
         bucket_states[full_idx] = full_state;
 
-        // Partial buckets saturate independent copies of the full state.
+        // Partial buckets are split into groups of consecutive buckets; each
+        // group shares one superset e-graph: every member's partial paths are
+        // injected before one seeded rewrite closure, and the union of member
+        // regions lets the rules retain alternatives useful to any member.
+        // The groups' closures are independent and run in parallel.
+        std::vector<uint32_t> partial_indices;
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+            if (b != full_idx)
+                partial_indices.push_back(b);
+        if (!partial_indices.empty())
         {
-            const uint32_t nb = static_cast<uint32_t>(buckets.size());
-            unsigned workers = std::max(1u, std::min(std::thread::hardware_concurrency(), nb));
-            if (const char *limit = std::getenv("TG_SATURATION_THREADS"))
-                workers = std::max(1u, std::min(workers, static_cast<unsigned>(std::stoul(limit))));
-            std::atomic<uint32_t> next_bucket{0};
+            const uint32_t num_partial = static_cast<uint32_t>(partial_indices.size());
+            // By default buckets that need the same output region share a
+            // group: they compute the same rows and differ only in which
+            // inputs are dirty, so most of their closure is common. The
+            // closure cost of a group grows with the number of distinct
+            // regions in it, so each region gets its own group, and regions
+            // are merged consecutively only when there are more of them than
+            // hardware threads. TG_PARTIAL_GROUPS overrides with that many
+            // groups of consecutive buckets (a diagnostic).
+            std::vector<uint32_t> region_of(num_partial);
+            std::vector<const std::vector<Region> *> distinct_regions;
+            for (uint32_t i = 0; i < num_partial; ++i)
+            {
+                const std::vector<Region> &region = buckets[partial_indices[i]].outputNeededRegion;
+                uint32_t k = 0;
+                while (k < distinct_regions.size() && !(*distinct_regions[k] == region))
+                    ++k;
+                if (k == distinct_regions.size())
+                    distinct_regions.push_back(&region);
+                region_of[i] = k;
+            }
+            const uint32_t num_regions = static_cast<uint32_t>(distinct_regions.size());
+            const uint32_t hw_threads = std::max(1u, std::thread::hardware_concurrency());
+            uint32_t num_groups = std::min(num_regions, hw_threads);
+            const char *groups_text = std::getenv("TG_PARTIAL_GROUPS");
+            if (groups_text)
+                num_groups = static_cast<uint32_t>(std::stoul(groups_text));
+            if (num_groups == 0 || num_groups > num_partial)
+                Error::throw_err("[Planner.planAll] partial bucket groups must be in [1, " +
+                                 std::to_string(num_partial) + "], got " + std::to_string(num_groups));
+            std::vector<std::vector<uint32_t>> groups(num_groups);
+            if (std::getenv("TG_PARTIAL_GROUPS_ROUND_ROBIN"))
+                for (uint32_t i = 0; i < num_partial; ++i)
+                    groups[i % num_groups].push_back(partial_indices[i]);
+            else if (groups_text)
+                for (uint32_t g = 0; g < num_groups; ++g)
+                    for (uint32_t i = g * num_partial / num_groups; i < (g + 1) * num_partial / num_groups; ++i)
+                        groups[g].push_back(partial_indices[i]);
+            else
+                for (uint32_t i = 0; i < num_partial; ++i)
+                    groups[static_cast<uint64_t>(region_of[i]) * num_groups / num_regions].push_back(partial_indices[i]);
+            LOG(INFO) << "[Planner.planAll] " << num_partial << " partial bucket(s), " << num_regions
+                      << " distinct output region(s), " << num_groups << " saturation group(s)";
+            // Build full_state's lazy lookup indices before it is read from
+            // several threads.
+            full_state.findEClassByLogicalId(rootId);
+            for (size_t c = 0; c < full_state.getNumClasses(); ++c)
+            {
+                const EClass &cls = full_state.getEClass(EClassId{static_cast<uint32_t>(c)});
+                if (cls.base_eclass_id != BaseEClassId{})
+                {
+                    full_state.findEClassByBaseId(cls.base_eclass_id);
+                    break;
+                }
+            }
+            // A group's state is kept by a member that is not an alias of an
+            // identical earlier bucket (aliases are redirected below).
+            std::vector<uint32_t> group_owner(num_groups, UINT32_MAX);
+            for (uint32_t g = 0; g < num_groups; ++g)
+            {
+                for (uint32_t b : groups[g])
+                    if (identical_to[b] == b)
+                    {
+                        group_owner[g] = b;
+                        break;
+                    }
+                if (group_owner[g] == UINT32_MAX)
+                    Error::throw_err("[Planner.planAll] partial bucket group " + std::to_string(g) +
+                                     " has only aliases of identical buckets");
+            }
             std::vector<std::thread> threads;
-            std::vector<std::exception_ptr> errors(workers);
-#ifdef _WIN32
-            const bool sample = SamplingProfiler::enabled();
-            if (sample)
-                SamplingProfiler::get().start();
-#endif
-            for (unsigned t = 0; t < workers; ++t)
-                threads.emplace_back([&, t]() {
-#ifdef _WIN32
-                    if (sample)
-                        SamplingProfiler::get().registerCurrentThread();
-#endif
+            std::vector<std::exception_ptr> errors(num_groups);
+            for (uint32_t g = 0; g < num_groups; ++g)
+                threads.emplace_back([&, g]() {
                     try
                     {
-                        // Each worker reuses its own scratch buffers. Sharing this planner's
-                        // vectors lets another bucket resize memory while a rule is using it.
                         Planner worker_planner(costModel, settings);
+                        worker_planner.cost_memo_ = cost_memo_;
                         worker_planner.fullSaturationRules_ = fullSaturationRules_;
-                        worker_planner.fullSaturationState_ = &full_state;
+                        worker_planner.fullSaturationState_ = fullSaturationState_;
                         worker_planner.fullSaturationSliceMemo_ = fullSaturationSliceMemo_;
                         worker_planner.fullSaturationBaseClassEnodeCounts_ = fullSaturationBaseClassEnodeCounts_;
                         worker_planner.fullSaturationBaseClassStaged_ = fullSaturationBaseClassStaged_;
-                        worker_planner.regionFacts_ = &region_facts;
-                        worker_planner.cached_topo_ = cached_topo_;
-                        worker_planner.cached_topo_root_ = cached_topo_root_;
-                        worker_planner.cached_topo_graph_ = cached_topo_graph_;
-                        worker_planner.cost_memo_ = cost_memo_;
-                        for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
-                        {
-                            if (b == full_idx || identical_to[b] != b)
-                                continue;
-                            bucket_states[b] = worker_planner.saturateBucket(
-                                rootId, graph, buckets[b], settings.saturate_partial_buckets, repo, &full_state);
-                        }
+                        worker_planner.regionFacts_ = regionFacts_;
+                        std::vector<const Bucket *> members;
+                        for (uint32_t b : groups[g])
+                            members.push_back(&buckets[b]);
+                        // Keep one owner per group until reduction finishes;
+                        // copying a union graph per bucket duplicates
+                        // hundreds of thousands of nodes.
+                        const auto group_start = std::chrono::steady_clock::now();
+                        bucket_states[group_owner[g]] = worker_planner.saturateBucket(
+                            rootId, graph, *members.front(), settings.saturate_partial_buckets, repo, &full_state,
+                            &members);
+                        LOG(INFO) << "[Planner.planAll] saturation group " << g << " (" << members.size()
+                                  << " bucket(s), owner " << group_owner[g] << ") closed in "
+                                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - group_start).count()
+                                  << "s with " << bucket_states[group_owner[g]].getNumENodes() << " enodes";
+                        worker_planner.fullSaturationState_ = nullptr;
+                        worker_planner.regionFacts_ = nullptr;
                     }
                     catch (...)
                     {
-                        errors[t] = std::current_exception();
+                        errors[g] = std::current_exception();
                     }
-#ifdef _WIN32
-                    if (sample)
-                        SamplingProfiler::get().unregisterCurrentThread();
-#endif
                 });
             for (auto &thread : threads)
                 thread.join();
-#ifdef _WIN32
-            if (sample)
-                SamplingProfiler::get().finish("saturation");
-#endif
             for (auto &error : errors)
                 if (error)
                     std::rethrow_exception(error);
+            for (uint32_t g = 0; g < num_groups; ++g)
+                for (uint32_t b : groups[g])
+                    shared_state_to[b] = group_owner[g];
         }
 
         for (uint32_t b = 0; b < bucket_states.size(); ++b)
             if (identical_to[b] != b && b != full_idx)
-                bucket_states[b] = bucket_states[identical_to[b]];
+                shared_state_to[b] = shared_state_to[identical_to[b]];
         for (uint32_t b = 0; b < bucket_states.size(); ++b)
-            egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
+            egraph_diagnostics::logClassSizeHistogram(bucket_states[shared_state_to[b]],
                                                       "bucket=" + std::to_string(b) + " stage=saturated");
-        reconcileBaseEqualities(full_state, bucket_states);
+        std::vector<EGraph *> unique_bucket_states{&full_state, &bucket_states[full_idx]};
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+            if (shared_state_to[b] == b && b != full_idx)
+                unique_bucket_states.push_back(&bucket_states[b]);
+        LOG(INFO) << "[Planner.planAll timeline] partial saturation done at " << planAllSeconds() << "s";
+        reconcileBaseEqualities(unique_bucket_states);
         for (uint32_t b = 0; b < bucket_states.size(); ++b)
-            egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
+            egraph_diagnostics::logClassSizeHistogram(bucket_states[shared_state_to[b]],
                                                       "bucket=" + std::to_string(b) + " stage=reconciled");
         LOG(INFO) << "[Planner.planAll timeline] saturation done at " << planAllSeconds() << "s";
 #ifdef _WIN32
@@ -3063,6 +3152,7 @@ struct Planner
         }
 
         // Add CACHE enodes to bucket egraphs for clean candidates
+        LOG(INFO) << "[Planner.planAll timeline] cache candidates done at " << planAllSeconds() << "s";
         Engine cpu = Engine{0, EngineType::CPU};
         auto addCacheENodes = [&](EGraph &bstate) {
             for (const auto &cand : candidates)
@@ -3096,6 +3186,7 @@ struct Planner
         }
 
         // Compute enode infos and prune egraphs
+        LOG(INFO) << "[Planner.planAll timeline] cache enodes done at " << planAllSeconds() << "s";
         std::vector<std::vector<ENodeInfo>> all_enode_infos(buckets.size());
         // Full cycle listings (egraph_cycles{0..N}.txt: before any pass, then
         // after each pass) are debug output and cost seconds per bucket to
@@ -3121,9 +3212,16 @@ struct Planner
         std::vector<BucketCycleReport> cycle_reports(buckets.size());
         auto reduceBucket = [&](uint32_t b, Planner &worker_planner) {
             BucketCycleReport &r = cycle_reports[b];
+            const auto reduce_start = std::chrono::steady_clock::now();
+            auto stepSeconds = [&]() {
+                return std::chrono::duration<double>(std::chrono::steady_clock::now() - reduce_start).count();
+            };
             bucket_states[b].rebuild(true);
+            LOG(INFO) << "[Planner.reduce] bucket=" << b << " rebuild " << stepSeconds() << "s";
 
-            all_enode_infos[b] = worker_planner.computeENodeInfos(bucket_states[b]);
+            // Pruning consumes kernel costs, not branch-order estimates.
+            // Build those estimates once, after reduction has finished.
+            all_enode_infos[b] = worker_planner.computeENodeInfos(bucket_states[b], false);
             if (std::getenv("TG_DEBUG_ROOTS"))
             {
                 const EGraph &eg = bucket_states[b];
@@ -3163,6 +3261,7 @@ struct Planner
                         scatterInf += all_enode_infos[b][e].cost == TGConstants::INF;
                     }
             worker_planner.pruneEGraph(bucket_states[b], all_enode_infos[b]);
+            LOG(INFO) << "[Planner.reduce] bucket=" << b << " infos+prune " << stepSeconds() << "s";
             if (std::getenv("TG_DEBUG_ROOTS"))
             {
                 uint32_t scatterAfter = 0;
@@ -3203,6 +3302,7 @@ struct Planner
             }
 
             r.logs.resize(cycle_logs.size());
+            LOG(INFO) << "[Planner.reduce] bucket=" << b << " unreachable " << stepSeconds() << "s";
             r.components.push_back(countCyclicComponents(bucket_states[b]));
             if (cycle_diagnostics)
             {
@@ -3223,39 +3323,47 @@ struct Planner
             }
 
             const uint32_t total_removed = std::accumulate(r.removed.begin(), r.removed.end(), 0u);
+            LOG(INFO) << "[Planner.reduce] bucket=" << b << " cycle passes " << stepSeconds() << "s";
             if (total_removed > 0 || any_unreachable_cleared || bucket_states[b].getENodes().size() != all_enode_infos[b].size())
             {
-                bucket_states[b].rebuild(true);
+                bucket_states[b].rebuild(true, false);
                 all_enode_infos[b] = worker_planner.computeENodeInfos(bucket_states[b]);
                 bucket_states[b].clearHashcons();
                 bucket_states[b].constantHashIndex.clear();
                 bucket_states[b].classes.shrink_to_fit();
                 bucket_states[b].enodes.shrink_to_fit();
             }
+            else
+                worker_planner.computeENodeHeuristicCosts(bucket_states[b], all_enode_infos[b]);
+            LOG(INFO) << "[Planner.reduce] bucket=" << b << " final infos " << stepSeconds() << "s";
             egraph_diagnostics::logClassSizeHistogram(bucket_states[b],
                                                       "bucket=" + std::to_string(b) + " stage=pruned");
             egraph_diagnostics::dumpRequestedClasses(bucket_states[b], b);
         };
         {
-            // The first bucket fills the cost memo the others mostly reuse.
             const uint32_t nb = static_cast<uint32_t>(buckets.size());
-            if (nb > 0)
-                reduceBucket(0, *this);
-            // Buckets identical to bucket 0 take its result now; the others
-            // after the parallel reduction.
+            std::vector<uint32_t> state_representatives;
+            for (uint32_t b = 0; b < nb; ++b)
+                if (shared_state_to[b] == b)
+                    state_representatives.push_back(b);
             auto copyReduced = [&](uint32_t b) {
-                const uint32_t from = identical_to[b];
-                bucket_states[b] = bucket_states[from];
+                const uint32_t from = shared_state_to[b];
                 all_enode_infos[b] = all_enode_infos[from];
                 cycle_reports[b].components = cycle_reports[from].components;
                 cycle_reports[b].removed = cycle_reports[from].removed;
                 cycle_reports[b].logs.resize(cycle_reports[from].logs.size());
             };
-            for (uint32_t b = 1; b < nb; ++b)
-                if (identical_to[b] == 0)
-                    copyReduced(b);
+            // With one partial group (plus the full bucket), the union graph
+            // is reduced on this thread first: measured faster than reducing
+            // it on a worker. Several groups are all reduced concurrently.
+            uint32_t first_pooled = 0;
+            if (!state_representatives.empty() && state_representatives.size() <= 2)
+            {
+                reduceBucket(state_representatives.front(), *this);
+                first_pooled = 1;
+            }
             const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), std::max(nb, 1u)));
-            std::atomic<uint32_t> next_bucket{1};
+            std::atomic<uint32_t> next_representative{first_pooled};
             std::vector<std::thread> threads;
             std::vector<std::exception_ptr> errors(hw);
             for (unsigned t = 0; t < hw; ++t)
@@ -3268,9 +3376,9 @@ struct Planner
                     {
                         Planner worker_planner(costModel, settings);
                         worker_planner.cost_memo_ = cost_memo_;
-                        for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
-                            if (identical_to[b] == b)
-                                reduceBucket(b, worker_planner);
+                        for (uint32_t i = next_representative++; i < state_representatives.size();
+                             i = next_representative++)
+                            reduceBucket(state_representatives[i], worker_planner);
                     }
                     catch (...)
                     {
@@ -3286,8 +3394,8 @@ struct Planner
             for (auto &error : errors)
                 if (error)
                     std::rethrow_exception(error);
-            for (uint32_t b = 1; b < nb; ++b)
-                if (identical_to[b] != b && identical_to[b] != 0)
+            for (uint32_t b = 0; b < nb; ++b)
+                if (shared_state_to[b] != b)
                     copyReduced(b);
         }
 
@@ -3295,7 +3403,7 @@ struct Planner
         {
             for (uint32_t b = 0; b < buckets.size(); ++b)
             {
-                const EGraph &eg = bucket_states[b];
+                const EGraph &eg = bucket_states[shared_state_to[b]];
                 const EClassId root = eg.findConst(eg.findEClassByLogicalId(rootId));
                 for (ENodeId enodeId : eg.getEClass(root).enodes)
                 {
@@ -3339,6 +3447,7 @@ struct Planner
         }
 
         // Preallocate constants and inputs
+        LOG(INFO) << "[Planner.planAll timeline] reduction done at " << planAllSeconds() << "s";
         std::unordered_map<BaseEClassId, ParallelBuffer> preallocated;
         preallocate(graph, bucket_states[full_idx], preallocated);
 
@@ -3361,12 +3470,17 @@ struct Planner
         search_state.preallocated_buffers = preallocated;
         search_state.preallocated_pages = preallocated_pages;
 
+        std::vector<std::shared_ptr<EGraph>> shared_search_graphs(buckets.size());
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+            if (shared_state_to[b] == b)
+                shared_search_graphs[b] = std::make_shared<EGraph>(std::move(bucket_states[b]));
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
-            // Moved: the search state owns the bucket egraphs from here on
-            // (copies would double the planner's largest allocation).
-            search_state.bucket_root_ids.push_back(bucket_states[b].findEClassByLogicalId(rootId));
-            search_state.bucket_egraphs.push_back(std::move(bucket_states[b]));
+            const uint32_t representative = shared_state_to[b];
+            if (!shared_search_graphs[representative])
+                Error::throw_err("[Planner.planAll] missing reduced e-graph representative");
+            search_state.bucket_root_ids.push_back(shared_search_graphs[representative]->findEClassByLogicalId(rootId));
+            search_state.bucket_egraphs.pushShared(shared_search_graphs[representative]);
             search_state.bucket_enode_infos.push_back(std::move(all_enode_infos[b]));
         }
 
@@ -3387,8 +3501,8 @@ struct Planner
         }
 
         // Variables per bucket: omit structurally unreachable classes entirely.
-        for (uint32_t b = 0; b < buckets.size(); ++b)
-            search_state.addBucketVariables(b);
+        LOG(INFO) << "[Planner.planAll timeline] cache variables done at " << planAllSeconds() << "s";
+        search_state.addAllBucketVariables(shared_state_to);
 
         for (uint32_t b = 0; b < buckets.size(); ++b)
         {
@@ -3405,7 +3519,8 @@ struct Planner
         auto selector = std::make_shared<plan::PriorityQueueSelector>();
         auto brancher_impl = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
-        plan::SearchEngine engine(std::move(search_state), selector, brancher_impl);
+        auto engine_holder = std::make_unique<plan::SearchEngine>(std::move(search_state), selector, brancher_impl);
+        plan::SearchEngine &engine = *engine_holder;
         plan::addAllPropagators(engine, true, all_buckets_dag);
 
         LOG(DEBUG) << "[Planner.planAll] Launching SearchEngine solve (minCompileSeconds=" << minCompileSeconds << "s)...";
@@ -3506,8 +3621,17 @@ struct Planner
             cg.bucket = buckets[b];
             compiled_graphs.push_back(std::move(cg));
         }
+        LOG(INFO) << "[Planner.planAll timeline] graphs built at " << planAllSeconds() << "s";
 
-        return {std::move(compiled_graphs), std::move(engine.incumbent_cached_nodes)};
+        // The search state and the saturated e-graphs take most of a second
+        // to free at large bucket counts; nothing reads them after this point,
+        // so free them off the compile's critical path.
+        std::unordered_set<BaseEClassId> cached_nodes = std::move(engine.incumbent_cached_nodes);
+        std::thread([engine_holder = std::move(engine_holder), temp_graph = std::move(temp_graph),
+                     full_state = std::move(full_state), bucket_states = std::move(bucket_states),
+                     all_enode_infos = std::move(all_enode_infos),
+                     shared_search_graphs = std::move(shared_search_graphs)]() mutable {}).detach();
+        return {std::move(compiled_graphs), std::move(cached_nodes)};
     }
 
     ExtractionResult extractBest(const LogicalId rootId, const Graph &graph, const EGraph &egraph,

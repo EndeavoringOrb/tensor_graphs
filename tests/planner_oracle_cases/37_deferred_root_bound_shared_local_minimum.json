@@ -1,0 +1,18 @@
+{
+  "name": "deferred root bound survives a suboptimal primal local minimum",
+  "description": "Separate operations cost 8. Switching just one branch to the shared cost-5 producer raises the plan cost to 9, while switching both costs 5. A stale bound from the validated cost-8 plan must not become the restored root bound or prune the globally optimal shared plan.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["left", "right"], "cost": 0}]},
+    "left": {"alternatives": [
+      {"cost": 4},
+      {"children": ["shared"], "cost": 0}
+    ]},
+    "right": {"alternatives": [
+      {"cost": 4},
+      {"children": ["shared"], "cost": 0}
+    ]},
+    "shared": {"alternatives": [{"cost": 5}]}
+  },
+  "expected_optimum": 5
+}

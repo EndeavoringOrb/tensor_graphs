@@ -171,9 +171,23 @@ class SelectionReachabilityPropagator : public Propagator
         {
             if (state.var_infos[changed].type != VarType::SELECTED)
                 return true;
+            const uint32_t b = state.var_infos[changed].bucket_idx;
             bool consistent = true;
-            if (completePlanCheck(state, state.var_infos[changed].bucket_idx, consistent))
+            if (completePlanCheck(state, b, consistent))
                 return consistent;
+            // The first event of a bucket builds its tree from the current
+            // domains, like updateSelectionReachability would; building every
+            // unbuilt bucket at that point is equally sound (domains only
+            // shrink, so a class unreachable now stays unreachable, and later
+            // changes still arrive as their own events) and runs in parallel.
+            if (!state.selectionReachabilityInitialized(b))
+            {
+                const bool built = initializeBuckets(state, /*update_initialized=*/false);
+                if (!state.selectionReachabilityInitialized(b))
+                    Error::throw_err("[SelectionReachability] bucket " + std::to_string(b) +
+                                     " has a selection event but no root selection variable");
+                return built;
+            }
             std::vector<VarId> unreachable;
             auto &forced_parents = state.pending_parent_selections;
             state.updateSelectionReachability(changed, unreachable, is_dag_, &forced_parents);
@@ -188,26 +202,53 @@ class SelectionReachabilityPropagator : public Propagator
         }
         else
         {
-            for (uint32_t b = 0; b < state.buckets.size(); ++b)
+            return initializeBuckets(state, /*update_initialized=*/true);
+        }
+        return true;
+    }
+
+  private:
+    // Builds every unbuilt bucket's tree in parallel, then removes the
+    // unreachable selections bucket by bucket. With update_initialized, an
+    // already built bucket is refreshed from its root variable instead.
+    bool initializeBuckets(SearchState &state, bool update_initialized)
+    {
+        std::vector<VarId> root_vars(state.buckets.size(), kInvalidVarId);
+        std::vector<uint8_t> was_initialized(state.buckets.size(), 0);
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            if (b >= state.bucket_root_ids.size())
+                continue;
+            auto it = state.selected_vars[b].find(state.bucket_root_ids[b]);
+            if (it == state.selected_vars[b].end())
+                continue;
+            root_vars[b] = it->second;
+            was_initialized[b] = state.selectionReachabilityInitialized(b);
+        }
+        std::vector<std::vector<VarId>> built_unreachable;
+        state.initializeSelectionReachability(root_vars, is_dag_, built_unreachable);
+        for (uint32_t b = 0; b < state.buckets.size(); ++b)
+        {
+            const VarId root_var = root_vars[b];
+            if (root_var == kInvalidVarId || (was_initialized[b] && !update_initialized))
+                continue;
+            std::vector<VarId> unreachable;
+            if (was_initialized[b])
             {
-                if (b >= state.bucket_root_ids.size())
-                    continue;
-                EClassId root_cid = state.bucket_root_ids[b];
-                auto it = state.selected_vars[b].find(root_cid);
-                if (it == state.selected_vars[b].end())
-                    continue;
-                VarId root_var = it->second;
-                std::vector<VarId> unreachable;
                 auto &forced_parents = state.pending_parent_selections;
                 state.updateSelectionReachability(root_var, unreachable, is_dag_, &forced_parents);
-                for (VarId sel_v : unreachable)
-                {
-                    const Domain &sel_dom = state.domains[sel_v];
-                    if (!sel_dom.contains(0))
-                        return reportConflict(state, root_var, sel_v, "initial required class unreachable");
-                    if (!sel_dom.isFixed())
-                        state.setDomain(sel_v, Domain::makeFixed(0, sel_dom.is_mask));
-                }
+            }
+            else
+            {
+                unreachable = std::move(built_unreachable[b]);
+            }
+            for (VarId sel_v : unreachable)
+            {
+                const Domain &sel_dom = state.domains[sel_v];
+                if (!sel_dom.contains(0))
+                    return reportConflict(state, root_var, sel_v, "initial required class unreachable");
+                if (!sel_dom.isFixed())
+                    state.setDomain(sel_v, Domain::makeFixed(0, sel_dom.is_mask));
             }
         }
         return true;

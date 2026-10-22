@@ -614,6 +614,19 @@ class WriteAfterReadPropagator : public Propagator
         return true;
     }
 
+    // Root propagation builds every bucket's schedule; each bucket writes only
+    // its own entry, so they are built in parallel up front. Later domain
+    // changes re-dirty the schedules as usual, and the per-bucket calls that
+    // follow rebuild lazily from there.
+    static void buildAllBucketInfo(const SearchState &state, bool with_fixed_offset_index)
+    {
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
+            buildBucketInfo(state, b);
+            if (with_fixed_offset_index)
+                buildFixedOffsetIndex(state, b, kInvalidVarId);
+        });
+    }
+
     static void buildFixedOffsetIndex(const SearchState &state, uint32_t b, VarId changed)
     {
         auto &schedule = state.propagation.write_after_read[b];
@@ -1298,10 +1311,16 @@ class WriteAfterReadPropagator : public Propagator
         }
         else
         {
+            buildAllBucketInfo(state, /*with_fixed_offset_index=*/true);
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 buildBucketInfo(state, b);
-                buildFixedOffsetIndex(state, b, kInvalidVarId);
+                // Rebuild only if an earlier bucket's pruning (a cache
+                // decision) or an offset change staled the prebuilt index.
+                const auto &schedule = state.propagation.write_after_read[b];
+                if (!schedule.fixed_offset_index_initialized || schedule.fixed_offset_structure_dirty ||
+                    schedule.spatial_dirty)
+                    buildFixedOffsetIndex(state, b, kInvalidVarId);
                 // Fixed offsets only: like the incremental path, an unfixed
                 // offset is checked against the fixed allocations when it
                 // becomes fixed. Forward-pruning every unfixed offset here
@@ -1936,6 +1955,7 @@ class FixedOffsetStartPropagator : public Propagator
         }
         else
         {
+            WriteAfterReadPropagator::buildAllBucketInfo(state, /*with_fixed_offset_index=*/false);
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 WriteAfterReadPropagator::buildBucketInfo(state, b);

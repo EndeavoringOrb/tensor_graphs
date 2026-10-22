@@ -16,7 +16,7 @@ MODEL_PATH = PROJECT_ROOT / "models" / "google" / "gemma-3-270m"
 # compile budget, kept for extraction, compiling and writing the plan
 # (agent-tunable; docs/agents/targets/prefill_decode_seq_len/target.md).
 # Extraction and plan writing takes ~1.2s; 3.0s margin leaves an extra ~12s for search.
-SEARCH_MARGIN_SECONDS = 3.0
+SEARCH_MARGIN_SECONDS = 5.5
 PLAN_NAME = "plan.bin"
 RUNS_DIR = PROJECT_ROOT / "logs" / "gemma_output_runs"
 BENCH_EXE = PROJECT_ROOT / "tensor_graphs_cpp" / ("bench.exe" if sys.platform == "win32" else "bench")

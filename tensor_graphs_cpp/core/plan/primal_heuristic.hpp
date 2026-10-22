@@ -541,7 +541,9 @@ struct PrimalBucketContext
 // Builds one plan per engine weighting (those with a consistent cache set),
 // sorted by simulated weighted makespan. Throws only on internal
 // inconsistencies; an empty result means no consistent plan was produced.
-inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, std::vector<PrimalBucketContext> &contexts)
+inline std::vector<PrimalPlan> buildRootPrimalPlans(
+    const SearchState &state, std::vector<PrimalBucketContext> &contexts,
+    const std::function<bool(const PrimalPlan &)> &accept = {})
 {
     const uint32_t nb = static_cast<uint32_t>(state.buckets.size());
     contexts.clear();
@@ -550,11 +552,14 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
         const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 16u));
         std::vector<std::thread> threads;
         std::vector<std::exception_ptr> errors(hw);
+        // Buckets differ in size, so threads take the next bucket as they
+        // finish rather than a fixed stride.
+        std::atomic<uint32_t> next_bucket{0};
         for (unsigned t = 0; t < hw; ++t)
             threads.emplace_back([&, t]() {
                 try
                 {
-                    for (uint32_t b = t; b < nb; b += hw)
+                    for (uint32_t b = next_bucket++; b < nb; b = next_bucket++)
                         fn(b);
                 }
                 catch (...)
@@ -574,14 +579,12 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
         if (!contexts[b].rb.acyclic || !contexts[b].rb.root_feasible)
             return;
         markCacheAlternatives(state, contexts[b].rb);
-        contexts[b].computer = std::make_unique<RelaxationBoundComputer>(contexts[b].rb);
     });
     for (uint32_t b = 0; b < nb; ++b)
-        if (!contexts[b].computer || !contexts[b].computer->ready())
+        if (!contexts[b].rb.acyclic || !contexts[b].rb.root_feasible)
         {
             LOG(INFO) << "[PrimalHeuristic] bucket " << b << " relaxation unusable: acyclic=" << contexts[b].rb.acyclic
-                      << " root_feasible=" << contexts[b].rb.root_feasible
-                      << " computer=" << (contexts[b].computer ? "not ready" : "none");
+                      << " root_feasible=" << contexts[b].rb.root_feasible;
             usable = false;
         }
     std::vector<PrimalPlan> plans;
@@ -653,9 +656,9 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
     std::vector<uint32_t> same_as(nb);
     {
         std::vector<std::vector<uint64_t>> signatures(nb);
+        parallel([&](uint32_t b) { signatures[b] = relaxationSignature(contexts[b].rb); });
         for (uint32_t b = 0; b < nb; ++b)
         {
-            signatures[b] = relaxationSignature(contexts[b].rb);
             same_as[b] = b;
             for (uint32_t c = 0; c < b; ++c)
                 if (same_as[c] == c && signatures[c] == signatures[b])
@@ -689,9 +692,11 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
             if (same_as[b] != b)
                 return;
             if (start_policy.cheap)
-                contexts[b].computer->cheapEstimates(lambda[b], estimates[b]);
+                cheapRelaxationEstimates(contexts[b].rb, lambda[b], estimates[b]);
             else
             {
+                if (!contexts[b].computer)
+                    contexts[b].computer = std::make_unique<RelaxationBoundComputer>(contexts[b].rb);
                 contexts[b].computer->evaluate(lambda[b]);
                 contexts[b].computer->regionEstimates(estimates[b]);
             }
@@ -903,7 +908,11 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(const SearchState &state, st
             duplicate |= same;
         }
         if (!duplicate)
+        {
             plans.push_back(std::move(plan));
+            if (accept && accept(plans.back()))
+                break;
+        }
     }
     std::sort(plans.begin(), plans.end(), [](const PrimalPlan &a, const PrimalPlan &b) { return a.cost < b.cost; });
     return plans;
@@ -1450,12 +1459,16 @@ inline bool improveByWindows(const SearchState &state, std::vector<PrimalBucketC
     for (uint32_t b = 0; b < contexts.size(); ++b)
     {
         const double weight = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0;
-        if (!(weight > 0.0) || !contexts[b].computer || !contexts[b].computer->ready())
+        if (!(weight > 0.0) || std::chrono::steady_clock::now() >= deadline)
             continue;
         RelaxationBoundComputer *computer = partitioned ? partitioned(b) : nullptr;
         if (!computer || computer->lastPartition().empty())
         {
+            if (!contexts[b].computer)
+                contexts[b].computer = std::make_unique<RelaxationBoundComputer>(contexts[b].rb, deadline);
             computer = contexts[b].computer.get();
+            if (!computer->ready())
+                continue;
             computer->flexibleIntervalBound(8, deadline);
         }
         auto it = std::find_if(groups.begin(), groups.end(), [&](const auto &g) { return g.first == computer; });

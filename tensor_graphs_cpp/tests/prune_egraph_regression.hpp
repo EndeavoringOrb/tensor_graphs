@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -73,6 +74,48 @@ inline void checkCascade(Planner &planner, bool shared_state)
                 Error::throw_err("[PruneEGraphRegression] surviving expression references an empty class");
 }
 
+// A pruned e-node stays in the e-node store and still takes part in the
+// rebuild's congruence closure. When it is the representative of a
+// congruence class, compaction must keep a listed congruent e-node in its
+// place instead of dropping both.
+inline void checkPrunedRepresentative()
+{
+    EGraph graph;
+    const MemSpace ram{1, HandleType::CPP};
+    auto makeClass = [&]() { return graph.addEClass({1}, {1}, DType::FLOAT32, ram); };
+    auto addNode = [&](EClassId owner, const std::string &name, std::vector<EClassId> children) {
+        const ENodeId node_id{static_cast<uint32_t>(graph.getNumENodes())};
+        graph.addENode(owner, ENode(KernelId{0}, OpType::FUSED, name, std::move(children),
+                                   {1}, {1}, DType::FLOAT32, ram, {}));
+        return node_id;
+    };
+    const EClassId leaf_a = makeClass();
+    const EClassId leaf_b = makeClass();
+    const EClassId pruned_owner = makeClass();
+    const EClassId live_owner = makeClass();
+    const EClassId root = makeClass();
+    // E-node 0 comes first in every rebuild shard, so it is the hashcons
+    // representative of its congruence class.
+    const ENodeId pruned = addNode(pruned_owner, "same", {leaf_a});
+    addNode(live_owner, "same", {leaf_b});
+    addNode(leaf_a, "leaf a", {});
+    addNode(leaf_b, "leaf b", {});
+    addNode(root, "root", {live_owner});
+    auto &pruned_enodes = graph.getEClass(pruned_owner).enodes;
+    pruned_enodes.erase(std::find(pruned_enodes.begin(), pruned_enodes.end(), pruned));
+    graph.merge(leaf_a, leaf_b);
+
+    graph.rebuild(true);
+    for (const auto &node : graph.getENodes())
+        for (EClassId child : node.getChildren())
+            if (graph.getEClass(graph.findConst(child)).enodes.empty())
+                Error::throw_err("[PruneEGraphRegression] compaction emptied a class whose congruent "
+                                 "representative was pruned");
+    if (graph.getNumENodes() != 4)
+        Error::throw_err("[PruneEGraphRegression] compaction kept " + std::to_string(graph.getNumENodes()) +
+                         " e-nodes, expected 4 (root, both leaves, same)");
+}
+
 inline void run()
 {
     CostModel cost_model(false, "");
@@ -80,6 +123,7 @@ inline void run()
     Planner planner(cost_model, settings);
     checkCascade(planner, false);
     checkCascade(planner, true);
+    checkPrunedRepresentative();
     std::cout << "pruneEGraph regression tests passed" << std::endl;
 }
 } // namespace PruneEGraphRegression

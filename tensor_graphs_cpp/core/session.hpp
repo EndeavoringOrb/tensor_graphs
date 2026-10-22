@@ -1,5 +1,7 @@
 #pragma once
 #include <algorithm>
+#include <chrono>
+#include <iomanip>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -192,6 +194,22 @@ struct Session
             return;
 
         BinaryWriter bw(file);
+        {
+            uint64_t graph_bytes = 0, unique_bytes = 0, global_bytes = 0;
+            std::unordered_set<const void *> seen;
+            for (const CompiledGraph &g : cachedGraphs)
+                for (const auto &pair : g.constantStaging)
+                    if (pair.second)
+                    {
+                        graph_bytes += pair.second->size();
+                        if (seen.insert(pair.second.get()).second)
+                            unique_bytes += pair.second->size();
+                    }
+            for (const auto &pair : graph.constantStaging)
+                global_bytes += pair.second->size();
+            LOG(INFO) << "[Session.persistCache] graph-constant bytes=" << graph_bytes << " unique=" << unique_bytes
+                      << " (" << seen.size() << " buffers) global-constant bytes=" << global_bytes;
+        }
 
         bw.write<uint8_t>(0); // Metadata block type
         bw.write<uint32_t>(kCacheFileVersion);
@@ -376,9 +394,17 @@ struct Session
         }
     }
 
+    static void logTimeline(const char *event)
+    {
+        LOG(INFO) << "[Session timeline] " << event << " epoch=" << std::fixed << std::setprecision(3)
+                  << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+                  << std::defaultfloat;
+    }
+
     void compile(bool doSaturate = true)
     {
         plan(doSaturate);
+        logTimeline("planned and persisted");
 
         // Compute exact peak allocation size required per MemSpace across all compiled graphs
         std::unordered_map<MemSpace, uint64_t> peakSizes;
@@ -435,6 +461,7 @@ struct Session
         }
 
         memManager.init(peakSizes);
+        logTimeline("arenas materialized");
 
         // Write all constants directly to their allocated offsets in memory
         // TODO: currently redundant with constant writing in Executor::run? we should try only write constants here
@@ -473,6 +500,7 @@ struct Session
             }
             total_written += written.size();
         }
+        logTimeline("constants written");
         std::cout << "Wrote " << total_written << " constants to memory across " << cachedGraphs.size()
                   << " graph(s). Graph has " << graph.constantStaging.size() << " constants." << std::endl;
 
@@ -512,6 +540,7 @@ struct Session
         persistent_initialized = false;
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
+        logTimeline("compiled");
     }
 
     void writeInput(LogicalId logicalId, const void *data, uint64_t size)
@@ -676,6 +705,7 @@ struct Session
         Planner planner(costModel, settings);
         auto [graphs, cached_nodes] = planner.planAll(
             rootId, graph, manualBuckets, bucket_weights, doSaturate, repo, minCompileSeconds, brancher);
+        logTimeline("planAll returned");
 
         cachedGraphs = std::move(graphs);
         selectedCachedNodes = std::move(cached_nodes);
@@ -692,7 +722,7 @@ struct Session
                              " buckets, but expected " + std::to_string(manualBuckets.size()) + ".");
         }
 
-        persistCache();
+        // Session::plan persists the cache once planning returns.
     }
 
     const uint32_t getBestGraphIdx(const Bucket &bucket) const

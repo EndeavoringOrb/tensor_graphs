@@ -106,7 +106,9 @@ struct StorageBuffer : public DeviceBuffer
 
 struct CppBuffer : public DeviceBuffer
 {
-    std::vector<uint8_t> cpu_arena;
+    // Zeroed by calloc: large arenas come straight from the OS as zero pages,
+    // so untouched pages cost nothing (a zero-filled vector touches them all).
+    std::unique_ptr<uint8_t, decltype(&std::free)> cpu_arena{nullptr, &std::free};
     uint8_t *arena_ptr = nullptr;
 
     CppBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
@@ -121,8 +123,10 @@ struct CppBuffer : public DeviceBuffer
         if (arena_ptr)
             return;
         uint64_t allocSize = std::max<uint64_t>(4096ULL, sizeBytes);
-        cpu_arena.resize(allocSize + 4096);
-        uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
+        cpu_arena.reset(static_cast<uint8_t *>(std::calloc(allocSize + 4096, 1)));
+        if (!cpu_arena)
+            Error::throw_err("CppBuffer: failed to allocate " + std::to_string(allocSize + 4096) + " bytes");
+        uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.get());
         arena_ptr = reinterpret_cast<uint8_t *>((ptr + 4095) & ~4095ULL);
     }
     void resize(uint64_t newSizeBytes) override
@@ -134,7 +138,7 @@ struct CppBuffer : public DeviceBuffer
     void freeArena() override
     {
         arena_ptr = nullptr;
-        cpu_arena.clear();
+        cpu_arena.reset();
     }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {

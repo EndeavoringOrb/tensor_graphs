@@ -25,8 +25,8 @@ class CycleAvoidancePropagator : public Propagator
         if (parents_initialized)
             return;
         bucket_parents.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
+        // Buckets are independent: each fills only its own map.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
             for (const auto &pair : state.selected_vars[b])
             {
                 EClassId p_cid = pair.first;
@@ -41,7 +41,7 @@ class CycleAvoidancePropagator : public Propagator
                     }
                 }
             }
-        }
+        });
         parents_initialized = true;
     }
 

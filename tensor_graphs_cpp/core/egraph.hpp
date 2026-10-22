@@ -8,7 +8,9 @@
 #include <utility>
 #include <vector>
 #include <deque>
+#include <thread>
 
+#include "core/common/thread_pool.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
@@ -86,6 +88,27 @@ struct ENode
     const std::string &getDebugOrigin() const
     {
         return debugOrigin;
+    }
+
+    // Overwrites every field, reusing this node's storage (for probing the
+    // hashcons without allocating); the signature and debug origin are reset.
+    void assignFields(KernelId newKernelId, OpType newOpType, const std::string &newOpName,
+                      const std::vector<EClassId> &newChildren, const std::vector<uint32_t> &newShape,
+                      const std::vector<uint64_t> &newStrides, DType newDType, MemSpace newMemSpace,
+                      const std::vector<Engine> &newEngines, const std::string &newContentHash)
+    {
+        kernelId = newKernelId;
+        opType = newOpType;
+        opName.assign(newOpName);
+        children.assign(newChildren.begin(), newChildren.end());
+        shape.assign(newShape.begin(), newShape.end());
+        strides.assign(newStrides.begin(), newStrides.end());
+        dtype = newDType;
+        mem_space = newMemSpace;
+        engines.assign(newEngines.begin(), newEngines.end());
+        contentHash.assign(newContentHash);
+        sig = 0;
+        debugOrigin.clear();
     }
 
     // Setters
@@ -910,105 +933,139 @@ struct EGraph
         return count;
     }
 
-    void rebuild(bool compact = false)
+    // `keep_hashcons` false leaves the compacted graph without a hashcons
+    // (as clearHashcons does) for callers that never add or look up enodes
+    // afterwards.
+    void rebuild(bool compact = false, bool keep_hashcons = true)
     {
+        if (!keep_hashcons && !compact)
+            Error::throw_err("[EGraph.rebuild] dropping the hashcons requires compaction");
         uint32_t total_merges = 0;
         const size_t base_count = shared_enodes ? shared_enodes->size() : 0;
+        const uint32_t thread_count = std::max(1u, ThreadPool::get().get_num_threads());
+        struct RebuildShard
+        {
+            std::unordered_map<uint64_t, std::vector<ENodeId>> hash;
+            std::vector<std::pair<EClassId, EClassId>> merges;
+        };
+        std::vector<RebuildShard> shards(thread_count);
         while (true)
         {
-            std::unordered_map<uint64_t, std::vector<ENodeId>> new_hash;
-            new_hash.reserve(enodes.size() * 2);
-            uint32_t n_dupes = 0;
-            uint32_t n_merges = 0;
+            const uint32_t num_enodes = static_cast<uint32_t>(enodes.size());
+            std::vector<std::vector<std::vector<uint32_t>>> local_indices(
+                thread_count, std::vector<std::vector<uint32_t>>(thread_count));
+            ThreadPool::get().parallel_for(thread_count, [&](uint32_t thread_idx) {
+                for (uint32_t i = thread_idx; i < num_enodes; i += thread_count)
+                {
+                    ENode &node = enodes[i];
+                    const ENodeId enode_id{static_cast<uint32_t>(base_count + i)};
+                    bool children_changed = false;
+                    for (EClassId child : node.getChildren())
+                    {
+                        if (findConst(child) != child)
+                        {
+                            children_changed = true;
+                            break;
+                        }
+                    }
+                    if (children_changed)
+                    {
+                        std::vector<EClassId> updated_children = node.getChildren();
+                        for (EClassId &child : updated_children)
+                            child = findConst(child);
+                        node.setChildren(std::move(updated_children));
+                        node.setSig(computeSignature(node));
+                    }
+                    else if (node.getSig() == 0)
+                        node.setSig(computeSignature(node));
 
-            for (uint32_t i = 0, n = static_cast<uint32_t>(enodes.size()); i < n; ++i)
+                    nodeToEClass[enode_id.value] = findConst(nodeToEClass[enode_id.value]);
+                    const uint32_t shard_idx = static_cast<uint32_t>(node.getSig() % thread_count);
+                    local_indices[thread_idx][shard_idx].push_back(i);
+                }
+            });
+
+            std::vector<std::vector<uint32_t>> shard_indices(thread_count);
+            for (uint32_t shard_idx = 0; shard_idx < thread_count; ++shard_idx)
             {
-                ENode &node = enodes[i];
-                ENodeId current_enode_id{static_cast<uint32_t>(base_count + i)};
-
-                bool children_changed = false;
-                for (EClassId child : node.getChildren())
+                size_t shard_size = 0;
+                for (uint32_t thread_idx = 0; thread_idx < thread_count; ++thread_idx)
+                    shard_size += local_indices[thread_idx][shard_idx].size();
+                shard_indices[shard_idx].reserve(shard_size);
+                for (uint32_t thread_idx = 0; thread_idx < thread_count; ++thread_idx)
                 {
-                    if (find(child) != child)
-                    {
-                        children_changed = true;
-                        break;
-                    }
-                }
-                if (children_changed)
-                {
-                    std::vector<EClassId> updated_children = node.getChildren();
-                    for (EClassId &child : updated_children)
-                    {
-                        child = find(child);
-                    }
-                    node.setChildren(std::move(updated_children));
-                    node.setSig(computeSignature(node));
-                }
-
-                EClassId cls = find(nodeToEClass[current_enode_id.value]);
-                nodeToEClass[current_enode_id.value] = cls;
-
-                if (node.getSig() == 0)
-                {
-                    node.setSig(computeSignature(node));
-                }
-
-                auto &bucket = new_hash[node.getSig()];
-                bool merged = false;
-
-                for (ENodeId other_enode_id : bucket)
-                {
-                    const EClassId other_cls = find(nodeToEClass[other_enode_id.value]);
-                    if (node == getENode(other_enode_id))
-                    {
-                        n_dupes++;
-                        if (other_cls != cls)
-                        {
-                            merge(other_cls, cls);
-                            n_merges++;
-                        }
-                        nodeToEClass[current_enode_id.value] = find(other_cls);
-                        merged = true;
-                        break;
-                    }
-                }
-
-                if (!merged && shared_hashcons)
-                {
-                    auto it = shared_hashcons->find(node.getSig());
-                    if (it != shared_hashcons->end())
-                    {
-                        for (ENodeId other_enode_id : it->second)
-                        {
-                            const EClassId other_cls = find(nodeToEClass[other_enode_id.value]);
-                            if (node == getENode(other_enode_id))
-                            {
-                                n_dupes++;
-                                if (other_cls != cls)
-                                {
-                                    merge(other_cls, cls);
-                                    n_merges++;
-                                }
-                                nodeToEClass[current_enode_id.value] = find(other_cls);
-                                merged = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (!merged)
-                {
-                    bucket.push_back(current_enode_id);
+                    auto &indices = local_indices[thread_idx][shard_idx];
+                    shard_indices[shard_idx].insert(shard_indices[shard_idx].end(), indices.begin(), indices.end());
                 }
             }
 
-            hashcons = std::move(new_hash);
+            ThreadPool::get().parallel_for(thread_count, [&](uint32_t shard_idx) {
+                auto &shard = shards[shard_idx];
+                shard.hash.clear();
+                shard.hash.reserve(shard_indices[shard_idx].size() * 2);
+                shard.merges.clear();
+                for (uint32_t i : shard_indices[shard_idx])
+                {
+                    ENode &node = enodes[i];
+                    const ENodeId current_enode_id{static_cast<uint32_t>(base_count + i)};
+                    const EClassId cls = nodeToEClass[current_enode_id.value];
+                    auto &bucket = shard.hash[node.getSig()];
+                    EClassId duplicate_class{};
+                    bool duplicate = false;
+                    for (ENodeId other_enode_id : bucket)
+                    {
+                        if (node == getENode(other_enode_id))
+                        {
+                            duplicate_class = nodeToEClass[other_enode_id.value];
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!duplicate && shared_hashcons)
+                    {
+                        auto it = shared_hashcons->find(node.getSig());
+                        if (it != shared_hashcons->end())
+                        {
+                            for (ENodeId other_enode_id : it->second)
+                            {
+                                if (node == getENode(other_enode_id))
+                                {
+                                    duplicate_class = nodeToEClass[other_enode_id.value];
+                                    duplicate = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (duplicate)
+                    {
+                        if (duplicate_class != cls)
+                            shard.merges.push_back({duplicate_class, cls});
+                    }
+                    else
+                        bucket.push_back(current_enode_id);
+                }
+            });
+
+            uint32_t n_merges = 0;
+            for (const RebuildShard &shard : shards)
+                for (const auto &[a, b] : shard.merges)
+                    if (findConst(a) != findConst(b))
+                    {
+                        merge(a, b);
+                        ++n_merges;
+                    }
             total_merges += n_merges;
 
             if (n_merges == 0)
+            {
+                hashcons.clear();
+                hashcons.reserve(static_cast<size_t>(num_enodes) * 2);
+                for (RebuildShard &shard : shards)
+                    for (auto &[signature, enode_ids] : shard.hash)
+                        hashcons.emplace(signature, std::move(enode_ids));
                 break;
+            }
         }
 
         if (total_merges > 0)
@@ -1058,6 +1115,54 @@ struct EGraph
                 }
             }
         }
+        // The hashcons is built over every e-node, including ones pruned from
+        // their class, so a congruence class's representative can be an
+        // e-node no class lists. Its first listed congruent e-node stands in
+        // for it; otherwise compaction would drop that listed e-node too and
+        // could leave its class empty while parents still reference it.
+        // Decided before any e-node is moved below.
+        {
+            std::vector<uint8_t> listed(getNumENodes(), 0);
+            for (uint32_t i = 0; i < num_old_classes; ++i)
+                if (find(EClassId{i}) == EClassId{i})
+                    for (ENodeId nid : getEClass(EClassId{i}).enodes)
+                        listed[nid.value] = 1;
+            auto findRepresentative = [&](const ENode &node) -> ENodeId {
+                auto it = hashcons.find(node.getSig());
+                if (it != hashcons.end())
+                    for (ENodeId other : it->second)
+                        if (node == getENode(other))
+                            return other;
+                if (shared_hashcons)
+                {
+                    auto shared_it = shared_hashcons->find(node.getSig());
+                    if (shared_it != shared_hashcons->end())
+                        for (ENodeId other : shared_it->second)
+                            if (node == getENode(other))
+                                return other;
+                }
+                return ENodeId{UINT32_MAX};
+            };
+            std::unordered_map<uint32_t, uint32_t> stand_in;
+            for (uint32_t i = 0; i < num_old_classes; ++i)
+            {
+                if (find(EClassId{i}) != EClassId{i})
+                    continue;
+                for (ENodeId nid : getEClass(EClassId{i}).enodes)
+                {
+                    if (is_alive_node[nid.value])
+                        continue;
+                    const ENodeId rep = findRepresentative(getENode(nid));
+                    if (rep.value == UINT32_MAX)
+                        Error::throw_err("[EGraph.rebuild] e-node " + std::to_string(nid.value) +
+                                         " has no hashcons representative");
+                    if (listed[rep.value])
+                        continue;
+                    if (stand_in.emplace(rep.value, nid.value).second)
+                        is_alive_node[nid.value] = true;
+                }
+            }
+        }
 
         std::vector<ENodeId> old_to_new_node(getNumENodes(), ENodeId{UINT32_MAX});
         std::vector<ENode> new_enodes;
@@ -1068,41 +1173,67 @@ struct EGraph
         std::vector<EClass> new_classes;
         new_classes.reserve(new_class_count);
 
+        // The old classes and enodes are discarded below, so the ones this
+        // graph owns (not in a shared copy-on-write base) are moved, not
+        // copied; each live class and alive enode is visited once.
+        const size_t shared_enode_count = shared_enodes ? shared_enodes->size() : 0;
         for (uint32_t old_cls_idx = 0; old_cls_idx < num_old_classes; ++old_cls_idx)
         {
             EClassId old_cls_id{old_cls_idx};
             if (find(old_cls_id) != old_cls_id)
                 continue;
 
-            const EClass &old_cls = getEClass(old_cls_id);
+            const bool owned_class = !shared_classes;
+            const EClass &old_cls = owned_class ? classes[old_cls_idx] : getEClass(old_cls_id);
             EClassId new_cls_id = old_to_new_class[old_cls_idx];
 
             EClass new_cls;
             new_cls.id = new_cls_id;
             new_cls.base_eclass_id = old_cls.base_eclass_id;
-            new_cls.shape = old_cls.shape;
-            new_cls.strides = old_cls.strides;
+            if (owned_class)
+            {
+                new_cls.shape = std::move(classes[old_cls_idx].shape);
+                new_cls.strides = std::move(classes[old_cls_idx].strides);
+            }
+            else
+            {
+                new_cls.shape = old_cls.shape;
+                new_cls.strides = old_cls.strides;
+            }
             new_cls.dtype = old_cls.dtype;
             new_cls.mem_space = old_cls.mem_space;
             new_cls.logical_id = old_cls.logical_id;
             new_cls.is_clean = isClean(old_cls_id);
+            new_cls.enodes.reserve(old_cls.enodes.size());
 
             for (ENodeId old_nid : old_cls.enodes)
             {
                 if (!is_alive_node[old_nid.value])
                     continue;
 
+                const ENodeId moved_to = old_to_new_node[old_nid.value];
                 ENodeId new_nid{static_cast<uint32_t>(new_enodes.size())};
                 old_to_new_node[old_nid.value] = new_nid;
 
-                ENode node = getENode(old_nid);
-                std::vector<EClassId> children = node.getChildren();
-                for (EClassId &child : children)
+                // Listed again: the earlier copy is already renumbered.
+                const bool renumbered = moved_to.value != UINT32_MAX;
+                ENode node = [&]() -> ENode {
+                    if (renumbered)
+                        return new_enodes[moved_to.value];
+                    if (old_nid.value >= shared_enode_count)
+                        return std::move(enodes[old_nid.value - shared_enode_count]);
+                    return getENode(old_nid);
+                }();
+                if (!renumbered)
                 {
-                    child = old_to_new_class[child.value];
+                    std::vector<EClassId> children = node.getChildren();
+                    for (EClassId &child : children)
+                    {
+                        child = old_to_new_class[child.value];
+                    }
+                    node.setChildren(std::move(children));
+                    node.setSig(computeSignature(node));
                 }
-                node.setChildren(std::move(children));
-                node.setSig(computeSignature(node));
 
                 new_enodes.push_back(std::move(node));
                 new_node_to_eclass.push_back(new_cls_id);
@@ -1197,15 +1328,22 @@ struct EGraph
 
         // Rebuild hashcons
         std::unordered_map<uint64_t, std::vector<ENodeId>> new_hashcons;
-        new_hashcons.reserve(new_enodes.size() * 2);
-        for (uint32_t i = 0; i < new_enodes.size(); ++i)
+        if (keep_hashcons)
         {
-            new_hashcons[new_enodes[i].getSig()].push_back(ENodeId{i});
+            new_hashcons.reserve(new_enodes.size() * 2);
+            for (uint32_t i = 0; i < new_enodes.size(); ++i)
+            {
+                new_hashcons[new_enodes[i].getSig()].push_back(ENodeId{i});
+            }
         }
 
         LOG(DEBUG) << "[EGraph.rebuild] Compacted egraph: " << num_old_classes << " -> " << new_classes.size()
                   << " classes, " << getNumENodes() << " -> " << new_enodes.size() << " enodes" << std::endl;
 
+        // Freeing the replaced containers takes most of a second on large
+        // graphs; nothing references them, so free them off this thread.
+        std::thread([old_classes = std::move(classes), old_enodes = std::move(enodes),
+                     old_hashcons = std::move(hashcons)]() mutable {}).detach();
         classes = std::move(new_classes);
         shared_classes.reset();
         modified_base_class.clear();

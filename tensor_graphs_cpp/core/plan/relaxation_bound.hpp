@@ -897,14 +897,43 @@ inline bool testBit(const uint64_t *w, size_t i) { return (w[i >> 6] >> (i & 63)
 // with the invariant L(c) <= weighted cost of the plan's classes in S(c), the
 // support of c. Regions follow a containment chain of necessary groups of the
 // root, so the shared history below a link is counted only once.
+// The primal's from-scratch estimates depend only on the bucket DAG, not
+// on the region decomposition needed to prove relaxation bounds.
+inline void cheapRelaxationEstimates(const RelaxationBucket &rb, const std::vector<double> &lambda,
+                                     std::vector<double> &estimates)
+{
+    if (!rb.acyclic || !rb.root_feasible || lambda.size() != rb.engines.size())
+        Error::throw_err("Cheap estimates require a feasible DAG and matching engine weights");
+    estimates.assign(rb.classes.size(), 0.0);
+    for (uint32_t u : rb.topo)
+    {
+        double best = std::numeric_limits<double>::infinity();
+        for (const auto &alt : rb.classes[u].alternatives)
+        {
+            double scale = 0.0;
+            for (uint32_t e = 0; e < lambda.size(); ++e)
+                if (alt.engine_mask & (1u << e))
+                    scale += lambda[e];
+            double cost = alt.duration * scale;
+            for (uint32_t ch : alt.children)
+                cost += estimates[ch];
+            best = std::min(best, cost);
+        }
+        estimates[u] = std::isfinite(best) ? best : 0.0;
+    }
+}
+
 class RelaxationBoundComputer
 {
   public:
-    explicit RelaxationBoundComputer(const RelaxationBucket &rb) : rb_(rb)
+    explicit RelaxationBoundComputer(
+        const RelaxationBucket &rb,
+        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) : rb_(rb)
     {
         if (!rb.acyclic || !rb.root_feasible)
             return;
-        prepare();
+        if (!prepare(deadline))
+            return;
         for (const Region &region : regions_)
             degenerate_ = degenerate_ || region.nodes.size() > kMaxRegionClasses;
         ready_ = true;
@@ -983,7 +1012,7 @@ class RelaxationBoundComputer
         std::vector<std::vector<size_t>> pending_slot(k + 1);
         std::atomic<bool> late{false};
         ThreadPool::get().parallel_for(static_cast<uint32_t>(k + 1), [&](uint32_t a1) {
-            if (std::chrono::steady_clock::now() >= deadline)
+            if (late.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() >= deadline)
             {
                 late = true;
                 return;
@@ -993,6 +1022,11 @@ class RelaxationBoundComputer
             prepareWindowStart(a1, ws);
             for (size_t b = a1; b <= std::min(k, a1 + max_len - 1); ++b)
             {
+                if (late.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() >= deadline)
+                {
+                    late = true;
+                    break;
+                }
                 double v = 0.0;
                 if (buildWindow(a1, b, ws, scratch) && !scratch[0].zero_value)
                 {
@@ -1014,7 +1048,7 @@ class RelaxationBoundComputer
             thread_weights_ = &local;
             for (size_t p = 0; p < pending[a1].size(); ++p)
             {
-                if (std::chrono::steady_clock::now() >= deadline)
+                if (late.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() >= deadline)
                 {
                     late = true;
                     break;
@@ -1621,8 +1655,10 @@ class RelaxationBoundComputer
         return (thread_weights_ ? *thread_weights_ : alt_weight_)[alt_offset_[u] + a];
     }
 
-    void prepare()
+    bool prepare(std::chrono::steady_clock::time_point deadline)
     {
+        if (std::chrono::steady_clock::now() >= deadline)
+            return false;
         using namespace relaxation_detail;
         const uint32_t n = static_cast<uint32_t>(rb_.classes.size());
         const uint32_t ng = static_cast<uint32_t>(rb_.group_members.size());
@@ -1637,6 +1673,8 @@ class RelaxationBoundComputer
         std::vector<uint64_t> acc(wg), uni(wg);
         for (uint32_t u : rb_.topo)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
             uint64_t *du = &desc[static_cast<size_t>(u) * wc];
             setBit(du, u);
             bool first = true;
@@ -1707,6 +1745,8 @@ class RelaxationBoundComputer
         std::vector<uint8_t> is_storage_group(ng, 0);
         for (uint32_t g = 0; g < ng; ++g)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
             for (uint32_t m : rb_.group_members[g])
             {
                 for (const auto &alt : rb_.classes[m].alternatives)
@@ -1785,6 +1825,8 @@ class RelaxationBoundComputer
         const uint64_t *groot = &gnd[static_cast<size_t>(rb_.root) * wg];
         for (uint32_t g = 0; g < ng; ++g)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
             if (!testBit(groot, g))
                 continue;
             necessary_desc[g] = groupDesc(g);
@@ -1802,6 +1844,8 @@ class RelaxationBoundComputer
         std::vector<uint32_t> longest(nn, 1), prev(nn, UINT32_MAX);
         for (size_t j = 0; j < nn; ++j)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
             const uint32_t g = necessary[j].second;
             for (size_t i = 0; i < j; ++i)
             {
@@ -1840,6 +1884,8 @@ class RelaxationBoundComputer
         std::vector<uint64_t> region_bits(wc, 0);
         for (size_t link = 0; link < chain.size(); ++link)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
             const std::vector<uint64_t> &top = necessary_desc[chain[link]];
             for (size_t w = 0; w < wc; ++w)
                 region_bits[w] = top[w] & ~below[w];
@@ -1857,6 +1903,8 @@ class RelaxationBoundComputer
         std::vector<uint8_t> group_done(ng, 0);
         for (uint32_t u : rb_.topo)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
             const uint32_t g = rb_.group[u];
             if (group_done[g] || !testBit(groot, g))
                 continue;
@@ -2016,6 +2064,7 @@ class RelaxationBoundComputer
         gnd_ = std::move(gnd);
         wc_ = wc;
         wg_ = wg;
+        return std::chrono::steady_clock::now() < deadline;
     }
 
     // Windows for every `stride`-th link of the interval chain (and the root).
@@ -3788,13 +3837,17 @@ inline double bestWindowPartition(size_t chain, const std::vector<IntervalRun> &
 // Best lower bound over a small set of engine weightings. Any probability
 // vector gives a valid bound; the search over lambda only tightens it.
 inline double maximizeRelaxationBound(RelaxationBoundComputer &computer, size_t num_engines,
-                                      std::vector<double> *best_lambda = nullptr)
+                                      std::vector<double> *best_lambda = nullptr,
+                                      std::chrono::steady_clock::time_point deadline =
+                                          std::chrono::steady_clock::time_point::max())
 {
     if (num_engines == 0)
         return 0.0;
     double best = -1.0;
     std::vector<double> best_l;
     auto consider = [&](const std::vector<double> &lambda) {
+        if (std::chrono::steady_clock::now() >= deadline)
+            return 0.0;
         const double v = computer.evaluate(lambda);
         if (v > best)
         {
@@ -3815,6 +3868,8 @@ inline double maximizeRelaxationBound(RelaxationBoundComputer &computer, size_t 
         double fc = consider({c, 1.0 - c}), fd = consider({d, 1.0 - d});
         for (int it = 0; it < 18; ++it)
         {
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
             if (fc < fd)
             {
                 a = c;

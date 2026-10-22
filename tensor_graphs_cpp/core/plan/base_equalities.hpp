@@ -2,25 +2,20 @@
 #include "core/egraph.hpp"
 #include "core/logging.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <exception>
+#include <functional>
+#include <thread>
 
 // Equalities discovered by independent bucket rewrites refer to the same
 // persistent value in every bucket. Reconcile identity before cache decisions,
 // without sharing extractions or changing any bucket's regions.
-inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buckets)
+inline void reconcileBaseEqualities(const std::vector<EGraph *> &graphs)
 {
-    bool has_any_equalities = !full_state.base_equalities.empty();
-    if (!has_any_equalities)
-    {
-        for (const EGraph &b : buckets)
-        {
-            if (!b.base_equalities.empty())
-            {
-                has_any_equalities = true;
-                break;
-            }
-        }
-    }
+    bool has_any_equalities = false;
+    for (const EGraph *graph : graphs)
+        has_any_equalities = has_any_equalities || !graph->base_equalities.empty();
     if (!has_any_equalities)
         return;
 
@@ -36,14 +31,32 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
         }
         return id;
     };
-    std::vector<EGraph *> graphs{&full_state};
-    for (EGraph &graph : buckets)
-        graphs.push_back(&graph);
-    for (EGraph *graph : graphs)
-    {
-        graph->materializeClasses();
-        graph->materializeENodes();
-    }
+    // Graphs are independent once a round's aliases are fixed: process them
+    // in parallel (aliases are only read there).
+    auto forEachGraph = [&](const std::function<void(EGraph &)> &work) {
+        std::vector<std::thread> threads;
+        std::vector<std::exception_ptr> errors(graphs.size());
+        for (size_t g = 0; g < graphs.size(); ++g)
+            threads.emplace_back([&, g]() {
+                try
+                {
+                    work(*graphs[g]);
+                }
+                catch (...)
+                {
+                    errors[g] = std::current_exception();
+                }
+            });
+        for (auto &thread : threads)
+            thread.join();
+        for (auto &error : errors)
+            if (error)
+                std::rethrow_exception(error);
+    };
+    forEachGraph([](EGraph &graph) {
+        graph.materializeClasses();
+        graph.materializeENodes();
+    });
     bool changed;
     do
     {
@@ -59,10 +72,12 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
                     changed = true;
                 }
             }
-        for (EGraph *graph : graphs)
-        {
+        std::atomic<bool> exposed{false};
+        forEachGraph([&](EGraph &graph_ref) {
+            EGraph *graph = &graph_ref;
             graph->allow_base_equalities = true;
             std::unordered_map<BaseEClassId, EClassId> owners;
+            bool graph_changed = false;
             for (EClass &cls : graph->classes)
             {
                 if (graph->findConst(cls.id) != cls.id || cls.base_eclass_id == BaseEClassId{})
@@ -76,6 +91,7 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
                         cls.mem_space != other.mem_space)
                         Error::throw_err("[reconcileBaseEqualities] equivalent persistent values have incompatible layouts");
                     graph->merge(it->second, cls.id);
+                    graph_changed = true;
                 }
             }
             for (ENode &node : graph->enodes)
@@ -85,15 +101,25 @@ inline void reconcileBaseEqualities(EGraph &full_state, std::vector<EGraph> &buc
                 if (tag.compare(0, prefix.size(), prefix) == 0)
                 {
                     const BaseEClassId owner{static_cast<uint32_t>(std::stoul(tag.substr(prefix.size())))};
-                    node.setContentHash(prefix + std::to_string(canonical(owner).value));
+                    const BaseEClassId canonical_owner = canonical(owner);
+                    if (canonical_owner != owner)
+                    {
+                        node.setContentHash(prefix + std::to_string(canonical_owner.value));
+                        graph_changed = true;
+                    }
                 }
             }
             graph->baseEClassIndexInitialized = false;
-            graph->rebuild();
+            // After the first round's rebuild, a graph with no merge and no
+            // retagged node this round is already congruence-closed.
+            if (rounds == 1 || graph_changed)
+                graph->rebuild();
             // Rebuilding congruence can expose further base equalities.
             for (const auto &[left, right] : graph->base_equalities)
-                changed = changed || canonical(left) != canonical(right);
-        }
+                if (canonical(left) != canonical(right))
+                    exposed = true;
+        });
+        changed = changed || exposed;
     } while (changed);
     LOG(INFO) << "[reconcileBaseEqualities] " << aliases.size() << " base alias(es) across " << graphs.size()
               << " graph(s) in " << rounds << " round(s), "

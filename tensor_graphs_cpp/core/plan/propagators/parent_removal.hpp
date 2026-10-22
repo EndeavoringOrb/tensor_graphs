@@ -21,8 +21,8 @@ class ParentRemovalPropagator : public Propagator
         if (parents_initialized)
             return;
         bucket_parents.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
+        // Buckets are independent: each fills only its own map.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
             for (const auto &pair : state.selected_vars[b])
             {
                 EClassId p_cid = pair.first;
@@ -37,7 +37,7 @@ class ParentRemovalPropagator : public Propagator
                     }
                 }
             }
-        }
+        });
         parents_initialized = true;
     }
 
@@ -66,6 +66,27 @@ class ParentRemovalPropagator : public Propagator
         return true;
     }
 
+    // While the root heuristic validates a complete plan (every selection of
+    // the bucket fixed), nothing is left to prune: a fixed parent alternative
+    // with an unselected child is a conflict SelectionChildrenPropagator
+    // reports (it removes 0 from the child). Checked once per selection
+    // revision; false while a selection of the bucket is still open.
+    std::vector<uint64_t> all_fixed_revision_;
+    bool completePlanFixed(const SearchState &state, uint32_t b)
+    {
+        if (!state.completing_plan)
+            return false;
+        if (all_fixed_revision_.size() < state.buckets.size())
+            all_fixed_revision_.resize(state.buckets.size(), UINT64_MAX);
+        if (all_fixed_revision_[b] == state.getSelectionRevision())
+            return true;
+        for (const auto &pair : state.selected_vars[b])
+            if (!state.domains[pair.second].isFixed())
+                return false;
+        all_fixed_revision_[b] = state.getSelectionRevision();
+        return true;
+    }
+
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
 
@@ -83,6 +104,8 @@ class ParentRemovalPropagator : public Propagator
             const Domain &dom = state.domains[changed];
             if (dom.isFixed() && dom.fixedValue() == 0)
             {
+                if (completePlanFixed(state, state.var_infos[changed].bucket_idx))
+                    return true;
                 return removeParentEnodes(state, state.var_infos[changed].bucket_idx,
                                           state.var_infos[changed].eclass_id);
             }

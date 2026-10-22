@@ -106,17 +106,28 @@ inline bool isOpCacheOrScatter(const ENode &enode)
             return true;
         if (entry.opType == OpType::FUSED && entry.refFactory)
         {
+            // Depends only on the kernel's reference graph: build it once.
+            thread_local std::unordered_map<KernelId, bool> memo;
+            auto it = memo.find(kid);
+            if (it != memo.end())
+                return it->second;
             Graph kGraph;
             std::vector<LogicalId> kInputs;
             for (uint64_t i = 0; i < entry.min_num_inputs; ++i)
                 kInputs.push_back(kGraph.input(entry.dummyShapes.size() > i ? entry.dummyShapes[i] : std::vector<uint32_t>{1},
                                                entry.dtypes.size() > i ? entry.dtypes[i] : DType::FLOAT32));
             entry.refFactory(kInputs, kGraph);
+            bool found = false;
             for (const auto &pair : kGraph.nodes)
             {
                 if (pair.second.opType == OpType::CACHE || pair.second.opType == OpType::SCATTER)
-                    return true;
+                {
+                    found = true;
+                    break;
+                }
             }
+            memo.emplace(kid, found);
+            return found;
         }
     }
     return false;
@@ -134,14 +145,20 @@ inline bool isOpRootScatterOrCache(const ENode &enode)
             return true;
         if (entry.opType == OpType::FUSED && entry.refFactory)
         {
+            // Depends only on the kernel's reference graph: build it once.
+            thread_local std::unordered_map<KernelId, bool> memo;
+            auto it = memo.find(kid);
+            if (it != memo.end())
+                return it->second;
             Graph kGraph;
             std::vector<LogicalId> kInputs;
             for (uint64_t i = 0; i < entry.min_num_inputs; ++i)
                 kInputs.push_back(kGraph.input(entry.dummyShapes.size() > i ? entry.dummyShapes[i] : std::vector<uint32_t>{1},
                                                entry.dtypes.size() > i ? entry.dtypes[i] : DType::FLOAT32));
             LogicalId rootId = entry.refFactory(kInputs, kGraph);
-            if (kGraph.getNode(rootId).opType == OpType::SCATTER)
-                return true;
+            const bool root_scatter = kGraph.getNode(rootId).opType == OpType::SCATTER;
+            memo.emplace(kid, root_scatter);
+            return root_scatter;
         }
     }
     return false;

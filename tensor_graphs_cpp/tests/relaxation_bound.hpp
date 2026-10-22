@@ -438,6 +438,10 @@ class RelaxationBoundRegression
             }
         for (const auto &lambda : lambdas)
         {
+            std::vector<double> prepared_estimates, cheap_estimates;
+            computer.cheapEstimates(lambda, prepared_estimates);
+            cheapRelaxationEstimates(rb, lambda, cheap_estimates);
+            require(cheap_estimates == prepared_estimates, "cheap estimates differ from the prepared computation");
             const double bound = computer.evaluate(lambda);
             const double truth = best_weighted(lambda);
             ++bound_checks;
@@ -564,6 +568,21 @@ class RelaxationBoundRegression
   public:
     static void run()
     {
+        // An expired optimization budget is a zero lower bound, not a
+        // partially evaluated weighting or a stale best-lambda output.
+        {
+            using namespace incremental_propagator_test;
+            std::mt19937 deadline_rng(20261022);
+            SearchState state = makeState(randomGraph(deadline_rng));
+            RelaxationBucket rb = buildRelaxationBucket(state, 0, /*allow_checkpoints=*/false);
+            RelaxationBoundComputer expired(rb, std::chrono::steady_clock::now());
+            require(!expired.ready(), "expired preparation must not expose a partially prepared bound");
+            RelaxationBoundComputer computer(rb);
+            std::vector<double> lambda{1.0};
+            const double bound = maximizeRelaxationBound(
+                computer, rb.engines.size(), &lambda, std::chrono::steady_clock::now());
+            require(bound == 0.0 && lambda.empty(), "expired bound optimization must return zero with no weighting");
+        }
         std::mt19937 rng(20261012);
         size_t checks = 0, positive = 0;
         // Own generator, so the other families keep their graphs.

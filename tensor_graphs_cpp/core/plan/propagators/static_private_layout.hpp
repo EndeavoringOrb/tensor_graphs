@@ -705,13 +705,14 @@ class StaticPrivateLayoutPropagator : public Propagator
         if (applied_)
             return true;
         applied_ = true;
-        std::map<std::string, MemSpace> spaces;
+        // Spaces are named once per distinct space, not once per offset.
+        std::unordered_set<MemSpace> distinct_spaces;
         for (uint32_t b = 0; b < state.buckets.size(); ++b)
             for (const auto &[cid, off_v] : state.offset_vars[b])
-            {
-                const MemSpace &space = state.bucket_egraphs[b].getEClass(cid).mem_space;
-                spaces.emplace(toString(space), space);
-            }
+                distinct_spaces.insert(state.bucket_egraphs[b].getEClass(cid).mem_space);
+        std::map<std::string, MemSpace> spaces;
+        for (const MemSpace &space : distinct_spaces)
+            spaces.emplace(toString(space), space);
         for (const auto &[space_name, space] : spaces)
         {
             SpaceLayout layout = planSpace(state, space);

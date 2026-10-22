@@ -111,6 +111,8 @@ class ThreadPool
             std::function<void(uint32_t)> task;
             std::exception_ptr exception;
             std::mutex exception_mutex;
+            std::mutex done_mutex;
+            std::condition_variable done;
 
             void record_exception(std::exception_ptr error)
             {
@@ -139,7 +141,11 @@ class ThreadPool
                     // doing so calls std::terminate and loses the diagnostic.
                     state->record_exception(std::current_exception());
                 }
-                state->completed.fetch_add(1, std::memory_order_release);
+                if (state->completed.fetch_add(1, std::memory_order_acq_rel) + 1 == num_tasks)
+                {
+                    std::lock_guard<std::mutex> lock(state->done_mutex);
+                    state->done.notify_all();
+                }
             }
         };
 
@@ -157,10 +163,19 @@ class ThreadPool
         // Main thread helps out
         worker_task();
 
-        // Spin-wait yield to minimize dispatch latency
-        while (state->completed.load(std::memory_order_acquire) < num_tasks)
+        // Spin briefly for short tasks, then sleep until the last task
+        // finishes: yielding in a loop keeps a core busy that other
+        // concurrent callers (parallel saturation groups) need.
+        const auto spin_start = std::chrono::steady_clock::now();
+        for (uint32_t spin = 0; state->completed.load(std::memory_order_acquire) < num_tasks; ++spin)
         {
-            std::this_thread::yield();
+            cpuRelax();
+            if ((spin & 63) == 63 && std::chrono::steady_clock::now() - spin_start > std::chrono::microseconds(50))
+            {
+                std::unique_lock<std::mutex> lock(state->done_mutex);
+                state->done.wait(lock, [&] { return state->completed.load(std::memory_order_acquire) >= num_tasks; });
+                break;
+            }
         }
 
         std::exception_ptr error;

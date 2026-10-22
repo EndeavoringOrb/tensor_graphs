@@ -43,8 +43,8 @@ class CriticalPathPropagator : public Propagator
 #endif
         bucket_data_.clear();
         bucket_data_.resize(state.buckets.size());
-        for (uint32_t b = 0; b < state.buckets.size(); ++b)
-        {
+        // Buckets are independent: each fills only its own data.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
             auto &data = bucket_data_[b];
             const auto &graph = state.bucket_egraphs.at(b);
             const auto &selections = state.selected_vars.at(b);
@@ -91,7 +91,7 @@ class CriticalPathPropagator : public Propagator
             data.memo.resize(data.nodes.size());
             data.memo_epochs.resize(data.nodes.size(), 0);
             data.visiting_epochs.resize(data.nodes.size(), 0);
-        }
+        });
         cached_num_vars_ = state.numVars();
         static_initialized_ = true;
     }
@@ -158,8 +158,12 @@ class CriticalPathPropagator : public Propagator
     }
 
   public:
-    PropagationBatch propagationBatch(const SearchState &, VarId changed) const override
+    PropagationBatch propagationBatch(const SearchState &state, VarId changed) const override
     {
+        // Bound only: a trial plan is accepted only if its leaf cost beats
+        // the incumbent, so completing one needs no critical-path bound.
+        if (state.completing_plan)
+            return PropagationBatch::SKIP;
         return changed == kInvalidVarId ? PropagationBatch::GLOBAL : PropagationBatch::BUCKET;
     }
     bool changesDomains() const override { return false; }

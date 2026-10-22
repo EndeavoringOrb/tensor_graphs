@@ -51,9 +51,87 @@ inline void SearchState::ensurePropagationState() const
     data.mem_alloc_visited_stamp.assign(numVars(), 0);
     data.mem_alloc_stamp = 0;
 
-    for (uint32_t b = 0; b < buckets.size(); ++b)
+    // Buckets are built in parallel: each writes only its own variables'
+    // entries. The two lists shared across buckets (cache users, engine
+    // usages) are collected per bucket and appended afterwards in bucket
+    // order, giving exactly the serial result.
+    struct BucketLocal
     {
-        std::unordered_map<Engine, uint32_t> engine_indices;
+        std::vector<std::pair<VarId, VarId>> cache_users; // (cache var, selection var)
+        std::vector<uint32_t> engine_slot_counts;         // per bucket-local engine index
+    };
+    std::vector<BucketLocal> locals(buckets.size());
+    // A bucket's alternatives and its start-precedence consumers are built by
+    // two independent tasks, which balances buckets of different sizes.
+    const uint32_t num_buckets = static_cast<uint32_t>(buckets.size());
+    ThreadPool::get().parallel_for(2 * num_buckets, [&](uint32_t task) {
+        const uint32_t b = task % num_buckets;
+        if (task < num_buckets)
+        {
+            BucketLocal &local = locals[b];
+            std::unordered_map<Engine, uint32_t> engine_indices;
+            for (EClassId cid : reachable_cids[b])
+            {
+                const VarId sel_var = selected_vars[b].at(cid);
+                data.owners[sel_var] = sel_var;
+                const auto offset_it = offset_vars[b].find(cid);
+                if (offset_it != offset_vars[b].end())
+                    data.owners[offset_it->second] = sel_var;
+                const EClass &cls = bucket_egraphs[b].getEClass(cid);
+                const auto cache_it = cached_vars.find(cls.base_eclass_id);
+                if (cache_it != cached_vars.end())
+                {
+                    data.cache_vars[sel_var] = cache_it->second;
+                    local.cache_users.emplace_back(cache_it->second, sel_var);
+                }
+                for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
+                {
+                    PropagationState::Alternative alternative;
+                    const ENodeId en_id = cls.enodes[en_idx];
+                    const ENode &enode = bucket_egraphs[b].getENode(en_id);
+                    alternative.op_type = enode.getOpType();
+                    if (b < bucket_enode_infos.size() && en_id.value < bucket_enode_infos[b].size())
+                    {
+                        const ENodeInfo &info = bucket_enode_infos[b][en_id.value];
+                        alternative.is_view = info.is_view;
+                        if (info.cost > 0.0f && info.cost < TGConstants::INF)
+                            alternative.cost = info.cost;
+                    }
+                    const auto start_it = start_vars[b].find(cid);
+                    if (start_it != start_vars[b].end())
+                    {
+                        alternative.start_var = start_it->second;
+                        data.owners[alternative.start_var] = sel_var;
+                    }
+                    for (EClassId child : enode.getChildren())
+                    {
+                        const EClassId canonical_child = bucket_egraphs[b].findConst(child);
+                        const auto child_it = selected_vars[b].find(canonical_child);
+                        const VarId child_var = child_it == selected_vars[b].end() ? kInvalidVarId : child_it->second;
+                        alternative.children.push_back(child_var);
+                        if (child_var == kInvalidVarId)
+                            continue;
+                        data.parents[child_var].push_back(sel_var);
+                        if (alternative.is_view)
+                        {
+                            data.view_neighbors[child_var].push_back(sel_var);
+                            data.view_neighbors[sel_var].push_back(child_var);
+                        }
+                    }
+                    for (const Engine &engine : enode.getEngines())
+                    {
+                        auto result =
+                            engine_indices.emplace(engine, static_cast<uint32_t>(local.engine_slot_counts.size()));
+                        if (result.second)
+                            local.engine_slot_counts.push_back(0);
+                        alternative.engine_slots.emplace_back(result.first->second,
+                                                              local.engine_slot_counts[result.first->second]++);
+                    }
+                    data.alternatives[sel_var].push_back(std::move(alternative));
+                }
+            }
+            return;
+        }
         auto &precedence = data.start_precedence[b];
         const size_t num_classes = bucket_egraphs[b].classes.size();
         precedence.consumers_by_cid.resize(num_classes);
@@ -65,68 +143,6 @@ inline void SearchState::ensurePropagationState() const
             if (pair.first.value < num_classes)
             {
                 precedence.selected_by_cid[pair.first.value] = pair.second;
-            }
-        }
-        for (EClassId cid : reachable_cids[b])
-        {
-            const VarId sel_var = selected_vars[b].at(cid);
-            data.owners[sel_var] = sel_var;
-            const auto offset_it = offset_vars[b].find(cid);
-            if (offset_it != offset_vars[b].end())
-                data.owners[offset_it->second] = sel_var;
-            const EClass &cls = bucket_egraphs[b].getEClass(cid);
-            const auto cache_it = cached_vars.find(cls.base_eclass_id);
-            if (cache_it != cached_vars.end())
-            {
-                data.cache_vars[sel_var] = cache_it->second;
-                data.cache_users[cache_it->second].push_back(sel_var);
-            }
-            for (uint32_t en_idx = 0; en_idx < cls.enodes.size(); ++en_idx)
-            {
-                PropagationState::Alternative alternative;
-                const ENodeId en_id = cls.enodes[en_idx];
-                const ENode &enode = bucket_egraphs[b].getENode(en_id);
-                alternative.op_type = enode.getOpType();
-                if (b < bucket_enode_infos.size() && en_id.value < bucket_enode_infos[b].size())
-                {
-                    const ENodeInfo &info = bucket_enode_infos[b][en_id.value];
-                    alternative.is_view = info.is_view;
-                    if (info.cost > 0.0f && info.cost < TGConstants::INF)
-                        alternative.cost = info.cost;
-                }
-                const auto start_it = start_vars[b].find(cid);
-                if (start_it != start_vars[b].end())
-                {
-                    alternative.start_var = start_it->second;
-                    data.owners[alternative.start_var] = sel_var;
-                }
-                for (EClassId child : enode.getChildren())
-                {
-                    const EClassId canonical_child = bucket_egraphs[b].findConst(child);
-                    const auto child_it = selected_vars[b].find(canonical_child);
-                    const VarId child_var = child_it == selected_vars[b].end() ? kInvalidVarId : child_it->second;
-                    alternative.children.push_back(child_var);
-                    if (child_var == kInvalidVarId)
-                        continue;
-                    data.parents[child_var].push_back(sel_var);
-                    if (alternative.is_view)
-                    {
-                        data.view_neighbors[child_var].push_back(sel_var);
-                        data.view_neighbors[sel_var].push_back(child_var);
-                    }
-                }
-                for (const Engine &engine : enode.getEngines())
-                {
-                    auto result = engine_indices.emplace(engine, static_cast<uint32_t>(data.engines.size()));
-                    if (result.second)
-                    {
-                        data.engines.emplace_back();
-                        data.engines.back().bucket_idx = b;
-                    }
-                    auto &usage = data.engines[result.first->second];
-                    alternative.engine_slots.emplace_back(result.first->second, usage.slot_count++);
-                }
-                data.alternatives[sel_var].push_back(std::move(alternative));
             }
         }
         // Preserve the selected_vars iteration order used by the original
@@ -212,6 +228,25 @@ inline void SearchState::ensurePropagationState() const
                 precedence.consumers_by_cid[acc.child.value].push_back(std::move(consumer));
             }
         }
+    });
+    for (uint32_t b = 0; b < buckets.size(); ++b)
+    {
+        const BucketLocal &local = locals[b];
+        for (const auto &[cache_var, sel_var] : local.cache_users)
+            data.cache_users[cache_var].push_back(sel_var);
+        const uint32_t engine_offset = static_cast<uint32_t>(data.engines.size());
+        for (uint32_t slot_count : local.engine_slot_counts)
+        {
+            data.engines.emplace_back();
+            data.engines.back().bucket_idx = b;
+            data.engines.back().slot_count = slot_count;
+        }
+        if (engine_offset == 0)
+            continue;
+        for (EClassId cid : reachable_cids[b])
+            for (auto &alternative : data.alternatives[selected_vars[b].at(cid)])
+                for (auto &slot : alternative.engine_slots)
+                    slot.first += engine_offset;
     }
     for (auto *lists : {&data.parents, &data.view_neighbors})
         for (auto &list : *lists)

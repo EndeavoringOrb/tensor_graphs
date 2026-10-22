@@ -68,6 +68,16 @@ class InputPruneStartPrecedencePropagator : public Propagator
         }
     }
 
+    // The per-bucket child tables are structural and independent, so the
+    // first bucket that needs one builds them all in parallel.
+    void prepareBuckets(SearchState &state)
+    {
+        if (cached_eclasses_.size() < state.buckets.size())
+            cached_eclasses_.resize(state.buckets.size());
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()),
+                                       [&](uint32_t b) { prepareBucket(state, b); });
+    }
+
     bool pruneEClass(SearchState &state, uint32_t b, EClassId cid, std::vector<VarId> &worklist,
                      VarId known_start_var = kInvalidVarId, VarId known_selection_var = kInvalidVarId)
     {
@@ -92,7 +102,8 @@ class InputPruneStartPrecedencePropagator : public Propagator
             st_var = st_it->second;
         }
 
-        prepareBucket(state, b);
+        if (b >= cached_eclasses_.size() || cached_eclasses_[b].size() < state.bucket_egraphs[b].classes.size())
+            prepareBuckets(state);
         if (cid.value >= cached_eclasses_[b].size())
             return true;
         const auto &cached_children_by_alternative = cached_eclasses_[b][cid.value].children_by_alternative;
@@ -285,6 +296,7 @@ class InputPruneStartPrecedencePropagator : public Propagator
         }
         else
         {
+            prepareBuckets(state);
             for (uint32_t b = 0; b < state.buckets.size(); ++b)
             {
                 for (const auto &pair : state.selected_vars[b])

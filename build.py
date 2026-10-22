@@ -966,6 +966,14 @@ class Toolchain:
 
     def run_cmd(self, cmd: list[str], label: str) -> subprocess.CompletedProcess:
         clean_cmd = [arg.strip('"') for arg in cmd]
+        # The dependency cache handles unchanged builds; ccache also reuses
+        # compiler results when experiments restore a previous source state.
+        # Keep compiler flags and the semantic build-cache keys unchanged.
+        if (not self.platform.is_windows and self.platform.compiler.kind in ("clang", "gcc")
+                and "-c" in clean_cmd and clean_cmd[0] == self.get_cxx_binary()):
+            compiler_cache = shutil.which("ccache")
+            if compiler_cache:
+                clean_cmd.insert(0, compiler_cache)
         cmd_str = subprocess.list2cmdline(clean_cmd)
 
         if (
