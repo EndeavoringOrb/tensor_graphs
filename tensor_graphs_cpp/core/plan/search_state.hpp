@@ -2,6 +2,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <functional>
 #include <cassert>
 #include <cstdint>
 #include <initializer_list>
@@ -58,6 +60,7 @@ class BucketEGraphSet
     void emplace_back() { graphs_.push_back(std::make_shared<EGraph>()); }
     void push_back(EGraph &&graph) { graphs_.push_back(std::make_shared<EGraph>(std::move(graph))); }
     void push_back(const EGraph &graph) { graphs_.push_back(std::make_shared<EGraph>(graph)); }
+    std::shared_ptr<EGraph> shared(size_t index) const { return graphs_.at(index); }
     void pushShared(std::shared_ptr<EGraph> graph)
     {
         if (!graph)
@@ -113,7 +116,6 @@ struct VarInfo
 {
     VarId id = kInvalidVarId;
     VarType type = VarType::SELECTED;
-    std::string name;
     uint32_t bucket_idx = 0;
     EClassId eclass_id;
     VarId selection_var = kInvalidVarId;
@@ -121,6 +123,25 @@ struct VarInfo
     MemSpace mem_space;
     uint64_t size_bytes = 0;
     uint32_t size_pages = 0;
+
+    // Diagnostic name (cached_<base>, selected_/start_/offset_<bucket>_<class>),
+    // formatted on demand: storing one per variable cost millions of strings.
+    std::string name() const
+    {
+        switch (type)
+        {
+        case VarType::CACHED:
+            return "cached_" + std::to_string(base_eclass_id.value);
+        case VarType::SELECTED:
+            return "selected_" + std::to_string(bucket_idx) + "_" + std::to_string(eclass_id.value);
+        case VarType::START:
+            return "start_" + std::to_string(bucket_idx) + "_" + std::to_string(eclass_id.value);
+        case VarType::OFFSET:
+            return "offset_" + std::to_string(bucket_idx) + "_" + std::to_string(eclass_id.value);
+        }
+        Error::throw_err("[VarInfo] unknown variable type");
+        return {};
+    }
 };
 
 // A directed Even-Shiloach tree for one bucket. Each enode contributes separate
@@ -813,6 +834,10 @@ class SearchState
     Domain last_domain_change_before;
     Domain last_domain_change_after;
 
+    // Whether a variable's domain was ever set after addVar (never cleared,
+    // also not by backtracking).
+    std::vector<uint8_t> domain_ever_changed;
+
     // Domain changes are consumed by SearchEngine's propagator worklist.
     std::vector<VarId> dirty_domains;
     std::vector<uint32_t> var_dirty_epoch;
@@ -1081,6 +1106,7 @@ class SearchState
         info.id = id;
         var_infos.push_back(std::move(info));
         domains.push_back(initial_domain);
+        domain_ever_changed.push_back(0);
         updateDomainIndexes(id, Domain{}, initial_domain);
         if (initial_domain.isEmpty())
             empty_domains.insert(id);
@@ -1134,9 +1160,51 @@ class SearchState
                 setBucketReachable(b, &reachable_cids[from]);
             buildBucketVariables(b, pending[b]);
         });
-        for (uint32_t b = 0; b < nb; ++b)
-            commitBucketVariables(b, pending[b]);
+        commitAllBucketVariables(pending);
         ThreadPool::get().parallel_for(nb, [&](uint32_t b) { indexBucketVariables(b, pending[b]); });
+    }
+
+    // A state over the same buckets, e-graphs and cache candidates (cache
+    // variables keep their current domains) whose bucket b has variables only
+    // for `classes[b]` (each list contains the bucket root; the order is the
+    // classes' start order source, as reachable_cids). The planner's root
+    // heuristic validates a complete plan in it: propagation then touches
+    // only the plan's classes instead of every reachable class.
+    SearchState restrictedTo(const std::vector<std::vector<EClassId>> &classes) const
+    {
+        const uint32_t nb = static_cast<uint32_t>(buckets.size());
+        if (classes.size() != nb)
+            Error::throw_err("[SearchState] restrictedTo needs one class list per bucket");
+        SearchState restricted;
+        restricted.buckets = buckets;
+        restricted.bucket_weights = bucket_weights;
+        restricted.candidates = candidates;
+        restricted.mem_caps = mem_caps;
+        restricted.page_alignments = page_alignments;
+        restricted.preallocated_buffers = preallocated_buffers;
+        restricted.preallocated_pages = preallocated_pages;
+        restricted.bucket_root_ids = bucket_root_ids;
+        restricted.bucket_enode_infos = bucket_enode_infos;
+        for (uint32_t b = 0; b < nb; ++b)
+            restricted.bucket_egraphs.pushShared(bucket_egraphs.shared(b));
+        for (const CacheCandidate &candidate : candidates)
+        {
+            const VarId var = cached_vars.at(candidate.base_eclass_id);
+            const VarId added = restricted.addVar(var_infos[var], domains[var]);
+            restricted.cached_vars[candidate.base_eclass_id] = added;
+        }
+        restricted.resizeBucketVariableMaps();
+        std::vector<BucketVariables> pending(nb);
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) {
+            restricted.setBucketReachable(b, &classes[b]);
+            const EClassId root = restricted.bucket_root_ids[b];
+            if (std::find(classes[b].begin(), classes[b].end(), root) == classes[b].end())
+                Error::throw_err("[SearchState] restrictedTo: bucket " + std::to_string(b) + " omits its root");
+            restricted.buildBucketVariables(b, pending[b]);
+        });
+        restricted.commitAllBucketVariables(pending);
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) { restricted.indexBucketVariables(b, pending[b]); });
+        return restricted;
     }
 
   private:
@@ -1146,6 +1214,76 @@ class SearchState
         std::vector<Domain> domains;
         VarId first_id = kInvalidVarId;
     };
+
+    // commitBucketVariables for every bucket in order, in parallel: the same
+    // ids (bucket b's variables are contiguous from its first id), domains,
+    // dirty order, empty-domain and fixed-offset indexes as one addVar per
+    // variable; each variable writes only its own slots and its bucket's
+    // fixed-offset set, and the revision counters advance as addVar's would.
+    void commitAllBucketVariables(std::vector<BucketVariables> &pending)
+    {
+        if (domain_volume_tracker.initialized())
+            Error::throw_err("Cannot add variables after initializing search volume");
+        assert(!propagation.initialized);
+        const uint32_t nb = static_cast<uint32_t>(pending.size());
+        const size_t base = var_infos.size();
+        size_t total = base;
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            pending[b].first_id = static_cast<VarId>(total);
+            LOG(INFO) << "[SearchState start horizon] bucket=" << b << " initial=[0.." << reachable_cids[b].size() - 1
+                      << "] source=structurally-reachable-classes count=" << reachable_cids[b].size();
+            total += pending[b].infos.size();
+        }
+        var_infos.resize(total);
+        domains.resize(total);
+        domain_ever_changed.resize(total, 0);
+        if (var_dirty_epoch.size() < total)
+            var_dirty_epoch.resize(total, 0);
+        if (fixed_offset_vars.size() < buckets.size())
+            fixed_offset_vars.resize(buckets.size());
+        std::vector<std::vector<VarId>> empty(nb);
+        std::vector<std::array<uint64_t, 3>> counts(nb, {0, 0, 0}); // selected, start, other
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) {
+            BucketVariables &bucket = pending[b];
+            for (size_t k = 0; k < bucket.infos.size(); ++k)
+            {
+                const VarId id = static_cast<VarId>(bucket.first_id + k);
+                VarInfo &info = bucket.infos[k];
+                if (info.type == VarType::CACHED || info.bucket_idx != b)
+                    Error::throw_err("[SearchState] bucket variables must belong to their bucket");
+                if (info.type == VarType::START)
+                    info.selection_var += bucket.first_id;
+                info.id = id;
+                const Domain &domain = bucket.domains[k];
+                if (info.type == VarType::SELECTED)
+                    ++counts[b][0];
+                else if (info.type == VarType::START)
+                    ++counts[b][1];
+                else
+                {
+                    ++counts[b][2];
+                    if (info.type == VarType::OFFSET && domain.isFixed())
+                        fixed_offset_vars[b].insert({domain.fixedValue(), id});
+                }
+                if (domain.isEmpty())
+                    empty[b].push_back(id);
+                var_infos[id] = std::move(info);
+                domains[id] = domain;
+                var_dirty_epoch[id] = current_dirty_epoch;
+            }
+        });
+        dirty_domains.reserve(dirty_domains.size() + (total - base));
+        for (size_t id = base; id < total; ++id)
+            dirty_domains.push_back(static_cast<VarId>(id));
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            empty_domains.insert(empty[b].begin(), empty[b].end());
+            selection_revision += counts[b][0];
+            schedule_revision += counts[b][1];
+            allocation_revision += counts[b][0] + counts[b][2];
+        }
+    }
 
     void resizeBucketVariableMaps()
     {
@@ -1206,7 +1344,6 @@ class SearchState
             sel_info.type = VarType::SELECTED;
             sel_info.bucket_idx = b;
             sel_info.eclass_id = cid;
-            sel_info.name = "selected_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
             uint64_t mask = UINT64_MAX >> (63 - n_enodes);
             if (cid == root_cid)
@@ -1222,7 +1359,6 @@ class SearchState
             st_info.bucket_idx = b;
             st_info.eclass_id = cid;
             st_info.selection_var = sel_vid;
-            st_info.name = "start_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
             add(std::move(st_info), Domain::makeRange(0, max_start));
 
@@ -1237,7 +1373,6 @@ class SearchState
                 off_info.mem_space = cls.mem_space;
                 off_info.size_bytes = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
                 off_info.size_pages = bytesToPages(off_info.size_bytes, cls.mem_space);
-                off_info.name = "offset_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
                 uint32_t align = getPageAlignment(cls.mem_space);
                 uint64_t cap = getMemoryCap(cls.mem_space);
@@ -1271,7 +1406,7 @@ class SearchState
             VarInfo &info = pending.infos[k];
             if (info.type == VarType::START)
                 info.selection_var += pending.first_id;
-            if (addVar(info, pending.domains[k]) != pending.first_id + k)
+            if (addVar(std::move(info), pending.domains[k]) != pending.first_id + k)
                 Error::throw_err("[SearchState] bucket variables were not added contiguously");
         }
     }
@@ -1391,6 +1526,7 @@ class SearchState
 #endif
             updatePropagationContribution(var_id, false);
             const bool was_empty = domains[var_id].isEmpty();
+            domain_ever_changed[var_id] = 1;
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
             updateDomainIndexes(var_id, domains[var_id], new_domain);
             domains[var_id] = new_domain;
@@ -1503,6 +1639,14 @@ class SearchState
     void schedulePropagation(VarId var_id)
     {
         markDomainDirty(var_id);
+    }
+
+    // False while the variable still has the domain addVar gave it: every
+    // variable is dirty from addVar, so propagators reading it have seen
+    // (or will see) only this domain.
+    bool domainEverChanged(VarId var_id) const
+    {
+        return domain_ever_changed.at(var_id) != 0;
     }
 
     static uint32_t getDefaultPageAlignment(const MemSpace &ms)

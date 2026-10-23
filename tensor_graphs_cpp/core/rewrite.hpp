@@ -400,8 +400,10 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
                               const std::string &contentHash = "")
 {
     EClassId cls = targetEClass;
-    // The debug origin is not part of an enode's identity: format it only
-    // when a node is added or a nested call needs it.
+    // The debug origin is not part of an enode's identity and only serves
+    // diagnostics: recorded with TG_ENODE_ORIGINS=1, formatted only when a
+    // node is added or a nested call needs it.
+    static const bool record_origins = std::getenv("TG_ENODE_ORIGINS") != nullptr;
     std::string origin_storage;
     bool origin_built = false;
     auto origin = [&]() -> const std::string & {
@@ -567,7 +569,8 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
                     EClassId contiguous_class = addOpToEGraph(
                         egraph, OpType::CONTIGUOUS, {source_class}, srcShape,
                         calcContiguousStrides(srcShape), srcDType, srcMem, EClassId(), loc,
-                        origin().empty() ? "addOpToEGraph.make_contiguous" : (origin() + " -> make_contiguous"));
+                        !record_origins ? std::string()
+                        : origin().empty() ? "addOpToEGraph.make_contiguous" : (origin() + " -> make_contiguous"));
                     adapted_children[input_idx] = contiguous_class;
                 }
             }
@@ -583,7 +586,8 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
             probe.setSig(EGraph::computeSignature(probe));
             auto addedNode = [&]() {
                 ENode n = probe;
-                n.setDebugOrigin(origin());
+                if (record_origins)
+                    n.setDebugOrigin(origin());
                 return n;
             };
             if (cls == EClassId())
@@ -842,10 +846,45 @@ struct FusionRule : public Rule
         }
     };
     using SelectionMemo = std::unordered_map<SelectionKey, std::shared_ptr<const std::vector<FusedCandidate>>, SelectionKeyHash>;
-    static SelectionMemo &selectionMemo()
+    // Selections depend only on the key's inputs, so saturation groups on
+    // different threads share them: a per-thread memo in front of a
+    // process-wide sharded one. Shard entries are never removed or replaced,
+    // so lookups hand out plain pointers (copying the shared pointer made
+    // every thread write its shared reference count).
+    static const std::vector<FusedCandidate> *findSelection(const SelectionKey &key)
     {
-        thread_local SelectionMemo memo;
-        return memo;
+        thread_local std::unordered_map<SelectionKey, const std::vector<FusedCandidate> *, SelectionKeyHash> local;
+        const auto local_it = local.find(key);
+        if (local_it != local.end())
+            return local_it->second;
+        SelectionShard &shard = selectionShard(key);
+        const std::vector<FusedCandidate> *found = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            const auto it = shard.memo.find(key);
+            if (it == shard.memo.end())
+                return nullptr;
+            found = it->second.get();
+        }
+        local.emplace(key, found);
+        return found;
+    }
+    static void storeSelection(const SelectionKey &key, std::shared_ptr<const std::vector<FusedCandidate>> selected)
+    {
+        SelectionShard &shard = selectionShard(key);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        shard.memo.emplace(key, std::move(selected));
+    }
+    struct SelectionShard
+    {
+        std::mutex mutex;
+        SelectionMemo memo;
+    };
+    static SelectionShard &selectionShard(const SelectionKey &key)
+    {
+        constexpr size_t kShards = 64;
+        static SelectionShard *const shards = new SelectionShard[kShards];
+        return shards[SelectionKeyHash{}(key) % kShards];
     }
 
     static void appendSignature(std::string &key, const void *data, size_t size)
@@ -1204,12 +1243,7 @@ struct FusionRule : public Rule
                 uint64_t k_h1 = (sig_h1 ^ ms_val) * 1099511628211ULL;
                 uint64_t k_h2 = (sig_h2 ^ (ms_val * 14695981039346656037ULL)) * 1099511628211ULL;
                 SelectionKey key{k_h1, k_h2};
-                std::shared_ptr<const std::vector<FusedCandidate>> selected;
-                {
-                    auto hit = selectionMemo().find(key);
-                    if (hit != selectionMemo().end())
-                        selected = hit->second;
-                }
+                const std::vector<FusedCandidate> *selected = findSelection(key);
                 if (selected)
                 {
                     materializeFusedCandidates(ctx, *selected, inputs, ENodeId{eNodeIdx});
@@ -1233,9 +1267,10 @@ struct FusionRule : public Rule
                     }
                 }
 
-                selected = std::make_shared<const std::vector<FusedCandidate>>(selectFusedCandidates(
+                const auto fresh = std::make_shared<const std::vector<FusedCandidate>>(selectFusedCandidates(
                     ctx, matched_kernels, target_ms, inputs, egraph.getENode(ENodeId{eNodeIdx})));
-                selectionMemo().emplace(key, selected);
+                selected = fresh.get();
+                storeSelection(key, fresh);
                 if (const char *dbg = std::getenv("TG_DEBUG_FUSION"))
                     if (pattern.opName.find(dbg) != std::string::npos)
                     {
@@ -1345,7 +1380,7 @@ struct FusionRule : public Rule
                     dummyNode.opType = OpType::INPUT;
                     dummyNode.dtype = parent.dtype;
                     dummyNode.setShape(parent.shape);
-                    dummyNode.strides = needContig ? calcContiguousStrides(parent.shape) : parent.strides;
+                    dummyNode.strides = needContig ? calcContiguousStrides(parent.shape) : parent.strides.get();
 
                     cand.child_mem_paths[i] =
                         findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, mapped_engines);
@@ -1453,29 +1488,35 @@ struct FusionRule : public Rule
                                     const std::vector<EClassId> &child_ids, ENodeId eNodeIdx)
     {
         EGraph &egraph = ctx.egraph;
-        std::vector<uint32_t> oldShape;
-        std::vector<uint64_t> oldStrides;
+        // Shapes, strides and debug origins are interned (stable storage that
+        // adding e-nodes below does not move); only the content hash is copied.
+        const std::vector<uint32_t> *old_shape;
+        const std::vector<uint64_t> *old_strides;
+        const std::string *old_origin;
         DType oldDType;
         std::string oldHash;
-        std::string oldOrigin;
         {
             const ENode &old = egraph.getENode(eNodeIdx);
-            oldShape = old.getShape();
-            oldStrides = old.getStrides();
+            old_shape = &old.getShape();
+            old_strides = &old.getStrides();
+            old_origin = &old.getDebugOrigin();
             oldDType = old.getDType();
             oldHash = old.getContentHash();
-            oldOrigin = old.getDebugOrigin();
         }
+        const std::vector<uint32_t> &oldShape = *old_shape;
+        const std::vector<uint64_t> &oldStrides = *old_strides;
+        const std::string &oldOrigin = *old_origin;
         const std::vector<uint64_t> contigStrides = calcContiguousStrides(oldShape);
         EClassId e_class_id = egraph.getENodeEClass(eNodeIdx);
         // -------------------------------------------------------------------------
         // Stage 3: Materialize only the winning candidates into the EGraph
         // -------------------------------------------------------------------------
+        // Reused across candidates; a node that is added copies it.
+        thread_local std::vector<EClassId> adapted_children;
         for (size_t k = 0; k < candidates.size(); ++k)
         {
             const auto &cand = candidates[k];
-            std::vector<EClassId> adapted_children;
-            adapted_children.reserve(child_ids.size());
+            adapted_children.clear();
 
             for (uint64_t i = 0; i < child_ids.size(); ++i)
             {
@@ -1592,14 +1633,14 @@ struct FusionRule : public Rule
                 if (!stridesMatch || duplicate)
                     continue;
 
-                ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, std::move(adapted_children),
+                ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, adapted_children,
                             oldShape, cand_strides, oldDType, cand.target_mem_space, cand.mapped_engines,
                             oldHash, 0, oldOrigin);
                 egraph.addENode(e_class_id, std::move(enode));
             }
             else
             {
-                ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, std::move(adapted_children),
+                ENode enode(cand.kernel->uid, cand.kernel->opType, cand.kernel->opName, adapted_children,
                             oldShape, cand_strides, oldDType, cand.target_mem_space, cand.mapped_engines,
                             oldHash, 0, oldOrigin);
                 EClassId newEClass =

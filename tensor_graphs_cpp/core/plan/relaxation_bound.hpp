@@ -272,32 +272,35 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
         }
     }
 
+    // Diagnostics (TG_DEBUG_BOUND), read once rather than per class.
+    static const bool debug_bound = std::getenv("TG_DEBUG_BOUND") != nullptr;
     RelaxationBucket rb;
     rb.bucket_idx = b;
     const auto &infos = state.bucket_enode_infos.at(b);
-    std::unordered_map<EClassId, uint32_t> local;
+    // Class id -> local index (UINT32_MAX: no selection variable).
+    std::vector<uint32_t> local(egraph.classes.size(), UINT32_MAX);
     for (EClassId cid : state.reachable_cids.at(b))
     {
         auto it = state.selected_vars.at(b).find(cid);
         if (it == state.selected_vars[b].end())
             continue;
-        local.emplace(cid, static_cast<uint32_t>(rb.classes.size()));
+        local.at(cid.value) = static_cast<uint32_t>(rb.classes.size());
         RelaxationClass rc;
         rc.cid = cid;
         rc.selected_var = it->second;
         rc.base = egraph.getEClass(cid).base_eclass_id;
         rb.classes.push_back(std::move(rc));
-        if (std::getenv("TG_DEBUG_BOUND") && ((cid.value >= 6870 && cid.value <= 6890) || (cid.value >= 3655 && cid.value <= 3662) || cid.value == 1))
+        if (debug_bound && ((cid.value >= 6870 && cid.value <= 6890) || (cid.value >= 3655 && cid.value <= 3662) || cid.value == 1))
         {
             LOG(INFO) << "[debug cid map] cid=" << cid.value << " -> u=" << (rb.classes.size() - 1);
         }
     }
-    const auto root_it = local.find(egraph.findConst(state.bucket_root_ids.at(b)));
-    if (root_it == local.end())
+    const uint32_t root_local = local.at(egraph.findConst(state.bucket_root_ids.at(b)).value);
+    if (root_local == UINT32_MAX)
         Error::throw_err("Relaxation bound: bucket " + std::to_string(b) + " root has no selection variable");
-    rb.root = root_it->second;
+    rb.root = root_local;
 
-    if (std::getenv("TG_DEBUG_BOUND"))
+    if (debug_bound)
     {
         EClassId root_cid = rb.classes[rb.root].cid;
         const EClass &rcls = egraph.getEClass(root_cid);
@@ -333,7 +336,7 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
                 const EClassId src_cid = egraph.findConst(enode.getChildren()[0]);
                 if (egraph.getEClass(src_cid).mem_space.type == HandleType::STORAGE)
                     is_storage_copy = true;
-                if (std::getenv("TG_DEBUG_BOUND") && rc.cid.value == 8432)
+                if (debug_bound && rc.cid.value == 8432)
                 {
                     LOG(INFO) << "[debug cid 8432] en_id=" << en_id.value << " op=" << static_cast<int>(enode.getOpType())
                               << " ch0=" << enode.getChildren()[0].value << " src_cid=" << src_cid.value
@@ -358,7 +361,7 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
                 if (std::isnan(cost) || cost < 0.0f)
                     Error::throw_err("Relaxation bound: invalid cost for e-node " + std::to_string(en_id.value));
                 alt.duration = cost;
-                if (std::getenv("TG_DEBUG_BOUND") && (rc.cid.value == 41 || rc.cid.value == 4 || rc.cid.value == 3659 || rc.cid.value == 6882 || rc.cid.value == 6884))
+                if (debug_bound && (rc.cid.value == 41 || rc.cid.value == 4 || rc.cid.value == 3659 || rc.cid.value == 6882 || rc.cid.value == 6884))
                 {
                     std::string kids_str;
                     for (auto ch : enode.getChildren()) kids_str += std::to_string(egraph.findConst(ch).value) + " ";
@@ -366,7 +369,7 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
                               << " op=" << static_cast<int>(enode.getOpType()) << " cost=" << cost
                               << " kname=" << enode.getOpName() << " kids=[" << kids_str << "]";
                 }
-                if (std::getenv("TG_DEBUG_BOUND") && cost > 5.0)
+                if (debug_bound && cost > 5.0)
                 {
                     std::string kname = enode.getOpName();
                     std::string kids_str;
@@ -388,12 +391,12 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
             }
             for (EClassId child : enode.getChildren())
             {
-                const auto child_it = local.find(egraph.findConst(child));
-                if (child_it == local.end())
+                const uint32_t child_local = local.at(egraph.findConst(child).value);
+                if (child_local == UINT32_MAX)
                     Error::throw_err("Relaxation bound: child class " + std::to_string(child.value) +
                                      " of a reachable class has no selection variable");
-                if (std::find(alt.children.begin(), alt.children.end(), child_it->second) == alt.children.end())
-                    alt.children.push_back(child_it->second);
+                if (std::find(alt.children.begin(), alt.children.end(), child_local) == alt.children.end())
+                    alt.children.push_back(child_local);
             }
             rc.alternatives.push_back(std::move(alt));
         }
@@ -821,7 +824,7 @@ inline RelaxationBucket buildRelaxationBucket(const SearchState &state, uint32_t
                 n_storage_copies++;
                 sum_storage_copy_dur += alt.duration;
             }
-    if (std::getenv("TG_DEBUG_BOUND"))
+    if (debug_bound)
     {
         LOG(INFO) << "[debug storage copies] count=" << n_storage_copies << " total_dur=" << sum_storage_copy_dur;
         LOG(INFO) << "[debug step 1] buildRelaxationBucket done n=" << n << " groups=" << rb.group_members.size();

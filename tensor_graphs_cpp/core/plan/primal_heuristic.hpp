@@ -82,18 +82,28 @@ inline void markCacheAlternatives(const SearchState &state, RelaxationBucket &rb
                 continue;
             }
             const uint64_t key = enode.getKernelId().value;
+            thread_local std::unordered_map<uint64_t, bool> local_memo;
+            if (const auto local_it = local_memo.find(key); local_it != local_memo.end())
+            {
+                alt.requires_cache = local_it->second;
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(memo_mutex);
                 auto it = memo.find(key);
                 if (it != memo.end())
                 {
                     alt.requires_cache = it->second;
+                    local_memo.emplace(key, it->second);
                     continue;
                 }
             }
             const bool needs = isOpCacheOrScatter(enode);
-            std::lock_guard<std::mutex> lock(memo_mutex);
-            memo[key] = needs;
+            {
+                std::lock_guard<std::mutex> lock(memo_mutex);
+                memo[key] = needs;
+            }
+            local_memo.emplace(key, needs);
             alt.requires_cache = needs;
         }
     }
@@ -345,17 +355,56 @@ inline void resolveAliases(const RelaxationBucket &rb, PrimalBucketPlan &plan)
         plan.value[h] = 0;
 }
 
+// Alternatives a bucket plan must not select, keyed by forbiddenKey(original
+// class index, selection value); level copies of an unrolled cycle share
+// their original class's key.
+using ForbiddenAlternatives = std::unordered_set<uint64_t>;
+
+inline uint64_t forbiddenKey(const RelaxationBucket &rb, uint32_t u, int32_t value)
+{
+    const uint32_t orig = u < rb.orig_class_of.size() ? rb.orig_class_of[u] : u;
+    return (static_cast<uint64_t>(orig) << 32) | static_cast<uint32_t>(value);
+}
+
+// Whether the root can be produced with cache alternatives limited to
+// `allowed_cache` and without the forbidden alternatives.
+inline bool rootProducible(const RelaxationBucket &rb, const std::unordered_set<BaseEClassId> &allowed_cache,
+                           const ForbiddenAlternatives &forbidden)
+{
+    std::vector<uint8_t> producible(rb.classes.size(), 0);
+    for (uint32_t u : rb.topo)
+        for (const auto &alt : rb.classes[u].alternatives)
+        {
+            if (!alt.is_alias && forbidden.count(forbiddenKey(rb, u, alt.value)))
+                continue;
+            if (alt.requires_cache && !allowed_cache.count(rb.classes[u].base))
+                continue;
+            bool ok = true;
+            for (uint32_t ch : alt.children)
+                ok = ok && producible[ch];
+            if (ok)
+            {
+                producible[u] = 1;
+                break;
+            }
+        }
+    return producible[rb.root] != 0;
+}
+
 // Top-down selection: parents choose the alternative minimizing its weighted
 // duration plus the region estimates of children that are not yet active.
 inline void extractSelection(const RelaxationBucket &rb, const std::vector<double> &lambda,
                              const std::vector<double> &estimates, const std::unordered_set<BaseEClassId> &allowed_cache,
-                             PrimalBucketPlan &plan)
+                             PrimalBucketPlan &plan, const ForbiddenAlternatives *forbidden = nullptr)
 {
     const uint32_t n = static_cast<uint32_t>(rb.classes.size());
     plan.value.assign(n, 0);
     // A class can be produced when one of its alternatives is allowed (cache
-    // alternatives need an allowed base) and all its children can be.
+    // alternatives need an allowed base, forbidden ones never are) and all
+    // its children can be.
     auto allowed = [&](uint32_t u, const RelaxationAlternative &alt) {
+        if (forbidden && !alt.is_alias && forbidden->count(forbiddenKey(rb, u, alt.value)))
+            return false;
         return !alt.requires_cache || allowed_cache.count(rb.classes[u].base) > 0;
     };
     std::vector<uint8_t> producible(n, 0);
@@ -423,7 +472,8 @@ inline void extractSelection(const RelaxationBucket &rb, const std::vector<doubl
 inline void extractCovering(const RelaxationBucket &rb, const std::vector<double> &lambda,
                             const std::vector<double> &estimates, const std::unordered_set<BaseEClassId> &allowed_cache,
                             const std::unordered_set<BaseEClassId> &targets, PrimalBucketPlan &plan,
-                            const std::unordered_map<BaseEClassId, double> *target_value = nullptr)
+                            const std::unordered_map<BaseEClassId, double> *target_value = nullptr,
+                            const ForbiddenAlternatives *forbidden = nullptr)
 {
     const uint32_t n = static_cast<uint32_t>(rb.classes.size());
     const uint32_t orig_n = rb.orig_class_count ? rb.orig_class_count : n;
@@ -453,7 +503,10 @@ inline void extractCovering(const RelaxationBucket &rb, const std::vector<double
         return v;
     };
     std::vector<int32_t> kept(n, -1);
-    std::vector<uint64_t> bits(words), best_bits(words);
+    std::vector<uint64_t> bits(words);
+    // A row's value, kept so an alternative with one child (most) reads its
+    // child's instead of summing the same bits again.
+    std::vector<double> row_value(n, 0.0);
     for (uint32_t u : rb.topo)
     {
         const RelaxationClass &rc = rb.classes[u];
@@ -463,18 +516,27 @@ inline void extractCovering(const RelaxationBucket &rb, const std::vector<double
             const auto &alt = rc.alternatives[a];
             if (alt.requires_cache && !allowed_cache.count(rc.base))
                 continue;
+            if (forbidden && !alt.is_alias && forbidden->count(forbiddenKey(rb, u, alt.value)))
+                continue;
             bool usable = true;
-            std::fill(bits.begin(), bits.end(), 0);
             for (uint32_t ch : alt.children)
-            {
                 usable = usable && kept[ch] >= 0;
-                const uint64_t *r = row(ch);
-                for (size_t w = 0; w < words; ++w)
-                    bits[w] |= r[w];
-            }
             if (!usable)
                 continue;
-            const double v = valueOf(bits);
+            double v = 0.0;
+            if (alt.children.size() == 1)
+                v = row_value[alt.children[0]];
+            else if (!alt.children.empty())
+            {
+                std::fill(bits.begin(), bits.end(), 0);
+                for (uint32_t ch : alt.children)
+                {
+                    const uint64_t *r = row(ch);
+                    for (size_t w = 0; w < words; ++w)
+                        bits[w] |= r[w];
+                }
+                v = valueOf(bits);
+            }
             double scale = 0.0;
             for (uint32_t e = 0; e < lambda.size(); ++e)
                 if (alt.engine_mask & (1u << e))
@@ -487,15 +549,22 @@ inline void extractCovering(const RelaxationBucket &rb, const std::vector<double
                 best_value = v;
                 best_cost = cost;
                 kept[u] = static_cast<int32_t>(a);
-                best_bits = bits;
             }
         }
         if (kept[u] < 0)
             continue; // not producible
         uint64_t *ru = row(u);
-        std::copy(best_bits.begin(), best_bits.end(), ru);
+        for (uint32_t ch : rc.alternatives[static_cast<size_t>(kept[u])].children)
+        {
+            const uint64_t *r = row(ch);
+            for (size_t w = 0; w < words; ++w)
+                ru[w] |= r[w];
+        }
         if (target_index[u] >= 0)
             ru[target_index[u] >> 6] |= 1ull << (target_index[u] & 63);
+        // Summed in bit order, exactly as valueOf would for this row.
+        std::copy(ru, ru + words, bits.begin());
+        row_value[u] = valueOf(bits);
     }
     if (kept[rb.root] < 0)
         Error::throw_err("Primal heuristic: the covering bucket's root cannot be produced");
@@ -574,11 +643,71 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
                 std::rethrow_exception(error);
     };
     bool usable = true;
+    // A bucket whose e-graph (the same shared owner), root, reachable classes,
+    // e-node infos and selection domains equal an earlier bucket's builds the
+    // same relaxation up to its selection variables (buildRelaxationBucket
+    // and markCacheAlternatives read nothing else): it copies that one and
+    // translates the variables. Prefill and decode buckets of one output row
+    // share a reduced e-graph and, before root propagation, their domains.
+    auto sameRelaxationInputs = [&](uint32_t a, uint32_t b) {
+        if (state.bucket_egraphs.shared(a) != state.bucket_egraphs.shared(b) ||
+            state.bucket_root_ids[a] != state.bucket_root_ids[b] || state.reachable_cids[a] != state.reachable_cids[b])
+            return false;
+        const auto &infos_a = state.bucket_enode_infos[a], &infos_b = state.bucket_enode_infos[b];
+        if (infos_a.size() != infos_b.size())
+            return false;
+        for (size_t i = 0; i < infos_a.size(); ++i)
+        {
+            const ENodeInfo &x = infos_a[i], &y = infos_b[i];
+            if (x.cost != y.cost || x.is_view != y.is_view)
+                return false;
+        }
+        for (EClassId cid : state.reachable_cids[a])
+            if (state.domains[state.selected_vars[a].at(cid)] != state.domains[state.selected_vars[b].at(cid)])
+                return false;
+        return true;
+    };
+    std::vector<uint32_t> relaxation_source(nb);
+    for (uint32_t b = 0; b < nb; ++b)
+    {
+        relaxation_source[b] = b;
+        for (uint32_t a = 0; a < b; ++a)
+            if (relaxation_source[a] == a && state.bucket_egraphs.shared(a) == state.bucket_egraphs.shared(b))
+            {
+                if (sameRelaxationInputs(a, b))
+                    relaxation_source[b] = a;
+                break;
+            }
+    }
     parallel([&](uint32_t b) {
+        if (relaxation_source[b] != b)
+            return;
         contexts[b].rb = buildRelaxationBucket(state, b);
         if (!contexts[b].rb.acyclic || !contexts[b].rb.root_feasible)
             return;
         markCacheAlternatives(state, contexts[b].rb);
+    });
+    // A copy with the same weight also gets the same estimates, selection,
+    // covering, alias checks and schedule (deterministic functions of the
+    // relaxation, the weighting and the shared cache sets): computed for its
+    // source only and copied.
+    std::vector<uint32_t> plan_twin(nb);
+    for (uint32_t b = 0; b < nb; ++b)
+    {
+        const uint32_t source = relaxation_source[b];
+        const float weight_b = b < state.bucket_weights.size() ? state.bucket_weights[b] : 1.0f;
+        const float weight_s = source < state.bucket_weights.size() ? state.bucket_weights[source] : 1.0f;
+        plan_twin[b] = weight_b == weight_s ? source : b;
+    }
+    parallel([&](uint32_t b) {
+        if (relaxation_source[b] == b)
+            return;
+        RelaxationBucket &rb = contexts[b].rb;
+        rb = contexts[relaxation_source[b]].rb;
+        rb.bucket_idx = b;
+        for (RelaxationClass &rc : rb.classes)
+            if (rc.selected_var != kInvalidVarId)
+                rc.selected_var = state.selected_vars[b].at(rc.cid);
     });
     for (uint32_t b = 0; b < nb; ++b)
         if (!contexts[b].rb.acyclic || !contexts[b].rb.root_feasible)
@@ -652,9 +781,14 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
         for (const auto &global_lambda : weightings)
             for (double cover_limit : {3.0, std::numeric_limits<double>::infinity()})
                 starts.push_back({global_lambda, cover_limit, cheap});
-    // Buckets with the same relaxation share estimates.
+    // Buckets with the same relaxation share region estimates (cheap
+    // estimates cost less than the signatures, so they are not shared).
     std::vector<uint32_t> same_as(nb);
-    {
+    std::iota(same_as.begin(), same_as.end(), 0u);
+    bool same_as_computed = false;
+    auto computeSameAs = [&]() {
+        if (same_as_computed)
+            return;
         std::vector<std::vector<uint64_t>> signatures(nb);
         parallel([&](uint32_t b) { signatures[b] = relaxationSignature(contexts[b].rb); });
         for (uint32_t b = 0; b < nb; ++b)
@@ -667,7 +801,8 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
                     break;
                 }
         }
-    }
+        same_as_computed = true;
+    };
     constexpr double kRegionStartSeconds = 3.0;
     const auto build_start = std::chrono::steady_clock::now();
     for (const Start &start_policy : starts)
@@ -688,8 +823,12 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
                 lambda[b][e] = global_lambda[g];
             }
         }
+        if (!start_policy.cheap)
+            computeSameAs();
         parallel([&](uint32_t b) {
-            if (same_as[b] != b)
+            if (!start_policy.cheap && same_as[b] != b)
+                return;
+            if (start_policy.cheap && plan_twin[b] != b)
                 return;
             if (start_policy.cheap)
                 cheapRelaxationEstimates(contexts[b].rb, lambda[b], estimates[b]);
@@ -702,20 +841,43 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
             }
         });
         for (uint32_t b = 0; b < nb; ++b)
-            if (same_as[b] != b)
+            if (!start_policy.cheap && same_as[b] != b)
                 estimates[b] = estimates[same_as[b]];
+            else if (start_policy.cheap && plan_twin[b] != b)
+                estimates[b] = estimates[plan_twin[b]];
         std::unordered_set<BaseEClassId> allowed = cache_possible;
+        // Per bucket: view alternatives found to alias two cached bases.
+        std::vector<ForbiddenAlternatives> forbidden(nb);
         PrimalPlan plan;
         plan.buckets.resize(nb);
+        auto copyTwinPlans = [&]() {
+            for (uint32_t b = 0; b < nb; ++b)
+                if (plan_twin[b] != b)
+                    plan.buckets[b] = plan.buckets[plan_twin[b]];
+        };
         bool consistent = false;
         size_t used_count = 0;
+        // A bucket's selection depends only on the allowed cache set and its
+        // forbidden alternatives, and its final plan also on the used cache
+        // set: a round with the same inputs reuses the previous round's.
+        bool have_previous = false;
+        std::unordered_set<BaseEClassId> previous_allowed, previous_used;
+        std::vector<ForbiddenAlternatives> previous_forbidden(nb);
+        std::vector<PrimalBucketPlan> previous_selection(nb), previous_final(nb);
         for (int round = 0; round < 64 && !consistent; ++round)
         {
             auto weighted = [&](uint32_t b) { return !(b < state.bucket_weights.size()) || state.bucket_weights[b] > 0.0f; };
+            const bool same_allowed = have_previous && allowed == previous_allowed;
             parallel([&](uint32_t b) {
-                if (weighted(b))
-                    extractSelection(contexts[b].rb, lambda[b], estimates[b], allowed, plan.buckets[b]);
+                if (!weighted(b) || plan_twin[b] != b)
+                    return;
+                if (same_allowed && forbidden[b] == previous_forbidden[b])
+                    plan.buckets[b] = previous_selection[b];
+                else
+                    extractSelection(contexts[b].rb, lambda[b], estimates[b], allowed, plan.buckets[b], &forbidden[b]);
+                previous_selection[b] = plan.buckets[b];
             });
+            copyTwinPlans();
             // Cache set: bases whose cache-only alternatives the weighted
             // buckets use, plus bases root propagation forced to be cached.
             std::unordered_set<BaseEClassId> used;
@@ -750,12 +912,20 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
             // takes the covering selection unless it costs over 3x as much
             // (caching pays off in every bucket; covering costs this one);
             // otherwise the base leaves the cache set below.
+            const bool same_used = have_previous && used == previous_used;
             parallel([&](uint32_t b) {
+                if (plan_twin[b] != b)
+                    return;
+                if (same_allowed && same_used && forbidden[b] == previous_forbidden[b])
+                {
+                    plan.buckets[b] = previous_final[b];
+                    return;
+                }
                 const auto &rb = contexts[b].rb;
                 const uint32_t orig_n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
                 if (!weighted(b))
                 {
-                    extractCovering(rb, lambda[b], estimates[b], used, used, plan.buckets[b], &saving);
+                    extractCovering(rb, lambda[b], estimates[b], used, used, plan.buckets[b], &saving, &forbidden[b]);
                     return;
                 }
                 bool missing = false;
@@ -764,10 +934,16 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
                 if (!missing)
                     return;
                 PrimalBucketPlan covering;
-                extractCovering(rb, lambda[b], estimates[b], used, used, covering, &saving);
+                extractCovering(rb, lambda[b], estimates[b], used, used, covering, &saving, &forbidden[b]);
                 if (selectionWork(rb, lambda[b], covering) <= cover_limit * selectionWork(rb, lambda[b], plan.buckets[b]))
                     plan.buckets[b] = std::move(covering);
             });
+            copyTwinPlans();
+            have_previous = true;
+            previous_allowed = allowed;
+            previous_used = used;
+            previous_forbidden = forbidden;
+            previous_final = plan.buckets;
             // A cached base must be selected in every bucket.
             std::unordered_set<BaseEClassId> violations;
             for (uint32_t b = 0; b < nb; ++b)
@@ -799,7 +975,62 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
                 bytes[info.mem_space] -= size;
                 violations.insert(base);
             }
+            // Each cached base gets its own offset, while a view shares its
+            // base's: a cached class selected as a view of a class with
+            // another cached base cannot be placed. Forbid that view in that
+            // bucket and select again; when the bucket's root could then not
+            // be produced, the class's base leaves the cache set instead.
+            std::vector<uint8_t> bucket_aliased(nb, 0);
+            std::vector<std::vector<BaseEClassId>> reverted_bases(nb);
+            parallel([&](uint32_t b) {
+                if (plan_twin[b] != b)
+                    return;
+                const auto &rb = contexts[b].rb;
+                const ForbiddenAlternatives before = forbidden[b];
+                std::vector<BaseEClassId> aliased_bases;
+                const uint32_t orig_n = rb.orig_class_count ? rb.orig_class_count : static_cast<uint32_t>(rb.classes.size());
+                for (uint32_t u = 0; u < orig_n; ++u)
+                {
+                    const int32_t v = plan.buckets[b].value[u];
+                    if (v <= 0 || !used.count(rb.classes[u].base) || violations.count(rb.classes[u].base))
+                        continue;
+                    for (const auto &alt : rb.classes[u].alternatives)
+                    {
+                        if (alt.value != v || !alt.is_view || alt.is_alias)
+                            continue;
+                        for (uint32_t ch : childrenOf(alt))
+                        {
+                            const BaseEClassId child_base = rb.classes[ch].base;
+                            if (child_base == rb.classes[u].base || !used.count(child_base) || violations.count(child_base))
+                                continue;
+                            forbidden[b].insert(forbiddenKey(rb, u, v));
+                            aliased_bases.push_back(rb.classes[u].base);
+                            bucket_aliased[b] = 1;
+                        }
+                    }
+                }
+                if (forbidden[b].size() != before.size() &&
+                    !(rootProducible(rb, allowed, forbidden[b]) && rootProducible(rb, used, forbidden[b])))
+                {
+                    forbidden[b] = before;
+                    reverted_bases[b] = std::move(aliased_bases);
+                }
+            });
+            for (uint32_t b = 0; b < nb; ++b)
+                if (plan_twin[b] != b)
+                {
+                    forbidden[b] = forbidden[plan_twin[b]];
+                    bucket_aliased[b] = bucket_aliased[plan_twin[b]];
+                }
+            bool aliased = false;
+            for (uint32_t b = 0; b < nb; ++b)
+            {
+                aliased |= bucket_aliased[b] != 0;
+                violations.insert(reverted_bases[b].begin(), reverted_bases[b].end());
+            }
             used_count = used.size();
+            if (aliased && violations.empty())
+                continue;
             if (violations.empty())
             {
                 plan.cached = used;
@@ -869,7 +1100,11 @@ inline std::vector<PrimalPlan> buildRootPrimalPlans(
                 LOG(INFO) << os.str();
             }
         }
-        parallel([&](uint32_t b) { listSchedule(contexts[b].rb, plan.buckets[b]); });
+        parallel([&](uint32_t b) {
+            if (plan_twin[b] == b)
+                listSchedule(contexts[b].rb, plan.buckets[b]);
+        });
+        copyTwinPlans();
         double total = 0.0;
         for (uint32_t b = 0; b < nb; ++b)
         {

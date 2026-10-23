@@ -51,7 +51,6 @@ inline SearchState makeState(const json &problem)
         info.base_eclass_id = BaseEClassId{cache.at("base_id").get<uint32_t>()};
         info.mem_space = space;
         info.size_bytes = cache.at("size_pages").get<uint64_t>() * 4;
-        info.name = "cached_" + std::to_string(info.base_eclass_id.value);
         state.cached_vars[info.base_eclass_id] = state.addVar(info, makeDomain(cache.at("domain")));
         CacheCandidate candidate;
         candidate.base_eclass_id = info.base_eclass_id;
@@ -115,14 +114,11 @@ inline SearchState makeState(const json &problem)
             info.size_pages = node.at("size_pages").get<uint32_t>();
             info.size_bytes = info.size_pages * 4;
             info.type = VarType::SELECTED;
-            info.name = "selected_" + std::to_string(b) + "_" + std::to_string(c);
             state.selected_vars[b][cid] = state.addVar(info, makeDomain(node.at("selected")));
             info.selection_var = state.selected_vars[b][cid];
             info.type = VarType::START;
-            info.name = "start_" + std::to_string(b) + "_" + std::to_string(c);
             state.start_vars[b][cid] = state.addVar(info, makeDomain(node.at("start")));
             info.type = VarType::OFFSET;
-            info.name = "offset_" + std::to_string(b) + "_" + std::to_string(c);
             state.offset_vars[b][cid] = state.addVar(info, makeDomain(node.at("offset")));
         }
     }

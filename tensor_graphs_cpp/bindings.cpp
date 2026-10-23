@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <chrono>
+#include <future>
 
 #if defined(_WIN32) || defined(_WIN64)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -446,6 +447,15 @@ class LLMSession
 
         auto act_brancher = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
+        // The session's cost model parses benchmarks/records.bin (about a
+        // second): load it while the model graph is built, recording the
+        // file's stamp from before the parse.
+        const Session::RecordsStamp cost_model_stamp = Session::recordsStamp("benchmarks/records.bin");
+        auto cost_model_load = std::async(std::launch::async, []() {
+            return std::make_unique<CostModel>(false, "benchmarks/records.bin");
+        });
+
+        Session::logTimeline("llm session start");
         mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
@@ -478,6 +488,7 @@ class LLMSession
             throw std::runtime_error("Unknown model: " + model_name);
         }
 
+        Session::logTimeline("model graph built");
         std::string gHash = computeGraphHash(*g, {logitsId});
         // Folded tensors live next to the plan when a repo path is given, so a
         // compile and the runs using its plan share a self-contained directory.
@@ -503,10 +514,14 @@ class LLMSession
         actual_cache += disable_caching ? ".no-dirty-cache" : ".dirty-cache";
         actual_cache += ".padded";
 
+        Session::logTimeline("repo opened");
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(),
                                             disable_caching,
                                             min_compile_time, act_brancher, log_cost_calls,
-                                            "benchmarks/records.bin", disable_compilation_caching);
+                                            "benchmarks/records.bin", disable_compilation_caching,
+                                            cost_model_load.get());
+        session->loadedRecords = cost_model_stamp;
+        session->costModel.setLogging(log_cost_calls);
         session->settings.disable_fusion = disable_fusion;
         session->settings.saturate_only = saturate_only;
         // Weight-only values (copies, casts, transposes) are computed while
@@ -1230,7 +1245,7 @@ PYBIND11_MODULE(tensor_graphs, m)
                               const std::vector<Region> &outNeeded, float weight) {
             s.addBucket(inDirty, outNeeded, weight);
         }, py::arg("input_dirty_regions"), py::arg("output_needed_region"), py::arg("weight") = 1.0f)
-        .def("plan", &Session::plan, py::arg("do_saturate") = true)
+        .def("plan", [](Session &s, bool do_saturate) { s.plan(do_saturate); }, py::arg("do_saturate") = true)
         .def("compile", &Session::compile, py::arg("do_saturate") = true)
         .def("ensure_full_bucket", &Session::ensureFullBucket)
         .def("benchmark_buckets", [](Session &s, uint32_t warmup, uint32_t iterations) {

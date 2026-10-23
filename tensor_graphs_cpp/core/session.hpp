@@ -5,10 +5,12 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -61,7 +63,10 @@ struct Session
 
     Graph &graph;
     MemoryManager &memManager;
-    CostModel costModel;
+    // Owned through a pointer so a caller can load it while it builds the
+    // graph (parsing the records takes about a second).
+    std::unique_ptr<CostModel> costModelOwner;
+    CostModel &costModel;
     std::unique_ptr<Executor> executor;
     LogicalId rootId;
     bool isPlanned;
@@ -80,6 +85,34 @@ struct Session
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
     std::string recordsPath = "benchmarks/records.bin";
+    // The records file as of the cost model's last load (size and write
+    // time); plan() reloads only if it changed since (e.g. calibration ran).
+    struct RecordsStamp
+    {
+        bool valid = false;
+        std::string path;
+        uintmax_t size = 0;
+        std::filesystem::file_time_type write_time{};
+        bool operator==(const RecordsStamp &other) const
+        {
+            return valid && other.valid && path == other.path && size == other.size &&
+                   write_time == other.write_time;
+        }
+    };
+    RecordsStamp loadedRecords;
+
+    static RecordsStamp recordsStamp(const std::string &path)
+    {
+        RecordsStamp stamp;
+        stamp.path = path;
+        std::error_code error;
+        stamp.size = std::filesystem::file_size(path, error);
+        if (error)
+            return stamp;
+        stamp.write_time = std::filesystem::last_write_time(path, error);
+        stamp.valid = !error;
+        return stamp;
+    }
 
     uint32_t fullBucketIdx = UINT32_MAX;
     TGStore *repo;
@@ -217,11 +250,19 @@ struct Session
         bw.write(selectedCachedNodes);
         bw.write(normalizedBucketWeights(manualBuckets));
 
-        for (const CompiledGraph &g : cachedGraphs)
-        {
-            bw.write<uint8_t>(1); // Bucket block type
-            bw.write(g);
-        }
+        // Graphs serialize independently: into per-graph buffers in
+        // parallel, then into the file in order (the same bytes).
+        std::vector<std::string> graph_blocks(cachedGraphs.size());
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(cachedGraphs.size()), [&](uint32_t i) {
+            std::ostringstream block(std::ios::binary);
+            BinaryWriter block_writer(block);
+            block_writer.write<uint8_t>(1); // Bucket block type
+            block_writer.write(cachedGraphs[i]);
+            graph_blocks[i] = std::move(block).str();
+        });
+        file.flush();
+        for (const std::string &block : graph_blocks)
+            file.write(block.data(), static_cast<std::streamsize>(block.size()));
 
         bw.write<uint8_t>(2); // Constants block type
         std::unordered_set<LogicalId> neededConstants;
@@ -279,10 +320,13 @@ struct Session
           disableCompilationCaching(_settings.disable_compilation_caching),
           minCompileSeconds(_settings.min_compile_seconds),
           brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()),
-          logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
+          logCostCalls(_settings.log_cost_calls),
+          costModelOwner(std::make_unique<CostModel>(_settings.log_cost_calls, _settings.records_path)),
+          costModel(*costModelOwner)
     {
-        // plan() reloads the cost model from recordsPath.
+        // plan() reloads the cost model from recordsPath if it changed.
         recordsPath = _settings.records_path;
+        loadedRecords = recordsStamp(recordsPath);
         initRepo(_repo);
         ensureOutputDirectories();
         loadCache();
@@ -291,14 +335,18 @@ struct Session
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             TGStore *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
             std::shared_ptr<plan::Brancher> _brancher = nullptr, bool _logCostCalls = true,
-            const std::string &_recordsPath = "benchmarks/records.bin", bool _disableCompilationCaching = false)
+            const std::string &_recordsPath = "benchmarks/records.bin", bool _disableCompilationCaching = false,
+            std::unique_ptr<CostModel> _loadedCostModel = nullptr)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
           disableCompilationCaching(_disableCompilationCaching),
           minCompileSeconds(_minCompileSeconds),
           brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()), logCostCalls(_logCostCalls),
-          costModel(_logCostCalls, _recordsPath)
+          costModelOwner(_loadedCostModel ? std::move(_loadedCostModel)
+                                           : std::make_unique<CostModel>(_logCostCalls, _recordsPath)),
+          costModel(*costModelOwner)
     {
+        loadedRecords = recordsStamp(_recordsPath);
         settings = Settings::get_default();
         settings.cache_file = cacheFile;
         settings.disable_caching = _disableCaching;
@@ -348,11 +396,21 @@ struct Session
         updateFullBucketWeight();
     }
 
-    void plan(bool doSaturate = true)
+    // With `persisted` given, the plan file is written on another thread and
+    // `persisted` waits for it (compile overlaps it with arena setup, which
+    // only reads the plan); otherwise it is written before plan returns.
+    void plan(bool doSaturate = true, std::future<void> *persisted = nullptr)
     {
+        logTimeline("plan start");
         ensureOutputDirectories();
         costModel.setLogging(logCostCalls);
-        costModel.load(recordsPath);
+        // The constructor loaded the same file; reload only if it changed.
+        const RecordsStamp current = recordsStamp(recordsPath);
+        if (!(current == loadedRecords))
+        {
+            costModel.load(recordsPath);
+            loadedRecords = current;
+        }
 
         ensureFullBucket();
         if (!settings.bucket_weights.empty())
@@ -384,12 +442,16 @@ struct Session
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
             foldCleanTensors();
+            logTimeline("clean tensors folded");
             ensureCacheCoverage(doSaturate);
             if (settings.saturate_only)
             {
                 return;
             }
-            persistCache();
+            if (persisted)
+                *persisted = std::async(std::launch::async, [this]() { persistCache(); });
+            else
+                persistCache();
             isPlanned = true;
         }
     }
@@ -403,8 +465,9 @@ struct Session
 
     void compile(bool doSaturate = true)
     {
-        plan(doSaturate);
-        logTimeline("planned and persisted");
+        std::future<void> persisted;
+        plan(doSaturate, &persisted);
+        logTimeline("planned");
 
         // Compute exact peak allocation size required per MemSpace across all compiled graphs
         std::unordered_map<MemSpace, uint64_t> peakSizes;
@@ -539,6 +602,9 @@ struct Session
 
         persistent_initialized = false;
         executor = std::make_unique<Executor>(memManager);
+        if (persisted.valid())
+            persisted.get();
+        logTimeline("persisted");
         isCompiled = true;
         logTimeline("compiled");
     }

@@ -120,6 +120,46 @@ inline void addExtraPropagators(EngineT &engine)
         engine.addPropagator(std::make_unique<RelaxationBoundPropagator>());
 }
 
+// Propagators that validate and complete a fixed plan in a restricted state
+// (SearchState::restrictedTo): every constraint propagator except the root
+// symmetry breaking of StartRankWindow (it restricts which of equivalent
+// schedules the search visits, not which plans are valid), and none of the
+// bound propagators (CriticalPath, EngineWorkload, StartRunMakespan,
+// RelaxationBound), which change no constraint.
+template <typename EngineT>
+inline void addValidationPropagators(EngineT &engine, bool is_dag = false)
+{
+    engine.addPropagator(std::make_unique<SelectionReachabilityPropagator>(is_dag));
+    engine.addPropagator(std::make_unique<SelectionParentSupportPropagator>());
+    engine.addPropagator(std::make_unique<SelectionChildrenPropagator>());
+    engine.addPropagator(std::make_unique<StaticPrivateLayoutPropagator>());
+    engine.addPropagator(std::make_unique<UnselectedStartOffsetPropagator>());
+    engine.addPropagator(std::make_unique<CacheExclusionPropagator>());
+    engine.addPropagator(std::make_unique<InputPruneStartPrecedencePropagator>());
+    engine.addPropagator(std::make_unique<ConsumerStartPrecedencePropagator>(true));
+    engine.addPropagator(std::make_unique<StartPrecedencePropagator>());
+    engine.addPropagator(std::make_unique<StartUniquePropagator>());
+    engine.addPropagator(std::make_unique<StartBoundsPropagator>());
+    engine.addPropagator(std::make_unique<MemoryNoOverlapPropagator>());
+    engine.addPropagator(std::make_unique<ViewSelectOffsetPropagator>());
+    engine.addPropagator(std::make_unique<ViewToBaseOffsetPropagator>());
+    engine.addPropagator(std::make_unique<BaseToViewOffsetPropagator>());
+    if (!is_dag)
+    {
+        engine.addPropagator(std::make_unique<CycleAvoidancePropagator>());
+        engine.addPropagator(std::make_unique<PearceKellyCyclePropagator>());
+    }
+    engine.addPropagator(std::make_unique<ParentRemovalPropagator>());
+    engine.addPropagator(std::make_unique<CacheRequirementPropagator>());
+    engine.addPropagator(std::make_unique<CacheFreshnessPropagator>());
+    engine.addPropagator(std::make_unique<CachedOffsetPropagator>());
+    engine.addPropagator(std::make_unique<CacheBudgetPropagator>());
+    engine.addPropagator(std::make_unique<EarlyCacheBudgetPropagator>());
+    engine.addPropagator(std::make_unique<WriteAfterReadStartPropagator>());
+    engine.addPropagator(std::make_unique<CachedOffsetAllocationPropagator>());
+    engine.addPropagator(std::make_unique<RequiredReachabilityPropagator>());
+}
+
 template <typename EngineT>
 inline void addAllPropagators(EngineT &engine, bool fixed_starts_only = false, bool is_dag = false)
 {

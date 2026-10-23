@@ -247,8 +247,8 @@ class WriteAfterReadStartPropagator : public Propagator
                 if (later_start.isEmpty())
                 {
                     conflict_reason_ = "bucket=" + std::to_string(b) + " earlier=" +
-                        state.var_infos[earlier.start_var].name + state.domains[earlier.start_var].toString() +
-                        " later=" + state.var_infos[later.start_var].name + state.domains[later.start_var].toString() +
+                        state.var_infos[earlier.start_var].name() + state.domains[earlier.start_var].toString() +
+                        " later=" + state.var_infos[later.start_var].name() + state.domains[later.start_var].toString() +
                         " overlap-offsets=" + std::to_string(earlier.offset) + "/" + std::to_string(later.offset) +
                         " last-reader-min=" + std::to_string(earliest_last_reader) + " required-min=" + std::to_string(required_start);
 #ifdef TG_PROFILE
@@ -326,6 +326,14 @@ class WriteAfterReadStartPropagator : public Propagator
     StartSelectionGuard startSelectionGuard() const override
     {
         return StartSelectionGuard::FIXED_START_NON_OPTIONAL;
+    }
+    // A pass covers the whole bucket, whichever start triggered it. While a
+    // complete plan is validated, interleaved offset fixes advance the
+    // allocation revision between start events (rebuilding the index each
+    // time), so one pass per bucket per flush replaces one per start.
+    PropagationBatch propagationBatch(const SearchState &state, VarId) const override
+    {
+        return state.completing_plan ? PropagationBatch::BUCKET : PropagationBatch::NONE;
     }
 
     std::string name() const override

@@ -88,6 +88,7 @@ class RequiredReachabilityPropagator : public Propagator
     {
         return varTypeMask(VarType::SELECTED);
     }
+    void prepare(const SearchState &state) override { ensureIndex(state); }
 
     std::string name() const override
     {
@@ -96,6 +97,11 @@ class RequiredReachabilityPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        // It only narrows a bucket root's selection, and while a complete
+        // plan is validated every selection (the root's too) was fixed before
+        // propagation: nothing to do, and no index to build.
+        if (state.completing_plan)
+            return true;
         ensureIndex(state);
 
         if (changed != kInvalidVarId)

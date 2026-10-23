@@ -28,7 +28,7 @@ class SelectionParentSupportPropagator : public Propagator
             const Domain &domain = state.domains.at(parent_var);
             if (!domain.contains(required_value))
             {
-                conflict_reason_ = "single supporting parent " + state.var_infos.at(parent_var).name +
+                conflict_reason_ = "single supporting parent " + state.var_infos.at(parent_var).name() +
                     "=" + domain.toString() + " cannot select " + std::to_string(required_value);
                 return false;
             }

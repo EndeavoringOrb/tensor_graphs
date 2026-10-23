@@ -52,9 +52,14 @@ class EngineWorkloadPropagator : public Propagator
             const uint32_t bucket_idx = state.var_infos[changed].bucket_idx;
             if (bucket_idx >= state.buckets.size())
                 Error::throw_err("bucket_idx " + std::to_string(bucket_idx) + " out of bounds in EngineWorkloadPropagator");
-            updateSelectedWork(state, changed);
-            state.bucket_engine_work_lower_bounds[bucket_idx] = bucketEngineWorkLowerBound(state.engine_work[bucket_idx]);
-            state.updateLowerBoundBucket(bucket_idx);
+            // The bucket's work, hence its bound, changes only when the
+            // variable had or now has a selected costed alternative.
+            if (updateSelectedWork(state, changed))
+            {
+                state.bucket_engine_work_lower_bounds[bucket_idx] =
+                    bucketEngineWorkLowerBound(state.engine_work[bucket_idx]);
+                state.updateLowerBoundBucket(bucket_idx);
+            }
         }
         if (!state.lower_bounds_pending && state.best_cost < TGConstants::INF && state.lower_bound >= state.best_cost)
             return false;
@@ -70,11 +75,13 @@ class EngineWorkloadPropagator : public Propagator
         return bound;
     }
 
-    static void updateSelectedWork(SearchState &state, VarId var_id)
+    // Returns whether the bucket's engine work changed.
+    static bool updateSelectedWork(SearchState &state, VarId var_id)
     {
         const uint32_t bucket_idx = state.var_infos[var_id].bucket_idx;
         auto &bucket_work = state.engine_work[bucket_idx];
         auto &cached_work = state.selected_engine_work[var_id];
+        const bool had_work = !cached_work.empty();
         for (const auto &entry : cached_work)
         {
             bucket_work[entry.first] -= entry.second;
@@ -85,32 +92,33 @@ class EngineWorkloadPropagator : public Propagator
 
         const Domain &sel_dom = state.domains[var_id];
         if (!sel_dom.isFixed() || sel_dom.fixedValue() <= 0)
-            return;
+            return had_work;
         auto selected = state.selected_vars[bucket_idx].find(state.var_infos[var_id].eclass_id);
         if (selected == state.selected_vars[bucket_idx].end())
-            return;
+            return had_work;
         const EClass &cls = state.bucket_egraphs[bucket_idx].getEClass(selected->first);
         const uint32_t en_idx = static_cast<uint32_t>(sel_dom.fixedValue() - 1);
         if (en_idx >= cls.enodes.size())
-            return;
+            return had_work;
         ENodeId en_id = cls.enodes[en_idx];
         const ENode &enode = state.bucket_egraphs[bucket_idx].getENode(en_id);
         // Views carry dependencies but occupy no execution engine, matching
         // MakespanSimulator even when their nominal cost is nonzero.
         if (en_id.value < state.bucket_enode_infos[bucket_idx].size() &&
             state.bucket_enode_infos[bucket_idx][en_id.value].is_view)
-            return;
+            return had_work;
         const float cost = en_id.value < state.bucket_enode_infos[bucket_idx].size()
                                ? state.bucket_enode_infos[bucket_idx][en_id.value].cost
                                : 0.0f;
         if (cost <= 0.0f || cost >= TGConstants::INF || enode.getOpType() == OpType::INPUT ||
             enode.getOpType() == OpType::CACHE)
-            return;
+            return had_work;
         for (const Engine &engine : enode.getEngines())
         {
             bucket_work[engine] += cost;
             cached_work[engine] += cost;
         }
+        return had_work || !cached_work.empty();
     }
 };
 

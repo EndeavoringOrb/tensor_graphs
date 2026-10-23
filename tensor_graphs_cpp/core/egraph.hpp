@@ -4,35 +4,189 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 #include <deque>
+#include <functional>
+#include <mutex>
 #include <thread>
+#include <unordered_set>
 
 #include "core/common/thread_pool.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
 
+// Interned immutable strings: equal values share one never-freed copy, so
+// e-nodes copy names and debug origins without allocating. The table only
+// grows; the values come from a small set (kernel names, rule origins).
+inline const std::string *internString(const std::string &value)
+{
+    static const std::string *const empty = new std::string();
+    if (value.empty())
+        return empty;
+    // Per-thread lookups first: rewrite threads intern the same few names
+    // millions of times. Keys view the interned (stable) strings.
+    thread_local std::unordered_map<std::string_view, const std::string *> local;
+    const auto local_it = local.find(std::string_view(value));
+    if (local_it != local.end())
+        return local_it->second;
+    struct Shard
+    {
+        std::mutex mutex;
+        std::unordered_set<std::string> values;
+    };
+    constexpr size_t kShards = 64;
+    static Shard *const shards = new Shard[kShards];
+    Shard &shard = shards[std::hash<std::string>{}(value) % kShards];
+    const std::string *interned;
+    {
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        interned = &*shard.values.insert(value).first;
+    }
+    local.emplace(std::string_view(*interned), interned);
+    return interned;
+}
+
+// Interned immutable vectors (shapes, strides, engine lists), as for
+// internString. Equality is exact element equality (engines include their
+// supported memory spaces), so an interned vector equals its input.
+inline bool internedElementEqual(uint32_t a, uint32_t b) { return a == b; }
+inline bool internedElementEqual(uint64_t a, uint64_t b) { return a == b; }
+inline bool internedElementEqual(const Engine &a, const Engine &b)
+{
+    return a.idx == b.idx && a.type == b.type && a.supported == b.supported;
+}
+inline uint64_t internedElementHash(uint32_t v) { return v; }
+inline uint64_t internedElementHash(uint64_t v) { return v; }
+inline uint64_t internedElementHash(const Engine &e)
+{
+    return (static_cast<uint64_t>(e.idx) << 8) ^ static_cast<uint64_t>(e.type) ^ (e.supported.size() << 40);
+}
+
+template <typename T>
+struct InternedVectorOps
+{
+    size_t operator()(const std::vector<T> *v) const noexcept
+    {
+        uint64_t h = 0xcbf29ce484222325ull ^ v->size();
+        for (const T &x : *v)
+            h = (h ^ internedElementHash(x)) * 0x100000001b3ull;
+        return static_cast<size_t>(h);
+    }
+    bool operator()(const std::vector<T> *a, const std::vector<T> *b) const noexcept
+    {
+        if (a->size() != b->size())
+            return false;
+        for (size_t i = 0; i < a->size(); ++i)
+            if (!internedElementEqual((*a)[i], (*b)[i]))
+                return false;
+        return true;
+    }
+};
+
+template <typename T>
+inline const std::vector<T> *internVector(const std::vector<T> &value)
+{
+    static const std::vector<T> *const empty = new std::vector<T>();
+    if (value.empty())
+        return empty;
+    using Set = std::unordered_set<const std::vector<T> *, InternedVectorOps<T>, InternedVectorOps<T>>;
+    thread_local Set local;
+    const auto local_it = local.find(&value);
+    if (local_it != local.end())
+        return *local_it;
+    struct Shard
+    {
+        std::mutex mutex;
+        Set values;
+    };
+    constexpr size_t kShards = 64;
+    static Shard *const shards = new Shard[kShards];
+    Shard &shard = shards[InternedVectorOps<T>{}(&value) % kShards];
+    const std::vector<T> *interned;
+    {
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        const auto it = shard.values.find(&value);
+        if (it != shard.values.end())
+            interned = *it;
+        else
+        {
+            interned = new std::vector<T>(value);
+            shard.values.insert(interned);
+        }
+    }
+    local.insert(interned);
+    return interned;
+}
+
+// An interned vector held by value: copies share the interned storage.
+// Reads go through the vector interface; assignment interns the new value.
+template <typename T>
+class InternedVector
+{
+  public:
+    InternedVector() : value_(internVector(std::vector<T>())) {}
+    InternedVector(const std::vector<T> &value) : value_(internVector(value)) {}
+    InternedVector &operator=(const std::vector<T> &value)
+    {
+        value_ = internVector(value);
+        return *this;
+    }
+    operator const std::vector<T> &() const { return *value_; }
+    const std::vector<T> &get() const { return *value_; }
+    size_t size() const { return value_->size(); }
+    bool empty() const { return value_->empty(); }
+    const T &operator[](size_t i) const { return (*value_)[i]; }
+    const T &at(size_t i) const { return value_->at(i); }
+    const T &front() const { return value_->front(); }
+    const T &back() const { return value_->back(); }
+    const T *data() const { return value_->data(); }
+    typename std::vector<T>::const_iterator begin() const { return value_->begin(); }
+    typename std::vector<T>::const_iterator end() const { return value_->end(); }
+    bool operator==(const InternedVector &other) const { return value_ == other.value_; }
+    bool operator!=(const InternedVector &other) const { return value_ != other.value_; }
+    friend bool operator==(const InternedVector &a, const std::vector<T> &b) { return *a.value_ == b; }
+    friend bool operator==(const std::vector<T> &a, const InternedVector &b) { return a == *b.value_; }
+    friend bool operator!=(const InternedVector &a, const std::vector<T> &b) { return *a.value_ != b; }
+    friend bool operator!=(const std::vector<T> &a, const InternedVector &b) { return a != *b.value_; }
+
+  private:
+    const std::vector<T> *value_;
+};
+
+template <typename T>
+inline std::string toString(const InternedVector<T> &value)
+{
+    return toString(value.get());
+}
+
 struct ENode
 {
   public:
-    ENode(KernelId kernelId, OpType opType, std::string opName, std::vector<EClassId> children,
-          std::vector<uint32_t> shape, std::vector<uint64_t> strides, DType dtype, MemSpace mem_space,
-          std::vector<Engine> engines, std::string contentHash = "", uint64_t sig = 0, std::string debugOrigin = "")
-        : kernelId(kernelId), opType(opType), opName(std::move(opName)), children(std::move(children)),
-          shape(std::move(shape)), strides(std::move(strides)), dtype(dtype), mem_space(mem_space),
-          engines(std::move(engines)), contentHash(std::move(contentHash)), sig(sig),
-          debugOrigin(std::move(debugOrigin))
+    // Names, shapes, strides and engines are interned, so they are taken by
+    // reference (an interned value is copied only the first time it occurs).
+    ENode(KernelId kernelId, OpType opType, const std::string &opName, std::vector<EClassId> children,
+          const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype, MemSpace mem_space,
+          const std::vector<Engine> &engines, std::string contentHash = "", uint64_t sig = 0,
+          const std::string &debugOrigin = "")
+        : kernelId(kernelId), opType(opType), opName(internString(opName)), children(std::move(children)),
+          shape(internVector(shape)), strides(internVector(strides)), dtype(dtype), mem_space(mem_space),
+          engines(internVector(engines)), contentHash(std::move(contentHash)), sig(sig),
+          debugOrigin(internString(debugOrigin))
     {
     }
 
+    // Interned names, shapes and strides are equal exactly when their
+    // pointers are; engine lists compare as before (by index and type).
     bool operator==(const ENode &other) const
     {
         return kernelId == other.kernelId && opType == other.opType && opName == other.opName &&
                children == other.children && shape == other.shape && strides == other.strides && dtype == other.dtype &&
-               mem_space == other.mem_space && engines == other.engines && contentHash == other.contentHash;
+               mem_space == other.mem_space && (engines == other.engines || *engines == *other.engines) &&
+               contentHash == other.contentHash;
     }
 
     bool operator!=(const ENode &other) const
@@ -51,7 +205,7 @@ struct ENode
     }
     const std::string &getOpName() const
     {
-        return opName;
+        return *opName;
     }
     const std::vector<EClassId> &getChildren() const
     {
@@ -59,11 +213,11 @@ struct ENode
     }
     const std::vector<uint32_t> &getShape() const
     {
-        return shape;
+        return *shape;
     }
     const std::vector<uint64_t> &getStrides() const
     {
-        return strides;
+        return *strides;
     }
     DType getDType() const
     {
@@ -75,7 +229,7 @@ struct ENode
     }
     const std::vector<Engine> &getEngines() const
     {
-        return engines;
+        return *engines;
     }
     const std::string &getContentHash() const
     {
@@ -87,7 +241,7 @@ struct ENode
     }
     const std::string &getDebugOrigin() const
     {
-        return debugOrigin;
+        return *debugOrigin;
     }
 
     // Overwrites every field, reusing this node's storage (for probing the
@@ -99,16 +253,21 @@ struct ENode
     {
         kernelId = newKernelId;
         opType = newOpType;
-        opName.assign(newOpName);
+        opName = internString(newOpName);
         children.assign(newChildren.begin(), newChildren.end());
-        shape.assign(newShape.begin(), newShape.end());
-        strides.assign(newStrides.begin(), newStrides.end());
+        // A reused probe often keeps its shape, strides and engines: compare
+        // before hashing them into the intern table.
+        if (!InternedVectorOps<uint32_t>{}(shape, &newShape))
+            shape = internVector(newShape);
+        if (!InternedVectorOps<uint64_t>{}(strides, &newStrides))
+            strides = internVector(newStrides);
         dtype = newDType;
         mem_space = newMemSpace;
-        engines.assign(newEngines.begin(), newEngines.end());
+        if (!InternedVectorOps<Engine>{}(engines, &newEngines))
+            engines = internVector(newEngines);
         contentHash.assign(newContentHash);
         sig = 0;
-        debugOrigin.clear();
+        debugOrigin = internString(std::string());
     }
 
     // Setters
@@ -125,24 +284,24 @@ struct ENode
         contentHash = std::move(value);
         sig = 0;
     }
-    void setDebugOrigin(std::string origin)
+    void setDebugOrigin(const std::string &origin)
     {
-        debugOrigin = std::move(origin);
+        debugOrigin = internString(origin);
     }
 
   private:
     KernelId kernelId;
     OpType opType;
-    std::string opName;
+    const std::string *opName;
     std::vector<EClassId> children;
-    std::vector<uint32_t> shape;
-    std::vector<uint64_t> strides;
+    const std::vector<uint32_t> *shape;
+    const std::vector<uint64_t> *strides;
     DType dtype;
     MemSpace mem_space;
-    std::vector<Engine> engines;
+    const std::vector<Engine> *engines;
     std::string contentHash;
     uint64_t sig;
-    std::string debugOrigin;
+    const std::string *debugOrigin;
 };
 
 inline std::string toString(const ENode &node)
@@ -174,8 +333,10 @@ struct EClass
     EClassId id;
     BaseEClassId base_eclass_id;
     std::vector<ENodeId> enodes;
-    std::vector<uint32_t> shape;
-    std::vector<uint64_t> strides;
+    // Interned: copying a class (copy-on-write, compaction) copies only its
+    // e-node list.
+    InternedVector<uint32_t> shape;
+    InternedVector<uint64_t> strides;
     DType dtype;
     MemSpace mem_space;
     LogicalId logical_id;
@@ -238,6 +399,31 @@ struct EGraph
     // signature -> candidate enode ids
     std::shared_ptr<const std::unordered_map<uint64_t, std::vector<ENodeId>>> shared_hashcons;
     std::unordered_map<uint64_t, std::vector<ENodeId>> hashcons;
+    // True while `hashcons` holds exactly the owned e-nodes that are not
+    // duplicates, each under its stored signature, and every other owned
+    // e-node equals one of them or a shared e-node (addENode and rebuild keep
+    // this). rebuild then re-canonicalizes only e-nodes whose children
+    // changed instead of re-hashing every owned e-node.
+    bool hashcons_tracks_owned = true;
+    // Owned e-nodes by child class (the child id as stored when indexed),
+    // kept between congruence closures while valid; a class merged away
+    // since (merged_since_closure) has its list appended to its root's when
+    // the next closure visits its parents.
+    struct OwnedParentIndex
+    {
+        bool valid = false;
+        uint32_t indexed = 0;
+        std::vector<uint32_t> head, tail, edge_next, edge_node;
+    };
+    OwnedParentIndex owned_parents;
+    std::vector<uint32_t> merged_since_closure;
+    // With no owned e-nodes the empty index is complete (shared e-nodes are
+    // never re-canonicalized); otherwise the next closure rebuilds it.
+    void resetOwnedParents()
+    {
+        owned_parents = OwnedParentIndex{};
+        owned_parents.valid = enodes.empty();
+    }
 
     // Dense enodeId -> e_class_id mapping.
     std::vector<EClassId> nodeToEClass;
@@ -322,6 +508,9 @@ struct EGraph
                 shared_hashcons.reset();
                 hashcons = other.hashcons;
             }
+            hashcons_tracks_owned = other.hashcons_tracks_owned;
+            resetOwnedParents();
+            merged_since_closure.clear();
             nodeToEClass.reserve(other.nodeToEClass.size() + 4096);
             nodeToEClass = other.nodeToEClass;
             auto t3 = std::chrono::high_resolution_clock::now();
@@ -543,6 +732,8 @@ struct EGraph
             shared_hashcons = std::make_shared<std::unordered_map<uint64_t, std::vector<ENodeId>>>(
                 std::move(hashcons));
             hashcons.clear();
+            hashcons_tracks_owned = enodes.empty();
+            resetOwnedParents();
         }
     }
 
@@ -573,6 +764,8 @@ struct EGraph
     {
         hashcons.clear();
         shared_hashcons.reset();
+        hashcons_tracks_owned = enodes.empty() && !shared_enodes;
+        owned_parents = OwnedParentIndex{};
     }
 
     void materializeENodes() const
@@ -594,8 +787,12 @@ struct EGraph
                 const_cast<EGraph *>(this)->enodes = std::move(combined);
             }
             const_cast<EGraph *>(this)->shared_enodes.reset();
+            // Owned positions shift: the parent index refers to the old ones.
+            const_cast<EGraph *>(this)->owned_parents = OwnedParentIndex{};
         }
     }
+
+    size_t getNumOwnedENodes() const { return enodes.size(); }
 
     size_t getNumENodes() const
     {
@@ -608,6 +805,8 @@ struct EGraph
         {
             shared_enodes = std::make_shared<std::vector<ENode>>(std::move(enodes));
             enodes.clear();
+            hashcons_tracks_owned = hashcons.empty();
+            resetOwnedParents();
         }
     }
 
@@ -615,6 +814,8 @@ struct EGraph
     {
         enodes.clear();
         shared_enodes.reset();
+        hashcons_tracks_owned = hashcons.empty();
+        owned_parents = OwnedParentIndex{};
     }
 
     // Class already holding an enode equal to `node` (children compared
@@ -912,6 +1113,7 @@ struct EGraph
         }
 
         parent[rb.value] = ra;
+        merged_since_closure.push_back(rb.value);
         ufSize[ra.value] += ufSize[rb.value];
     }
 
@@ -936,6 +1138,207 @@ struct EGraph
     // `keep_hashcons` false leaves the compacted graph without a hashcons
     // (as clearHashcons does) for callers that never add or look up enodes
     // afterwards.
+    // Congruence closure when `hashcons` tracks the owned e-nodes: only owned
+    // e-nodes with a non-canonical child (their stored signature is stale)
+    // leave the hashcons, are re-canonicalized and are looked up again, in
+    // increasing id order; a match merges the two classes, which can make
+    // further e-nodes stale (the owned parents of merged-away classes, the
+    // only e-nodes a merge can make stale). Ends with the same classes and the same set of
+    // distinct owned e-nodes as re-hashing every owned e-node; only which of
+    // two congruent e-nodes stays in the hashcons can differ. Shared e-nodes
+    // are never re-canonicalized, as in the full pass.
+    uint32_t closeCongruenceIncrementally(size_t base_count, uint32_t thread_count)
+    {
+        uint32_t total_merges = 0;
+        const uint32_t num_owned = static_cast<uint32_t>(enodes.size());
+        constexpr uint32_t kNone = UINT32_MAX;
+        OwnedParentIndex &index = owned_parents;
+        auto addEdges = [&](uint32_t from, uint32_t to) {
+            const size_t num_classes = getNumClasses();
+            if (index.head.size() < num_classes)
+            {
+                index.head.resize(num_classes, kNone);
+                index.tail.resize(num_classes, kNone);
+            }
+            for (uint32_t i = from; i < to; ++i)
+                for (EClassId child : enodes[i].getChildren())
+                {
+                    const uint32_t c = child.value;
+                    const uint32_t edge = static_cast<uint32_t>(index.edge_node.size());
+                    index.edge_node.push_back(i);
+                    index.edge_next.push_back(kNone);
+                    if (index.tail[c] == kNone)
+                        index.head[c] = edge;
+                    else
+                        index.edge_next[index.tail[c]] = edge;
+                    index.tail[c] = edge;
+                }
+        };
+        std::vector<uint32_t> visited(num_owned, 0);
+        uint32_t visit_epoch = 0;
+        std::vector<uint32_t> stale_ids;
+        // Appends a merged-away class's list to its root's, collecting its
+        // e-nodes (once per epoch) as stale.
+        auto foldMergedAway = [&](uint32_t loser) {
+            const uint32_t root = findConst(EClassId{loser}).value;
+            if (loser >= index.head.size() || index.head[loser] == kNone || root == loser)
+                return;
+            for (uint32_t edge = index.head[loser]; edge != kNone; edge = index.edge_next[edge])
+            {
+                const uint32_t node = index.edge_node[edge];
+                if (visited[node] != visit_epoch)
+                {
+                    visited[node] = visit_epoch;
+                    stale_ids.push_back(node);
+                }
+            }
+            if (index.tail[root] == kNone)
+                index.head[root] = index.head[loser];
+            else
+                index.edge_next[index.tail[root]] = index.head[loser];
+            index.tail[root] = index.tail[loser];
+            index.head[loser] = index.tail[loser] = kNone;
+        };
+
+        ++visit_epoch;
+        if (!index.valid)
+        {
+            // First closure of this graph: every owned e-node with a
+            // non-canonical child (or no signature yet); the index starts here.
+            std::vector<uint8_t> stale(num_owned, 0);
+            ThreadPool::get().parallel_for(thread_count, [&](uint32_t thread_idx) {
+                for (uint32_t i = thread_idx; i < num_owned; i += thread_count)
+                {
+                    const ENode &node = enodes[i];
+                    uint8_t is_stale = node.getSig() == 0 ? 1 : 0;
+                    for (EClassId child : node.getChildren())
+                        if (findConst(child) != child)
+                        {
+                            is_stale = 1;
+                            break;
+                        }
+                    stale[i] = is_stale;
+                    EClassId &owner = nodeToEClass[base_count + i];
+                    owner = findConst(owner);
+                }
+            });
+            for (uint32_t i = 0; i < num_owned; ++i)
+                if (stale[i])
+                    stale_ids.push_back(i);
+            addEdges(0, num_owned);
+            index.indexed = num_owned;
+            index.valid = true;
+        }
+        else
+        {
+            // Since the last closure only merges made e-nodes stale: the
+            // parents of the classes merged away (e-nodes added since are
+            // indexed first, under the children they were added with).
+            addEdges(index.indexed, num_owned);
+            index.indexed = num_owned;
+            for (uint32_t loser : merged_since_closure)
+                foldMergedAway(loser);
+            for (uint32_t i : stale_ids)
+            {
+                EClassId &owner = nodeToEClass[base_count + i];
+                owner = findConst(owner);
+            }
+            std::sort(stale_ids.begin(), stale_ids.end());
+        }
+        merged_since_closure.clear();
+
+        std::vector<std::pair<EClassId, EClassId>> merges;
+        while (!stale_ids.empty())
+        {
+            for (uint32_t i : stale_ids)
+            {
+                auto it = hashcons.find(enodes[i].getSig());
+                if (it == hashcons.end())
+                    continue;
+                const ENodeId id{static_cast<uint32_t>(base_count + i)};
+                auto pos = std::find(it->second.begin(), it->second.end(), id);
+                if (pos == it->second.end())
+                    continue;
+                it->second.erase(pos);
+                if (it->second.empty())
+                    hashcons.erase(it);
+            }
+            const uint32_t num_stale = static_cast<uint32_t>(stale_ids.size());
+            ThreadPool::get().parallel_for(thread_count, [&](uint32_t thread_idx) {
+                for (uint32_t k = thread_idx; k < num_stale; k += thread_count)
+                {
+                    ENode &node = enodes[stale_ids[k]];
+                    std::vector<EClassId> children = node.getChildren();
+                    for (EClassId &child : children)
+                        child = findConst(child);
+                    node.setChildren(std::move(children));
+                    node.setSig(computeSignature(node));
+                }
+            });
+            merges.clear();
+            for (uint32_t i : stale_ids)
+            {
+                const ENode &node = enodes[i];
+                const ENodeId id{static_cast<uint32_t>(base_count + i)};
+                const EClassId cls = findConst(nodeToEClass[id.value]);
+                EClassId duplicate_class{};
+                bool duplicate = false;
+                auto it = hashcons.find(node.getSig());
+                if (it != hashcons.end())
+                    for (ENodeId other : it->second)
+                        if (node == getENode(other))
+                        {
+                            duplicate_class = findConst(nodeToEClass[other.value]);
+                            duplicate = true;
+                            break;
+                        }
+                if (!duplicate && shared_hashcons)
+                {
+                    auto shared_it = shared_hashcons->find(node.getSig());
+                    if (shared_it != shared_hashcons->end())
+                        for (ENodeId other : shared_it->second)
+                            if (node == getENode(other))
+                            {
+                                duplicate_class = findConst(nodeToEClass[other.value]);
+                                duplicate = true;
+                                break;
+                            }
+                }
+                if (!duplicate)
+                    hashcons[node.getSig()].push_back(id);
+                else if (duplicate_class != cls)
+                    merges.push_back({duplicate_class, cls});
+            }
+            uint32_t n_merges = 0;
+            for (const auto &[a, b] : merges)
+                if (findConst(a) != findConst(b))
+                {
+                    merge(a, b);
+                    ++n_merges;
+                }
+            total_merges += n_merges;
+            if (n_merges == 0)
+                break;
+            ++visit_epoch;
+            stale_ids.clear();
+            std::vector<uint32_t> losers;
+            losers.swap(merged_since_closure);
+            for (uint32_t loser : losers)
+                foldMergedAway(loser);
+            std::sort(stale_ids.begin(), stale_ids.end());
+        }
+        merged_since_closure.clear();
+        if (total_merges > 0)
+            ThreadPool::get().parallel_for(thread_count, [&](uint32_t thread_idx) {
+                for (uint32_t i = thread_idx; i < num_owned; i += thread_count)
+                {
+                    EClassId &owner = nodeToEClass[base_count + i];
+                    owner = findConst(owner);
+                }
+            });
+        return total_merges;
+    }
+
     void rebuild(bool compact = false, bool keep_hashcons = true)
     {
         if (!keep_hashcons && !compact)
@@ -949,7 +1352,9 @@ struct EGraph
             std::vector<std::pair<EClassId, EClassId>> merges;
         };
         std::vector<RebuildShard> shards(thread_count);
-        while (true)
+        if (hashcons_tracks_owned)
+            total_merges = closeCongruenceIncrementally(base_count, thread_count);
+        while (!hashcons_tracks_owned)
         {
             const uint32_t num_enodes = static_cast<uint32_t>(enodes.size());
             std::vector<std::vector<std::vector<uint32_t>>> local_indices(
@@ -1064,6 +1469,9 @@ struct EGraph
                 for (RebuildShard &shard : shards)
                     for (auto &[signature, enode_ids] : shard.hash)
                         hashcons.emplace(signature, std::move(enode_ids));
+                hashcons_tracks_owned = true;
+                owned_parents = OwnedParentIndex{};
+                merged_since_closure.clear();
                 break;
             }
         }
@@ -1143,16 +1551,36 @@ struct EGraph
                 }
                 return ENodeId{UINT32_MAX};
             };
+            // Congruent e-nodes share a class, and the hashcons holds one
+            // e-node per congruence class: a listed alive e-node of the same
+            // class equal to this one is its representative, found without
+            // a hashcons lookup.
             std::unordered_map<uint32_t, uint32_t> stand_in;
             for (uint32_t i = 0; i < num_old_classes; ++i)
             {
                 if (find(EClassId{i}) != EClassId{i})
                     continue;
-                for (ENodeId nid : getEClass(EClassId{i}).enodes)
+                const std::vector<ENodeId> &class_enodes = getEClass(EClassId{i}).enodes;
+                for (ENodeId nid : class_enodes)
                 {
                     if (is_alive_node[nid.value])
                         continue;
-                    const ENodeId rep = findRepresentative(getENode(nid));
+                    const ENode &node = getENode(nid);
+                    bool listed_representative = false;
+                    for (ENodeId other : class_enodes)
+                    {
+                        if (!is_alive_node[other.value] || other == nid)
+                            continue;
+                        const ENode &candidate = getENode(other);
+                        if (candidate.getSig() == node.getSig() && candidate == node)
+                        {
+                            listed_representative = true;
+                            break;
+                        }
+                    }
+                    if (listed_representative)
+                        continue;
+                    const ENodeId rep = findRepresentative(node);
                     if (rep.value == UINT32_MAX)
                         Error::throw_err("[EGraph.rebuild] e-node " + std::to_string(nid.value) +
                                          " has no hashcons representative");
@@ -1356,6 +1784,9 @@ struct EGraph
         nodeToEClass = std::move(new_node_to_eclass);
         shared_hashcons.reset();
         hashcons = std::move(new_hashcons);
+        hashcons_tracks_owned = keep_hashcons;
+        owned_parents = OwnedParentIndex{};
+        merged_since_closure.clear();
 
         rebuildConstantHashIndex();
     }
@@ -1451,22 +1882,28 @@ struct EGraph
         // through getEClass(). Build the index on the first lookup so those
         // graphs retain the same lookup behavior without penalizing indexed
         // lookups thereafter.
-        if (!baseEClassIndexInitialized)
-        {
-            baseEClassToEClass.clear();
-            const size_t num_classes = getNumClasses();
-            baseEClassToEClass.reserve(num_classes);
-            for (size_t i = 0; i < num_classes; ++i)
-            {
-                EClassId cid{static_cast<uint32_t>(i)};
-                const EClass &cls = getEClass(cid);
-                if (findConst(cls.id) == cls.id && cls.base_eclass_id != BaseEClassId{})
-                    baseEClassToEClass.emplace(cls.base_eclass_id, cls.id);
-            }
-            baseEClassIndexInitialized = true;
-        }
+        ensureBaseEClassIndex();
         auto it = baseEClassToEClass.find(base_id);
         return it == baseEClassToEClass.end() ? EClassId{} : it->second;
+    }
+
+    // Builds the base id -> class index findEClassByBaseId uses (lazily
+    // built otherwise; graphs can build theirs concurrently).
+    void ensureBaseEClassIndex() const
+    {
+        if (baseEClassIndexInitialized)
+            return;
+        baseEClassToEClass.clear();
+        const size_t num_classes = getNumClasses();
+        baseEClassToEClass.reserve(num_classes);
+        for (size_t i = 0; i < num_classes; ++i)
+        {
+            EClassId cid{static_cast<uint32_t>(i)};
+            const EClass &cls = getEClass(cid);
+            if (findConst(cls.id) == cls.id && cls.base_eclass_id != BaseEClassId{})
+                baseEClassToEClass.emplace(cls.base_eclass_id, cls.id);
+        }
+        baseEClassIndexInitialized = true;
     }
 
     EClassId getENodeEClass(ENodeId enodeId) const

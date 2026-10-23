@@ -9,7 +9,9 @@ namespace plan
 class CacheFreshnessPropagator : public Propagator
 {
     std::unordered_map<BaseEClassId, std::vector<VarId>> base_to_selected_;
-    std::unordered_map<VarId, VarId> selected_to_cached_;
+    // Selection variable -> cached variable of its base (kInvalidVarId if
+    // the base is not a cache candidate), indexed by VarId.
+    std::vector<VarId> selected_to_cached_;
     bool initialized_ = false;
 
     void ensureIndex(const SearchState &state)
@@ -32,13 +34,14 @@ class CacheFreshnessPropagator : public Propagator
                     base_to_selected_[base_id].push_back(sel_vid);
             }
         }
+        selected_to_cached_.assign(state.numVars(), kInvalidVarId);
         for (const auto &[base_id, cached_vid] : state.cached_vars)
         {
             auto it = base_to_selected_.find(base_id);
             if (it == base_to_selected_.end())
                 continue;
             for (VarId sel_vid : it->second)
-                selected_to_cached_[sel_vid] = cached_vid;
+                selected_to_cached_.at(sel_vid) = cached_vid;
         }
         initialized_ = true;
     }
@@ -89,10 +92,9 @@ class CacheFreshnessPropagator : public Propagator
                 const Domain &dom = state.domains[changed];
                 if (dom.isFixed() && dom.fixedValue() == 0)
                 {
-                    auto it = selected_to_cached_.find(changed);
-                    if (it != selected_to_cached_.end())
+                    const VarId cached_vid = selected_to_cached_.at(changed);
+                    if (cached_vid != kInvalidVarId)
                     {
-                        VarId cached_vid = it->second;
                         Domain c_dom = state.domains[cached_vid];
                         if (c_dom.contains(1))
                         {
@@ -133,8 +135,11 @@ class CacheFreshnessPropagator : public Propagator
             }
         }
 
-        for (const auto &[sel_vid, cached_vid] : selected_to_cached_)
+        for (VarId sel_vid = 0; sel_vid < selected_to_cached_.size(); ++sel_vid)
         {
+            const VarId cached_vid = selected_to_cached_[sel_vid];
+            if (cached_vid == kInvalidVarId)
+                continue;
             const Domain &sel_dom = state.domains[sel_vid];
             if (sel_dom.isFixed() && sel_dom.fixedValue() == 0)
             {

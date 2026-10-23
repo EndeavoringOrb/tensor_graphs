@@ -58,9 +58,56 @@ class StartUniquePropagator : public Propagator
         return true;
     }
 
+    // The bucket-level form of removeStartVal over every fixed active start:
+    // fixed starts must be distinct, and their values leave the unfixed
+    // active starts' domains. O(A log A) instead of O(A) per fixed start.
+    bool propagateBucket(SearchState &state, uint32_t b)
+    {
+        ensureActiveStarts(state, b);
+        std::vector<std::pair<int32_t, VarId>> fixed;
+        std::vector<VarId> unfixed;
+        for (VarId st_v : active_start_vars_[b])
+        {
+            const Domain &dom = state.domains[st_v];
+            if (dom.isEmpty())
+                return false;
+            if (dom.isFixed())
+                fixed.emplace_back(dom.fixedValue(), st_v);
+            else
+                unfixed.push_back(st_v);
+        }
+        std::sort(fixed.begin(), fixed.end());
+        for (size_t i = 1; i < fixed.size(); ++i)
+            if (fixed[i].first == fixed[i - 1].first)
+                return false;
+        for (VarId st_v : unfixed)
+        {
+            Domain next = state.domains[st_v];
+            bool changed = false;
+            for (const auto &[value, var] : fixed)
+                if (next.contains(value))
+                {
+                    next.remove(value);
+                    changed = true;
+                }
+            if (!changed)
+                continue;
+            if (next.isEmpty())
+                return false;
+            state.setDomain(st_v, next);
+        }
+        return true;
+    }
+
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START); }
     StartSelectionGuard startSelectionGuard() const override { return StartSelectionGuard::FIXED_START_POSITIVE; }
+    // While a complete plan is validated, every active start is fixed: one
+    // bucket-level pass per flush replaces a scan of the bucket per start.
+    PropagationBatch propagationBatch(const SearchState &state, VarId) const override
+    {
+        return state.completing_plan ? PropagationBatch::BUCKET : PropagationBatch::NONE;
+    }
 
     std::string name() const override
     {
@@ -77,6 +124,8 @@ class StartUniquePropagator : public Propagator
             if (!dom.isFixed())
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
+            if (state.completing_plan)
+                return propagateBucket(state, b);
             EClassId cid = state.var_infos[changed].eclass_id;
             VarId sel_v = state.selected_vars[b].at(cid);
             const Domain &sel_dom = state.domains[sel_v];

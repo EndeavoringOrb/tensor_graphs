@@ -169,6 +169,7 @@ class CriticalPathPropagator : public Propagator
     bool changesDomains() const override { return false; }
 
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+    void prepare(const SearchState &state) override { ensureStaticData(state); }
 
     std::string name() const override
     {

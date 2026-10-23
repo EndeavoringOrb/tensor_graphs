@@ -865,12 +865,12 @@ class WriteAfterReadPropagator : public Propagator
                                     const std::string &cause)
     {
         return cause + "; A(cid=" + std::to_string(A.cid.value) + ", start=" +
-               state.var_infos[A.start_var].name + "=" + state.domains[A.start_var].toString() +
-               ", offset=" + state.var_infos[A.offset_var].name + "=" +
+               state.var_infos[A.start_var].name() + "=" + state.domains[A.start_var].toString() +
+               ", offset=" + state.var_infos[A.offset_var].name() + "=" +
                state.domains[A.offset_var].toString() + ", size_pages=" + std::to_string(A.size) +
                ") B(cid=" + std::to_string(B.cid.value) + ", start=" +
-               state.var_infos[B.start_var].name + "=" + state.domains[B.start_var].toString() +
-               ", offset=" + state.var_infos[B.offset_var].name + "=" +
+               state.var_infos[B.start_var].name() + "=" + state.domains[B.start_var].toString() +
+               ", offset=" + state.var_infos[B.offset_var].name() + "=" +
                state.domains[B.offset_var].toString() + ", size_pages=" + std::to_string(B.size) +
                ") mem_space=" + toString(A.mem_space);
     }

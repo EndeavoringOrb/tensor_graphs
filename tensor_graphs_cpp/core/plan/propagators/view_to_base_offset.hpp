@@ -55,6 +55,15 @@ class ViewToBaseOffsetPropagator : public Propagator
             const auto &info = state.var_infos[changed];
             if (info.type != VarType::OFFSET)
                 return true;
+            // An unselected view constrains nothing: it has no confirmed base
+            // and filterUnviableViewEnodes keeps its selection.
+            const auto sel_it = state.selected_vars[info.bucket_idx].find(info.eclass_id);
+            if (sel_it != state.selected_vars[info.bucket_idx].end())
+            {
+                const Domain &selection = state.domains[sel_it->second];
+                if (selection.isFixed() && selection.fixedValue() == 0)
+                    return true;
+            }
             return propagateEClass(state, info.bucket_idx, info.eclass_id, worklist);
         }
         else

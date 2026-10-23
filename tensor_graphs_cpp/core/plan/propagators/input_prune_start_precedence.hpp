@@ -31,7 +31,7 @@ class InputPruneStartPrecedencePropagator : public Propagator
     std::vector<EClassId> touched_inputs_;
     uint32_t input_occurrence_epoch_ = 0;
 
-    void prepareBucket(SearchState &state, uint32_t b)
+    void prepareBucket(const SearchState &state, uint32_t b)
     {
         const size_t num_classes = state.bucket_egraphs[b].classes.size();
         if (cached_eclasses_.size() <= b)
@@ -70,7 +70,7 @@ class InputPruneStartPrecedencePropagator : public Propagator
 
     // The per-bucket child tables are structural and independent, so the
     // first bucket that needs one builds them all in parallel.
-    void prepareBuckets(SearchState &state)
+    void prepareBuckets(const SearchState &state)
     {
         if (cached_eclasses_.size() < state.buckets.size())
             cached_eclasses_.resize(state.buckets.size());
@@ -130,9 +130,9 @@ class InputPruneStartPrecedencePropagator : public Propagator
                 int32_t input_start_min = state.domains[child.start_var].getMin();
                 if (input_start_min != INT32_MAX && input_start_min >= cand_start_max)
                 {
-                    conflict_reason_ = "consumer=" + state.var_infos[st_var].name +
+                    conflict_reason_ = "consumer=" + state.var_infos[st_var].name() +
                         state.domains[st_var].toString() + " alternative=" + std::to_string(cand_val) +
-                        " child=" + state.var_infos[child.start_var].name + state.domains[child.start_var].toString();
+                        " child=" + state.var_infos[child.start_var].name() + state.domains[child.start_var].toString();
                     remove_cand = true;
                     break;
                 }
@@ -243,8 +243,8 @@ class InputPruneStartPrecedencePropagator : public Propagator
                         {
                             if (in_st_dom.isEmpty())
                             {
-                                conflict_reason_ = "mandatory child=" + state.var_infos[in_st_v].name +
-                                    state.domains[in_st_v].toString() + " consumer=" + state.var_infos[st_var].name +
+                                conflict_reason_ = "mandatory child=" + state.var_infos[in_st_v].name() +
+                                    state.domains[in_st_v].toString() + " consumer=" + state.var_infos[st_var].name() +
                                     state.domains[st_var].toString() + " required-max=" + std::to_string(max_allowed_input_start);
                                 return false;
                             }
@@ -261,6 +261,15 @@ class InputPruneStartPrecedencePropagator : public Propagator
 
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::START) | varTypeMask(VarType::SELECTED); }
+    void prepare(const SearchState &state) override { prepareBuckets(state); }
+    // While a complete plan is validated, one pass over the bucket's classes
+    // per flush replaces the per-event class and consumer passes (a class's
+    // pass reads its own selection and start and its children's selections
+    // and starts, so passing every class reaches the same fixpoint).
+    PropagationBatch propagationBatch(const SearchState &state, VarId) const override
+    {
+        return state.completing_plan ? PropagationBatch::BUCKET : PropagationBatch::NONE;
+    }
     // Optional child bounds can invalidate alternatives of a mandatory parent.
     // pruneEClass itself checks whether each consumer is mandatory.
     StartSelectionGuard startSelectionGuard() const override { return StartSelectionGuard::NONE; }
@@ -282,15 +291,31 @@ class InputPruneStartPrecedencePropagator : public Propagator
                 return true;
             const auto &info = state.var_infos.at(changed);
             const uint32_t b = info.bucket_idx;
+            if (state.completing_plan)
+            {
+                for (const auto &[cid, selection_var] : state.selected_vars[b])
+                    if (!pruneEClass(state, b, cid, worklist, kInvalidVarId, selection_var))
+                        return false;
+                return true;
+            }
             const EClassId cid = info.eclass_id;
             if (!pruneEClass(state, b, cid, worklist))
                 return false;
+            // A consumer's pruning reads only a child's start minimum and
+            // whether the child is unselected (fixed to 0), which only removes
+            // it from consideration: a selection change cannot prune a
+            // consumer, and neither can the start of an unselected child.
+            if (type == VarType::SELECTED)
+                return true;
+            const Domain &selection = state.domains[state.selected_vars[b].at(cid)];
+            if (selection.isFixed() && selection.fixedValue() == 0)
+                return true;
             // A child's lower bound can invalidate a consumer alternative even
             // when that consumer's own start domain did not change.
             state.ensurePropagationState();
             const auto &consumers = state.propagation.start_precedence[b].consumers_by_cid.at(cid.value);
             for (const auto &consumer : consumers)
-                if (!pruneEClass(state, b, consumer.parent_cid, worklist))
+                if (!pruneEClass(state, b, consumer.parent_cid, worklist, consumer.start_var, consumer.selection_var))
                     return false;
             return true;
         }

@@ -11,7 +11,7 @@ Task: follow `docs/agents/targets/prefill_decode_incumbent_seq_len/target.md`. R
 
 ## Comparison table
 
-Accepted implementation: **C022 scaling**, reference `I358_c022_n14` (patch under target logs), built by `I356_c022_parallel_vars_build`. N*=**14**, first incumbent **27.899543 s**, compile **29.097 s**; all twenty-nine logits graphs exact-checked (`ok=true`); confirmations I359 (27.839 s, 28.979 s compile) and I360 (28.071 s, 29.350 s). Prior N*=12 regression `I361_c022_n12_regression` passes (24.112 s). Gates: planner oracle 48/48 (`I362`), search gap (`I363`), six native suites plus `--prune-egraph` (`I364`-`I370`). C021 (N*=12, I335, 25.744363 s) is the prior reference.
+Accepted implementation: **C037 scaling**, reference `I619_c037_n47` (patch under target logs), built by `I618_c037_costkey_build`. N*=**47**, first incumbent **28.194377 s**, compile **29.736 s**; all ninety-five logits graphs exact-checked (`ok=true`); confirmations I620 (28.173 s, 29.642 s compile) and I621 (28.276 s, 29.742 s). Prior N*=46 regression `I622_c037_n46_regression` passes (27.612 s, 0.5 s earlier than C036). Gates I623-I631 pass (oracle 48/48, search gap, seven native suites).
 
 | Run | Change | N | ok | first incumbent s | final incumbent | compile s | Verdict |
 |---|---|---|---|---|---|---|---|
@@ -124,6 +124,101 @@ Accepted implementation: **C022 scaling**, reference `I358_c022_n14` (patch unde
 | I359_c022_n14_confirm1 | C022 identical source/build | 14 | true | 27.839048 | 649.000000 | 28.979 | confirmation 1 passes |
 | I360_c022_n14_confirm2 | C022 identical source/build | 14 | true | 28.071328 | 649.000000 | 29.350 | confirmation 2 passes |
 | I361_c022_n12_regression | C022 | 12 | true | 24.112437 | 28.246435 | 25.548 | prior N*=12 no regression (1.6 s earlier than C021) |
+| I372_c023_n16 | **C023**: incremental congruence closure in `EGraph::rebuild` (only e-nodes with a non-canonical child are re-hashed) | 16 | true | 26.240398 | 32.487766 | 27.640 | first N=16 pass |
+| I373_c023_n17 | C023 | 17 | true | 28.296102 | 210.009293 | 29.765 | **accepted scaling change, N*=17**; all 35 graphs exact |
+| I374_c023_n17_confirm1 | C023 identical source/build | 17 | true | 28.133551 | 210.009293 | 29.428 | confirmation 1 passes |
+| I375_c023_n17_confirm2 | C023 identical source/build | 17 | true | 28.486986 | 210.009293 | 29.850 | confirmation 2 passes |
+| I376_c023_n14_regression | C023 | 14 | true | 23.418888 | — | 25.369 | prior N*=14 no regression (4.5 s earlier than C022) |
+| I387_c024_n18 | C024 step 1: propagator work on unselected classes trimmed (see C024 notes) | 18 | false | after deadline | none | 30.056 | miss: 18 regions on 16 threads merged two groups, partial saturation 9.2 s |
+| I389_c024_n18 | **C024** + one saturation group per output region up to 4x hardware threads | 18 | true | 27.985398 | 223.352 | 29.511 | **accepted scaling change, N*=18**; all 37 graphs exact |
+| I390_c024_n18_confirm1 | C024 identical source/build | 18 | true | 28.083753 | 223.352 | 29.606 | confirmation 1 passes |
+| I391_c024_n18_confirm2 | C024 identical source/build | 18 | true | 27.887367 | 223.352 | 29.439 | confirmation 2 passes |
+| I392_c024_n17_regression | C024 | 17 | true | 26.135702 | — | 27.531 | prior N*=17 no regression (2.2 s earlier than C023) |
+| I403_c025_n19 | C025 step 1: StartPrecedence reschedules starts only after a real selection change; PearceKelly dense parent lists | 19 | true | 28.484578 | — | 30.001 | passes with no margin; not claimed |
+| I405_c025_n19 | + primal heuristic forbids cached views of differently cached bases (first trial plan no longer rejected) | 19 | true | 28.168934 | 348.603943 | 29.759 | passes, 0.24 s margin |
+| I407_c025_n19 | **C025** + lazy relaxation signatures, parallel alias check | 19 | true | 27.796348 | 348.603943 | 29.222 | **accepted scaling change, N*=19**; all 39 graphs exact |
+| I408_c025_n19_confirm1 | C025 identical source/build | 19 | true | 27.833079 | 348.603943 | 29.265 | confirmation 1 passes |
+| I409_c025_n19_confirm2 | C025 identical source/build | 19 | true | 27.543056 | 348.603943 | 29.019 | confirmation 2 passes |
+| I410_c025_n18_regression | C025 | 18 | true | 26.051405 | — | 27.708 | prior N*=18 no regression (1.9 s earlier than C024) |
+| I420_c026_alloc_build | C026 build (first attempt) | — | — | — | — | — | build failed the repository lint (ENode reference held across e-graph mutation in materializeFusedCandidates); I421_c026_n20 ran on an unrecorded build of that source and is superseded |
+| I4223_c026_n20 | **C026**: fewer allocations (interned ENode names/origins/shapes/strides/engines, reused buffers; see C026 notes), built by I422 | 20 | true | 26.637883 | 443.285889 | 28.184 | first N=20 pass (run id typo for I423) |
+| I4224_c026_n21 | C026 | 21 | true | 27.701424 | 420.521912 | 29.425 | **accepted scaling change, N*=21**; all 43 graphs exact (run id typo for I424) |
+| I425_c026_n21_confirm1 | C026 identical source/build | 21 | true | 27.577033 | 420.521912 | 29.235 | confirmation 1 passes |
+| I426_c026_n21_confirm2 | C026 identical source/build | 21 | true | 27.586768 | 420.521912 | 29.209 | confirmation 2 passes |
+| I427_c026_n19_regression | C026 | 19 | true | 25.460740 | — | 26.941 | prior N*=19 no regression (2.3 s earlier than C025) |
+| I438_c027_n22 | **C027**: EClass shape/strides interned (`InternedVector`) | 22 | true | 27.330481 | 446.980042 | 29.064 | **accepted scaling change, N*=22**; all 45 graphs exact |
+| I439_c027_n23 | C027 frontier | 23 | false | none | none | 30.060 | budget miss |
+| I440_c027_n22_confirm1 | C027 identical source/build | 22 | true | 27.754192 | 446.980042 | 29.465 | confirmation 1 passes |
+| I441_c027_n22_confirm2 | C027 identical source/build | 22 | true | 27.790077 | 446.980042 | 29.576 | confirmation 2 passes |
+| I442_c027_n21_regression | C027 | 21 | true | 26.444695 | — | 28.137 | prior N*=21 no regression (1.3 s earlier than C026) |
+| I453_c028_n26 | C028 step 1 (I452 build): first incumbent from the root heuristic on unpropagated domains, validated in a plan-restricted state | 26 | true | 23.364295 | 652.285339 | 24.654 | passes |
+| I456_c028_n30 | same | 30 | true | 28.108505 | 45.403740 | 29.769 | passes (restricted propagation 4.9 s) |
+| I458_c028_n32 | **C028** + StartUnique/WriteAfterReadStart batched per bucket while completing a plan (I457 build) | 32 | true | 26.034607 | 43.419163 | 27.698 | passes |
+| I459_c028_n36 | C028 | 36 | false | none | none | 30.089 | miss: search done 27.45 s, killed while writing |
+| I460_c028_n34 | C028 | 34 | true | 27.794994 | 605.776917 | 29.575 | **accepted scaling change, N*=34**; all 69 graphs exact |
+| I461_c028_n34_confirm1 | C028 identical source/build | 34 | true | 27.899348 | 605.776917 | 29.594 | confirmation 1 passes |
+| I462_c028_n34_confirm2 | C028 identical source/build | 34 | true | 28.038950 | 605.776917 | 29.762 | confirmation 2 passes |
+| I463_c028_n22_regression | C028 | 22 | true | 19.329610 | — | 20.692 | prior N*=22 no regression (8.0 s earlier than C027) |
+| I474_c029_n36 | C029 step 1 (I473 build): session skips reloading an unchanged records file | 36 | true | 28.063625 | 687.363281 | 29.731 | passes, 0.27 s margin |
+| I476_c029_n37 | **C029** + twin relaxation buckets shared, RequiredReachability idle while completing a plan, per-thread cache-alternative memo (I475 build) | 37 | true | 27.549184 | 693.133911 | 29.333 | **accepted scaling change, N*=37**; all 75 graphs exact |
+| I477_c029_n38 | C029 | 38 | false | none | none | 30.135 | budget miss |
+| I478_c029_n37_confirm1 | C029 identical source/build | 37 | true | 27.768410 | 693.133911 | 29.677 | confirmation 1 passes |
+| I479_c029_n37_confirm2 | C029 identical source/build | 37 | true | 27.896376 | 693.133911 | 29.705 | confirmation 2 passes |
+| I480_c029_n34_regression | C029 | 34 | true | 25.970638 | — | 27.918 | prior N*=34 no regression (1.8 s earlier than C028) |
+| I491_c030_n38 | C030 step 1 (I490 build): congruence closure follows parent lists after the first round | 38 | false | none | none | 30.055 | miss |
+| I493_c030_n38 | + parallel base indexes, cache e-nodes and compiled graphs (I492 build) | 38 | true | 27.860941 | 73.399780 | 29.942 | passes, 0.06 s margin |
+| I495_c030_n38 | + parallel plan serialization (I494 build) | 38 | true | 27.693157 | 73.399780 | 29.649 | passes |
+| I497_c030_n38 | **C030** + twin buckets share heuristic rounds (I496 build) | 38 | true | 26.879646 | 73.399780 | 28.386 | passes |
+| I498_c030_n39 | C030 | 39 | true | 27.543094 | 77.747307 | 29.268 | **accepted scaling change, N*=39**; all 79 graphs exact |
+| I499_c030_n39_confirm1 | C030 identical source/build | 39 | true | 27.564896 | 77.747307 | 29.485 | confirmation 1 passes |
+| I500_c030_n39_confirm2 | C030 identical source/build | 39 | true | 27.590890 | 77.747307 | 29.127 | confirmation 2 passes |
+| I501_c030_n37_regression | C030 | 37 | true | 25.123486 | — | 26.466 | prior N*=37 no regression (2.4 s earlier than C029) |
+| I512_c031_n40 | C031 step 1 (I511 build): e-node debug origins only with TG_ENODE_ORIGINS, probes skip re-interning unchanged vectors | 40 | true | 27.162854 | 76.352119 | 28.656 | passes |
+| I513_c031_n41 | same | 41 | false | — | — | 28.988 | **crash**: double free after the plan was written (exit -6); parallel buildCompiledGraph race (see C030 defect) |
+| I515_c031_n40 | **C031** + compiled graphs built serially again (I514 build) | 40 | true | 27.103334 | — | 29.229 | passes |
+| I516_c031_n41 | C031 | 41 | true | 27.549989 | — | 29.598 | **accepted scaling change, N*=41**; all 83 graphs exact |
+| I517_c031_n41_confirm1 | C031 identical source/build | 41 | true | 27.477222 | — | 29.489 | confirmation 1 passes |
+| I518_c031_n41_confirm2 | C031 identical source/build | 41 | true | 27.537306 | — | 29.525 | confirmation 2 passes |
+| I519_c031_n39_regression | C031 | 39 | true | 27.051803 | — | 29.382 | prior N*=39 no regression (0.5 s earlier than C030) |
+| I530_c032_n42 | **C032**: per-chunk cost-memo answers, shared fusion selections, restricted engine freed in the background | 42 | false | none | none | 30.145 | miss |
+| I531_c032_n41 | C032 | 41 | true | 27.005217 | — | 28.944 | **accepted speed change at N*=41** (0.54 s earlier than C031) |
+| I532_c032_n41_confirm1 | C032 identical source/build | 41 | true | 27.078229 | — | 29.152 | confirmation 1 passes |
+| I533_c032_n41_confirm2 | C032 identical source/build | 41 | true | 27.037847 | — | 29.090 | confirmation 2 passes |
+| I544_c033_n42 | **C033**: sweep-filter parent lists kept across the sweeps of a saturation call | 42 | true | 27.534729 | — | 29.535 | **accepted scaling change, N*=42**; all 85 graphs exact |
+| I545_c033_n42_confirm1 | C033 identical source/build | 42 | true | 27.563193 | — | 29.582 | confirmation 1 passes |
+| I546_c033_n42_confirm2 | C033 identical source/build | 42 | true | 27.654769 | — | 29.865 | confirmation 2 passes |
+| I547_c033_n41_regression | C033 | 41 | true | 26.599438 | — | 28.530 | prior N*=41 no regression (0.4 s earlier than C032) |
+| I558_c034_n43 | C034 candidate (I557 build): cost model loaded concurrently with the model graph build; pre-planAll timeline markers | 43 | false | none | none | 30.093 | miss (pre-planAll 2.25 -> 2.11 s at N=42: the graph build takes only 0.14 s, the 1.1 s records parse is the fixed loader) |
+| I560_c034_n43 | + compiled graphs built in parallel again, Debug::BaseRefVerifier::registerBase locked (I559 build) | 43 | false | none | none | 30.054 | miss; graph build 0.96 -> 0.51 s |
+| I562_c034_n43 | + no lock around kernel view inference (I561 build) | 43 | false | none | none | 30.055 | miss |
+| I564_c034_n43 | + VarInfo names formatted on demand (I563 build) | 43 | true | 28.057661 | — | 29.959 | passes, 0.04 s margin |
+| I566_c034_n43 | **C034** + plan file written while arenas and constants are set up (I565 build) | 43 | true | 27.899814 | — | 29.686 | **accepted scaling change, N*=43**; all 87 graphs exact |
+| I567_c034_n43_confirm1 | C034 identical source/build | 43 | true | 28.047107 | — | 29.785 | confirmation 1 passes |
+| I568_c034_n43_confirm2 | C034 identical source/build | 43 | true | 28.008164 | — | 29.853 | confirmation 2 passes |
+| I569_c034_n42_regression | C034 | 42 | true | 26.920283 | — | 28.550 | prior N*=42 no regression (0.6 s earlier than C033) |
+| I580_c035_n44 | C035 step 1 (I579 build): StartPrecedence / InputPruneStartPrecedence run one pass over the bucket per flush while completing a plan | 44 | false | none | none | 30.109 | miss |
+| I582_c035_n44 | + ConsumerStartPrecedence bucket pass, extractCovering reuses single-child row values (I581 build) | 44 | true | 28.184389 | — | 30.000 | passes with no margin; not claimed |
+| I584_c035_n44 | **C035** + cheaper relaxation build (debug flag read once, dense class index), base registrations batched per graph (I583 build) | 44 | true | 28.037186 | — | 29.635 | **accepted scaling change, N*=44**; all 89 graphs exact |
+| I585_c035_n44_confirm1 | C035 identical source/build | 44 | true | 28.032700 | — | 29.518 | confirmation 1 passes |
+| I586_c035_n44_confirm2 | C035 identical source/build | 44 | true | 28.016230 | — | 29.521 | confirmation 2 passes |
+| I587_c035_n43_regression | C035 | 43 | true | 27.430076 | — | 28.863 | prior N*=43 no regression (0.5 s earlier than C034) |
+| I598_c036_n46 | **C036**: owned-parent index kept between congruence closures (rebuild visits only parents of merged-away classes) | 46 | true | 28.112762 | — | 29.608 | **accepted scaling change, N*=46**; all 93 graphs exact |
+| I599_c036_n47 | C036 | 47 | false | none | none | 30.073 | miss |
+| I600_c036_n46_confirm1 | C036 identical source/build | 46 | true | 28.176634 | — | 29.742 | confirmation 1 passes |
+| I601_c036_n46_confirm2 | C036 identical source/build | 46 | true | 28.105761 | — | 29.573 | confirmation 2 passes |
+| I602_c036_n44_regression | C036 | 44 | true | 27.505821 | — | 29.082 | prior N*=44 no regression (0.5 s earlier than C035) |
+| I612_c037_cycles_build | C036 + cycle-component counts only after the last pass (others under TG_CYCLE_DIAGNOSTICS) + valid empty owned-parent index when no owned e-nodes | — | — | — | — | — | build ok; N=46 diagnostic reduction 0.23 s shorter, same cost |
+| I613_c037_n47 | I612 build | 47 | false | none | none | 30.207 | miss |
+| I614_c037_rounds_build | I612 + primal rounds reuse a bucket's selection/final plan when allowed, used and forbidden sets are unchanged (const deterministic inputs; identical plans) | — | — | — | — | — | build ok; N=46 early primal 5.01 -> 4.91 s, same cost 80.8953 |
+| I615_c037_n47 | I614 build | 47 | false | none | none | 30.030 | miss by 0.03 s |
+| I616_c037_selptr_build | I614 + FusionRule selection memo hands out plain pointers (shard entries are never removed or replaced) instead of copying shared pointers | — | — | — | — | — | build ok; N=46 diagnostic: identical group sizes and cost, partial saturation -0.07 s (noise) |
+| I617_c037_n47 | I616 build | 47 | false | none | none | 30.205 | miss |
+| I618_c037_costkey_build | I616 + planner cost memo keyed by two 64-bit hashes of the arguments instead of a byte-string key | — | — | — | — | — | build ok; N=46 diagnostic reduction -0.29 s, identical search buckets and cost |
+| I619_c037_n47 | **C037** (I618 build) | 47 | true | 28.194377 | — | 29.736 | **accepted scaling change, N*=47**; all 95 graphs exact |
+| I620_c037_n47_confirm1 | C037 identical source/build | 47 | true | 28.172919 | — | 29.642 | confirmation 1 passes |
+| I621_c037_n47_confirm2 | C037 identical source/build | 47 | true | 28.276296 | — | 29.742 | confirmation 2 passes |
+| I622_c037_n46_regression | C037 | 46 | true | 27.611915 | — | 29.099 | prior N*=46 no regression (0.5 s earlier than C036) |
+| I632_c038_standin_build | C037 + compaction finds a listed duplicate's representative among its own class's alive e-nodes before a hashcons lookup (congruent e-nodes share a class; same stand-ins and the same no-representative error) | — | — | — | — | — | build ok; N=46 diagnostic: identical search buckets and cost, compaction stand-in step 4.0 -> ~0 CPU-s of lookups, reduction wall -0.05 s |
 
 I094/I095 tested sharing the root primal's selection, cache covering, and list scheduling among buckets only when relaxation signatures, base IDs, lambdas, and weighted status all matched. The N=2 exact check passed, but the first incumbent was 0.10 s slower than C007's reference (within run variance); N=3 still reached search at 28.834 s, essentially the C007 28.735 s result. That candidate was reverted.
 
@@ -181,14 +276,41 @@ C013 (I178-I182) addresses graph assembly and serialization overhead as bucket c
 | 14 (C021) | 29 | 8.8 (partial) +1.6 reconcile | 3.87 | 5.38 | not reached in budget | none |
 | 13 (C022) | 27 | 7.98 (partial) +1.12 reconcile | 4.29 (+0.48 setup) | 4.78 | ~6.2 (0.36 rejected + tryPlan 3.84) | 26.424315 |
 | 14 (C022) | 29 | 8.6 (partial) +1.17 reconcile | 4.56 (+0.53 setup) | 4.97 | ~6.6 (tryPlan 4.15) | 27.899543 |
+| 14 (C023, diag) | 29 | 5.4 (partial) +0.8 reconcile | 3.1 (+0.5 setup) | ~5.0 | ~6.5 | (diagnostic compile 25.3 s) |
+| 17 (C023) | 35 | 6.8 (partial) +1.0 reconcile | 3.8 (+0.56 setup) | 5.96 | ~8.1 (rejected 0.44 + tryPlan 4.79) | 28.296102 |
+| 18 (C024) | 37 | 7.4 (partial, 18 groups) +1.1 reconcile | ~4.3 (+0.6 setup) | 6.0 | ~6.0 (rejected 0.54 + tryPlan 3.4) | 27.985398 |
+| 19 (C025) | 39 | 6.8 (partial, 19 groups) +1.1 reconcile | 4.3 (+0.75 setup) | 5.49 | 2.6 construction + 4.26 tryPlan | 27.796348 |
+| 19 (C026, diag) | 39 | 6.4 (partial) +0.75 reconcile | 3.2 (+0.76 setup) | 5.4 | ~2.4 construction + ~4.2 tryPlan | (diag compile 26.9 s; search start 12.82 s vs 14.96 s C025) |
+| 34 (C028) | 69 | ~11.8 (partial, 34 groups) +0.8 reconcile | ~4.7 (+1.1 setup) | skipped (early incumbent) | early primal ~5.9 (restricted validation ~2.2) | 27.794994 |
 
 ## Resume checkpoint
 
-- Accepted implementation: **C022 scaling**, N*=14; I356 build, I358 exact N=14 reference, I359/I360 confirmations, I361 N=12 regression; gates I362-I370 all pass.
+- Accepted implementation: **C037 scaling**, N*=47; I618 build, I619 exact N=47 reference, I620/I621 confirmations, I622 N=46 regression; gates I623-I631 pass.
+- C037 contents (on top of C036): (1) reduction computes cyclic-component counts only after the last cycle pass (the one that decides DAG buckets; the others under TG_CYCLE_DIAGNOSTICS); (2) a graph with no owned e-nodes starts with a valid empty owned-parent index; (3) primal rounds reuse a bucket's selection/final plan when the allowed, used and forbidden sets are unchanged (extractSelection/extractCovering are deterministic in const inputs); (4) the FusionRule selection memo hands out plain pointers (shard entries are never removed or replaced); (5) the planner cost memo is keyed by two independent 64-bit hashes of every argument (as the selection and op-match memos are) instead of a byte-string key (reduction -0.29 s at N=46); (6) saturation groups log their owned e-node count.
+- C036 contents (on top of C035): the EGraph keeps its owned-e-node parent index (`OwnedParentIndex`: per class, the owned e-nodes listing it as a stored child) between congruence closures, and `merge` records each merged-away class (`merged_since_closure`). A closure indexes the e-nodes added since, then visits only the parents of classes merged away since the last one (appending each such class's list to its root's), instead of scanning every owned e-node for a non-canonical child (the scan was ~3.5% of all CPU, run at every rebuild); only merges make an e-node stale, so the stale set is the same. The index is reset by copying, freezing, clearing, materializing (owned positions shift; missing this crashed compaction in a diagnostic) and compaction. N=40: identical group e-node counts, search buckets and cost; compile 28.28 -> 25.93 s (with C035).
+- C035 contents (on top of C034): (1) while completing a plan, StartPrecedence, InputPruneStartPrecedence and ConsumerStartPrecedence run one pass over the bucket's classes per flush (PropagationBatch::BUCKET; each class's pass reads only its own selection/start and its children's or consumers' domains, so passing every class reaches the same fixpoint); restricted validation at N=43 3.00 -> 2.6 s; (2) extractCovering reads a kept row value for single-child alternatives and builds the winner's row once (row values summed exactly as valueOf; identical choices); (3) buildRelaxationBucket reads TG_DEBUG_BOUND once and maps classes through a dense array; (4) buildCompiledGraph sends its base registrations to Debug::BaseRefVerifier in one locked batch per graph (graph build 0.49 -> 0.14 s at N=43). N=43 diagnostic compile 28.9 s.
+- C034 contents (on top of C033): (1) **root cause of the C030 heap corruption**: `buildCompiledGraph` registers every class's base in the global `Debug::BaseRefVerifier` map, unsynchronized; `registerBase` now locks, and compiled graphs are built in parallel again (gdb stress at N=41: crashed on the first run twice before, then 9 clean runs; kernel view inference works on a local graph and needs no lock); graph build 0.96 -> 0.49 s at N=43; (2) `VarInfo::name()` formats the diagnostic name on demand instead of storing one string per variable (search setup 0.80 -> 0.56 s at N=43); (3) `SearchState::commitAllBucketVariables` commits buckets' variables in parallel (same ids, domains, dirty order, empty/fixed-offset indexes; revision counters advanced as addVar's would); (4) `Session::compile` writes the plan file on a thread (`plan(doSaturate, &persisted)`) while arenas and constants are set up (both only read the plan), joining before `compiled`; (5) the cost model is loaded on a thread while the model graph is built (LLMSession; Session owns its CostModel through a pointer; the stamp is taken before the parse), and pre-planAll timeline markers.
+- C033 contents (on top of C032): saturateRules' sweep-filter parent lists (child class -> parent e-nodes) persist across the sweeps of one call: each sweep indexes only newly added e-nodes and appends the list of every class that stopped being canonical to its root's list (same canonical (class, parent) pairs as re-indexing every e-node, so identical filter depths); was a full rebuild over all ~265k group e-nodes per sweep (~3% of all CPU). N=40: partial saturation 12.09 -> 11.71 s, identical group e-node counts and cost.
+- C032 contents (on top of C031): (1) computeENodeInfos chunks keep their own argument buffers, memo key buffer and cost answers (`memoizedCost` key_scratch/local_costs: repeated layer queries skip the shared lock; thread_local accesses cost __tls_get_addr calls in the module); (2) FusionRule's fused-candidate selection memo is process-wide (64 locked shards behind a per-thread cache) instead of per thread, so saturation groups share selections (same 128-bit key as before); (3) validateRestricted frees its restricted engine on a background thread (~0.3 s at N=40). N=40 diagnostic: reduction 5.40 -> 5.15 s, early primal 5.51 -> 5.23 s; same group e-node counts and cost.
+- C031 contents (on top of C030): (1) compiled graphs are built serially again (the C030 parallel loop raced, see below); (2) addOpToEGraph records e-node debug origins only with TG_ENODE_ORIGINS=1 (diagnostic-only field; formatting/interning it per added node was ~2% of saturation); (3) ENode::assignFields compares the probe's interned shape/strides/engines with the new values before re-interning (probe reuse in kernel loops); partial saturation at N=38 12.29 -> 11.70 s with identical group e-node counts and cost.
+- C030 contents (on top of C029): (1) `closeCongruenceIncrementally` scans every owned e-node only in its first round; later rounds visit only the owned parents of the classes the previous round merged away (per-class parent lists built once when a second round is needed; a merged-away class's list is appended to the survivor's), then canonicalizes nodeToEClass once; same classes/e-nodes (verified at N=36: identical group e-node counts, search variables and cost); the per-round full rescans had been ~10% of all CPU; (2) bucket base-id indexes are built concurrently before the cache-candidate loop, CACHE e-nodes are added to bucket graphs in parallel, compiled graphs are built in parallel (each reads only its const e-graph/extraction/infos), and plan blocks are serialized per graph in parallel then written in order (same bytes); (3) SearchState::reserveVariables before committing bucket variables, VarInfo moved into addVar; (4) in buildRootPrimalPlans a bucket whose relaxation is a copy of an earlier one with the same weight takes that bucket's estimates, selection, covering, alias decisions and schedule instead of recomputing them (deterministic in those inputs); early primal at N=38 6.49 -> 5.70 s, same cost.
+- C030 defect found later: building compiled graphs in parallel was not thread-safe (kernel view inference/matching through temporary Graphs); at N=41 (I513) it corrupted the heap (`double free or corruption` after the plan was written, exit -6; a gdb run crashed in Planner::buildCompiledGraph on a pool thread). C031 restores the serial loop; four N=41 gdb runs were then clean. C030's accepted runs passed their exact checks, but C031 replaces it as the reference.
+- C029 contents (on top of C028): (1) `Session::plan` reloads the cost records only if the file's path, size or write time changed since the constructor loaded it (the same file was parsed twice, ~1.1 s each at 167k records; pre-planAll time at N=34 2.58 -> 1.49 s; the cost model and records are unchanged); (2) buildRootPrimalPlans builds one relaxation per group of buckets with the same shared e-graph owner, root, reachable classes, e-node costs/views and selection domains (what buildRelaxationBucket and markCacheAlternatives read) and copies it to the others with their selection variables (prefill/decode twins before root propagation); early primal at N=36 6.21 -> 5.33 s; (3) RequiredReachability returns at once while completing a plan (it only narrows an unfixed root selection; every selection is fixed first), so the restricted state never builds its index; (4) markCacheAlternatives keeps a per-thread memo in front of its locked one.
+- Where the time goes at N=41/42 (C032): pre-planAll ~1.9 s (one 1.1 s records parse is the fixed cost model's loader), full saturation 0.8 s, partial saturation ~11.4 s (41 groups on 16 cores: CPU-bound, so only less CPU helps, not more inner parallelism), reconcile+cache ~1.7 s, reduction ~5.1 s (computeENodeInfos ~45%, compaction ~35% of its CPU), setup ~0.8 s, early primal ~5.2 s (construction ~2.5 s, restricted validation ~2.5 s serial), extraction+write ~1.4 s. CPU split (N=40, all threads): saturation ~50% (fusion materialization 30% of it, sweep loop/filter 14%, fusion matching 8%, region computation 6%, copy-chain rules 6%), reduction ~25%.
+- Next ideas: incremental sweep-filter parent index in saturateRules (rebuilt over all ~265k group e-nodes each sweep, ~3% of all CPU); avoid materializing fused candidates already present; one compaction instead of two in reduction; MemoryNoOverlap bucket batching while completing a plan (~25% of restricted validation); share reduced graphs / heuristic work across near-identical middle groups (the only route to large N; needs a checkable equivalence argument).
+- C028 contents (on top of C027): (1) **early incumbent before root propagation**: `SearchEngine::solve` (when the planner sets `add_validation_propagators`) pushes the root node open at bound 0, samples the gap, then `runEarlyPrimal` builds the root heuristic's plans on the unpropagated domains (a diagnostic showed the heuristic picks the same plan with or without root propagation: predicted 420.521 vs 420.522 at N=21) and validates each with `validateRestricted` until one holds; root propagation and everything after it run only if about `kRootSecondsPerVar` (2.5 us) per variable fits before the deadline, else the early incumbent is kept (gap and volume reported as at a deadline). A root contradiction after a validated incumbent throws. The post-root heuristic validates only starts predicted to beat the incumbent. (2) **restricted validation**: `SearchState::restrictedTo(classes)` builds a state over the same buckets, shared e-graphs, enode infos and cache candidates (cache variables keep their domains) with variables only for the plan's active classes plus every class of a cached base (all in reachable order); selections are fixed to the plan (0 for inactive cached-base classes, so CacheFreshness rejects a plan that leaves a cached base unselected), ranks follow dispatch order, and `completeFixedPlan` (the propagate/disjoint-offset/complete half of tryPlan, now shared) completes it with `addValidationPropagators`: every constraint propagator except StartRankWindow (root symmetry breaking: it restricts which of equivalent schedules search visits, not validity) and the bound-only propagators (CriticalPath, EngineWorkload, StartRunMakespan, RelaxationBound). A selected alternative whose child is not active is rejected explicitly (the restricted state has no variable for that child). Soundness: every constraint of the full state over the plan's classes is present and checked on a fully fixed assignment; constraints of unselected classes in the full state only canonicalize their irrelevant coordinates (UnselectedStartOffset) or exclude them from consideration (consumers skip fixed-0 children), except the cached-base requirement, which the restricted state keeps; the incumbent's extraction comes from the restricted state over the same e-graphs, and the exact check runs every graph. When root propagation does run (small N), it must not contradict the incumbent. (3) While completing a plan, StartUnique (bucket pass: fixed active starts distinct, their values removed from unfixed ones) and WriteAfterReadStart run once per bucket per flush (PropagationBatch::BUCKET) instead of per start; restricted propagation at N=21 2.65 -> 1.16 s. (4) Structural propagator indexes (`Propagator::prepare`, ensurePropagationState) are built concurrently before root propagation; ensurePropagationState resizes its per-variable arrays and deduplicates lists in parallel. At N=34 the first incumbent arrives ~6 s after search start with no root propagation.
+- C027 contents (on top of C026): `EClass::shape`/`strides` are `InternedVector` values (a pointer into the intern table with the read-only vector interface, implicit conversion to `const std::vector<T>&`, assignment interns; `toString` overload), so class copies (copy-on-write materialization in reconcile, getMutableEClass, compaction) copy only the e-node list. N=21 diagnostic: search start 13.92 -> 12.75 s (reconcile 0.84 -> 0.51 s, reduction 3.62 -> 3.11 s); same plan cost.
+- C026 contents (on top of C025): allocation reduction (an LD_PRELOAD jemalloc diagnostic at N=19 was 3.7 s faster, 2.9 s of it before search, so glibc malloc time was the target): (1) ENode stores its op name and debug origin as pointers into a global intern table (`internString`, 64 locked shards behind a per-thread cache, never freed) and its shape, strides and engine list as interned vectors (`internVector`; engines compared including their supported memory spaces), so copying or building an e-node allocates only its children (and a non-empty content hash); equality compares interned pointers (engine lists fall back to the old index/type comparison); signatures still hash contents; the constructor takes these by const reference; (2) Tarjan in `findCyclicComponents` keeps only cyclic components (one reused scratch vector, no per-singleton allocation); (3) `memoizedCost` builds its key in a thread-local buffer; `computeENodeInfos` reuses thread-local argument vectors; (4) `materializeFusedCandidates` reads the old node's interned shape/strides/origin instead of copying them and reuses one children buffer. Search start at N=19: 14.96 -> 12.82 s (reduction 4.41 -> 3.20 s, reconcile 1.09 -> 0.75 s); same plan cost.
+- C025 contents (on top of C024): (1) `SearchState::domainEverChanged` (per-variable flag set by setDomain, never cleared); StartPrecedence reschedules a class's own and its children's start variables after a SELECTED event only if that selection domain ever changed: every variable is dirty from addVar, so on its initial event the starts have seen only this selection (root START events at N=14: 1.74M -> ~1.0M); root propagation 6.0 -> 5.2 s at N=18; (2) PearceKellyCycle keeps per-class parent lists (vector indexed by class) that carry the parent's selection variable (no hash lookups in the ancestor walk); (3) primal heuristic: a cached class selected as a view of a class with another cached base cannot be placed (each cached base gets its own offset; a view shares its base's), so such a view is forbidden in that bucket and selection repeats (`ForbiddenAlternatives`, extractSelection/extractCovering skip them); if the bucket's root could then not be produced, the base leaves the cache set instead. The first trial plan (the [0.5,0.5] weighting) was always rejected by ViewSelectOffset for this reason (KV-cache [4,N,256] as a RESHAPE of a cached [1,4,N,256] in bucket 0); now it validates, so the first incumbent is that plan (higher cost than the [0.6,0.4] plan C024 happened to validate second); (4) relaxation signatures are computed only for region-estimate starts (cheap estimates cost less than the signatures); the alias check runs per bucket in parallel.
+- C024 contents (on top of C023): (1) InputPruneStartPrecedence and StartPrecedence skip their consumer loops on SELECTED events and skip START events of classes fixed unselected: a consumer's pruning reads only a child's start minimum and whether it is fixed to 0, which only removes it from consideration, so these calls could never change a domain; consumer loops pass the consumer entry's stored selection/start variables instead of two hash lookups; (2) ViewToBaseOffset returns at once for an unselected view (it has no confirmed base and filterUnviableViewEnodes keeps a fixed-0 selection); (3) EngineWorkload recomputes a bucket's bound only when the variable had or gains a costed selected alternative (every bound component writer calls updateLowerBoundBucket itself); (4) CacheFreshness's selection->cached index is a dense VarId array; (5) partial saturation uses one group per distinct output region up to 4x hardware threads (was capped at hardware threads: at N=18 two merged groups took 9.2 s vs 7.4 s with 18 groups). tryPlan at N=17: 4.79 -> 3.32 s; N=14 trial-plan events are 96% unselected classes (2.97M of 3.1M).
+- C023 contents (on top of C022): `EGraph::rebuild` keeps the hashcons between calls (`hashcons_tracks_owned`, maintained by addENode, freeze/clear and compaction) and closes congruence incrementally (`closeCongruenceIncrementally`): only owned e-nodes with a non-canonical child leave the hashcons, are re-canonicalized and looked up again, repeated while merges happen. Same classes and distinct e-nodes as the full re-hash (verified at N=14: identical per-group e-node counts and per-bucket variable counts); only which of two congruent e-nodes is the hashcons representative can differ. Middle-group rebuild 3.4 s -> 0.43 s; partial saturation 8.9 -> 5.4 s at N=14.
 - C022 contents (on top of C021): (1) `ThreadPool::parallel_for` callers spin 50 us, then block on a per-call condition variable signalled by the worker that completes the last task (was: `yield` loop, ~400 samples of `sched_yield` in saturation rebuilds); (2) trial plans the heuristic prices at infinity are not validated; ParentRemoval returns early while completing a trial plan whose bucket selections are all fixed (checked once per selection revision): a fixed parent alternative with an unselected child is then a conflict SelectionChildren reports; (3) `reconcileBaseEqualities` rebuilds a graph after round 1 only if that round merged classes or retagged a scatter node; (4) `SearchState::addAllBucketVariables`: reachable classes and variable descriptions per bucket in parallel, `addVar` in bucket order (identical ids; START selection index translated by the bucket's first id), per-bucket maps filled in parallel; `addBucketVariables` keeps the single-bucket path for tests.
 - C021/C020/C019 contents as in their notes (glibc malloc tuning, Knuth heuristic DP, trial-plan bound skip, parallel root setup, compaction stand-in fix, one saturation group per output region).
 - N=14 phases (I358): partial saturation 8.6 s (groups for middle t ~7-8 s each under contention), reconcile 1.17 s, cache 0.6 s, reduction ~4.0 s, setup 0.53 s, root propagation 4.97 s, primal build ~2.4 s, tryPlan 4.15 s, extraction+write ~1.3 s; compile 29.1 s.
-- Working tree / build: C022 built (I356). No running processes.
+- Working tree / build: C037 + compaction same-class representative (I632 build, not yet evaluated). Tried and reverted: pre-forbidding aliasing views before the primal rounds (leaves buckets with only infinite-cost plans); computing the root-maintenance check for all buckets in parallel (the serial loop stops at the first unmaintained bucket; parallel was 0.9 s slower); hashing computeENodeInfos cost queries straight from the e-graph to skip argument copies (identical, no measurable gain: reduction is ~76 CPU-s on 16 threads and bandwidth-bound). Measured (N=46, TG_DEBUG_COMPACT diagnostic, removed): 94 compactions take ~22 CPU-s (moving e-nodes 11.5, hashcons rebuild 3-4, alive/stand-in 6.8 of which hashcons lookups 4.0); the restricted plan validation propagates 576k variables serially in 1.95 s. No running processes. Next run id: I633.
+- Scaling bound (measured, N=20 and N=46 diagnostics): a middle saturation group is ~266k e-nodes of which ~184k are owned (shared base ~82k), the same at N=20 and N=46; each bucket's reduced e-graph averages ~82k e-nodes and the search has ~112k variables per bucket (10.4M at N=46, 93 buckets). At N=32768 (65,537 buckets) per-bucket state would be ~5.4e9 e-nodes and ~7.3e9 search variables, against 31 GB RAM on box (<5 bytes per variable) and the 30 s budget. Reaching it therefore needs every per-bucket stage (saturation, reduction, search state, extraction, graph build, persistence) to be shared across buckets through a checkable equivalence (e.g. compilation parametric in the bucket's row offset), not further constant-factor work; buckets may not be merged or dropped. The owned e-node count is now logged per saturation group.
+- Shared saturation across middle groups (investigated, not implemented): prefill bucket t has dirty tokens [0, t) (prefillDecodeBuckets), so a group's partial-path shapes grow with t rather than shifting, and saturation's fixed equivalent-candidate cost filter decides on concrete shapes and costs. A group's saturated graph can therefore legitimately differ with t, and reusing one group's graph for another is exact only if re-checked per group, which costs about what sharing saves. Even with saturation shared, per-bucket reduction (~1.6 CPU-s per representative) and search state (~112k variables per bucket) stay linear in N; the estimated ceiling is in the low hundreds, not 32768.
+- Where the time goes (N=46): the 44 middle saturation groups are each ~265k e-nodes and ~4 CPU-s, independent of N; saturation is CPU-bound (~180 CPU-s on 16 threads), FusionRule::apply 39% of it (addOpToEGraph during fused-candidate materialization the largest part), computeBucketRegions 8%. Per-N cost ~0.9 s across all phases, so reaching large N needs the middle groups to share one saturation through a checkable equivalence (not implemented).
 - Scaling slope at C022: ~1.3-1.5 s of compile per unit of N; every phase is per group or per bucket and contention-bound (at N=14 a middle-t representative's reduction steps take rebuild 1.27 s, infos+prune 1.05 s, cycle passes 0.77 s, final infos 0.54 s with ~15 running concurrently). Micro-optimizations now buy about one N each.
 - Structural next step (recommended): groups for t=2..N-1 are near-identical (same enode counts within 0.1%, same reduced class counts within a few classes); saturating and reducing one representative and instantiating the others by substituting t would make saturation/reduction cost independent of N. It must be checkable by the planner (e.g. saturate two values of t, verify the results are isomorphic up to the t-dependent shape/slice constants, then instantiate), and the instantiated graph must equal what the bucket computes itself or be a sound superset.
 - Next for N=15/16 otherwise: hardware threads (16) cap the default group count, so N>16 merges regions into shared groups (slower closures); saturation contention (jemalloc diagnostic showed allocator-bound closures) and the search phase (root propagation + primal + tryPlan ~11.5 s, all per bucket) are the scaling terms. Per-bucket work over prefill/decode pairs sharing one graph is duplicated (different domains).
@@ -3068,3 +3190,1946 @@ C021 notes: I332/I333 PearceKelly shared walk and split propagation-state tasks 
 - Completed: 2026-10-22T10:08:53.831845-04:00; exit 0; runner elapsed 0.232 s.
 
 C022 notes: profile of N=12 saturation: `EGraph::rebuild` 1761/6069 samples, of which ~400 `sched_yield` in parallel_for waits and ~700 allocation. I350/I351 blocking wait (small gain). I352/I353 trial-plan skips (oracle 48/48). I354/I355 reconcile skip. Search setup profiling showed `addBucketVariables` serial (~1 s at N=13); I356/I357 two-phase parallel creation (oracle, `--selection-reachability`, `--incremental-propagators` pass before the build). I358 first N=14 pass, I359/I360 confirmations, I361 N=12 regression, I362-I370 gates.
+
+### I371_c023_incremental_rebuild_build
+- In progress: 2026-10-22T11:50:01.466518-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I371_c023_incremental_rebuild_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I371_c023_incremental_rebuild_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I371_c023_incremental_rebuild_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T11:52:18.521964-04:00; exit 0; runner elapsed 137.053 s.
+
+### I372_c023_n16
+- In progress: 2026-10-22T11:53:05.317053-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I372_c023_n16.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I372_c023_n16.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I372_c023_n16.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 16 --ignore-checkpoints --run-dir logs/gemma_output_runs/I372_c023_n16`
+- Completed: 2026-10-22T11:57:40.457845-04:00; exit 0; runner elapsed 275.139 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.438695742 total-domain-bits=51684281.275955945 remaining-domain-bits=51684281.274578325 log2-remaining-fraction=-0.0013776198029518127 eliminated-bits=0.0013776198029518127 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.992931949014388 normalized=0.99976439830047958 final-gap=0.99812000000246259 final-incumbent=32.487766000000001 final-bound=0.061076999999999999 first-incumbent-elapsed=26.240398406982422 samples=4`
+  `[SearchEngine] New best cost: 32.4878 at iteration 0 source=root-heuristic event-epoch=1792684599.0068917 program-deadline=1792684597.2665055`
+- First incumbent: 26.240398407 s, cost 32.4878; best cost 32.487766.
+
+### I373_c023_n17
+- In progress: 2026-10-22T11:57:50.488779-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I373_c023_n17.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I373_c023_n17.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I373_c023_n17.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 17 --ignore-checkpoints --run-dir logs/gemma_output_runs/I373_c023_n17`
+- Completed: 2026-10-22T12:02:08.634298-04:00; exit 0; runner elapsed 258.143 s.
+  `[SearchEngine volume] iterations=0 elapsed=14.089580098000001 total-domain-bits=54225133.898260109 remaining-domain-bits=54225133.896784946 log2-remaining-fraction=-0.0014751628041267395 eliminated-bits=0.0014751628041267395 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999384895717384 normalized=0.99997949652391283 final-gap=0.99963900168932041 final-incumbent=210.00929300000001 final-bound=0.075813000000000005 first-incumbent-elapsed=28.296102046966553 samples=4`
+  `[SearchEngine] New best cost: 210.009 at iteration 0 source=root-heuristic event-epoch=1792684878.5806704 program-deadline=1792684874.7845829`
+- First incumbent: 28.296102047 s, cost 210.009; best cost 210.009293.
+
+### I374_c023_n17_confirm1
+- In progress: 2026-10-22T12:04:13.830067-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I374_c023_n17_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I374_c023_n17_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I374_c023_n17_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 17 --ignore-checkpoints --run-dir logs/gemma_output_runs/I374_c023_n17_confirm1`
+- Completed: 2026-10-22T12:05:49.898100-04:00; exit 0; runner elapsed 96.066 s.
+  `[SearchEngine volume] iterations=0 elapsed=14.026891072 total-domain-bits=54225133.898260109 remaining-domain-bits=54225133.896784946 log2-remaining-fraction=-0.0014751628041267395 eliminated-bits=0.0014751628041267395 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999326215107626 normalized=0.99997754050358756 final-gap=0.99963900168932041 final-incumbent=210.00929300000001 final-bound=0.075813000000000005 first-incumbent-elapsed=28.133551120758057 samples=4`
+  `[SearchEngine] New best cost: 210.009 at iteration 0 source=root-heuristic event-epoch=1792685099.596122 program-deadline=1792685095.9625843`
+- First incumbent: 28.133551121 s, cost 210.009; best cost 210.009293.
+
+### I375_c023_n17_confirm2
+- In progress: 2026-10-22T12:05:49.955017-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I375_c023_n17_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I375_c023_n17_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I375_c023_n17_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 17 --ignore-checkpoints --run-dir logs/gemma_output_runs/I375_c023_n17_confirm2`
+- Completed: 2026-10-22T12:07:26.221128-04:00; exit 0; runner elapsed 96.265 s.
+  `[SearchEngine volume] iterations=0 elapsed=14.113786481 total-domain-bits=54225133.898260109 remaining-domain-bits=54225133.896784946 log2-remaining-fraction=-0.0014751628041267395 eliminated-bits=0.0014751628041267395 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999453804387691 normalized=0.99998179347958971 final-gap=0.99963900168932041 final-incumbent=210.00929300000001 final-bound=0.075813000000000005 first-incumbent-elapsed=28.486985683441162 samples=4`
+  `[SearchEngine] New best cost: 210.009 at iteration 0 source=root-heuristic event-epoch=1792685196.0338826 program-deadline=1792685192.0469089`
+- First incumbent: 28.486985683 s, cost 210.009; best cost 210.009293.
+
+### I376_c023_n14_regression
+- In progress: 2026-10-22T12:07:38.108243-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I376_c023_n14_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I376_c023_n14_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I376_c023_n14_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 14 --ignore-checkpoints --run-dir logs/gemma_output_runs/I376_c023_n14_regression`
+- Completed: 2026-10-22T12:09:14.243258-04:00; exit 0; runner elapsed 96.133 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.586549735 total-domain-bits=44877722.271791115 remaining-domain-bits=44877722.2705606 log2-remaining-fraction=-0.0012305155396461487 eliminated-bits=0.0012305155396461487 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999405509984275 normalized=0.9999801836661425 final-gap=0.99990966723472008 final-incumbent=648.07049600000005 final-bound=0.058541999999999997 first-incumbent-elapsed=23.418888330459595 samples=4`
+  `[SearchEngine] New best cost: 648.07 at iteration 0 source=root-heuristic event-epoch=1792685296.1957517 program-deadline=1792685297.2768776`
+- First incumbent: 23.418888330 s, cost 648.07; best cost 648.070496.
+
+### I377_c023_oracle
+- In progress: 2026-10-22T12:09:14.292016-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I377_c023_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I377_c023_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I377_c023_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T12:09:18.857273-04:00; exit 0; runner elapsed 4.564 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I378_c023_search_gap
+- In progress: 2026-10-22T12:09:18.904981-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I378_c023_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I378_c023_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I378_c023_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T12:09:18.927335-04:00; exit 0; runner elapsed 0.021 s.
+
+### I379_c023_native__private_layout
+- In progress: 2026-10-22T12:09:18.979255-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I379_c023_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I379_c023_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I379_c023_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T12:09:19.170316-04:00; exit 0; runner elapsed 0.189 s.
+
+### I380_c023_native__write_after_read_cache
+- In progress: 2026-10-22T12:09:19.229480-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I380_c023_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I380_c023_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I380_c023_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T12:09:19.442031-04:00; exit 0; runner elapsed 0.211 s.
+
+### I381_c023_native__incremental_propagators
+- In progress: 2026-10-22T12:09:19.501026-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I381_c023_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I381_c023_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I381_c023_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T12:09:19.707124-04:00; exit 0; runner elapsed 0.204 s.
+
+### I382_c023_native__start_rank_window
+- In progress: 2026-10-22T12:09:19.769624-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I382_c023_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I382_c023_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I382_c023_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T12:09:19.986366-04:00; exit 0; runner elapsed 0.215 s.
+
+### I383_c023_native__selection_reachability
+- In progress: 2026-10-22T12:09:20.042250-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I383_c023_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I383_c023_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I383_c023_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T12:09:20.285949-04:00; exit 0; runner elapsed 0.242 s.
+
+### I384_c023_native__relaxation_bound
+- In progress: 2026-10-22T12:09:20.361808-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I384_c023_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I384_c023_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I384_c023_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T12:11:08.702393-04:00; exit 0; runner elapsed 108.339 s.
+
+### I385_c023_native__prune_egraph
+- In progress: 2026-10-22T12:11:08.761075-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I385_c023_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I385_c023_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I385_c023_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T12:11:08.981238-04:00; exit 0; runner elapsed 0.217 s.
+
+### I386_c024_unselected_events_build
+- In progress: 2026-10-22T12:37:45.341387-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I386_c024_unselected_events_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I386_c024_unselected_events_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I386_c024_unselected_events_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T12:40:04.560816-04:00; exit 0; runner elapsed 139.217 s.
+
+### I387_c024_n18
+- In progress: 2026-10-22T12:40:04.617860-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I387_c024_n18.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I387_c024_n18.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I387_c024_n18.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 18 --ignore-checkpoints --run-dir logs/gemma_output_runs/I387_c024_n18`
+- Completed: 2026-10-22T12:43:48.099325-04:00; exit 1; runner elapsed 223.480 s.
+  `[SearchEngine] New best cost: 223.352 at iteration 0 source=root-heuristic event-epoch=1792687428.023803 program-deadline=1792687422.5269284`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 223.352 (no supervisor gap summary); best cost 223.352.
+
+### I388_c024_groups_build
+- In progress: 2026-10-22T12:44:53.494653-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I388_c024_groups_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I388_c024_groups_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I388_c024_groups_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T12:47:12.780518-04:00; exit 0; runner elapsed 139.282 s.
+
+### I389_c024_n18
+- In progress: 2026-10-22T12:47:12.851733-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I389_c024_n18.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I389_c024_n18.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I389_c024_n18.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 18 --ignore-checkpoints --run-dir logs/gemma_output_runs/I389_c024_n18`
+- Completed: 2026-10-22T12:49:11.628343-04:00; exit 0; runner elapsed 118.775 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.692577633999999 total-domain-bits=58307093.479124464 remaining-domain-bits=58307093.477595061 log2-remaining-fraction=-0.001529403030872345 eliminated-bits=0.001529403030872345 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999473703858929 normalized=0.99998245679529763 final-gap=0.9997387592102579 final-incumbent=223.34567300000001 final-bound=0.058347000000000003 first-incumbent-elapsed=27.985398292541504 samples=4`
+  `[SearchEngine] New best cost: 223.346 at iteration 0 source=root-heuristic event-epoch=1792687697.3920193 program-deadline=1792687693.9066353`
+- First incumbent: 27.985398293 s, cost 223.346; best cost 223.345673.
+
+### I390_c024_n18_confirm1
+- In progress: 2026-10-22T12:49:19.298438-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I390_c024_n18_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I390_c024_n18_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I390_c024_n18_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 18 --ignore-checkpoints --run-dir logs/gemma_output_runs/I390_c024_n18_confirm1`
+- Completed: 2026-10-22T12:50:58.851159-04:00; exit 0; runner elapsed 99.551 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.707321319 total-domain-bits=58307093.479124464 remaining-domain-bits=58307093.477595061 log2-remaining-fraction=-0.001529403030872345 eliminated-bits=0.001529403030872345 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999499398086563 normalized=0.99998331326955214 final-gap=0.9997387592102579 final-incumbent=223.34567300000001 final-bound=0.058347000000000003 first-incumbent-elapsed=28.083752870559692 samples=4`
+  `[SearchEngine] New best cost: 223.346 at iteration 0 source=root-heuristic event-epoch=1792687805.3174407 program-deadline=1792687801.7337039`
+- First incumbent: 28.083752871 s, cost 223.346; best cost 223.345673.
+
+### I391_c024_n18_confirm2
+- In progress: 2026-10-22T12:50:58.913299-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I391_c024_n18_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I391_c024_n18_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I391_c024_n18_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 18 --ignore-checkpoints --run-dir logs/gemma_output_runs/I391_c024_n18_confirm2`
+- Completed: 2026-10-22T12:52:38.348512-04:00; exit 0; runner elapsed 99.434 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.628415220999999 total-domain-bits=58307093.479124464 remaining-domain-bits=58307093.477595061 log2-remaining-fraction=-0.001529403030872345 eliminated-bits=0.001529403030872345 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999448094151571 normalized=0.99998160313838569 final-gap=0.9997387592102579 final-incumbent=223.34567300000001 final-bound=0.058347000000000003 first-incumbent-elapsed=27.887367248535156 samples=4`
+  `[SearchEngine] New best cost: 223.346 at iteration 0 source=root-heuristic event-epoch=1792687904.6446633 program-deadline=1792687901.2573094`
+- First incumbent: 27.887367249 s, cost 223.346; best cost 223.345673.
+
+### I392_c024_n17_regression
+- In progress: 2026-10-22T12:52:44.008495-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I392_c024_n17_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I392_c024_n17_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I392_c024_n17_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 17 --ignore-checkpoints --run-dir logs/gemma_output_runs/I392_c024_n17_regression`
+- Completed: 2026-10-22T12:54:34.810361-04:00; exit 0; runner elapsed 110.800 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.395381262000001 total-domain-bits=54983325.089566827 remaining-domain-bits=54983325.088112921 log2-remaining-fraction=-0.0014539062976837158 eliminated-bits=0.0014539062976837158 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.998770219586262 normalized=0.99995900731954213 final-gap=0.99968175841915619 final-incumbent=210.01026899999999 final-bound=0.066834000000000005 first-incumbent-elapsed=26.135701656341553 samples=4`
+  `[SearchEngine] New best cost: 210.01 at iteration 0 source=root-heuristic event-epoch=1792688024.4675627 program-deadline=1792688022.8318744`
+- First incumbent: 26.135701656 s, cost 210.01; best cost 210.010269.
+
+### I393_c024_oracle
+- In progress: 2026-10-22T12:54:34.878933-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I393_c024_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I393_c024_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I393_c024_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T12:54:39.479523-04:00; exit 0; runner elapsed 4.599 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I394_c024_search_gap
+- In progress: 2026-10-22T12:54:39.528041-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I394_c024_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I394_c024_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I394_c024_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T12:54:39.553694-04:00; exit 0; runner elapsed 0.024 s.
+
+### I395_c024_native__private_layout
+- In progress: 2026-10-22T12:54:39.605303-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I395_c024_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I395_c024_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I395_c024_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T12:54:39.820469-04:00; exit 0; runner elapsed 0.214 s.
+
+### I396_c024_native__write_after_read_cache
+- In progress: 2026-10-22T12:54:39.887036-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I396_c024_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I396_c024_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I396_c024_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T12:54:40.065158-04:00; exit 0; runner elapsed 0.175 s.
+
+### I397_c024_native__incremental_propagators
+- In progress: 2026-10-22T12:54:40.121852-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I397_c024_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I397_c024_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I397_c024_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T12:54:40.325477-04:00; exit 0; runner elapsed 0.202 s.
+
+### I398_c024_native__start_rank_window
+- In progress: 2026-10-22T12:54:40.385347-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I398_c024_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I398_c024_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I398_c024_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T12:54:40.582550-04:00; exit 0; runner elapsed 0.195 s.
+
+### I399_c024_native__selection_reachability
+- In progress: 2026-10-22T12:54:40.645290-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I399_c024_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I399_c024_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I399_c024_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T12:54:40.893702-04:00; exit 0; runner elapsed 0.247 s.
+
+### I400_c024_native__relaxation_bound
+- In progress: 2026-10-22T12:54:40.974046-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I400_c024_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I400_c024_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I400_c024_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T12:56:29.006005-04:00; exit 0; runner elapsed 108.030 s.
+
+### I401_c024_native__prune_egraph
+- In progress: 2026-10-22T12:56:29.068527-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I401_c024_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I401_c024_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I401_c024_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T12:56:29.271390-04:00; exit 0; runner elapsed 0.200 s.
+
+### I402_c025_root_build
+- In progress: 2026-10-22T13:09:17.086135-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I402_c025_root_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I402_c025_root_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I402_c025_root_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T13:11:17.851125-04:00; exit 0; runner elapsed 120.763 s.
+
+### I403_c025_n19
+- In progress: 2026-10-22T13:11:17.925399-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I403_c025_n19.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I403_c025_n19.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I403_c025_n19.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 19 --ignore-checkpoints --run-dir logs/gemma_output_runs/I403_c025_n19`
+- Completed: 2026-10-22T13:16:01.670448-04:00; exit 0; runner elapsed 283.743 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.180596546 total-domain-bits=61571166.049465388 remaining-domain-bits=61571166.04785917 log2-remaining-fraction=-0.0016062185168266296 eliminated-bits=0.0016062185168266296 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999621241830184 normalized=0.99998737472767274 final-gap=0.99975006428322699 final-incumbent=233.980164 final-bound=0.058479999999999997 first-incumbent-elapsed=28.484577655792236 samples=4`
+  `[SearchEngine] New best cost: 233.98 at iteration 0 source=root-heuristic event-epoch=1792689304.9091144 program-deadline=1792689300.9245503`
+- First incumbent: 28.484577656 s, cost 233.98; best cost 233.980164.
+
+### I404_c025_alias_build
+- In progress: 2026-10-22T13:24:41.655309-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I404_c025_alias_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I404_c025_alias_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I404_c025_alias_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T13:27:01.388254-04:00; exit 0; runner elapsed 139.731 s.
+
+### I405_c025_n19
+- In progress: 2026-10-22T13:27:01.449642-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I405_c025_n19.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I405_c025_n19.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I405_c025_n19.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 19 --ignore-checkpoints --run-dir logs/gemma_output_runs/I405_c025_n19`
+- Completed: 2026-10-22T13:28:45.354292-04:00; exit 0; runner elapsed 103.901 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.947738684000001 total-domain-bits=61571166.049465388 remaining-domain-bits=61571166.04785917 log2-remaining-fraction=-0.0016062185168266296 eliminated-bits=0.0016062185168266296 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999692829747143 normalized=0.99998976099157144 final-gap=0.99983224515621738 final-incumbent=348.60394300000002 final-bound=0.058479999999999997 first-incumbent-elapsed=28.168933629989624 samples=4`
+  `[SearchEngine] New best cost: 348.604 at iteration 0 source=root-heuristic event-epoch=1792690068.5390017 program-deadline=1792690064.8700812`
+- First incumbent: 28.168933630 s, cost 348.604; best cost 348.603943.
+
+### I406_c025_primal_build
+- In progress: 2026-10-22T13:32:52.306563-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I406_c025_primal_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I406_c025_primal_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I406_c025_primal_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T13:35:12.395377-04:00; exit 0; runner elapsed 140.085 s.
+
+### I407_c025_n19
+- In progress: 2026-10-22T13:35:12.473300-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I407_c025_n19.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I407_c025_n19.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I407_c025_n19.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 19 --ignore-checkpoints --run-dir logs/gemma_output_runs/I407_c025_n19`
+- Completed: 2026-10-22T13:36:55.893830-04:00; exit 0; runner elapsed 103.417 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.444816102000001 total-domain-bits=61571166.049465388 remaining-domain-bits=61571166.04785917 log2-remaining-fraction=-0.0016062185168266296 eliminated-bits=0.0016062185168266296 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999630326718915 normalized=0.99998767755729712 final-gap=0.99983224515621738 final-incumbent=348.60394300000002 final-bound=0.058479999999999997 first-incumbent-elapsed=27.796348094940186 samples=4`
+  `[SearchEngine] New best cost: 348.604 at iteration 0 source=root-heuristic event-epoch=1792690559.4731345 program-deadline=1792690556.1767974`
+- First incumbent: 27.796348095 s, cost 348.604; best cost 348.603943.
+
+### I408_c025_n19_confirm1
+- In progress: 2026-10-22T13:37:00.643300-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I408_c025_n19_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I408_c025_n19_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I408_c025_n19_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 19 --ignore-checkpoints --run-dir logs/gemma_output_runs/I408_c025_n19_confirm1`
+- Completed: 2026-10-22T13:38:43.905757-04:00; exit 0; runner elapsed 103.260 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.325420834999999 total-domain-bits=61571166.049465388 remaining-domain-bits=61571166.04785917 log2-remaining-fraction=-0.0016062185168266296 eliminated-bits=0.0016062185168266296 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999636488442881 normalized=0.99998788294809604 final-gap=0.99983224515621738 final-incumbent=348.60394300000002 final-bound=0.058479999999999997 first-incumbent-elapsed=27.833078622817993 samples=4`
+  `[SearchEngine] New best cost: 348.604 at iteration 0 source=root-heuristic event-epoch=1792690667.4254665 program-deadline=1792690664.0924022`
+- First incumbent: 27.833078623 s, cost 348.604; best cost 348.603943.
+
+### I409_c025_n19_confirm2
+- In progress: 2026-10-22T13:38:43.966296-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I409_c025_n19_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I409_c025_n19_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I409_c025_n19_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 19 --ignore-checkpoints --run-dir logs/gemma_output_runs/I409_c025_n19_confirm2`
+- Completed: 2026-10-22T13:40:27.635867-04:00; exit 0; runner elapsed 103.668 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.217489655 total-domain-bits=61571166.049465388 remaining-domain-bits=61571166.04785917 log2-remaining-fraction=-0.0016062185168266296 eliminated-bits=0.0016062185168266296 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999587835784972 normalized=0.9999862611928324 final-gap=0.99983224515621738 final-incumbent=348.60394300000002 final-bound=0.058479999999999997 first-incumbent-elapsed=27.54305624961853 samples=4`
+  `[SearchEngine] New best cost: 348.604 at iteration 0 source=root-heuristic event-epoch=1792690770.5946374 program-deadline=1792690767.5515935`
+- First incumbent: 27.543056250 s, cost 348.604; best cost 348.603943.
+
+### I410_c025_n18_regression
+- In progress: 2026-10-22T13:40:33.393893-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I410_c025_n18_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I410_c025_n18_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I410_c025_n18_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 18 --ignore-checkpoints --run-dir logs/gemma_output_runs/I410_c025_n18_regression`
+- Completed: 2026-10-22T13:42:18.660207-04:00; exit 0; runner elapsed 105.264 s.
+  `[SearchEngine volume] iterations=0 elapsed=11.769040627000001 total-domain-bits=58307093.479124464 remaining-domain-bits=58307093.477595061 log2-remaining-fraction=-0.001529403030872345 eliminated-bits=0.001529403030872345 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999443173211322 normalized=0.99998143910704407 final-gap=0.99985898101747739 final-incumbent=413.75280800000002 final-bound=0.058347000000000003 first-incumbent-elapsed=26.051405429840088 samples=4`
+  `[SearchEngine] New best cost: 413.753 at iteration 0 source=root-heuristic event-epoch=1792690877.8203321 program-deadline=1792690876.2689407`
+- First incumbent: 26.051405430 s, cost 413.753; best cost 413.752808.
+
+### I411_c025_oracle
+- In progress: 2026-10-22T13:42:18.721054-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I411_c025_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I411_c025_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I411_c025_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T13:42:23.481844-04:00; exit 0; runner elapsed 4.759 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I412_c025_search_gap
+- In progress: 2026-10-22T13:42:23.538989-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I412_c025_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I412_c025_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I412_c025_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T13:42:23.565708-04:00; exit 0; runner elapsed 0.025 s.
+
+### I413_c025_native__private_layout
+- In progress: 2026-10-22T13:42:23.624511-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I413_c025_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I413_c025_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I413_c025_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T13:42:23.844443-04:00; exit 0; runner elapsed 0.218 s.
+
+### I414_c025_native__write_after_read_cache
+- In progress: 2026-10-22T13:42:23.913688-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I414_c025_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I414_c025_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I414_c025_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T13:42:24.151286-04:00; exit 0; runner elapsed 0.236 s.
+
+### I415_c025_native__incremental_propagators
+- In progress: 2026-10-22T13:42:24.221153-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I415_c025_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I415_c025_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I415_c025_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T13:42:24.417400-04:00; exit 0; runner elapsed 0.194 s.
+
+### I416_c025_native__start_rank_window
+- In progress: 2026-10-22T13:42:24.476974-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I416_c025_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I416_c025_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I416_c025_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T13:42:24.665630-04:00; exit 0; runner elapsed 0.187 s.
+
+### I417_c025_native__selection_reachability
+- In progress: 2026-10-22T13:42:24.729033-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I417_c025_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I417_c025_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I417_c025_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T13:42:24.984615-04:00; exit 0; runner elapsed 0.254 s.
+
+### I418_c025_native__relaxation_bound
+- In progress: 2026-10-22T13:42:25.070747-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I418_c025_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I418_c025_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I418_c025_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T13:44:14.293814-04:00; exit 0; runner elapsed 109.221 s.
+
+### I419_c025_native__prune_egraph
+- In progress: 2026-10-22T13:44:14.361322-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I419_c025_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I419_c025_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I419_c025_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T13:44:14.582724-04:00; exit 0; runner elapsed 0.219 s.
+
+### I420_c026_alloc_build
+- In progress: 2026-10-22T14:07:05.567146-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I420_c026_alloc_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I420_c026_alloc_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I420_c026_alloc_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T14:07:05.830364-04:00; exit 1; runner elapsed 0.261 s.
+
+### I421_c026_n20
+- In progress: 2026-10-22T14:07:05.902408-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I421_c026_n20.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I421_c026_n20.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I421_c026_n20.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 20 --ignore-checkpoints --run-dir logs/gemma_output_runs/I421_c026_n20`
+- Completed: 2026-10-22T14:12:17.004699-04:00; exit 0; runner elapsed 311.099 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.757365679999999 total-domain-bits=64861245.8245904 remaining-domain-bits=64861245.822908171 log2-remaining-fraction=-0.0016822293400764465 eliminated-bits=0.0016822293400764465 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999572375918071 normalized=0.99998574586393574 final-gap=0.99986807610742612 final-incumbent=443.285889 final-bound=0.058479999999999997 first-incumbent-elapsed=26.758554697036743 samples=4`
+  `[SearchEngine] New best cost: 443.286 at iteration 0 source=root-heuristic event-epoch=1792692670.36554 program-deadline=1792692668.1069977`
+- First incumbent: 26.758554697 s, cost 443.286; best cost 443.285889.
+
+### I422_c026_alloc_build
+- In progress: 2026-10-22T14:12:52.793081-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I422_c026_alloc_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I422_c026_alloc_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I422_c026_alloc_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T14:19:06.745716-04:00; exit 0; runner elapsed 373.951 s.
+
+### I4223_c026_n20
+- In progress: 2026-10-22T14:19:13.154211-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I4223_c026_n20.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I4223_c026_n20.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I4223_c026_n20.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 20 --ignore-checkpoints --run-dir logs/gemma_output_runs/I4223_c026_n20`
+- Completed: 2026-10-22T14:21:02.945719-04:00; exit 0; runner elapsed 109.790 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.90919008 total-domain-bits=64861245.8245904 remaining-domain-bits=64861245.822908171 log2-remaining-fraction=-0.0016822293400764465 eliminated-bits=0.0016822293400764465 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999556456462653 normalized=0.99998521521542172 final-gap=0.99986807610742612 final-incumbent=443.285889 final-bound=0.058479999999999997 first-incumbent-elapsed=26.637883186340332 samples=4`
+  `[SearchEngine] New best cost: 443.286 at iteration 0 source=root-heuristic event-epoch=1792693196.0204785 program-deadline=1792693193.8826089`
+- First incumbent: 26.637883186 s, cost 443.286; best cost 443.285889.
+
+### I4224_c026_n21
+- In progress: 2026-10-22T14:21:03.018173-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I4224_c026_n21.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I4224_c026_n21.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I4224_c026_n21.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 21 --ignore-checkpoints --run-dir logs/gemma_output_runs/I4224_c026_n21`
+- Completed: 2026-10-22T14:26:12.505095-04:00; exit 0; runner elapsed 309.485 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.243372219999999 total-domain-bits=68080310.160167813 remaining-domain-bits=68080310.158407524 log2-remaining-fraction=-0.0017602890729904175 eliminated-bits=0.0017602890729904175 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999681539477514 normalized=0.99998938464925047 final-gap=0.99986145311733476 final-incumbent=420.52191199999999 final-bound=0.058262000000000001 first-incumbent-elapsed=27.701424121856689 samples=4`
+  `[SearchEngine] New best cost: 420.522 at iteration 0 source=root-heuristic event-epoch=1792693502.6166954 program-deadline=1792693499.4152842`
+- First incumbent: 27.701424122 s, cost 420.522; best cost 420.521912.
+
+### I425_c026_n21_confirm1
+- In progress: 2026-10-22T14:26:19.369880-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I425_c026_n21_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I425_c026_n21_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I425_c026_n21_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 21 --ignore-checkpoints --run-dir logs/gemma_output_runs/I425_c026_n21_confirm1`
+- Completed: 2026-10-22T14:28:14.194142-04:00; exit 0; runner elapsed 114.822 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.198591566999999 total-domain-bits=68080310.160167813 remaining-domain-bits=68080310.158407524 log2-remaining-fraction=-0.0017602890729904175 eliminated-bits=0.0017602890729904175 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999664305514326 normalized=0.99998881018381092 final-gap=0.99986145311733476 final-incumbent=420.52191199999999 final-bound=0.058262000000000001 first-incumbent-elapsed=27.577033281326294 samples=4`
+  `[SearchEngine] New best cost: 420.522 at iteration 0 source=root-heuristic event-epoch=1792693623.9919729 program-deadline=1792693620.9149523`
+- First incumbent: 27.577033281 s, cost 420.522; best cost 420.521912.
+
+### I426_c026_n21_confirm2
+- In progress: 2026-10-22T14:28:14.260340-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I426_c026_n21_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I426_c026_n21_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I426_c026_n21_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 21 --ignore-checkpoints --run-dir logs/gemma_output_runs/I426_c026_n21_confirm2`
+- Completed: 2026-10-22T14:30:08.193669-04:00; exit 0; runner elapsed 113.931 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.32598978 total-domain-bits=68080310.160167813 remaining-domain-bits=68080310.158407524 log2-remaining-fraction=-0.0017602890729904175 eliminated-bits=0.0017602890729904175 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.99966565425008 normalized=0.99998885514166935 final-gap=0.99986145311733476 final-incumbent=420.52191199999999 final-bound=0.058262000000000001 first-incumbent-elapsed=27.58676815032959 samples=4`
+  `[SearchEngine] New best cost: 420.522 at iteration 0 source=root-heuristic event-epoch=1792693738.993449 program-deadline=1792693735.9067042`
+- First incumbent: 27.586768150 s, cost 420.522; best cost 420.521912.
+
+### I427_c026_n19_regression
+- In progress: 2026-10-22T14:30:13.814211-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I427_c026_n19_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I427_c026_n19_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I427_c026_n19_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 19 --ignore-checkpoints --run-dir logs/gemma_output_runs/I427_c026_n19_regression`
+- Completed: 2026-10-22T14:31:52.139218-04:00; exit 0; runner elapsed 98.323 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.188216567 total-domain-bits=61571166.049465388 remaining-domain-bits=61571166.04785917 log2-remaining-fraction=-0.0016062185168266296 eliminated-bits=0.0016062185168266296 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999238517122816 normalized=0.9999746172374272 final-gap=0.99983224515621738 final-incumbent=348.60394300000002 final-bound=0.058479999999999997 first-incumbent-elapsed=25.460739850997925 samples=4`
+  `[SearchEngine] New best cost: 348.604 at iteration 0 source=root-heuristic event-epoch=1792693855.2307968 program-deadline=1792693854.2700689`
+- First incumbent: 25.460739851 s, cost 348.604; best cost 348.603943.
+
+### I428_c026_oracle
+- In progress: 2026-10-22T14:31:52.211944-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I428_c026_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I428_c026_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I428_c026_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T14:31:56.760138-04:00; exit 0; runner elapsed 4.545 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I429_c026_search_gap
+- In progress: 2026-10-22T14:31:56.821437-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I429_c026_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I429_c026_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I429_c026_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T14:31:56.847047-04:00; exit 0; runner elapsed 0.024 s.
+
+### I430_c026_native__private_layout
+- In progress: 2026-10-22T14:31:56.910527-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I430_c026_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I430_c026_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I430_c026_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T14:31:57.124508-04:00; exit 0; runner elapsed 0.212 s.
+
+### I431_c026_native__write_after_read_cache
+- In progress: 2026-10-22T14:31:57.196416-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I431_c026_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I431_c026_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I431_c026_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T14:31:57.406523-04:00; exit 0; runner elapsed 0.208 s.
+
+### I432_c026_native__incremental_propagators
+- In progress: 2026-10-22T14:31:57.479008-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I432_c026_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I432_c026_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I432_c026_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T14:31:57.716383-04:00; exit 0; runner elapsed 0.236 s.
+
+### I433_c026_native__start_rank_window
+- In progress: 2026-10-22T14:31:57.795211-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I433_c026_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I433_c026_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I433_c026_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T14:31:58.017203-04:00; exit 0; runner elapsed 0.220 s.
+
+### I434_c026_native__selection_reachability
+- In progress: 2026-10-22T14:31:58.089401-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I434_c026_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I434_c026_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I434_c026_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T14:31:58.348139-04:00; exit 0; runner elapsed 0.257 s.
+
+### I435_c026_native__relaxation_bound
+- In progress: 2026-10-22T14:31:58.438857-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I435_c026_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I435_c026_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I435_c026_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T14:33:46.819216-04:00; exit 0; runner elapsed 108.378 s.
+
+### I436_c026_native__prune_egraph
+- In progress: 2026-10-22T14:33:46.885343-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I436_c026_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I436_c026_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I436_c026_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T14:33:47.106694-04:00; exit 0; runner elapsed 0.219 s.
+
+### I437_c027_eclass_intern_build
+- In progress: 2026-10-22T14:44:12.774313-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I437_c027_eclass_intern_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I437_c027_eclass_intern_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I437_c027_eclass_intern_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T14:46:14.199703-04:00; exit 0; runner elapsed 121.424 s.
+
+### I438_c027_n22
+- In progress: 2026-10-22T14:46:18.526019-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I438_c027_n22.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I438_c027_n22.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I438_c027_n22.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 22 --ignore-checkpoints --run-dir logs/gemma_output_runs/I438_c027_n22`
+- Completed: 2026-10-22T14:51:38.672647-04:00; exit 0; runner elapsed 320.145 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.559483804999999 total-domain-bits=71394640.980641842 remaining-domain-bits=71394640.978805855 log2-remaining-fraction=-0.0018359869718551636 eliminated-bits=0.0018359869718551636 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999650767104267 normalized=0.99998835890347559 final-gap=0.99986917760413119 final-incumbent=446.98004200000003 final-bound=0.058474999999999999 first-incumbent-elapsed=27.330480813980103 samples=4`
+  `[SearchEngine] New best cost: 446.98 at iteration 0 source=root-heuristic event-epoch=1792695025.4142013 program-deadline=1792695022.5837352`
+- First incumbent: 27.330480814 s, cost 446.98; best cost 446.980042.
+
+### I439_c027_n23
+- In progress: 2026-10-22T14:51:38.741815-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I439_c027_n23.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I439_c027_n23.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I439_c027_n23.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 23 --ignore-checkpoints --run-dir logs/gemma_output_runs/I439_c027_n23`
+- Completed: 2026-10-22T14:56:01.581182-04:00; exit 1; runner elapsed 262.838 s.
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: none within budget (+infinity); best cost None.
+
+### I440_c027_n22_confirm1
+- In progress: 2026-10-22T14:56:11.856907-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I440_c027_n22_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I440_c027_n22_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I440_c027_n22_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 22 --ignore-checkpoints --run-dir logs/gemma_output_runs/I440_c027_n22_confirm1`
+- Completed: 2026-10-22T14:58:10.181038-04:00; exit 0; runner elapsed 118.322 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.659087061999999 total-domain-bits=71394640.980641842 remaining-domain-bits=71394640.978805855 log2-remaining-fraction=-0.0018359869718551636 eliminated-bits=0.0018359869718551636 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999706198062867 normalized=0.99999020660209559 final-gap=0.99986917760413119 final-incumbent=446.98004200000003 final-bound=0.058474999999999999 first-incumbent-elapsed=27.754192352294922 samples=4`
+  `[SearchEngine] New best cost: 446.98 at iteration 0 source=root-heuristic event-epoch=1792695416.4896073 program-deadline=1792695413.2354319`
+- First incumbent: 27.754192352 s, cost 446.98; best cost 446.980042.
+
+### I441_c027_n22_confirm2
+- In progress: 2026-10-22T14:58:10.255217-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I441_c027_n22_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I441_c027_n22_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I441_c027_n22_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 22 --ignore-checkpoints --run-dir logs/gemma_output_runs/I441_c027_n22_confirm2`
+- Completed: 2026-10-22T15:00:09.581539-04:00; exit 0; runner elapsed 119.325 s.
+  `[SearchEngine volume] iterations=0 elapsed=13.862539112 total-domain-bits=71394640.980641842 remaining-domain-bits=71394640.978805855 log2-remaining-fraction=-0.0018359869718551636 eliminated-bits=0.0018359869718551636 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999710892637051 normalized=0.99999036308790168 final-gap=0.99986917760413119 final-incumbent=446.98004200000003 final-bound=0.058474999999999999 first-incumbent-elapsed=27.790077447891235 samples=4`
+  `[SearchEngine] New best cost: 446.98 at iteration 0 source=root-heuristic event-epoch=1792695534.6463418 program-deadline=1792695531.3562775`
+- First incumbent: 27.790077448 s, cost 446.98; best cost 446.980042.
+
+### I442_c027_n21_regression
+- In progress: 2026-10-22T15:00:09.649620-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I442_c027_n21_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I442_c027_n21_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I442_c027_n21_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 21 --ignore-checkpoints --run-dir logs/gemma_output_runs/I442_c027_n21_regression`
+- Completed: 2026-10-22T15:02:02.242063-04:00; exit 0; runner elapsed 112.591 s.
+  `[SearchEngine volume] iterations=0 elapsed=12.992875055000001 total-domain-bits=68080310.160167813 remaining-domain-bits=68080310.158407524 log2-remaining-fraction=-0.0017602890729904175 eliminated-bits=0.0017602890729904175 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=29.999507423508692 normalized=0.99998358078362304 final-gap=0.99986145311733476 final-incumbent=420.52191199999999 final-bound=0.058262000000000001 first-incumbent-elapsed=26.444694519042969 samples=4`
+  `[SearchEngine] New best cost: 420.522 at iteration 0 source=root-heuristic event-epoch=1792695652.2758849 program-deadline=1792695650.3312025`
+- First incumbent: 26.444694519 s, cost 420.522; best cost 420.521912.
+
+### I443_c027_oracle
+- In progress: 2026-10-22T15:02:02.307536-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I443_c027_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I443_c027_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I443_c027_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T15:02:06.927063-04:00; exit 0; runner elapsed 4.618 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I444_c027_search_gap
+- In progress: 2026-10-22T15:02:06.982588-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I444_c027_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I444_c027_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I444_c027_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T15:02:07.008633-04:00; exit 0; runner elapsed 0.025 s.
+
+### I445_c027_native__private_layout
+- In progress: 2026-10-22T15:02:07.064666-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I445_c027_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I445_c027_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I445_c027_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T15:02:07.252354-04:00; exit 0; runner elapsed 0.186 s.
+
+### I446_c027_native__write_after_read_cache
+- In progress: 2026-10-22T15:02:07.319223-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I446_c027_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I446_c027_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I446_c027_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T15:02:07.530732-04:00; exit 0; runner elapsed 0.210 s.
+
+### I447_c027_native__incremental_propagators
+- In progress: 2026-10-22T15:02:07.601834-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I447_c027_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I447_c027_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I447_c027_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T15:02:07.814651-04:00; exit 0; runner elapsed 0.211 s.
+
+### I448_c027_native__start_rank_window
+- In progress: 2026-10-22T15:02:07.887210-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I448_c027_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I448_c027_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I448_c027_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T15:02:08.085675-04:00; exit 0; runner elapsed 0.195 s.
+
+### I449_c027_native__selection_reachability
+- In progress: 2026-10-22T15:02:08.153213-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I449_c027_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I449_c027_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I449_c027_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T15:02:08.425283-04:00; exit 0; runner elapsed 0.270 s.
+
+### I450_c027_native__relaxation_bound
+- In progress: 2026-10-22T15:02:08.519207-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I450_c027_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I450_c027_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I450_c027_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T15:03:56.708196-04:00; exit 0; runner elapsed 108.186 s.
+
+### I451_c027_native__prune_egraph
+- In progress: 2026-10-22T15:03:56.778462-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I451_c027_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I451_c027_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I451_c027_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T15:03:57.006291-04:00; exit 0; runner elapsed 0.224 s.
+
+### I452_c028_restricted_build
+- In progress: 2026-10-22T15:34:49.755390-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I452_c028_restricted_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I452_c028_restricted_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I452_c028_restricted_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T15:36:51.051435-04:00; exit 0; runner elapsed 121.294 s.
+
+### I453_c028_n26
+- In progress: 2026-10-22T15:36:51.139270-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I453_c028_n26.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I453_c028_n26.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I453_c028_n26.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 26 --ignore-checkpoints --run-dir logs/gemma_output_runs/I453_c028_n26`
+- Completed: 2026-10-22T15:44:05.469437-04:00; exit 0; runner elapsed 434.327 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.6443493589999996 total-domain-bits=84654449.764165878 remaining-domain-bits=84654449.764165878 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=652.28533900000002 final-bound=0 first-incumbent-elapsed=23.364295482635498 samples=3`
+  `[SearchEngine] New best cost: 652.285 at iteration 0 source=root-heuristic-restricted event-epoch=1792698133.0241106 program-deadline=1792698134.1598272`
+- First incumbent: 23.364295483 s, cost 652.285; best cost 652.285339.
+
+### I454_c028_oracle
+- In progress: 2026-10-22T15:44:11.326413-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I454_c028_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I454_c028_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I454_c028_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T15:44:16.174007-04:00; exit 0; runner elapsed 4.844 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I455_c028_search_gap
+- In progress: 2026-10-22T15:44:16.234350-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I455_c028_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I455_c028_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I455_c028_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T15:44:16.257024-04:00; exit 0; runner elapsed 0.021 s.
+
+### I456_c028_n30
+- In progress: 2026-10-22T15:44:21.786810-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I456_c028_n30.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I456_c028_n30.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I456_c028_n30.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 30 --ignore-checkpoints --run-dir logs/gemma_output_runs/I456_c028_n30`
+- Completed: 2026-10-22T15:51:23.190498-04:00; exit 0; runner elapsed 421.402 s.
+  `[SearchEngine volume] iterations=0 elapsed=8.9221951510000004 total-domain-bits=97912699.603301644 remaining-domain-bits=97912699.603301644 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=45.403739999999999 final-bound=0 first-incumbent-elapsed=28.108504772186279 samples=3`
+  `[SearchEngine] New best cost: 45.4037 at iteration 0 source=root-heuristic-restricted event-epoch=1792698545.1737165 program-deadline=1792698541.5652258`
+- First incumbent: 28.108504772 s, cost 45.4037; best cost 45.40374.
+
+### I457_c028_batched_build
+- In progress: 2026-10-22T15:56:22.038138-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I457_c028_batched_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I457_c028_batched_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I457_c028_batched_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T15:58:23.971291-04:00; exit 0; runner elapsed 121.931 s.
+
+### I458_c028_n32
+- In progress: 2026-10-22T15:58:24.065423-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I458_c028_n32.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I458_c028_n32.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I458_c028_n32.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 32 --ignore-checkpoints --run-dir logs/gemma_output_runs/I458_c028_n32`
+- Completed: 2026-10-22T16:05:58.114260-04:00; exit 0; runner elapsed 454.047 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.7862407779999998 total-domain-bits=104592057.17486978 remaining-domain-bits=104592057.17486978 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=43.419162999999998 final-bound=0 first-incumbent-elapsed=26.034607410430908 samples=3`
+  `[SearchEngine] New best cost: 43.4192 at iteration 0 source=root-heuristic-restricted event-epoch=1792699390.6462843 program-deadline=1792699389.1116893`
+- First incumbent: 26.034607410 s, cost 43.4192; best cost 43.419163.
+
+### I459_c028_n36
+- In progress: 2026-10-22T16:06:05.410333-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I459_c028_n36.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I459_c028_n36.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I459_c028_n36.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 36 --ignore-checkpoints --run-dir logs/gemma_output_runs/I459_c028_n36`
+- Completed: 2026-10-22T16:11:57.507069-04:00; exit 1; runner elapsed 352.095 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.4346364109999996 total-domain-bits=117856628.49071015 remaining-domain-bits=117856628.49071015 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 687.363 at iteration 0 source=root-heuristic-restricted event-epoch=1792699916.6473563 program-deadline=1792699911.8964279`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 687.363 (no supervisor gap summary); best cost 687.363.
+
+### I460_c028_n34
+- In progress: 2026-10-22T16:12:30.574763-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I460_c028_n34.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I460_c028_n34.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I460_c028_n34.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 34 --ignore-checkpoints --run-dir logs/gemma_output_runs/I460_c028_n34`
+- Completed: 2026-10-22T16:19:11.877937-04:00; exit 0; runner elapsed 401.300 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.15583773 total-domain-bits=111169665.27186811 remaining-domain-bits=111169665.27186811 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=605.77691700000003 final-bound=0 first-incumbent-elapsed=27.794993877410889 samples=3`
+  `[SearchEngine] New best cost: 605.777 at iteration 0 source=root-heuristic-restricted event-epoch=1792700220.5328717 program-deadline=1792700217.2378886`
+- First incumbent: 27.794993877 s, cost 605.777; best cost 605.776917.
+
+### I461_c028_n34_confirm1
+- In progress: 2026-10-22T16:21:39.377682-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I461_c028_n34_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I461_c028_n34_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I461_c028_n34_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 34 --ignore-checkpoints --run-dir logs/gemma_output_runs/I461_c028_n34_confirm1`
+- Completed: 2026-10-22T16:24:43.909042-04:00; exit 0; runner elapsed 184.530 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.0210892400000002 total-domain-bits=111169665.27186811 remaining-domain-bits=111169665.27186811 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=605.77691700000003 final-bound=0 first-incumbent-elapsed=27.899348258972168 samples=3`
+  `[SearchEngine] New best cost: 605.777 at iteration 0 source=root-heuristic-restricted event-epoch=1792700552.6520379 program-deadline=1792700549.2527015`
+- First incumbent: 27.899348259 s, cost 605.777; best cost 605.776917.
+
+### I462_c028_n34_confirm2
+- In progress: 2026-10-22T16:24:43.983166-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I462_c028_n34_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I462_c028_n34_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I462_c028_n34_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 34 --ignore-checkpoints --run-dir logs/gemma_output_runs/I462_c028_n34_confirm2`
+- Completed: 2026-10-22T16:27:50.507997-04:00; exit 0; runner elapsed 186.523 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.1216220750000003 total-domain-bits=111169665.27186811 remaining-domain-bits=111169665.27186811 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=605.77691700000003 final-bound=0 first-incumbent-elapsed=28.038949966430664 samples=3`
+  `[SearchEngine] New best cost: 605.777 at iteration 0 source=root-heuristic-restricted event-epoch=1792700737.2758515 program-deadline=1792700733.736913`
+- First incumbent: 28.038949966 s, cost 605.777; best cost 605.776917.
+
+### I463_c028_n22_regression
+- In progress: 2026-10-22T16:27:57.321621-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I463_c028_n22_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I463_c028_n22_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I463_c028_n22_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 22 --ignore-checkpoints --run-dir logs/gemma_output_runs/I463_c028_n22_regression`
+- Completed: 2026-10-22T16:29:48.656550-04:00; exit 0; runner elapsed 111.333 s.
+  `[SearchEngine volume] iterations=0 elapsed=3.797860386 total-domain-bits=71394640.980641842 remaining-domain-bits=71394640.980641842 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=446.98004200000003 final-bound=0 first-incumbent-elapsed=19.329610347747803 samples=3`
+  `[SearchEngine] New best cost: 446.98 at iteration 0 source=root-heuristic-restricted event-epoch=1792700915.3215468 program-deadline=1792700920.4919472`
+- First incumbent: 19.329610348 s, cost 446.98; best cost 446.980042.
+
+### I464_c028_oracle
+- In progress: 2026-10-22T16:29:48.722034-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I464_c028_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I464_c028_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I464_c028_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T16:29:53.423600-04:00; exit 0; runner elapsed 4.700 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I465_c028_search_gap
+- In progress: 2026-10-22T16:29:53.490138-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I465_c028_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I465_c028_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I465_c028_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T16:29:53.514302-04:00; exit 0; runner elapsed 0.023 s.
+
+### I466_c028_native__private_layout
+- In progress: 2026-10-22T16:29:53.581392-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I466_c028_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I466_c028_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I466_c028_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T16:29:53.777650-04:00; exit 0; runner elapsed 0.195 s.
+
+### I467_c028_native__write_after_read_cache
+- In progress: 2026-10-22T16:29:53.848674-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I467_c028_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I467_c028_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I467_c028_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T16:29:54.047683-04:00; exit 0; runner elapsed 0.197 s.
+
+### I468_c028_native__incremental_propagators
+- In progress: 2026-10-22T16:29:54.121543-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I468_c028_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I468_c028_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I468_c028_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T16:29:54.319335-04:00; exit 0; runner elapsed 0.195 s.
+
+### I469_c028_native__start_rank_window
+- In progress: 2026-10-22T16:29:54.395201-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I469_c028_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I469_c028_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I469_c028_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T16:29:54.597146-04:00; exit 0; runner elapsed 0.199 s.
+
+### I470_c028_native__selection_reachability
+- In progress: 2026-10-22T16:29:54.673571-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I470_c028_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I470_c028_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I470_c028_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T16:29:54.894906-04:00; exit 0; runner elapsed 0.220 s.
+
+### I471_c028_native__relaxation_bound
+- In progress: 2026-10-22T16:29:54.993710-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I471_c028_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I471_c028_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I471_c028_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T16:31:42.654098-04:00; exit 0; runner elapsed 107.659 s.
+
+### I472_c028_native__prune_egraph
+- In progress: 2026-10-22T16:31:42.726942-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I472_c028_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I472_c028_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I472_c028_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T16:31:42.942274-04:00; exit 0; runner elapsed 0.212 s.
+
+### I473_c029_records_build
+- In progress: 2026-10-22T16:36:57.661669-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I473_c029_records_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I473_c029_records_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I473_c029_records_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T16:38:59.345521-04:00; exit 0; runner elapsed 121.681 s.
+
+### I474_c029_n36
+- In progress: 2026-10-22T16:38:59.436398-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I474_c029_n36.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I474_c029_n36.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I474_c029_n36.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 36 --ignore-checkpoints --run-dir logs/gemma_output_runs/I474_c029_n36`
+- Completed: 2026-10-22T16:42:11.561065-04:00; exit 0; runner elapsed 192.123 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.3884737400000002 total-domain-bits=117856628.49071015 remaining-domain-bits=117856628.49071015 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=687.36328100000003 final-bound=0 first-incumbent-elapsed=28.063624620437622 samples=3`
+  `[SearchEngine] New best cost: 687.363 at iteration 0 source=root-heuristic-restricted event-epoch=1792701592.6891046 program-deadline=1792701589.125493`
+- First incumbent: 28.063624620 s, cost 687.363; best cost 687.363281.
+
+### I475_c029_share_build
+- In progress: 2026-10-22T16:50:45.471096-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I475_c029_share_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I475_c029_share_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I475_c029_share_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T16:52:47.541590-04:00; exit 0; runner elapsed 122.069 s.
+
+### I476_c029_n37
+- In progress: 2026-10-22T16:52:47.631262-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I476_c029_n37.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I476_c029_n37.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I476_c029_n37.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 37 --ignore-checkpoints --run-dir logs/gemma_output_runs/I476_c029_n37`
+- Completed: 2026-10-22T17:01:11.510206-04:00; exit 0; runner elapsed 503.877 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1553251160000002 total-domain-bits=121113513.43611048 remaining-domain-bits=121113513.43611048 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=693.13391100000001 final-bound=0 first-incumbent-elapsed=27.549184083938599 samples=3`
+  `[SearchEngine] New best cost: 693.134 at iteration 0 source=root-heuristic-restricted event-epoch=1792702700.3265953 program-deadline=1792702697.2774248`
+- First incumbent: 27.549184084 s, cost 693.134; best cost 693.133911.
+
+### I477_c029_n38
+- In progress: 2026-10-22T17:02:13.962692-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I477_c029_n38.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I477_c029_n38.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I477_c029_n38.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 38 --ignore-checkpoints --run-dir logs/gemma_output_runs/I477_c029_n38`
+- Completed: 2026-10-22T17:07:38.746259-04:00; exit 1; runner elapsed 324.782 s.
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: none within budget (+infinity); best cost None.
+
+### I478_c029_n37_confirm1
+- In progress: 2026-10-22T17:07:47.147308-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I478_c029_n37_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I478_c029_n37_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I478_c029_n37_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 37 --ignore-checkpoints --run-dir logs/gemma_output_runs/I478_c029_n37_confirm1`
+- Completed: 2026-10-22T17:11:22.673578-04:00; exit 0; runner elapsed 215.524 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.26036883 total-domain-bits=121113513.43611048 remaining-domain-bits=121113513.43611048 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=693.13391100000001 final-bound=0 first-incumbent-elapsed=27.768410205841064 samples=3`
+  `[SearchEngine] New best cost: 693.134 at iteration 0 source=root-heuristic-restricted event-epoch=1792703321.6087017 program-deadline=1792703318.340302`
+- First incumbent: 27.768410206 s, cost 693.134; best cost 693.133911.
+
+### I479_c029_n37_confirm2
+- In progress: 2026-10-22T17:11:22.741464-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I479_c029_n37_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I479_c029_n37_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I479_c029_n37_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 37 --ignore-checkpoints --run-dir logs/gemma_output_runs/I479_c029_n37_confirm2`
+- Completed: 2026-10-22T17:15:02.239747-04:00; exit 0; runner elapsed 219.497 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.2198928369999997 total-domain-bits=121113513.43611048 remaining-domain-bits=121113513.43611048 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=693.13391100000001 final-bound=0 first-incumbent-elapsed=27.896376132965088 samples=3`
+  `[SearchEngine] New best cost: 693.134 at iteration 0 source=root-heuristic-restricted event-epoch=1792703537.0910366 program-deadline=1792703533.6946723`
+- First incumbent: 27.896376133 s, cost 693.134; best cost 693.133911.
+
+### I480_c029_n34_regression
+- In progress: 2026-10-22T17:15:11.633145-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I480_c029_n34_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I480_c029_n34_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I480_c029_n34_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 34 --ignore-checkpoints --run-dir logs/gemma_output_runs/I480_c029_n34_regression`
+- Completed: 2026-10-22T17:18:17.320685-04:00; exit 0; runner elapsed 185.685 s.
+  `[SearchEngine volume] iterations=0 elapsed=4.966105175 total-domain-bits=111169665.27186811 remaining-domain-bits=111169665.27186811 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=605.77691700000003 final-bound=0 first-incumbent-elapsed=25.970638275146484 samples=3`
+  `[SearchEngine] New best cost: 605.777 at iteration 0 source=root-heuristic-restricted event-epoch=1792703762.5889542 program-deadline=1792703761.1183257`
+- First incumbent: 25.970638275 s, cost 605.777; best cost 605.776917.
+
+### I481_c029_oracle
+- In progress: 2026-10-22T17:18:17.389677-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I481_c029_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I481_c029_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I481_c029_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T17:18:22.036659-04:00; exit 0; runner elapsed 4.645 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I482_c029_search_gap
+- In progress: 2026-10-22T17:18:22.097863-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I482_c029_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I482_c029_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I482_c029_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T17:18:22.124816-04:00; exit 0; runner elapsed 0.025 s.
+
+### I483_c029_native__private_layout
+- In progress: 2026-10-22T17:18:22.192383-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I483_c029_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I483_c029_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I483_c029_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T17:18:22.382069-04:00; exit 0; runner elapsed 0.188 s.
+
+### I484_c029_native__write_after_read_cache
+- In progress: 2026-10-22T17:18:22.450771-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I484_c029_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I484_c029_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I484_c029_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T17:18:22.642190-04:00; exit 0; runner elapsed 0.189 s.
+
+### I485_c029_native__incremental_propagators
+- In progress: 2026-10-22T17:18:22.716356-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I485_c029_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I485_c029_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I485_c029_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T17:18:22.918283-04:00; exit 0; runner elapsed 0.200 s.
+
+### I486_c029_native__start_rank_window
+- In progress: 2026-10-22T17:18:22.995313-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I486_c029_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I486_c029_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I486_c029_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T17:18:23.206177-04:00; exit 0; runner elapsed 0.209 s.
+
+### I487_c029_native__selection_reachability
+- In progress: 2026-10-22T17:18:23.282400-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I487_c029_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I487_c029_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I487_c029_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T17:18:23.555209-04:00; exit 0; runner elapsed 0.271 s.
+
+### I488_c029_native__relaxation_bound
+- In progress: 2026-10-22T17:18:23.641579-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I488_c029_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I488_c029_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I488_c029_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T17:20:11.865581-04:00; exit 0; runner elapsed 108.222 s.
+
+### I489_c029_native__prune_egraph
+- In progress: 2026-10-22T17:20:11.938022-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I489_c029_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I489_c029_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I489_c029_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T17:20:12.158164-04:00; exit 0; runner elapsed 0.219 s.
+
+### I490_c030_parents_build
+- In progress: 2026-10-22T17:30:19.063721-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I490_c030_parents_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I490_c030_parents_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I490_c030_parents_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T17:32:21.769910-04:00; exit 0; runner elapsed 122.703 s.
+
+### I491_c030_n38
+- In progress: 2026-10-22T17:32:21.863262-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I491_c030_n38.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I491_c030_n38.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I491_c030_n38.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 38 --ignore-checkpoints --run-dir logs/gemma_output_runs/I491_c030_n38`
+- Completed: 2026-10-22T17:33:18.153344-04:00; exit 1; runner elapsed 56.288 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.6906662389999996 total-domain-bits=124429959.84881338 remaining-domain-bits=124429959.84881338 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 73.3998 at iteration 0 source=root-heuristic-restricted event-epoch=1792704797.0579731 program-deadline=1792704792.5819983`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 73.3998 (no supervisor gap summary); best cost 73.3998.
+
+### I492_c030_setup_build
+- In progress: 2026-10-22T17:43:05.822419-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I492_c030_setup_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I492_c030_setup_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I492_c030_setup_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T17:45:28.009475-04:00; exit 0; runner elapsed 142.185 s.
+
+### I493_c030_n38
+- In progress: 2026-10-22T17:45:28.099701-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I493_c030_n38.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I493_c030_n38.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I493_c030_n38.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 38 --ignore-checkpoints --run-dir logs/gemma_output_runs/I493_c030_n38`
+- Completed: 2026-10-22T17:48:30.164687-04:00; exit 0; runner elapsed 182.062 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.7211209519999997 total-domain-bits=124429959.84881338 remaining-domain-bits=124429959.84881338 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=73.399780000000007 final-bound=0 first-incumbent-elapsed=27.860941171646118 samples=3`
+  `[SearchEngine] New best cost: 73.3998 at iteration 0 source=root-heuristic-restricted event-epoch=1792705581.3437729 program-deadline=1792705577.9828444`
+- First incumbent: 27.860941172 s, cost 73.3998; best cost 73.39978.
+
+### I494_c030_persist_build
+- In progress: 2026-10-22T17:49:09.051560-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I494_c030_persist_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I494_c030_persist_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I494_c030_persist_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T17:51:30.038777-04:00; exit 0; runner elapsed 140.984 s.
+
+### I495_c030_n38
+- In progress: 2026-10-22T17:51:30.133529-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I495_c030_n38.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I495_c030_n38.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I495_c030_n38.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 38 --ignore-checkpoints --run-dir logs/gemma_output_runs/I495_c030_n38`
+- Completed: 2026-10-22T17:54:47.391919-04:00; exit 0; runner elapsed 197.257 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.7374884860000002 total-domain-bits=124429959.84881338 remaining-domain-bits=124429959.84881338 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=73.399780000000007 final-bound=0 first-incumbent-elapsed=27.693156957626343 samples=3`
+  `[SearchEngine] New best cost: 73.3998 at iteration 0 source=root-heuristic-restricted event-epoch=1792705943.244545 program-deadline=1792705940.0514004`
+- First incumbent: 27.693156958 s, cost 73.3998; best cost 73.39978.
+
+### I496_c030_twins_build
+- In progress: 2026-10-22T18:03:39.322212-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I496_c030_twins_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I496_c030_twins_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I496_c030_twins_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T18:05:41.177108-04:00; exit 0; runner elapsed 121.853 s.
+
+### I497_c030_n38
+- In progress: 2026-10-22T18:05:41.270301-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I497_c030_n38.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I497_c030_n38.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I497_c030_n38.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 38 --ignore-checkpoints --run-dir logs/gemma_output_runs/I497_c030_n38`
+- Completed: 2026-10-22T18:08:39.550233-04:00; exit 0; runner elapsed 178.278 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.9619729640000001 total-domain-bits=124429959.84881338 remaining-domain-bits=124429959.84881338 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=73.399780000000007 final-bound=0 first-incumbent-elapsed=26.879645586013794 samples=3`
+  `[SearchEngine] New best cost: 73.3998 at iteration 0 source=root-heuristic-restricted event-epoch=1792706793.7105823 program-deadline=1792706791.3309481`
+- First incumbent: 26.879645586 s, cost 73.3998; best cost 73.39978.
+
+### I498_c030_n39
+- In progress: 2026-10-22T18:08:39.616502-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I498_c030_n39.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I498_c030_n39.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I498_c030_n39.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 39 --ignore-checkpoints --run-dir logs/gemma_output_runs/I498_c030_n39`
+- Completed: 2026-10-22T18:16:30.215133-04:00; exit 0; runner elapsed 470.597 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.0670546400000003 total-domain-bits=127740759.46516791 remaining-domain-bits=127740759.46516791 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=77.747307000000006 final-bound=0 first-incumbent-elapsed=27.543094396591187 samples=3`
+  `[SearchEngine] New best cost: 77.7473 at iteration 0 source=root-heuristic-restricted event-epoch=1792707253.4432259 program-deadline=1792707250.4001439`
+- First incumbent: 27.543094397 s, cost 77.7473; best cost 77.747307.
+
+### I499_c030_n39_confirm1
+- In progress: 2026-10-22T18:17:31.506727-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I499_c030_n39_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I499_c030_n39_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I499_c030_n39_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 39 --ignore-checkpoints --run-dir logs/gemma_output_runs/I499_c030_n39_confirm1`
+- Completed: 2026-10-22T18:20:55.145510-04:00; exit 0; runner elapsed 203.637 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.0835623490000001 total-domain-bits=127740759.46516791 remaining-domain-bits=127740759.46516791 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=77.747307000000006 final-bound=0 first-incumbent-elapsed=27.564896106719971 samples=3`
+  `[SearchEngine] New best cost: 77.7473 at iteration 0 source=root-heuristic-restricted event-epoch=1792707505.4663942 program-deadline=1792707502.4015126`
+- First incumbent: 27.564896107 s, cost 77.7473; best cost 77.747307.
+
+### I500_c030_n39_confirm2
+- In progress: 2026-10-22T18:20:55.237878-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I500_c030_n39_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I500_c030_n39_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I500_c030_n39_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 39 --ignore-checkpoints --run-dir logs/gemma_output_runs/I500_c030_n39_confirm2`
+- Completed: 2026-10-22T18:23:55.694141-04:00; exit 0; runner elapsed 180.455 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.1232778699999999 total-domain-bits=127740759.46516791 remaining-domain-bits=127740759.46516791 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=77.747307000000006 final-bound=0 first-incumbent-elapsed=27.590890407562256 samples=3`
+  `[SearchEngine] New best cost: 77.7473 at iteration 0 source=root-heuristic-restricted event-epoch=1792707709.1244206 program-deadline=1792707706.0335438`
+- First incumbent: 27.590890408 s, cost 77.7473; best cost 77.747307.
+
+### I501_c030_n37_regression
+- In progress: 2026-10-22T18:23:55.764009-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I501_c030_n37_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I501_c030_n37_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I501_c030_n37_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 37 --ignore-checkpoints --run-dir logs/gemma_output_runs/I501_c030_n37_regression`
+- Completed: 2026-10-22T18:27:34.105484-04:00; exit 0; runner elapsed 218.340 s.
+  `[SearchEngine volume] iterations=0 elapsed=4.7049511659999999 total-domain-bits=121113513.43611048 remaining-domain-bits=121113513.43611048 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=693.13391100000001 final-bound=0 first-incumbent-elapsed=25.123485803604126 samples=3`
+  `[SearchEngine] New best cost: 693.134 at iteration 0 source=root-heuristic-restricted event-epoch=1792707886.1845913 program-deadline=1792707885.5611196`
+- First incumbent: 25.123485804 s, cost 693.134; best cost 693.133911.
+
+### I502_c030_oracle
+- In progress: 2026-10-22T18:27:34.172137-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I502_c030_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I502_c030_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I502_c030_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T18:27:38.862182-04:00; exit 0; runner elapsed 4.689 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I503_c030_search_gap
+- In progress: 2026-10-22T18:27:38.921861-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I503_c030_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I503_c030_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I503_c030_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T18:27:38.945777-04:00; exit 0; runner elapsed 0.022 s.
+
+### I504_c030_native__private_layout
+- In progress: 2026-10-22T18:27:39.004167-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I504_c030_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I504_c030_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I504_c030_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T18:27:39.183657-04:00; exit 0; runner elapsed 0.178 s.
+
+### I505_c030_native__write_after_read_cache
+- In progress: 2026-10-22T18:27:39.255739-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I505_c030_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I505_c030_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I505_c030_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T18:27:39.472376-04:00; exit 0; runner elapsed 0.215 s.
+
+### I506_c030_native__incremental_propagators
+- In progress: 2026-10-22T18:27:39.550532-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I506_c030_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I506_c030_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I506_c030_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T18:27:39.769599-04:00; exit 0; runner elapsed 0.217 s.
+
+### I507_c030_native__start_rank_window
+- In progress: 2026-10-22T18:27:39.849761-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I507_c030_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I507_c030_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I507_c030_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T18:27:40.059892-04:00; exit 0; runner elapsed 0.207 s.
+
+### I508_c030_native__selection_reachability
+- In progress: 2026-10-22T18:27:40.129049-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I508_c030_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I508_c030_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I508_c030_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T18:27:40.378176-04:00; exit 0; runner elapsed 0.247 s.
+
+### I509_c030_native__relaxation_bound
+- In progress: 2026-10-22T18:27:40.479021-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I509_c030_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I509_c030_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I509_c030_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T18:29:29.441265-04:00; exit 0; runner elapsed 108.961 s.
+
+### I510_c030_native__prune_egraph
+- In progress: 2026-10-22T18:29:29.518289-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I510_c030_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I510_c030_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I510_c030_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T18:29:29.763111-04:00; exit 0; runner elapsed 0.243 s.
+
+### I511_c031_origins_build
+- In progress: 2026-10-22T18:39:42.410030-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I511_c031_origins_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I511_c031_origins_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I511_c031_origins_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T18:41:45.226847-04:00; exit 0; runner elapsed 122.815 s.
+
+### I512_c031_n40
+- In progress: 2026-10-22T18:41:45.317082-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I512_c031_n40.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I512_c031_n40.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I512_c031_n40.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 40 --ignore-checkpoints --run-dir logs/gemma_output_runs/I512_c031_n40`
+- Completed: 2026-10-22T18:50:28.951155-04:00; exit 0; runner elapsed 523.632 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.6761750419999997 total-domain-bits=131121970.79991183 remaining-domain-bits=131121970.79991183 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=76.352119000000002 final-bound=0 first-incumbent-elapsed=27.162854194641113 samples=3`
+  `[SearchEngine] New best cost: 76.3521 at iteration 0 source=root-heuristic-restricted event-epoch=1792709256.401252 program-deadline=1792709253.7384105`
+- First incumbent: 27.162854195 s, cost 76.3521; best cost 76.352119.
+
+### I513_c031_n41
+- In progress: 2026-10-22T18:50:57.494838-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I513_c031_n41.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I513_c031_n41.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I513_c031_n41.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I513_c031_n41`
+- Completed: 2026-10-22T18:57:07.363502-04:00; exit 1; runner elapsed 369.867 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4296952809999999 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792709825.8430181 program-deadline=1792709822.8459306`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 72.3879 (no supervisor gap summary); best cost 72.3879.
+
+### I514_c031_serial_build
+- In progress: 2026-10-22T19:04:56.354206-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I514_c031_serial_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I514_c031_serial_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I514_c031_serial_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T19:06:58.213736-04:00; exit 0; runner elapsed 121.858 s.
+
+### I515_c031_n40
+- In progress: 2026-10-22T19:06:58.301496-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I515_c031_n40.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I515_c031_n40.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I515_c031_n40.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 40 --ignore-checkpoints --run-dir logs/gemma_output_runs/I515_c031_n40`
+- Completed: 2026-10-22T19:10:45.973748-04:00; exit 0; runner elapsed 227.671 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.5979900000000002 total-domain-bits=131121970.79991183 remaining-domain-bits=131121970.79991183 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=76.352119000000002 final-bound=0 first-incumbent-elapsed=27.103334426879883 samples=3`
+  `[SearchEngine] New best cost: 76.3521 at iteration 0 source=root-heuristic-restricted event-epoch=1792710472.297595 program-deadline=1792710469.6942732`
+- First incumbent: 27.103334427 s, cost 76.3521; best cost 76.352119.
+
+### I516_c031_n41
+- In progress: 2026-10-22T19:10:46.039062-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I516_c031_n41.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I516_c031_n41.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I516_c031_n41.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I516_c031_n41`
+- Completed: 2026-10-22T19:14:55.425322-04:00; exit 0; runner elapsed 249.385 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4240842430000002 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=27.549988985061646 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792710700.9343145 program-deadline=1792710697.8843389`
+- First incumbent: 27.549988985 s, cost 72.3879; best cost 72.387917.
+
+### I517_c031_n41_confirm1
+- In progress: 2026-10-22T19:16:37.767496-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I517_c031_n41_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I517_c031_n41_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I517_c031_n41_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I517_c031_n41_confirm1`
+- Completed: 2026-10-22T19:20:41.502100-04:00; exit 0; runner elapsed 243.731 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4130133000000002 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=27.477222442626953 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792711052.8399823 program-deadline=1792711049.8627734`
+- First incumbent: 27.477222443 s, cost 72.3879; best cost 72.387917.
+
+### I518_c031_n41_confirm2
+- In progress: 2026-10-22T19:20:41.571184-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I518_c031_n41_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I518_c031_n41_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I518_c031_n41_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I518_c031_n41_confirm2`
+- Completed: 2026-10-22T19:24:38.824939-04:00; exit 0; runner elapsed 237.250 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4163219009999999 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=27.53730583190918 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792711296.5119953 program-deadline=1792711293.4747028`
+- First incumbent: 27.537305832 s, cost 72.3879; best cost 72.387917.
+
+### I519_c031_n39_regression
+- In progress: 2026-10-22T19:24:38.899275-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I519_c031_n39_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I519_c031_n39_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I519_c031_n39_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 39 --ignore-checkpoints --run-dir logs/gemma_output_runs/I519_c031_n39_regression`
+- Completed: 2026-10-22T19:27:41.788373-04:00; exit 0; runner elapsed 182.888 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.0600560850000003 total-domain-bits=127740759.46516791 remaining-domain-bits=127740759.46516791 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=77.747307000000006 final-bound=0 first-incumbent-elapsed=27.051803112030029 samples=3`
+  `[SearchEngine] New best cost: 77.7473 at iteration 0 source=root-heuristic-restricted event-epoch=1792711532.3594782 program-deadline=1792711529.8076859`
+- First incumbent: 27.051803112 s, cost 77.7473; best cost 77.747307.
+
+### I520_c031_oracle
+- In progress: 2026-10-22T19:27:41.857236-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I520_c031_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I520_c031_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I520_c031_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T19:27:46.593254-04:00; exit 0; runner elapsed 4.734 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I521_c031_search_gap
+- In progress: 2026-10-22T19:27:46.655049-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I521_c031_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I521_c031_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I521_c031_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T19:27:46.681015-04:00; exit 0; runner elapsed 0.023 s.
+
+### I522_c031_native__private_layout
+- In progress: 2026-10-22T19:27:46.741975-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I522_c031_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I522_c031_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I522_c031_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T19:27:46.958326-04:00; exit 0; runner elapsed 0.215 s.
+
+### I523_c031_native__write_after_read_cache
+- In progress: 2026-10-22T19:27:47.037547-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I523_c031_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I523_c031_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I523_c031_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T19:27:47.242076-04:00; exit 0; runner elapsed 0.202 s.
+
+### I524_c031_native__incremental_propagators
+- In progress: 2026-10-22T19:27:47.314343-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I524_c031_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I524_c031_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I524_c031_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T19:27:47.525948-04:00; exit 0; runner elapsed 0.210 s.
+
+### I525_c031_native__start_rank_window
+- In progress: 2026-10-22T19:27:47.597642-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I525_c031_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I525_c031_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I525_c031_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T19:27:47.771385-04:00; exit 0; runner elapsed 0.172 s.
+
+### I526_c031_native__selection_reachability
+- In progress: 2026-10-22T19:27:47.843859-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I526_c031_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I526_c031_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I526_c031_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T19:27:48.099459-04:00; exit 0; runner elapsed 0.254 s.
+
+### I527_c031_native__relaxation_bound
+- In progress: 2026-10-22T19:27:48.204935-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I527_c031_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I527_c031_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I527_c031_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T19:29:36.040943-04:00; exit 0; runner elapsed 107.833 s.
+
+### I528_c031_native__prune_egraph
+- In progress: 2026-10-22T19:29:36.116310-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I528_c031_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I528_c031_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I528_c031_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T19:29:36.321715-04:00; exit 0; runner elapsed 0.204 s.
+
+### I529_c032_memo_build
+- In progress: 2026-10-22T19:42:59.671565-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I529_c032_memo_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I529_c032_memo_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I529_c032_memo_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T19:45:02.319898-04:00; exit 0; runner elapsed 122.646 s.
+
+### I530_c032_n42
+- In progress: 2026-10-22T19:45:02.406804-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I530_c032_n42.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I530_c032_n42.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I530_c032_n42.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 42 --ignore-checkpoints --run-dir logs/gemma_output_runs/I530_c032_n42`
+- Completed: 2026-10-22T19:51:14.060860-04:00; exit 1; runner elapsed 371.652 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.7562764709999996 total-domain-bits=137687443.63319042 remaining-domain-bits=137687443.63319042 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 76.459 at iteration 0 source=root-heuristic-restricted event-epoch=1792713071.8998737 program-deadline=1792713068.3996544`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 76.459 (no supervisor gap summary); best cost 76.459.
+
+### I531_c032_n41
+- In progress: 2026-10-22T19:51:27.424188-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I531_c032_n41.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I531_c032_n41.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I531_c032_n41.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I531_c032_n41`
+- Completed: 2026-10-22T19:55:38.691455-04:00; exit 0; runner elapsed 251.265 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1884923010000001 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=27.005216836929321 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792713141.6839716 program-deadline=1792713139.1787672`
+- First incumbent: 27.005216837 s, cost 72.3879; best cost 72.387917.
+
+### I532_c032_n41_confirm1
+- In progress: 2026-10-22T19:55:38.758781-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I532_c032_n41_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I532_c032_n41_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I532_c032_n41_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I532_c032_n41_confirm1`
+- Completed: 2026-10-22T19:59:50.168291-04:00; exit 0; runner elapsed 251.406 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.2278101220000002 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=27.078228712081909 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792713392.9700685 program-deadline=1792713390.3918545`
+- First incumbent: 27.078228712 s, cost 72.3879; best cost 72.387917.
+
+### I533_c032_n41_confirm2
+- In progress: 2026-10-22T19:59:50.239892-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I533_c032_n41_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I533_c032_n41_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I533_c032_n41_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I533_c032_n41_confirm2`
+- Completed: 2026-10-22T20:03:47.514588-04:00; exit 0; runner elapsed 237.273 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1506089959999999 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=27.03784704208374 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792713644.5679059 program-deadline=1792713642.0300717`
+- First incumbent: 27.037847042 s, cost 72.3879; best cost 72.387917.
+
+### I534_c032_oracle
+- In progress: 2026-10-22T20:04:45.614943-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I534_c032_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I534_c032_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I534_c032_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T20:04:50.460920-04:00; exit 0; runner elapsed 4.842 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I535_c032_search_gap
+- In progress: 2026-10-22T20:04:50.524474-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I535_c032_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I535_c032_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I535_c032_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T20:04:50.545505-04:00; exit 0; runner elapsed 0.019 s.
+
+### I536_c032_native__private_layout
+- In progress: 2026-10-22T20:04:50.605717-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I536_c032_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I536_c032_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I536_c032_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T20:04:50.805794-04:00; exit 0; runner elapsed 0.198 s.
+
+### I537_c032_native__write_after_read_cache
+- In progress: 2026-10-22T20:04:50.881611-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I537_c032_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I537_c032_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I537_c032_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T20:04:51.072341-04:00; exit 0; runner elapsed 0.189 s.
+
+### I538_c032_native__incremental_propagators
+- In progress: 2026-10-22T20:04:51.147137-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I538_c032_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I538_c032_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I538_c032_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T20:04:51.351933-04:00; exit 0; runner elapsed 0.203 s.
+
+### I539_c032_native__start_rank_window
+- In progress: 2026-10-22T20:04:51.429373-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I539_c032_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I539_c032_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I539_c032_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T20:04:51.617679-04:00; exit 0; runner elapsed 0.187 s.
+
+### I540_c032_native__selection_reachability
+- In progress: 2026-10-22T20:04:51.695741-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I540_c032_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I540_c032_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I540_c032_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T20:04:51.943859-04:00; exit 0; runner elapsed 0.245 s.
+
+### I541_c032_native__relaxation_bound
+- In progress: 2026-10-22T20:04:52.050737-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I541_c032_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I541_c032_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I541_c032_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T20:06:39.832636-04:00; exit 0; runner elapsed 107.780 s.
+
+### I542_c032_native__prune_egraph
+- In progress: 2026-10-22T20:06:39.902246-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I542_c032_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I542_c032_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I542_c032_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T20:06:40.096172-04:00; exit 0; runner elapsed 0.192 s.
+
+### I543_c033_filter_build
+- In progress: 2026-10-22T20:16:43.005342-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I543_c033_filter_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I543_c033_filter_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I543_c033_filter_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T20:18:45.358226-04:00; exit 0; runner elapsed 122.350 s.
+
+### I544_c033_n42
+- In progress: 2026-10-22T20:18:45.453918-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I544_c033_n42.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I544_c033_n42.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I544_c033_n42.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 42 --ignore-checkpoints --run-dir logs/gemma_output_runs/I544_c033_n42`
+- Completed: 2026-10-22T20:22:38.204065-04:00; exit 0; runner elapsed 232.748 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.6882953020000002 total-domain-bits=137687443.63319042 remaining-domain-bits=137687443.63319042 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=76.459014999999994 final-bound=0 first-incumbent-elapsed=27.534729480743408 samples=3`
+  `[SearchEngine] New best cost: 76.459 at iteration 0 source=root-heuristic-restricted event-epoch=1792714780.3654308 program-deadline=1792714777.3307128`
+- First incumbent: 27.534729481 s, cost 76.459; best cost 76.459015.
+
+### I545_c033_n42_confirm1
+- In progress: 2026-10-22T20:22:52.791130-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I545_c033_n42_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I545_c033_n42_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I545_c033_n42_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 42 --ignore-checkpoints --run-dir logs/gemma_output_runs/I545_c033_n42_confirm1`
+- Completed: 2026-10-22T20:27:03.384970-04:00; exit 0; runner elapsed 250.592 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.7013640780000001 total-domain-bits=137687443.63319042 remaining-domain-bits=137687443.63319042 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=76.459014999999994 final-bound=0 first-incumbent-elapsed=27.563192844390869 samples=3`
+  `[SearchEngine] New best cost: 76.459 at iteration 0 source=root-heuristic-restricted event-epoch=1792715027.8449514 program-deadline=1792715024.7817693`
+- First incumbent: 27.563192844 s, cost 76.459; best cost 76.459015.
+
+### I546_c033_n42_confirm2
+- In progress: 2026-10-22T20:27:03.453521-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I546_c033_n42_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I546_c033_n42_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I546_c033_n42_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 42 --ignore-checkpoints --run-dir logs/gemma_output_runs/I546_c033_n42_confirm2`
+- Completed: 2026-10-22T20:31:13.095296-04:00; exit 0; runner elapsed 249.640 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.7076237340000002 total-domain-bits=137687443.63319042 remaining-domain-bits=137687443.63319042 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=76.459014999999994 final-bound=0 first-incumbent-elapsed=27.6547691822052 samples=3`
+  `[SearchEngine] New best cost: 76.459 at iteration 0 source=root-heuristic-restricted event-epoch=1792715278.5998569 program-deadline=1792715275.4450982`
+- First incumbent: 27.654769182 s, cost 76.459; best cost 76.459015.
+
+### I547_c033_n41_regression
+- In progress: 2026-10-22T20:31:13.164191-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I547_c033_n41_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I547_c033_n41_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I547_c033_n41_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 41 --ignore-checkpoints --run-dir logs/gemma_output_runs/I547_c033_n41_regression`
+- Completed: 2026-10-22T20:35:21.889013-04:00; exit 0; runner elapsed 248.723 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1215376609999996 total-domain-bits=134375658.09119266 remaining-domain-bits=134375658.09119266 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=72.387917000000002 final-bound=0 first-incumbent-elapsed=26.599437713623047 samples=3`
+  `[SearchEngine] New best cost: 72.3879 at iteration 0 source=root-heuristic-restricted event-epoch=1792715526.5856259 program-deadline=1792715524.4861991`
+- First incumbent: 26.599437714 s, cost 72.3879; best cost 72.387917.
+
+### I548_c033_oracle
+- In progress: 2026-10-22T20:35:21.957187-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I548_c033_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I548_c033_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I548_c033_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T20:35:26.651185-04:00; exit 0; runner elapsed 4.693 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I549_c033_search_gap
+- In progress: 2026-10-22T20:35:26.716298-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I549_c033_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I549_c033_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I549_c033_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T20:35:26.736397-04:00; exit 0; runner elapsed 0.019 s.
+
+### I550_c033_native__private_layout
+- In progress: 2026-10-22T20:35:26.794030-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I550_c033_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I550_c033_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I550_c033_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T20:35:27.017624-04:00; exit 0; runner elapsed 0.222 s.
+
+### I551_c033_native__write_after_read_cache
+- In progress: 2026-10-22T20:35:27.093488-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I551_c033_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I551_c033_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I551_c033_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T20:35:27.288611-04:00; exit 0; runner elapsed 0.193 s.
+
+### I552_c033_native__incremental_propagators
+- In progress: 2026-10-22T20:35:27.362968-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I552_c033_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I552_c033_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I552_c033_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T20:35:27.576620-04:00; exit 0; runner elapsed 0.212 s.
+
+### I553_c033_native__start_rank_window
+- In progress: 2026-10-22T20:35:27.655564-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I553_c033_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I553_c033_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I553_c033_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T20:35:27.859389-04:00; exit 0; runner elapsed 0.201 s.
+
+### I554_c033_native__selection_reachability
+- In progress: 2026-10-22T20:35:27.933194-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I554_c033_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I554_c033_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I554_c033_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T20:35:28.174940-04:00; exit 0; runner elapsed 0.240 s.
+
+### I555_c033_native__relaxation_bound
+- In progress: 2026-10-22T20:35:28.271001-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I555_c033_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I555_c033_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I555_c033_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T20:37:16.736297-04:00; exit 0; runner elapsed 108.464 s.
+
+### I556_c033_native__prune_egraph
+- In progress: 2026-10-22T20:37:16.814072-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I556_c033_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I556_c033_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I556_c033_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T20:37:17.010258-04:00; exit 0; runner elapsed 0.194 s.
+
+### I557_c034_costload_build
+- In progress: 2026-10-22T21:01:33.741002-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I557_c034_costload_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I557_c034_costload_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I557_c034_costload_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T21:03:36.028312-04:00; exit 0; runner elapsed 122.286 s.
+
+### I558_c034_n43
+- In progress: 2026-10-22T21:03:36.118946-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I558_c034_n43.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I558_c034_n43.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I558_c034_n43.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I558_c034_n43`
+- Completed: 2026-10-22T21:09:59.202648-04:00; exit 1; runner elapsed 383.082 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.1410073030000003 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792717797.3597174 program-deadline=1792717793.5782239`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 81.6109 (no supervisor gap summary); best cost 81.6109.
+
+### I559_c034_graphs_build
+- In progress: 2026-10-22T21:22:05.322503-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I559_c034_graphs_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I559_c034_graphs_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I559_c034_graphs_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T21:24:07.283513-04:00; exit 0; runner elapsed 121.959 s.
+
+### I560_c034_n43
+- In progress: 2026-10-22T21:24:07.367461-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I560_c034_n43.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I560_c034_n43.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I560_c034_n43.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I560_c034_n43`
+- Completed: 2026-10-22T21:25:05.545224-04:00; exit 1; runner elapsed 58.176 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.1512306470000002 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792718703.7396362 program-deadline=1792718699.963383`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 81.6109 (no supervisor gap summary); best cost 81.6109.
+
+### I561_c034_nolock_build
+- In progress: 2026-10-22T21:29:28.261968-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I561_c034_nolock_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I561_c034_nolock_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I561_c034_nolock_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T21:31:30.718532-04:00; exit 0; runner elapsed 122.455 s.
+
+### I562_c034_n43
+- In progress: 2026-10-22T21:31:30.804119-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I562_c034_n43.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I562_c034_n43.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I562_c034_n43.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I562_c034_n43`
+- Completed: 2026-10-22T21:32:28.952145-04:00; exit 1; runner elapsed 58.146 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.093754949 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792719147.1490369 program-deadline=1792719143.3692262`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 81.6109 (no supervisor gap summary); best cost 81.6109.
+
+### I563_c034_names_build
+- In progress: 2026-10-22T21:50:36.283710-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I563_c034_names_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I563_c034_names_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I563_c034_names_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T21:52:38.926639-04:00; exit 0; runner elapsed 122.640 s.
+
+### I564_c034_n43
+- In progress: 2026-10-22T21:52:39.025194-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I564_c034_n43.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I564_c034_n43.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I564_c034_n43.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I564_c034_n43`
+- Completed: 2026-10-22T21:57:24.863363-04:00; exit 0; runner elapsed 285.836 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.1300903309999999 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=81.610916000000003 final-bound=0 first-incumbent-elapsed=28.057661056518555 samples=3`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792720415.1029 program-deadline=1792720411.5452507`
+- First incumbent: 28.057661057 s, cost 81.6109; best cost 81.610916.
+
+### I565_c034_persist_build
+- In progress: 2026-10-22T22:02:33.566199-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I565_c034_persist_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I565_c034_persist_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I565_c034_persist_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T22:04:36.276347-04:00; exit 0; runner elapsed 122.708 s.
+
+### I566_c034_n43
+- In progress: 2026-10-22T22:04:36.362477-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I566_c034_n43.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I566_c034_n43.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I566_c034_n43.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I566_c034_n43`
+- Completed: 2026-10-22T22:09:18.717778-04:00; exit 0; runner elapsed 282.354 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.0374908920000001 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=81.610916000000003 final-bound=0 first-incumbent-elapsed=27.899813652038574 samples=3`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792721132.2475009 program-deadline=1792721128.8476989`
+- First incumbent: 27.899813652 s, cost 81.6109; best cost 81.610916.
+
+### I567_c034_n43_confirm1
+- In progress: 2026-10-22T22:09:18.789580-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I567_c034_n43_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I567_c034_n43_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I567_c034_n43_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I567_c034_n43_confirm1`
+- Completed: 2026-10-22T22:14:08.163683-04:00; exit 0; runner elapsed 289.372 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.0230769009999996 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=81.610916000000003 final-bound=0 first-incumbent-elapsed=28.047106742858887 samples=3`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792721414.8569117 program-deadline=1792721411.3098171`
+- First incumbent: 28.047106743 s, cost 81.6109; best cost 81.610916.
+
+### I568_c034_n43_confirm2
+- In progress: 2026-10-22T22:14:08.234051-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I568_c034_n43_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I568_c034_n43_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I568_c034_n43_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I568_c034_n43_confirm2`
+- Completed: 2026-10-22T22:18:54.651421-04:00; exit 0; runner elapsed 286.415 s.
+  `[SearchEngine volume] iterations=0 elapsed=6.1042873369999997 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=81.610916000000003 final-bound=0 first-incumbent-elapsed=28.008164167404175 samples=3`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792721704.2355571 program-deadline=1792721700.7274032`
+- First incumbent: 28.008164167 s, cost 81.6109; best cost 81.610916.
+
+### I569_c034_n42_regression
+- In progress: 2026-10-22T22:19:56.899933-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I569_c034_n42_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I569_c034_n42_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I569_c034_n42_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 42 --ignore-checkpoints --run-dir logs/gemma_output_runs/I569_c034_n42_regression`
+- Completed: 2026-10-22T22:24:13.070622-04:00; exit 0; runner elapsed 256.167 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.3461697539999999 total-domain-bits=137687443.63319042 remaining-domain-bits=137687443.63319042 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=76.459014999999994 final-bound=0 first-incumbent-elapsed=26.92028284072876 samples=3`
+  `[SearchEngine] New best cost: 76.459 at iteration 0 source=root-heuristic-restricted event-epoch=1792722051.5622065 program-deadline=1792722049.1419349`
+- First incumbent: 26.920282841 s, cost 76.459; best cost 76.459015.
+
+### I570_c034_oracle
+- In progress: 2026-10-22T22:24:13.149703-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I570_c034_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I570_c034_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I570_c034_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T22:24:18.022310-04:00; exit 0; runner elapsed 4.871 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I571_c034_search_gap
+- In progress: 2026-10-22T22:24:18.084813-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I571_c034_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I571_c034_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I571_c034_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T22:24:18.104626-04:00; exit 0; runner elapsed 0.018 s.
+
+### I572_c034_native__private_layout
+- In progress: 2026-10-22T22:24:18.175446-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I572_c034_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I572_c034_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I572_c034_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T22:24:18.363987-04:00; exit 0; runner elapsed 0.187 s.
+
+### I573_c034_native__write_after_read_cache
+- In progress: 2026-10-22T22:24:18.444823-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I573_c034_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I573_c034_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I573_c034_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T22:24:18.647574-04:00; exit 0; runner elapsed 0.201 s.
+
+### I574_c034_native__incremental_propagators
+- In progress: 2026-10-22T22:24:18.726702-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I574_c034_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I574_c034_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I574_c034_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T22:24:18.944162-04:00; exit 0; runner elapsed 0.216 s.
+
+### I575_c034_native__start_rank_window
+- In progress: 2026-10-22T22:24:19.025645-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I575_c034_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I575_c034_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I575_c034_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T22:24:19.248891-04:00; exit 0; runner elapsed 0.221 s.
+
+### I576_c034_native__selection_reachability
+- In progress: 2026-10-22T22:24:19.336335-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I576_c034_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I576_c034_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I576_c034_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T22:24:19.565630-04:00; exit 0; runner elapsed 0.228 s.
+
+### I577_c034_native__relaxation_bound
+- In progress: 2026-10-22T22:24:19.679329-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I577_c034_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I577_c034_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I577_c034_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T22:26:07.006034-04:00; exit 0; runner elapsed 107.325 s.
+
+### I578_c034_native__prune_egraph
+- In progress: 2026-10-22T22:26:07.082519-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I578_c034_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I578_c034_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I578_c034_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T22:26:07.301876-04:00; exit 0; runner elapsed 0.218 s.
+
+### I579_c035_precedence_build
+- In progress: 2026-10-22T22:31:11.778849-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I579_c035_precedence_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I579_c035_precedence_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I579_c035_precedence_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T22:33:14.284441-04:00; exit 0; runner elapsed 122.504 s.
+
+### I580_c035_n44
+- In progress: 2026-10-22T22:33:14.372601-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I580_c035_n44.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I580_c035_n44.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I580_c035_n44.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 44 --ignore-checkpoints --run-dir logs/gemma_output_runs/I580_c035_n44`
+- Completed: 2026-10-22T22:39:55.654459-04:00; exit 1; runner elapsed 401.279 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.8671127079999996 total-domain-bits=144383514.37867966 remaining-domain-bits=144383514.37867966 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 80.8816 at iteration 0 source=root-heuristic-restricted event-epoch=1792723193.8590519 program-deadline=1792723190.0174272`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 80.8816 (no supervisor gap summary); best cost 80.8816.
+
+### I581_c035_covering_build
+- In progress: 2026-10-22T22:50:04.782291-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I581_c035_covering_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I581_c035_covering_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I581_c035_covering_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T22:52:06.947624-04:00; exit 0; runner elapsed 122.163 s.
+
+### I582_c035_n44
+- In progress: 2026-10-22T22:52:07.041248-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I582_c035_n44.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I582_c035_n44.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I582_c035_n44.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 44 --ignore-checkpoints --run-dir logs/gemma_output_runs/I582_c035_n44`
+- Completed: 2026-10-22T22:57:17.348811-04:00; exit 0; runner elapsed 310.306 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.7518866510000004 total-domain-bits=144383514.37867966 remaining-domain-bits=144383514.37867966 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.881568999999999 final-bound=0 first-incumbent-elapsed=28.184388637542725 samples=3`
+  `[SearchEngine] New best cost: 80.8816 at iteration 0 source=root-heuristic-restricted event-epoch=1792723984.1643789 program-deadline=1792723980.4800007`
+- First incumbent: 28.184388638 s, cost 80.8816; best cost 80.881569.
+
+### I583_c035_bases_build
+- In progress: 2026-10-22T23:04:27.812549-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I583_c035_bases_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I583_c035_bases_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I583_c035_bases_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T23:06:30.432028-04:00; exit 0; runner elapsed 122.618 s.
+
+### I584_c035_n44
+- In progress: 2026-10-22T23:06:30.535225-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I584_c035_n44.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I584_c035_n44.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I584_c035_n44.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 44 --ignore-checkpoints --run-dir logs/gemma_output_runs/I584_c035_n44`
+- Completed: 2026-10-22T23:11:40.677156-04:00; exit 0; runner elapsed 310.138 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.6534919720000003 total-domain-bits=144383514.37867966 remaining-domain-bits=144383514.37867966 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.881568999999999 final-bound=0 first-incumbent-elapsed=28.037186145782471 samples=3`
+  `[SearchEngine] New best cost: 80.8816 at iteration 0 source=root-heuristic-restricted event-epoch=1792724847.47703 program-deadline=1792724843.9398539`
+- First incumbent: 28.037186146 s, cost 80.8816; best cost 80.881569.
+
+### I585_c035_n44_confirm1
+- In progress: 2026-10-22T23:11:40.751027-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I585_c035_n44_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I585_c035_n44_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I585_c035_n44_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 44 --ignore-checkpoints --run-dir logs/gemma_output_runs/I585_c035_n44_confirm1`
+- Completed: 2026-10-22T23:16:46.594479-04:00; exit 0; runner elapsed 305.842 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.6013199680000003 total-domain-bits=144383514.37867966 remaining-domain-bits=144383514.37867966 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.881568999999999 final-bound=0 first-incumbent-elapsed=28.032699823379517 samples=3`
+  `[SearchEngine] New best cost: 80.8816 at iteration 0 source=root-heuristic-restricted event-epoch=1792725157.5967855 program-deadline=1792725154.0640979`
+- First incumbent: 28.032699823 s, cost 80.8816; best cost 80.881569.
+
+### I586_c035_n44_confirm2
+- In progress: 2026-10-22T23:16:46.676347-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I586_c035_n44_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I586_c035_n44_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I586_c035_n44_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 44 --ignore-checkpoints --run-dir logs/gemma_output_runs/I586_c035_n44_confirm2`
+- Completed: 2026-10-22T23:21:50.298755-04:00; exit 0; runner elapsed 303.620 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.5563610260000003 total-domain-bits=144383514.37867966 remaining-domain-bits=144383514.37867966 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.881568999999999 final-bound=0 first-incumbent-elapsed=28.016229867935181 samples=3`
+  `[SearchEngine] New best cost: 80.8816 at iteration 0 source=root-heuristic-restricted event-epoch=1792725463.7923217 program-deadline=1792725460.2761037`
+- First incumbent: 28.016229868 s, cost 80.8816; best cost 80.881569.
+
+### I587_c035_n43_regression
+- In progress: 2026-10-22T23:22:58.944890-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I587_c035_n43_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I587_c035_n43_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I587_c035_n43_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 43 --ignore-checkpoints --run-dir logs/gemma_output_runs/I587_c035_n43_regression`
+- Completed: 2026-10-22T23:27:39.969345-04:00; exit 0; runner elapsed 281.023 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4301069460000004 total-domain-bits=141002167.41865814 remaining-domain-bits=141002167.41865814 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=81.610916000000003 final-bound=0 first-incumbent-elapsed=27.430076360702515 samples=3`
+  `[SearchEngine] New best cost: 81.6109 at iteration 0 source=root-heuristic-restricted event-epoch=1792725834.8855722 program-deadline=1792725831.955508`
+- First incumbent: 27.430076361 s, cost 81.6109; best cost 81.610916.
+
+### I588_c035_oracle
+- In progress: 2026-10-22T23:27:40.044518-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I588_c035_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I588_c035_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I588_c035_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-22T23:27:44.797462-04:00; exit 0; runner elapsed 4.751 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I589_c035_search_gap
+- In progress: 2026-10-22T23:27:44.866488-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I589_c035_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I589_c035_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I589_c035_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-22T23:27:44.889094-04:00; exit 0; runner elapsed 0.021 s.
+
+### I590_c035_native__private_layout
+- In progress: 2026-10-22T23:27:44.960657-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I590_c035_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I590_c035_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I590_c035_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-22T23:27:45.143388-04:00; exit 0; runner elapsed 0.181 s.
+
+### I591_c035_native__write_after_read_cache
+- In progress: 2026-10-22T23:27:45.225298-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I591_c035_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I591_c035_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I591_c035_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-22T23:27:45.406763-04:00; exit 0; runner elapsed 0.180 s.
+
+### I592_c035_native__incremental_propagators
+- In progress: 2026-10-22T23:27:45.489298-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I592_c035_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I592_c035_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I592_c035_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-22T23:27:45.707001-04:00; exit 0; runner elapsed 0.214 s.
+
+### I593_c035_native__start_rank_window
+- In progress: 2026-10-22T23:27:45.797041-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I593_c035_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I593_c035_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I593_c035_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-22T23:27:46.013768-04:00; exit 0; runner elapsed 0.215 s.
+
+### I594_c035_native__selection_reachability
+- In progress: 2026-10-22T23:27:46.100940-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I594_c035_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I594_c035_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I594_c035_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-22T23:27:46.376925-04:00; exit 0; runner elapsed 0.274 s.
+
+### I595_c035_native__relaxation_bound
+- In progress: 2026-10-22T23:27:46.497548-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I595_c035_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I595_c035_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I595_c035_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-22T23:29:33.248521-04:00; exit 0; runner elapsed 106.749 s.
+
+### I596_c035_native__prune_egraph
+- In progress: 2026-10-22T23:29:33.337595-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I596_c035_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I596_c035_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I596_c035_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-22T23:29:33.563074-04:00; exit 0; runner elapsed 0.223 s.
+
+### I597_c036_parents_build
+- In progress: 2026-10-22T23:51:24.878414-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I597_c036_parents_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I597_c036_parents_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I597_c036_parents_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-22T23:53:28.550375-04:00; exit 0; runner elapsed 123.669 s.
+
+### I598_c036_n46
+- In progress: 2026-10-22T23:53:28.652760-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I598_c036_n46.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I598_c036_n46.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I598_c036_n46.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 46 --ignore-checkpoints --run-dir logs/gemma_output_runs/I598_c036_n46`
+- Completed: 2026-10-23T00:06:15.178056-04:00; exit 0; runner elapsed 766.524 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1450666280000004 total-domain-bits=150947892.70465142 remaining-domain-bits=150947892.70465142 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.895331999999996 final-bound=0 first-incumbent-elapsed=28.112761974334717 samples=3`
+  `[SearchEngine] New best cost: 80.8953 at iteration 0 source=root-heuristic-restricted event-epoch=1792728088.4048862 program-deadline=1792728084.7921355`
+- First incumbent: 28.112761974 s, cost 80.8953; best cost 80.895332.
+
+### I599_c036_n47
+- In progress: 2026-10-23T00:06:15.249773-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I599_c036_n47.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I599_c036_n47.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I599_c036_n47.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I599_c036_n47`
+- Completed: 2026-10-23T00:13:49.324595-04:00; exit 1; runner elapsed 454.073 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.369020345 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792728828.3388112 program-deadline=1792728823.7366383`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 80.4027 (no supervisor gap summary); best cost 80.4027.
+
+### I600_c036_n46_confirm1
+- In progress: 2026-10-23T00:14:25.026194-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I600_c036_n46_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I600_c036_n46_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I600_c036_n46_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 46 --ignore-checkpoints --run-dir logs/gemma_output_runs/I600_c036_n46_confirm1`
+- Completed: 2026-10-23T00:20:10.758511-04:00; exit 0; runner elapsed 345.729 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1000466749999998 total-domain-bits=150947892.70465142 remaining-domain-bits=150947892.70465142 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.895331999999996 final-bound=0 first-incumbent-elapsed=28.176634073257446 samples=3`
+  `[SearchEngine] New best cost: 80.8953 at iteration 0 source=root-heuristic-restricted event-epoch=1792728923.5508747 program-deadline=1792728919.874253`
+- First incumbent: 28.176634073 s, cost 80.8953; best cost 80.895332.
+
+### I601_c036_n46_confirm2
+- In progress: 2026-10-23T00:20:10.828745-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I601_c036_n46_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I601_c036_n46_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I601_c036_n46_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 46 --ignore-checkpoints --run-dir logs/gemma_output_runs/I601_c036_n46_confirm2`
+- Completed: 2026-10-23T00:25:59.929690-04:00; exit 0; runner elapsed 349.099 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.0938542289999997 total-domain-bits=150947892.70465142 remaining-domain-bits=150947892.70465142 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.895331999999996 final-bound=0 first-incumbent-elapsed=28.105761051177979 samples=3`
+  `[SearchEngine] New best cost: 80.8953 at iteration 0 source=root-heuristic-restricted event-epoch=1792729269.217308 program-deadline=1792729265.6115589`
+- First incumbent: 28.105761051 s, cost 80.8953; best cost 80.895332.
+
+### I602_c036_n44_regression
+- In progress: 2026-10-23T00:26:00.007837-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I602_c036_n44_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I602_c036_n44_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I602_c036_n44_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 44 --ignore-checkpoints --run-dir logs/gemma_output_runs/I602_c036_n44_regression`
+- Completed: 2026-10-23T00:30:57.177461-04:00; exit 0; runner elapsed 297.168 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.3953330560000001 total-domain-bits=144383514.37867966 remaining-domain-bits=144383514.37867966 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.881568999999999 final-bound=0 first-incumbent-elapsed=27.505820989608765 samples=3`
+  `[SearchEngine] New best cost: 80.8816 at iteration 0 source=root-heuristic-restricted event-epoch=1792729616.942318 program-deadline=1792729613.9365077`
+- First incumbent: 27.505820990 s, cost 80.8816; best cost 80.881569.
+
+### I603_c036_oracle
+- In progress: 2026-10-23T00:30:57.257146-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I603_c036_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I603_c036_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I603_c036_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-23T00:31:01.961907-04:00; exit 0; runner elapsed 4.703 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I604_c036_search_gap
+- In progress: 2026-10-23T00:31:02.036397-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I604_c036_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I604_c036_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I604_c036_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-23T00:31:02.061696-04:00; exit 0; runner elapsed 0.024 s.
+
+### I605_c036_native__private_layout
+- In progress: 2026-10-23T00:31:02.131911-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I605_c036_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I605_c036_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I605_c036_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-23T00:31:02.334643-04:00; exit 0; runner elapsed 0.200 s.
+
+### I606_c036_native__write_after_read_cache
+- In progress: 2026-10-23T00:31:02.416299-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I606_c036_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I606_c036_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I606_c036_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-23T00:31:02.633755-04:00; exit 0; runner elapsed 0.216 s.
+
+### I607_c036_native__incremental_propagators
+- In progress: 2026-10-23T00:31:02.722368-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I607_c036_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I607_c036_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I607_c036_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-23T00:31:02.941852-04:00; exit 0; runner elapsed 0.218 s.
+
+### I608_c036_native__start_rank_window
+- In progress: 2026-10-23T00:31:03.028988-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I608_c036_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I608_c036_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I608_c036_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-23T00:31:03.229348-04:00; exit 0; runner elapsed 0.199 s.
+
+### I609_c036_native__selection_reachability
+- In progress: 2026-10-23T00:31:03.313643-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I609_c036_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I609_c036_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I609_c036_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-23T00:31:03.570366-04:00; exit 0; runner elapsed 0.254 s.
+
+### I610_c036_native__relaxation_bound
+- In progress: 2026-10-23T00:31:03.689981-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I610_c036_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I610_c036_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I610_c036_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-23T00:32:51.889969-04:00; exit 0; runner elapsed 108.197 s.
+
+### I611_c036_native__prune_egraph
+- In progress: 2026-10-23T00:32:51.975250-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I611_c036_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I611_c036_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I611_c036_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-23T00:32:52.205036-04:00; exit 0; runner elapsed 0.226 s.
+
+### I612_c037_cycles_build
+- In progress: 2026-10-23T00:54:37.065227-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I612_c037_cycles_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I612_c037_cycles_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I612_c037_cycles_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-23T00:56:40.660723-04:00; exit 0; runner elapsed 123.593 s.
+
+### I613_c037_n47
+- In progress: 2026-10-23T00:56:40.765809-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I613_c037_n47.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I613_c037_n47.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I613_c037_n47.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I613_c037_n47`
+- Completed: 2026-10-23T00:57:41.473059-04:00; exit 1; runner elapsed 60.705 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4219820890000001 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792731459.8892446 program-deadline=1792731455.7370641`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 80.4027 (no supervisor gap summary); best cost 80.4027.
+
+### I614_c037_rounds_build
+- In progress: 2026-10-23T01:01:48.047070-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I614_c037_rounds_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I614_c037_rounds_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I614_c037_rounds_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-23T01:03:51.255550-04:00; exit 0; runner elapsed 123.206 s.
+
+### I615_c037_n47
+- In progress: 2026-10-23T01:03:51.360775-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I615_c037_n47.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I615_c037_n47.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I615_c037_n47.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I615_c037_n47`
+- Completed: 2026-10-23T01:04:52.097973-04:00; exit 1; runner elapsed 60.736 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.3679665139999999 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792731890.5274467 program-deadline=1792731886.5401487`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 80.4027 (no supervisor gap summary); best cost 80.4027.
+
+### I616_c037_selptr_build
+- In progress: 2026-10-23T01:14:36.888646-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I616_c037_selptr_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I616_c037_selptr_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I616_c037_selptr_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-23T01:16:40.155756-04:00; exit 0; runner elapsed 123.265 s.
+
+### I617_c037_n47
+- In progress: 2026-10-23T01:16:40.261874-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I617_c037_n47.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I617_c037_n47.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I617_c037_n47.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I617_c037_n47`
+- Completed: 2026-10-23T01:17:40.876731-04:00; exit 1; runner elapsed 60.613 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.4545243780000003 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792732659.2844317 program-deadline=1792732655.1399968`
+- Missing volume or gap report: FAILED evaluation.
+- First incumbent: elapsed unavailable, cost 80.4027 (no supervisor gap summary); best cost 80.4027.
+
+### I618_c037_costkey_build
+- In progress: 2026-10-23T01:29:55.394368-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I618_c037_costkey_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I618_c037_costkey_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I618_c037_costkey_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-23T01:31:59.340926-04:00; exit 0; runner elapsed 123.943 s.
+
+### I619_c037_n47
+- In progress: 2026-10-23T01:31:59.445965-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I619_c037_n47.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I619_c037_n47.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I619_c037_n47.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I619_c037_n47`
+- Completed: 2026-10-23T01:38:07.182920-04:00; exit 0; runner elapsed 367.735 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.3743759689999999 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.402702000000005 final-bound=0 first-incumbent-elapsed=28.194376707077026 samples=3`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792733577.7390163 program-deadline=1792733574.0446517`
+- First incumbent: 28.194376707 s, cost 80.4027; best cost 80.402702.
+
+### I620_c037_n47_confirm1
+- In progress: 2026-10-23T01:38:22.377660-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I620_c037_n47_confirm1.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I620_c037_n47_confirm1.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I620_c037_n47_confirm1.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I620_c037_n47_confirm1`
+- Completed: 2026-10-23T01:44:31.339757-04:00; exit 0; runner elapsed 368.960 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.3505715260000004 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.402702000000005 final-bound=0 first-incumbent-elapsed=28.172918796539307 samples=3`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792733960.7010727 program-deadline=1792733957.0281639`
+- First incumbent: 28.172918797 s, cost 80.4027; best cost 80.402702.
+
+### I621_c037_n47_confirm2
+- In progress: 2026-10-23T01:44:31.421242-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I621_c037_n47_confirm2.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I621_c037_n47_confirm2.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I621_c037_n47_confirm2.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 47 --ignore-checkpoints --run-dir logs/gemma_output_runs/I621_c037_n47_confirm2`
+- Completed: 2026-10-23T01:50:35.156671-04:00; exit 0; runner elapsed 363.733 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.3235408660000001 total-domain-bits=154261549.1440661 remaining-domain-bits=154261549.1440661 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.402702000000005 final-bound=0 first-incumbent-elapsed=28.27629566192627 samples=3`
+  `[SearchEngine] New best cost: 80.4027 at iteration 0 source=root-heuristic-restricted event-epoch=1792734329.7909622 program-deadline=1792734326.014678`
+- First incumbent: 28.276295662 s, cost 80.4027; best cost 80.402702.
+
+### I622_c037_n46_regression
+- In progress: 2026-10-23T01:50:35.229203-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I622_c037_n46_regression.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I622_c037_n46_regression.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I622_c037_n46_regression.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_gemma_output --config prefill+decode --optimal --timeout 30 --seq-len 46 --ignore-checkpoints --run-dir logs/gemma_output_runs/I622_c037_n46_regression`
+- Completed: 2026-10-23T01:56:20.117370-04:00; exit 0; runner elapsed 344.887 s.
+  `[SearchEngine volume] iterations=0 elapsed=5.1050091660000003 total-domain-bits=150947892.70465142 remaining-domain-bits=150947892.70465142 log2-remaining-fraction=0 eliminated-bits=-0 remaining-nodes=1 exhausted=false incomplete-branches=0`
+  `[Program gap] primal-dual-integral=30 normalized=1 final-gap=1 final-incumbent=80.895331999999996 final-bound=0 first-incumbent-elapsed=27.611914873123169 samples=3`
+  `[SearchEngine] New best cost: 80.8953 at iteration 0 source=root-heuristic-restricted event-epoch=1792734692.3960319 program-deadline=1792734689.2841299`
+- First incumbent: 27.611914873 s, cost 80.8953; best cost 80.895332.
+
+### I623_c037_oracle
+- In progress: 2026-10-23T01:56:20.193064-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I623_c037_oracle.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I623_c037_oracle.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I623_c037_oracle.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_planner_oracle`
+- Completed: 2026-10-23T01:56:25.028154-04:00; exit 0; runner elapsed 4.834 s.
+- Oracle verdict: 48/48 cases passed.
+
+### I624_c037_search_gap
+- In progress: 2026-10-23T01:56:25.098689-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I624_c037_search_gap.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I624_c037_search_gap.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I624_c037_search_gap.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python -m tests.test_search_gap`
+- Completed: 2026-10-23T01:56:25.125201-04:00; exit 0; runner elapsed 0.025 s.
+
+### I625_c037_native__private_layout
+- In progress: 2026-10-23T01:56:25.192899-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I625_c037_native__private_layout.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I625_c037_native__private_layout.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I625_c037_native__private_layout.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --private-layout`
+- Completed: 2026-10-23T01:56:25.390808-04:00; exit 0; runner elapsed 0.196 s.
+
+### I626_c037_native__write_after_read_cache
+- In progress: 2026-10-23T01:56:25.473769-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I626_c037_native__write_after_read_cache.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I626_c037_native__write_after_read_cache.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I626_c037_native__write_after_read_cache.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --write-after-read-cache`
+- Completed: 2026-10-23T01:56:25.655707-04:00; exit 0; runner elapsed 0.180 s.
+
+### I627_c037_native__incremental_propagators
+- In progress: 2026-10-23T01:56:25.735486-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I627_c037_native__incremental_propagators.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I627_c037_native__incremental_propagators.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I627_c037_native__incremental_propagators.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --incremental-propagators`
+- Completed: 2026-10-23T01:56:25.932329-04:00; exit 0; runner elapsed 0.194 s.
+
+### I628_c037_native__start_rank_window
+- In progress: 2026-10-23T01:56:26.013012-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I628_c037_native__start_rank_window.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I628_c037_native__start_rank_window.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I628_c037_native__start_rank_window.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --start-rank-window`
+- Completed: 2026-10-23T01:56:26.225729-04:00; exit 0; runner elapsed 0.210 s.
+
+### I629_c037_native__selection_reachability
+- In progress: 2026-10-23T01:56:26.310584-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I629_c037_native__selection_reachability.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I629_c037_native__selection_reachability.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I629_c037_native__selection_reachability.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --selection-reachability`
+- Completed: 2026-10-23T01:56:26.562970-04:00; exit 0; runner elapsed 0.251 s.
+
+### I630_c037_native__relaxation_bound
+- In progress: 2026-10-23T01:56:26.671175-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I630_c037_native__relaxation_bound.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I630_c037_native__relaxation_bound.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I630_c037_native__relaxation_bound.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --relaxation-bound`
+- Completed: 2026-10-23T01:58:13.566022-04:00; exit 0; runner elapsed 106.893 s.
+
+### I631_c037_native__prune_egraph
+- In progress: 2026-10-23T01:58:13.638898-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I631_c037_native__prune_egraph.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I631_c037_native__prune_egraph.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I631_c037_native__prune_egraph.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/tensor_graphs_cpp/test --prune-egraph`
+- Completed: 2026-10-23T01:58:13.866034-04:00; exit 0; runner elapsed 0.224 s.
+
+### I632_c038_standin_build
+- In progress: 2026-10-23T02:26:47.310339-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/I632_c038_standin_build.json`; log `logs/targets/prefill_decode_incumbent_seq_len/I632_c038_standin_build.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/I632_c038_standin_build.patch`
+- Command: `/home/aaron/Projects/tensor_graphs/.venv/bin/python build.py --targets bindings test bench --log-level INFO`
+- Completed: 2026-10-23T02:28:52.133095-04:00; exit 0; runner elapsed 124.821 s.

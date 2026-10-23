@@ -12,8 +12,10 @@ class PearceKellyCyclePropagator : public Propagator
     {
         EClassId parent_cid;
         uint32_t en_idx;
+        VarId parent_selection_var;
     };
-    std::vector<std::unordered_map<EClassId, std::vector<ParentInfo>>> bucket_parents;
+    // Per bucket, indexed by canonical child class id.
+    std::vector<std::vector<std::vector<ParentInfo>>> bucket_parents;
     bool parents_initialized = false;
 
     void ensureParents(const SearchState &state)
@@ -23,6 +25,8 @@ class PearceKellyCyclePropagator : public Propagator
         bucket_parents.resize(state.buckets.size());
         // Buckets are independent: each fills only its own map.
         ThreadPool::get().parallel_for(static_cast<uint32_t>(state.buckets.size()), [&](uint32_t b) {
+            auto &parents = bucket_parents[b];
+            parents.resize(state.bucket_egraphs[b].classes.size());
             for (const auto &pair : state.selected_vars[b])
             {
                 EClassId p_cid = pair.first;
@@ -33,7 +37,7 @@ class PearceKellyCyclePropagator : public Propagator
                     for (EClassId ch : enode.getChildren())
                     {
                         EClassId canon_ch = state.bucket_egraphs[b].findConst(ch);
-                        bucket_parents[b][canon_ch].push_back(ParentInfo{p_cid, en_idx});
+                        parents.at(canon_ch.value).push_back(ParentInfo{p_cid, en_idx, pair.second});
                     }
                 }
             }
@@ -64,17 +68,15 @@ class PearceKellyCyclePropagator : public Propagator
         ancestor_frontier_.clear();
         ancestor_frontier_.push_back(cid);
         ancestor_stamp_[cid.value] = ancestor_epoch_;
+        const auto &parents = bucket_parents[b];
         for (size_t head = 0; head < ancestor_frontier_.size(); ++head)
         {
-            auto it = bucket_parents[b].find(ancestor_frontier_[head]);
-            if (it == bucket_parents[b].end())
+            const uint32_t current = ancestor_frontier_[head].value;
+            if (current >= parents.size())
                 continue;
-            for (const auto &p_info : it->second)
+            for (const auto &p_info : parents[current])
             {
-                auto sel_it = state.selected_vars[b].find(p_info.parent_cid);
-                if (sel_it == state.selected_vars[b].end())
-                    continue;
-                const Domain &p_sel_dom = state.domains[sel_it->second];
+                const Domain &p_sel_dom = state.domains[p_info.parent_selection_var];
                 if (!p_sel_dom.isFixed() || p_sel_dom.fixedValue() != static_cast<int32_t>(p_info.en_idx + 1))
                     continue;
                 if (ancestor_stamp_[p_info.parent_cid.value] != ancestor_epoch_)
@@ -202,6 +204,7 @@ class PearceKellyCyclePropagator : public Propagator
 
   public:
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED); }
+    void prepare(const SearchState &state) override { ensureParents(state); }
 
     std::string name() const override
     {

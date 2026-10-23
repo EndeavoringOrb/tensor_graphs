@@ -86,6 +86,11 @@ class Propagator
     // Domain-changing batches run before bound-only batches at quiescence.
     virtual PropagationBatch propagationBatch(const SearchState &, VarId) const { return PropagationBatch::NONE; }
     virtual bool changesDomains() const { return true; }
+    // Builds indexes that depend only on the search state's structure (never
+    // its domains), which propagation would otherwise build lazily.
+    // SearchEngine::solve runs every propagator's prepare concurrently before
+    // root propagation; an implementation writes only its own members.
+    virtual void prepare(const SearchState &) {}
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;
 };

@@ -294,7 +294,7 @@ class StaticPrivateLayoutPropagator : public Propagator
                     continue; // unselected: its address is irrelevant
                 if (!state.domains[off_v].contains(slot_it->second))
                 {
-                    layout.skip_reason = state.var_infos[off_v].name + " domain excludes its private slot";
+                    layout.skip_reason = state.var_infos[off_v].name() + " domain excludes its private slot";
                     return layout;
                 }
                 layout.fixes.push_back({off_v, slot_it->second});
@@ -312,7 +312,7 @@ class StaticPrivateLayoutPropagator : public Propagator
                 std::unordered_set<uint32_t> address_visiting;
                 if (!collectViewAddresses(state, b, cid, slot_by_cid, address_memo, address_visiting))
                 {
-                    layout.skip_reason = state.var_infos[off_v].name + " has an uncertified view address";
+                    layout.skip_reason = state.var_infos[off_v].name() + " has an uncertified view address";
                     return layout;
                 }
                 uint32_t view_pages = 1;
@@ -325,12 +325,12 @@ class StaticPrivateLayoutPropagator : public Propagator
                     const bool fits_prealloc = address >= 0 && static_cast<int64_t>(address) + view_pages <= prealloc_end;
                     if (!fits_private && !fits_prealloc)
                     {
-                        layout.skip_reason = state.var_infos[off_v].name + " view footprint exceeds its reserved base range";
+                        layout.skip_reason = state.var_infos[off_v].name() + " view footprint exceeds its reserved base range";
                         return layout;
                     }
                     if (!state.domains[off_v].contains(address))
                     {
-                        layout.skip_reason = state.var_infos[off_v].name + " domain excludes a candidate base address";
+                        layout.skip_reason = state.var_infos[off_v].name() + " domain excludes a candidate base address";
                         return layout;
                     }
                 }
@@ -678,7 +678,7 @@ class StaticPrivateLayoutPropagator : public Propagator
                 continue; // unselected: its address is irrelevant
             if (!state.domains[off_v].contains(slot))
             {
-                layout.skip_reason = info.name + " domain excludes its shared slot";
+                layout.skip_reason = info.name() + " domain excludes its shared slot";
                 return layout;
             }
             layout.fixes.push_back({off_v, slot});
@@ -734,7 +734,7 @@ class StaticPrivateLayoutPropagator : public Propagator
                 if (state.domains[off_v].isFixed() && state.domains[off_v].fixedValue() == slot)
                     continue;
                 if (!state.domains[off_v].contains(slot))
-                    Error::throw_err("StaticPrivateLayout slot left the domain of " + state.var_infos[off_v].name);
+                    Error::throw_err("StaticPrivateLayout slot left the domain of " + state.var_infos[off_v].name());
                 state.setDomain(off_v, Domain::makeFixed(slot));
                 worklist.push_back(off_v);
                 ++fixed;
@@ -745,7 +745,7 @@ class StaticPrivateLayoutPropagator : public Propagator
                 if (!next.setRange(hull.first, hull.second))
                     continue;
                 if (next.isEmpty())
-                    Error::throw_err("StaticPrivateLayout view hull left the domain of " + state.var_infos[off_v].name);
+                    Error::throw_err("StaticPrivateLayout view hull left the domain of " + state.var_infos[off_v].name());
                 state.setDomain(off_v, next);
                 worklist.push_back(off_v);
                 ++fixed;

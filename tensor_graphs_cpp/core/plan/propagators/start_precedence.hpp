@@ -11,20 +11,31 @@ class StartPrecedencePropagator : public Propagator
 {
     std::string conflict_reason_;
 
-    bool propagateEClass(SearchState &state, uint32_t b, EClassId cid, std::vector<VarId> &worklist)
+    // `known_selection_var` and `known_start_var`, when given, are cid's
+    // variables (a consumer entry stores them), saving the lookups.
+    bool propagateEClass(SearchState &state, uint32_t b, EClassId cid, std::vector<VarId> &worklist,
+                         VarId known_selection_var = kInvalidVarId, VarId known_start_var = kInvalidVarId)
     {
-        auto sel_it = state.selected_vars[b].find(cid);
-        if (sel_it == state.selected_vars[b].end())
-            return true;
-        VarId sel_v = sel_it->second;
+        VarId sel_v = known_selection_var;
+        if (sel_v == kInvalidVarId)
+        {
+            auto sel_it = state.selected_vars[b].find(cid);
+            if (sel_it == state.selected_vars[b].end())
+                return true;
+            sel_v = sel_it->second;
+        }
         const Domain &sel_dom = state.domains[sel_v];
         if (sel_dom.contains(0))
             return true;
 
-        auto st_it = state.start_vars[b].find(cid);
-        if (st_it == state.start_vars[b].end())
-            return true;
-        VarId st_var = st_it->second;
+        VarId st_var = known_start_var;
+        if (st_var == kInvalidVarId)
+        {
+            auto st_it = state.start_vars[b].find(cid);
+            if (st_it == state.start_vars[b].end())
+                return true;
+            st_var = st_it->second;
+        }
         const EClass &cls = state.bucket_egraphs[b].getEClass(cid);
 
         int32_t min_enode_start_min = INT32_MAX;
@@ -63,7 +74,7 @@ class StartPrecedencePropagator : public Propagator
             {
                 if (st_dom.isEmpty())
                 {
-                    conflict_reason_ = "consumer=" + state.var_infos[st_var].name +
+                    conflict_reason_ = "consumer=" + state.var_infos[st_var].name() +
                         state.domains[st_var].toString() + " selection=" + sel_dom.toString() +
                         " required-min=" + std::to_string(min_enode_start_min);
                     return false;
@@ -81,6 +92,14 @@ class StartPrecedencePropagator : public Propagator
     }
 
     uint8_t interestedVarTypes() const override { return varTypeMask(VarType::SELECTED) | varTypeMask(VarType::START); }
+    // While a complete plan is validated, one pass over the bucket's classes
+    // per flush replaces the per-event class and consumer passes (each class's
+    // pass reads only its own selection and its children's starts, so passing
+    // every class reaches the same fixpoint).
+    PropagationBatch propagationBatch(const SearchState &state, VarId) const override
+    {
+        return state.completing_plan ? PropagationBatch::BUCKET : PropagationBatch::NONE;
+    }
 
     std::string conflictReason() const override { return conflict_reason_; }
 
@@ -98,8 +117,18 @@ class StartPrecedencePropagator : public Propagator
             if (type != VarType::START && type != VarType::SELECTED)
                 return true;
             uint32_t b = state.var_infos[changed].bucket_idx;
+            if (state.completing_plan)
+            {
+                for (const auto &[cid, selection_var] : state.selected_vars[b])
+                    if (!propagateEClass(state, b, cid, worklist, selection_var))
+                        return false;
+                return true;
+            }
             EClassId cid = state.var_infos[changed].eclass_id;
-            if (state.var_infos[changed].type == VarType::SELECTED)
+            // An unchanged selection (its initial event) needs no
+            // rescheduling: every start variable is dirty from addVar and has
+            // seen only this selection domain.
+            if (state.var_infos[changed].type == VarType::SELECTED && state.domainEverChanged(changed))
             {
                 // Selection changes activate both forward and backward edges.
                 state.schedulePropagation(state.start_vars[b].at(cid));
@@ -115,9 +144,17 @@ class StartPrecedencePropagator : public Propagator
             }
             if (!propagateEClass(state, b, cid, worklist))
                 return false;
+            // A consumer's bound reads only its children's start minima and
+            // skips children fixed to 0, so it cannot rise on a selection
+            // change or on the start of an unselected child.
+            if (state.var_infos[changed].type == VarType::SELECTED)
+                return true;
+            const Domain &selection = state.domains[state.selected_vars[b].at(cid)];
+            if (selection.isFixed() && selection.fixedValue() == 0)
+                return true;
             state.ensurePropagationState();
             for (const auto &consumer : state.propagation.start_precedence[b].consumers_by_cid.at(cid.value))
-                if (!propagateEClass(state, b, consumer.parent_cid, worklist))
+                if (!propagateEClass(state, b, consumer.parent_cid, worklist, consumer.selection_var, consumer.start_var))
                     return false;
             return true;
         }

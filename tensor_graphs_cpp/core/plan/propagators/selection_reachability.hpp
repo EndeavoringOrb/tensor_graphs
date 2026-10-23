@@ -21,7 +21,7 @@ class SelectionReachabilityPropagator : public Propagator
         const uint64_t victim_count = ++conflicts_by_victim_[victim];
         const auto describe = [&](VarId var_id) {
             return var_id == kInvalidVarId ? std::string("initial") :
-                state.var_infos.at(var_id).name + "=" + state.domains.at(var_id).toString();
+                state.var_infos.at(var_id).name() + "=" + state.domains.at(var_id).toString();
         };
         conflict_reason_ = kind + ": trigger=" + describe(changed) +
                            ", victim=" + describe(victim);
@@ -84,7 +84,7 @@ class SelectionReachabilityPropagator : public Propagator
             return a.second > b.second || (a.second == b.second && a.first < b.first);
         });
         for (size_t idx = 0; idx < std::min<size_t>(5, ranked.size()); ++idx)
-            LOG(INFO) << "[Reachability hotspot] victim=" << state.var_infos.at(ranked[idx].first).name
+            LOG(INFO) << "[Reachability hotspot] victim=" << state.var_infos.at(ranked[idx].first).name()
                       << " conflicts=" << ranked[idx].second;
         return false;
     }
@@ -137,7 +137,7 @@ class SelectionReachabilityPropagator : public Propagator
             if (state.domains[pair.second].fixedValue() > 0 && !reached.count(pair.first))
             {
                 conflict_reason_ = "complete plan selects a class unreachable from the root: " +
-                                   state.var_infos[pair.second].name;
+                                   state.var_infos[pair.second].name();
                 consistent = false;
                 return true;
             }

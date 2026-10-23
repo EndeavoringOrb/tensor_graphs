@@ -89,7 +89,10 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
     std::vector<int32_t> low_link(class_count, -1);
     std::vector<uint8_t> on_stack(class_count, 0);
     std::vector<uint32_t> stack;
-    std::vector<std::vector<uint32_t>> components;
+    // Components are emitted in completion order; only cyclic ones (more
+    // than one class, or a self edge) are kept, sorted.
+    std::vector<std::vector<uint32_t>> cyclic_components;
+    std::vector<uint32_t> component;
     int32_t next_index = 0;
 
     // Iterative Tarjan; visits children in the same order as the recursive form.
@@ -122,7 +125,7 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
             frames.pop_back();
             if (low_link[done] == index[done])
             {
-                std::vector<uint32_t> component;
+                component.clear();
                 while (true)
                 {
                     const uint32_t member = stack.back();
@@ -132,7 +135,15 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
                     if (member == done)
                         break;
                 }
-                components.push_back(std::move(component));
+                bool cyclic = component.size() > 1;
+                if (!cyclic)
+                    for (const CycleEdge &edge : outgoing[done])
+                        cyclic = cyclic || edge.to == done;
+                if (cyclic)
+                {
+                    std::sort(component.begin(), component.end());
+                    cyclic_components.push_back(component);
+                }
             }
             if (!frames.empty())
             {
@@ -140,22 +151,6 @@ inline std::vector<std::vector<uint32_t>> findCyclicComponents(
                 low_link[parent] = std::min(low_link[parent], low_link[done]);
             }
         }
-    }
-
-    std::vector<std::vector<uint32_t>> cyclic_components;
-    for (auto &component : components)
-    {
-        bool cyclic = component.size() > 1;
-        if (!cyclic)
-        {
-            const uint32_t node = component.front();
-            for (const CycleEdge &edge : outgoing[node])
-                cyclic = cyclic || edge.to == node;
-        }
-        if (!cyclic)
-            continue;
-        std::sort(component.begin(), component.end());
-        cyclic_components.push_back(std::move(component));
     }
 
     std::sort(cyclic_components.begin(), cyclic_components.end(),
