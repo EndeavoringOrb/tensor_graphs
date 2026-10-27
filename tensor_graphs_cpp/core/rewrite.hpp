@@ -2767,7 +2767,7 @@ struct SlicePushDownStructural : public Rule
         RestrictedMemoKey rkey{opId.value, box};
         auto rit = restricted_memo.find(rkey);
         if (rit != restricted_memo.end())
-            return egraph.findConst(rit->second);
+            return rit->second == EClassId{} ? EClassId{} : egraph.findConst(rit->second);
         EClassId res = buildRestrictedImpl(egraph, opId, srcShape, srcDType, srcMemSpace, box);
         restricted_memo[rkey] = res;
         return res;
@@ -2788,6 +2788,8 @@ struct SlicePushDownStructural : public Rule
         {
         case OpType::GATHER: {
             const size_t idxRank = egraph.getEClass(egraph.findConst(children[1])).shape.size();
+            if (idxRank > box.region.size())
+                return EClassId{};
             Region idxBox;
             for (size_t d = 0; d < idxRank; ++d)
                 idxBox.region.push_back(box.region[d]);
@@ -2804,6 +2806,9 @@ struct SlicePushDownStructural : public Rule
                 return EClassId{};
             const auto inShape = egraph.getEClass(egraph.findConst(children[0])).shape;
             const int32_t axis = axisV[0] < 0 ? axisV[0] + (int32_t)inShape.size() : axisV[0];
+            if (axis < 0 || static_cast<size_t>(axis) >= inShape.size() || static_cast<size_t>(axis) >= box.region.size() ||
+                static_cast<size_t>(axis) >= srcShape.size())
+                return EClassId{};
             Region inBox = box;
             if (inShape[axis] == 1)
                 inBox.region[axis] = {0, 1};
@@ -2835,6 +2840,8 @@ struct SlicePushDownStructural : public Rule
                 inLogicalId = in.logical_id;
             }
             const int32_t axis = axisV[0] < 0 ? axisV[0] + (int32_t)inShape.size() : axisV[0];
+            if (axis < 0 || static_cast<size_t>(axis) >= inShape.size() || static_cast<size_t>(axis) >= box.region.size())
+                return EClassId{};
             Region inBox = box;
             inBox.region[axis] = {0, inShape[axis]};
             if (regions_ && regions_->facts && inLogicalId != LogicalId{})
@@ -2897,7 +2904,11 @@ struct SlicePushDownStructural : public Rule
             const auto inShape = egraph.getEClass(egraph.findConst(children[0])).shape;
             Region inBox = fullBox(inShape);
             for (size_t i = 0; i < dims.size(); ++i)
+            {
+                if (dims[i] < 0 || static_cast<size_t>(dims[i]) >= inBox.region.size())
+                    return EClassId{};
                 inBox.region[dims[i]] = box.region[i];
+            }
             EClassId inSlice = memoSliceOf(egraph, children[0], inBox);
             const std::vector<uint64_t> inStrides = egraph.getEClass(egraph.findConst(inSlice)).strides;
             std::vector<uint64_t> strides(dims.size());
@@ -2911,6 +2922,8 @@ struct SlicePushDownStructural : public Rule
             if (!constInts(egraph, children[0], axisV) || axisV.size() != 1)
                 return EClassId{};
             const int32_t axis = axisV[0] < 0 ? axisV[0] + (int32_t)srcShape.size() : axisV[0];
+            if (axis < 0 || static_cast<size_t>(axis) >= srcShape.size() || static_cast<size_t>(axis) >= box.region.size())
+                return EClassId{};
             std::vector<EClassId> pieces = {children[0]};
             uint32_t offset = 0;
             for (size_t i = 1; i < children.size(); ++i)
@@ -2937,7 +2950,7 @@ struct SlicePushDownStructural : public Rule
             if (!constInts(egraph, children[1], starts) || !constInts(egraph, children[3], steps))
                 return EClassId{};
             const auto inShape = egraph.getEClass(egraph.findConst(children[0])).shape;
-            if (starts.size() != inShape.size() || steps.size() != inShape.size())
+            if (starts.size() != inShape.size() || steps.size() != inShape.size() || starts.size() != box.region.size())
                 return EClassId{};
             Region inBox = box;
             for (size_t d = 0; d < starts.size(); ++d)
@@ -3087,10 +3100,9 @@ struct SlicePushDownStructural : public Rule
 
             visited.insert(MatchKey{contig_class, sliceIdx.value});
 
-            const size_t numSrc = egraph.getEClass(srcClass).enodes.size();
-            for (size_t s_i = 0; s_i < numSrc; ++s_i)
+            const auto srcEnodes = egraph.getEClass(srcClass).enodes;
+            for (ENodeId srcIdx : srcEnodes)
             {
-                ENodeId srcIdx = egraph.getEClass(srcClass).enodes[s_i];
                 if (!isStructural(egraph.getENode(srcIdx).getOpType()))
                     continue;
                 if (ctx.base_enode_watermark > 0 && eNodeIdx < ctx.base_enode_watermark &&
@@ -3193,15 +3205,32 @@ inline const FusedRowLocality &fusedRowLocality(const std::string &opName)
         // Patterns whose shapes depend on runtime inputs (shape tensors) cannot
         // be shown row-local from the pattern alone.
         bool shapesKnown = true;
-        try
+        for (LogicalId id : topo)
         {
-            for (LogicalId id : topo)
-                if (g.getNode(id).opType != OpType::INPUT)
-                    prop.inferShape(id, g);
+            const auto &node = g.getNode(id);
+            for (size_t i = 0; i < node.child_ids.size(); ++i)
+            {
+                if (isConstant(node.opType, i, node.child_ids.size()) && !g.constantStaging.count(node.child_ids[i]))
+                {
+                    shapesKnown = false;
+                    break;
+                }
+            }
+            if (!shapesKnown)
+                break;
         }
-        catch (const std::exception &)
+        if (shapesKnown)
         {
-            shapesKnown = false;
+            try
+            {
+                for (LogicalId id : topo)
+                    if (g.getNode(id).opType != OpType::INPUT)
+                        prop.inferShape(id, g);
+            }
+            catch (const std::exception &)
+            {
+                shapesKnown = false;
+            }
         }
         const auto outShape = shapesKnown ? g.getNode(patternRoot).getShape() : std::vector<uint32_t>{};
         if (outShape.size() >= 2)

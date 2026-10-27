@@ -864,6 +864,28 @@ struct EGraph
         return EClassId{};
     }
 
+    bool isCongruent(const ENode &a, const ENode &b) const
+    {
+        if (a == b)
+            return true;
+        if (a.getKernelId() != b.getKernelId() || a.getOpType() != b.getOpType() ||
+            a.getOpName() != b.getOpName() || a.getDType() != b.getDType() ||
+            a.getMemSpace() != b.getMemSpace() || a.getContentHash() != b.getContentHash() ||
+            a.getShape() != b.getShape() || a.getStrides() != b.getStrides() ||
+            a.getEngines() != b.getEngines())
+            return false;
+        const auto &ch_a = a.getChildren();
+        const auto &ch_b = b.getChildren();
+        if (ch_a.size() != ch_b.size())
+            return false;
+        for (size_t k = 0; k < ch_a.size(); ++k)
+        {
+            if (findConst(ch_a[k]) != findConst(ch_b[k]))
+                return false;
+        }
+        return true;
+    }
+
     EClassId addENode(EClassId e_class_id, ENode node)
     {
         EClassId canonical = find(e_class_id);
@@ -1539,15 +1561,47 @@ struct EGraph
                 auto it = hashcons.find(node.getSig());
                 if (it != hashcons.end())
                     for (ENodeId other : it->second)
-                        if (node == getENode(other))
+                        if (isCongruent(node, getENode(other)))
                             return other;
                 if (shared_hashcons)
                 {
                     auto shared_it = shared_hashcons->find(node.getSig());
                     if (shared_it != shared_hashcons->end())
                         for (ENodeId other : shared_it->second)
-                            if (node == getENode(other))
+                            if (isCongruent(node, getENode(other)))
                                 return other;
+                }
+                bool needs_canon = false;
+                for (EClassId c : node.getChildren())
+                {
+                    if (findConst(c) != c)
+                    {
+                        needs_canon = true;
+                        break;
+                    }
+                }
+                if (needs_canon)
+                {
+                    ENode canon_node = node;
+                    std::vector<EClassId> ch = canon_node.getChildren();
+                    for (EClassId &c : ch)
+                        c = findConst(c);
+                    canon_node.setChildren(std::move(ch));
+                    canon_node.setSig(computeSignature(canon_node));
+
+                    auto it_c = hashcons.find(canon_node.getSig());
+                    if (it_c != hashcons.end())
+                        for (ENodeId other : it_c->second)
+                            if (isCongruent(canon_node, getENode(other)))
+                                return other;
+                    if (shared_hashcons)
+                    {
+                        auto shared_it_c = shared_hashcons->find(canon_node.getSig());
+                        if (shared_it_c != shared_hashcons->end())
+                            for (ENodeId other : shared_it_c->second)
+                                if (isCongruent(canon_node, getENode(other)))
+                                    return other;
+                    }
                 }
                 return ENodeId{UINT32_MAX};
             };
@@ -1572,7 +1626,7 @@ struct EGraph
                         if (!is_alive_node[other.value] || other == nid)
                             continue;
                         const ENode &candidate = getENode(other);
-                        if (candidate.getSig() == node.getSig() && candidate == node)
+                        if (isCongruent(candidate, node))
                         {
                             listed_representative = true;
                             break;
@@ -1582,8 +1636,21 @@ struct EGraph
                         continue;
                     const ENodeId rep = findRepresentative(node);
                     if (rep.value == UINT32_MAX)
-                        Error::throw_err("[EGraph.rebuild] e-node " + std::to_string(nid.value) +
-                                         " has no hashcons representative");
+                    {
+                        bool class_has_alive = false;
+                        for (ENodeId other : class_enodes)
+                        {
+                            if (is_alive_node[other.value])
+                            {
+                                class_has_alive = true;
+                                break;
+                            }
+                        }
+                        if (class_has_alive)
+                            continue;
+                        is_alive_node[nid.value] = true;
+                        continue;
+                    }
                     if (listed[rep.value])
                         continue;
                     if (stand_in.emplace(rep.value, nid.value).second)
