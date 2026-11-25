@@ -1,5 +1,6 @@
 -use `rg` instead of `grep`. make searches targeted (e.g rg something tensor_graphs_cpp) to avoid long search times.
 -use .venv/Scripts/python.exe (or .venv/bin/python for linux) when running python.
+-agents are only allowed to do read-only git commands (no merge, pull, push)
 
 ## kernels
 - kernels should not have branching logic (e.g. to thread or not to thread based on input size), it is the compiler's responsibility to decide to use the threaded version or the unthreaded version so they should be two different kernels. this also means that any capability guards like `#if defined(TG_HAS_AVX2)` should wrap the entire kernel file, there shouldn't be fallbacks inside the run functions.

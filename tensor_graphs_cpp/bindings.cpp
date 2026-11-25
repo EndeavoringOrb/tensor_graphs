@@ -3,6 +3,8 @@
 #include <pybind11/stl.h>
 #include <chrono>
 #include <future>
+#include <iomanip>
+#include <sstream>
 
 #if defined(_WIN32) || defined(_WIN64)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -826,8 +828,17 @@ class Krea2Session
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            actual_cache = "dirty_region_caches/krea-2-turbo-pipeline-" + std::to_string(width) + "x" +
-                           std::to_string(height) + "-s" + std::to_string(steps) + ".bin";
+            // Keep every plan-affecting Krea parameter in the default filename
+            // so a cache from another shape, checkpoint, timestep schedule, or
+            // compile budget cannot match.
+            std::ostringstream cache_identity;
+            cache_identity << actual_dit_path << "|" << actual_te_path << "|" << actual_vae_path << "|"
+                           << width << "|" << height << "|" << text_seq_len << "|" << steps << "|"
+                           << std::setprecision(9) << mu << "|" << (disable_caching ? 1 : 0) << "|"
+                           << std::setprecision(9) << min_compile_time;
+            SHA256 cache_hash;
+            cache_hash.update(cache_identity.str());
+            actual_cache = "dirty_region_caches/krea-2-turbo-pipeline-" + cache_hash.digest() + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,

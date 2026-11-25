@@ -80,6 +80,12 @@ def main():
         help="Path to .txt file containing the prompt",
     )
     parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Prompt text; overrides --prompt_file and exits after one image",
+    )
+    parser.add_argument(
         "--model-path",
         type=str,
         default="models/krea/Krea-2-Turbo/krea.safetensors",
@@ -165,9 +171,12 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    if not args.prompt_file.is_file():
-        raise FileNotFoundError(f"Prompt file not found: {args.prompt_file}")
-    prompt = args.prompt_file.read_text(encoding="utf-8").strip()
+    if args.prompt is not None:
+        prompt = args.prompt
+    else:
+        if not args.prompt_file.is_file():
+            raise FileNotFoundError(f"Prompt file not found: {args.prompt_file}")
+        prompt = args.prompt_file.read_text(encoding="utf-8").strip()
 
     print("=========================================================")
     print(" Krea 2 Turbo (Qwen3-VL + 12B DiT + VAE)")
@@ -218,6 +227,9 @@ def main():
         args.width,
         args.steps,
     )
+
+    if args.prompt is not None:
+        return
 
     print(f"Watching {args.prompt_file} for changes. Press Ctrl+C to exit.")
     try:
