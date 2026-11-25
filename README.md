@@ -2,9 +2,9 @@
 
 A compiler and inference engine for ML models, written in C++ with Python bindings.
 
-You give it a model as a graph of tensor operations. It works out how to run that graph on your hardware (CPU, GPU, or both): which kernel implements each operation, which device it runs on, in what order, where each tensor lives in memory, and what to cache between runs. It runs real models end to end: **Gemma 3 270M** (text generation), **EmbeddingGemma** (text and audio embeddings), and an image diffusion model.
+You give it a model as a graph of tensor operations. It works out how to run that graph on your hardware (CPU, GPU, or both): which kernel implements each operation, which device it runs on, in what order, where each tensor lives in memory, and what to cache between runs. Currently implemented: **Gemma 3 270M** (text generation), **EmbeddingGemma** (text and audio embeddings), and an image diffusion model.
 
-> **Status: paused.** I worked on this for about 10 months (~1,400 commits) and have since stopped. My conclusion is that a *universal* compiler is the hard way to get speed; an engine specialized for one model on one piece of hardware gets there faster. It is still the project I learned the most from. A write-up is on my site: [endeavoringorb.github.io/projects_html/tensor_graphs.html](https://endeavoringorb.github.io/projects_html/tensor_graphs.html).
+> **Status: paused.** Worked on for ~10 months. A compiler is the hard way to get speed; an engine specialized for one model on one piece of hardware gets there faster. Write-up: [endeavoringorb.github.io/projects_html/tensor_graphs.html](https://endeavoringorb.github.io/projects_html/tensor_graphs.html).
 
 ## How it works
 
