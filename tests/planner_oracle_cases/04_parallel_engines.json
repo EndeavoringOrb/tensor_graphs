@@ -1,0 +1,10 @@
+{
+  "name": "independent engines permit overlap",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["cpu0", "cpu1"], "cost": 1, "engines": [0]}]},
+    "cpu0": {"alternatives": [{"cost": 4, "engines": [0]}]},
+    "cpu1": {"alternatives": [{"cost": 6, "engines": [1]}]}
+  },
+  "expected_optimum": 7
+}

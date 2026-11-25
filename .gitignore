@@ -12,11 +12,13 @@ resources/*.html
 resources/*.json
 *pack.bat
 .vscode
+tests/data
 lns_selectors/gnn/samples
 .*
 flux-klein-4b
 malloc_heuristic/build
 egraph_cycles*.txt
+logs
 tmp*
 tools
 scratch
@@ -96,3 +98,5 @@ tensor_graphs_cpp/generated/
 OpenCL-SDK
 
 .bench_agent.json
+# Full HF reference logits for the inference benchmark (~202 MiB; regenerate with -m tests.inference_reference)
+tests/inference_reference/*.logits.npy

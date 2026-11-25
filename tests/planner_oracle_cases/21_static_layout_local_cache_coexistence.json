@@ -1,0 +1,26 @@
+{
+  "name": "static layout checks uncached coexistence in every bucket",
+  "description": "Caches cannot both be enabled because of bucket zero, but their uncached copies can coexist in bucket one. Sharing their slots would discard the optimum with cached p and computed q.",
+  "buckets": [
+    {
+      "root": "out",
+      "nodes": {
+        "out": {"alternatives": [{"children": ["p"], "cost": 1}, {"children": ["q"], "cost": 4}], "offset": [0, 1, 2, 3]},
+        "p": {"alternatives": [{"cost": 5}, {"op": "cache"}], "size_pages": 2, "offset": [0, 1, 2]},
+        "q": {"alternatives": [{"cost": 2}, {"op": "cache"}], "size_pages": 2, "offset": [0, 1, 2]}
+      }
+    },
+    {
+      "root": "out",
+      "nodes": {
+        "out": {"alternatives": [{"children": ["q"], "view": true}], "offset": [0, 1, 2, 3]},
+        "p": {"alternatives": [{"children": ["s"], "cost": 5}, {"op": "cache"}], "size_pages": 2, "offset": [0, 1, 2]},
+        "q": {"alternatives": [{"children": ["p"], "cost": 2}, {"op": "cache"}], "size_pages": 2, "offset": [0, 1, 2]},
+        "s": {"alternatives": [{"cost": 1}], "offset": [0, 1, 2, 3]}
+      }
+    }
+  ],
+  "caches": {"p": {"domain": [0, 1], "size_pages": 2}, "q": {"domain": [0, 1], "size_pages": 2}},
+  "capacity_pages": 4,
+  "expected_optimum": 3
+}

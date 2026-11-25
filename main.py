@@ -1,5 +1,6 @@
 # main.py
 import argparse
+import json
 from pathlib import Path
 
 import tensor_graphs
@@ -39,6 +40,19 @@ def encode_text(tokenizer_obj, text: str, is_first: bool = False):
     raise ValueError("Unsupported tokenizer type")
 
 
+def prefillDecodeBuckets(seq_len: int):
+    if seq_len < 0:
+        raise ValueError("seq_len must be non-negative")
+    return [
+        bucket
+        for token_count in range(1, seq_len + 1)
+        for bucket in (
+            (0, token_count, token_count - 1, 1.0),
+            (token_count - 1, token_count, token_count - 1, 1.0),
+        )
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run AutoRegressive LLM Interactive Chat / Completion"
@@ -50,6 +64,11 @@ def main():
         help="gemma-3-270m, qwen-3.6-35b-a3b, deepseek-v4",
     )
     parser.add_argument("--model-path", type=str, default="models/google/gemma-3-270m")
+    parser.add_argument(
+        "--config",
+        choices=["prefill+decode"],
+        help="Compile prefill and decode buckets for each sequence position",
+    )
     parser.add_argument(
         "--run-dir",
         type=str,
@@ -66,7 +85,7 @@ def main():
         "--seq-len",
         type=int,
         default=128,
-        help="Maximum model sequence length (also determines the decode buckets)",
+        help="Maximum model sequence length",
     )
     parser.add_argument(
         "--min-compile-time",
@@ -80,9 +99,10 @@ def main():
         help="Search until the planner exhausts its search space",
     )
     parser.add_argument(
-        "--compile-decode-buckets",
-        action="store_true",
-        help="Compile decode buckets in addition to the single full bucket",
+        "--token-buckets",
+        type=json.loads,
+        default=[],
+        help="JSON list of [dirty_start, dirty_end, output_row, weight] buckets",
     )
     parser.add_argument(
         "--compile-no-weights-bucket",
@@ -117,23 +137,6 @@ def main():
         help="Compare intermediate tensors with this reference file",
     )
     parser.add_argument(
-        "--use-ortools",
-        action="store_true",
-        help="Use the OR-Tools global cache/extraction planner",
-    )
-    parser.add_argument(
-        "--use-ortools-full",
-        action="store_true",
-        help="Jointly solve cache, extraction, dispatch, bufferization and allocation with OR-Tools",
-    )
-    parser.add_argument(
-        "--use-ortools-lns",
-        action="store_true",
-        help="Use iterative subgraph LNS solver with OR-Tools",
-    )
-    parser.add_argument("--max-time-seconds", type=float, default=None,
-                        help="Maximum time in seconds for the OR-Tools solver")
-    parser.add_argument(
         "--cache-file",
         type=str,
         default="",
@@ -163,6 +166,12 @@ def main():
         help="Number of C++ threads (0 = auto-detect based on hardware)",
     )
     args = parser.parse_args()
+
+    token_buckets = [tuple(bucket) for bucket in args.token_buckets]
+    max_sequence_length = args.seq_len
+    if args.config == "prefill+decode":
+        token_buckets = prefillDecodeBuckets(args.seq_len)
+        max_sequence_length = max(1, args.seq_len)
 
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
@@ -198,9 +207,6 @@ def main():
     else:
         delegate = None
 
-    if args.use_ortools_lns:
-        os.environ["TENSOR_GRAPHS_USE_LNS"] = "1"
-
     disable_compilation_caching = (
         args.disable_compilation_caching or args.saturate_only
     )
@@ -210,18 +216,14 @@ def main():
         args.model_path,
         delegate,
         min_compile_time=-1.0 if args.optimal else args.min_compile_time,
-        compile_decode_buckets=args.compile_decode_buckets,
+        token_buckets=token_buckets,
         compile_no_weights_bucket=args.compile_no_weights_bucket,
         cache_file=args.cache_file,
         disable_node_caching=args.disable_node_caching,
         disable_compilation_caching=disable_compilation_caching,
         threads=args.threads,
         log_cost_calls=args.log_cost_calls,
-        max_sequence_length=args.seq_len,
-        use_ortools=args.use_ortools,
-        use_ortools_full=args.use_ortools_full,
-        max_time_seconds=args.max_time_seconds or 0.0,
-        use_ortools_lns=args.use_ortools_lns,
+        max_sequence_length=max_sequence_length,
         disable_fusion=args.disable_fusion,
         write_refs=args.write_refs,
         compare_refs=args.compare_refs,

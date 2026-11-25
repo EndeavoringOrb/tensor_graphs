@@ -1,0 +1,12 @@
+{
+  "name": "deferred root bound covers alternatives omitted by the first primal plan",
+  "description": "At uniform engine weights the cheap primal selects the single-engine cost-8 operation (weighted cost 4) ahead of the cost-5 two-engine operation (weighted cost 5). A root bound built on that fixed trial plan would incorrectly exclude the optimum 5 after restoring the root.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [
+      {"cost": 8, "engines": [0]},
+      {"cost": 5, "engines": [0, 1]}
+    ]}
+  },
+  "expected_optimum": 5
+}

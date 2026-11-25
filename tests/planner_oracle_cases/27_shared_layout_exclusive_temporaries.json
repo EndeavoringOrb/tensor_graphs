@@ -1,0 +1,12 @@
+{
+  "name": "shared static layout lets exclusive temporaries share pages",
+  "description": "a and b are only reachable through different root alternatives, so they are never active together. A private layout needs 5 pages but capacity is 3; the exclusivity-shared layout places a and b on the same pages and must keep the optimum.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a"], "cost": 1}, {"children": ["b"], "cost": 1}], "offset": [0, 1, 2]},
+    "a": {"alternatives": [{"cost": 1}], "size_pages": 2, "offset": [0, 1]},
+    "b": {"alternatives": [{"cost": 2}], "size_pages": 2, "offset": [0, 1]}
+  },
+  "capacity_pages": 3,
+  "expected_optimum": 2
+}

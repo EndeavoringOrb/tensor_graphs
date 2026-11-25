@@ -20,6 +20,12 @@ class StartRunMakespanPropagator : public Propagator
   public:
     PropagationBatch propagationBatch(const SearchState &state, VarId changed) const override
     {
+        // A trial plan is accepted only if its leaf cost beats the incumbent,
+        // so this bound (which never changes domains) cannot reject anything
+        // the leaf comparison would keep; skipping it leaves the root's bucket
+        // bounds as they were.
+        if (state.completing_plan)
+            return PropagationBatch::SKIP;
         if (changed == kInvalidVarId)
             return PropagationBatch::GLOBAL;
         const auto &info = state.var_infos.at(changed);

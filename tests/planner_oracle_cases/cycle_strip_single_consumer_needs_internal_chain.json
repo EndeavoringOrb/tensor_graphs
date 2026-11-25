@@ -1,0 +1,13 @@
+{
+  "name": "cycle strip: only external consumer still needs an internal chain",
+  "description": "SCC x -> y -> z -> x; only x is consumed outside. The optimum computes x from y, y from z, and z from the input. single_external_consumer deletes y's only enode because its child z is inside the component.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["x"], "cost": 1}]},
+    "x": {"alternatives": [{"children": ["y"], "cost": 1}, {"children": ["inp"], "cost": 10}]},
+    "y": {"alternatives": [{"children": ["z"], "cost": 1}]},
+    "z": {"alternatives": [{"children": ["x"], "cost": 1}, {"children": ["inp"], "cost": 1}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 4
+}

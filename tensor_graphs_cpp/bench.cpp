@@ -32,6 +32,10 @@ int main(int argc, char *argv[])
     parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
     parser.add_option({"--cache"}, "Path to cache file. If provided, benchmark only configurations from this cache.",
                       "");
+    parser.add_option({"--calls"}, "Calls log to benchmark (written by the cost model).", "benchmarks/calls.bin");
+    parser.add_option({"--max-ref-estimate-ms"},
+                      "Skip reference kernels whose estimated time exceeds this many ms (negative: never skip).",
+                      "10000");
     parser.add_positional("targetKernel", "Bench only kernels whose name contain this string.", "");
 
     if (!parser.parse(argc, argv))
@@ -43,9 +47,10 @@ int main(int argc, char *argv[])
     bool listOnly = parser.get_flag("--list");
     std::string cachePath = parser.get_option("--cache");
     std::string targetKernel = parser.get_positional("targetKernel");
+    const float maxReferenceEstimateMs = std::stof(parser.get_option("--max-ref-estimate-ms"));
 
     std::filesystem::create_directories("benchmarks");
-    std::string callsPath = "benchmarks/calls.bin";
+    std::string callsPath = parser.get_option("--calls");
     std::string recordsPath = "benchmarks/records.bin";
 
     if (!targetKernel.empty())
@@ -92,6 +97,7 @@ int main(int argc, char *argv[])
         {
             std::cerr << "No calls file found at " << callsPath
                       << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
+            std::cout << "[Bench summary] pending=0 benchmarked=0 failed=0" << std::endl;
             return 0;
         }
 
@@ -116,6 +122,9 @@ int main(int argc, char *argv[])
             if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelId))
             {
                 const auto &kernel = KernelRegistry::get().getKernel(r.kernelId);
+                if (kernel.is_view)
+                    continue;
+
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
                 if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
@@ -129,6 +138,7 @@ int main(int argc, char *argv[])
     if (toBenchmark.empty())
     {
         std::cout << "No kernels match the filters or all already benchmarked." << std::endl;
+        std::cout << "[Bench summary] pending=0 benchmarked=0 failed=0" << std::endl;
         return 0;
     }
 
@@ -139,6 +149,21 @@ int main(int argc, char *argv[])
                                             r.inputStrides, r.inputDTypes, r.inputConstants);
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
+
+    // Reference kernels estimated above --max-ref-estimate-ms are too slow to
+    // measure; the planner keeps using their estimate.
+    uint64_t skipped = 0;
+    auto tooSlow = std::remove_if(toBenchmark.begin(), toBenchmark.end(), [&](const Record &r) {
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(r.kernelId);
+        if (maxReferenceEstimateMs < 0.0f || !kernel.isReference || r.runTime <= maxReferenceEstimateMs)
+            return false;
+        std::cout << "Skipping reference kernel " << kernel.getName() << " (0x" << std::hex << r.kernelId.value
+                  << std::dec << "): estimated " << r.runTime << " ms > " << maxReferenceEstimateMs << " ms"
+                  << std::endl;
+        ++skipped;
+        return true;
+    });
+    toBenchmark.erase(tooSlow, toBenchmark.end());
 
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb) {
         float costA = ra.runTime;
@@ -178,6 +203,7 @@ int main(int argc, char *argv[])
         outFile.open(recordsPath, std::ios::app | std::ios::binary);
     }
     BinaryWriter bw(outFile);
+    uint64_t benchmarked = 0, failed = 0;
 
     for (uint64_t i = startIdx; i < toBenchmark.size(); ++i)
     {
@@ -232,6 +258,7 @@ int main(int argc, char *argv[])
             {
                 std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId
                           << "): record fails matches() validity check." << std::endl;
+                ++failed;
                 continue;
             }
 
@@ -247,28 +274,19 @@ int main(int argc, char *argv[])
             std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
-            if (!kernel.is_view)
-            {
-                pk.updateStorageContext(kernel, r, 0);
-                pk.run(kernel);
-                pk.synchronize();
-            }
+            pk.updateStorageContext(kernel, r, 0);
+            pk.run(kernel);
+            pk.synchronize();
 
             int iters = 8;
             std::vector<float> latencies;
             latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
-                if (!kernel.is_view)
-                {
-                    pk.updateStorageContext(kernel, r, it + 1);
-                }
+                pk.updateStorageContext(kernel, r, it + 1);
 
                 auto iterStart = std::chrono::high_resolution_clock::now();
-                if (!kernel.is_view)
-                {
-                    pk.run(kernel);
-                }
+                pk.run(kernel);
                 pk.synchronize();
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
@@ -304,13 +322,17 @@ int main(int argc, char *argv[])
             }
 
             std::cout << "\n  Benchmarked -> " << runtimeMs << " ms" << std::endl;
+            ++benchmarked;
         }
         catch (const std::exception &e)
         {
             std::cerr << "Failed to benchmark kernel " << kernelId << ": " << e.what() << std::endl;
+            ++failed;
         }
     }
 
     std::cout << "Benchmarking complete." << std::endl;
+    std::cout << "[Bench summary] pending=" << (toBenchmark.size() - startIdx) << " benchmarked=" << benchmarked
+              << " failed=" << failed << " skipped=" << skipped << std::endl;
     return 0;
 }

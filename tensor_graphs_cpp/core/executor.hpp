@@ -1,5 +1,10 @@
 #pragma once
 #include <cmath>
+#include <map>
+#include <fstream>
+#include <chrono>
+#include <cstring>
+#include <unordered_map>
 #include "core/debug.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
@@ -13,13 +18,170 @@ class Executor
   private:
     MemoryManager &memManager;
 
+    // Host-only fast path: for a compiled graph whose buffers all live in host
+    // memory or storage and whose kernels all run on the CPU, kernels run
+    // synchronously in order, so each instruction's KernelContext (pointers
+    // into the fixed arenas) is built once and reused.
+    struct PreparedInstruction
+    {
+        KernelFunc run;
+        KernelContext ctx;
+        // Diagnostics (TG_EXEC_PROFILE): label and accumulated run time.
+        std::string label;
+        double seconds = 0.0;
+        uint64_t calls = 0;
+    };
+    struct PreparedConstant
+    {
+        uint8_t *dst;
+        const std::vector<uint8_t> *data;
+    };
+    struct PreparedGraph
+    {
+        bool hostOnly = false;
+        std::vector<PreparedInstruction> instructions;
+        std::vector<PreparedConstant> constants;
+    };
+    std::unordered_map<const CompiledGraph *, PreparedGraph> prepared;
+    bool debugEnvironment = false;
+    // TG_EXEC_PROFILE=<file>: time every fast-path kernel; the totals per
+    // kernel and output shape are written when the executor is destroyed.
+    const char *profilePath = std::getenv("TG_EXEC_PROFILE");
+
+    PreparedGraph &prepare(const CompiledGraph &compiled)
+    {
+        auto it = prepared.find(&compiled);
+        if (it != prepared.end())
+            return it->second;
+        PreparedGraph pg;
+        pg.hostOnly = true;
+        auto hostSpace = [](const MemSpace &ms) {
+            return ms.type == HandleType::CPP || ms.type == HandleType::STORAGE;
+        };
+        for (const OpInstruction &inst : compiled.instructions)
+        {
+            bool host = hostSpace(inst.outBuffer.mem_space);
+            for (const ParallelBuffer &b : inst.inBuffers)
+                host = host && hostSpace(b.mem_space);
+            for (const Engine &e : inst.engines)
+                host = host && e.type == EngineType::CPU;
+            if (!host)
+            {
+                pg.hostOnly = false;
+                break;
+            }
+        }
+        if (pg.hostOnly)
+        {
+            DeviceBuffer *hostBuffer = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+            for (const auto &pair : compiled.constantStaging)
+            {
+                if (compiled.nodeViews.count(pair.first) == 0)
+                    continue;
+                const TensorView &view = compiled.nodeViews.at(pair.first);
+                if (!hostBuffer || !hostBuffer->getBasePtr())
+                    Error::throw_err("[Executor.prepare] host arena not initialized");
+                pg.constants.push_back({hostBuffer->getBasePtr() + view.offset, pair.second.get()});
+            }
+            for (const OpInstruction &inst : compiled.instructions)
+            {
+                const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+                if (kernel.is_view || !kernel.run)
+                    continue;
+                PreparedInstruction pi;
+                pi.run = kernel.run;
+                if (profilePath)
+                    pi.label = kernel.opName + " " + toString(compiled.nodeViews.at(inst.eclass_id).getShape());
+                for (uint64_t i = 0; i < inst.children.size(); ++i)
+                {
+                    LogicalId logical_id;
+                    if (compiled.has_logical_id(inst.children[i]))
+                        logical_id = compiled.get_logical_id(inst.children[i]);
+                    memManager.getBuffer(inst.inBuffers[i].mem_space)
+                        ->setupInput(pi.ctx, compiled.nodeViews.at(inst.children[i]), logical_id);
+                }
+                LogicalId logical_id;
+                if (compiled.has_logical_id(inst.eclass_id))
+                    logical_id = compiled.get_logical_id(inst.eclass_id);
+                memManager.getBuffer(inst.outBuffer.mem_space)
+                    ->setupOutput(pi.ctx, compiled.nodeViews.at(inst.eclass_id), logical_id);
+                pg.instructions.push_back(std::move(pi));
+            }
+        }
+        return prepared.emplace(&compiled, std::move(pg)).first->second;
+    }
+
   public:
+    ~Executor()
+    {
+        if (!profilePath)
+            return;
+        std::ofstream out(profilePath, std::ios::app);
+        if (!out)
+            return; // destructor: nowhere to report
+        for (const auto &[graph, pg] : prepared)
+        {
+            std::map<std::string, std::pair<double, uint64_t>> totals;
+            uint64_t runs = 0;
+            for (const PreparedInstruction &pi : pg.instructions)
+            {
+                totals[pi.label].first += pi.seconds;
+                totals[pi.label].second += pi.calls;
+                runs = std::max(runs, pi.calls);
+            }
+            if (runs == 0)
+                continue;
+            double total = 0.0;
+            for (const auto &[label, t] : totals)
+                total += t.first;
+            uint64_t constant_bytes = 0;
+            for (const PreparedConstant &c : pg.constants)
+                constant_bytes += c.data->size();
+            out << "== graph " << graph << " runs=" << runs << " ms/run=" << 1000.0 * total / runs
+                << " constants=" << pg.constants.size() << " constant_bytes=" << constant_bytes << '\n';
+            std::vector<std::pair<double, std::string>> sorted;
+            for (const auto &[label, t] : totals)
+                sorted.push_back({t.first, label + " x" + std::to_string(t.second / runs)});
+            std::sort(sorted.rbegin(), sorted.rend());
+            for (const auto &[seconds, label] : sorted)
+                out << 1000.0 * seconds / runs << '\t' << label << '\n';
+        }
+    }
+
     Executor(MemoryManager &mm) : memManager(mm)
     {
+        for (const char *name : {"TG_DUMP_BASE_REFS", "TG_COMPARE_BASE_REFS", "TG_CHECK_NAN", "TG_BASE_REF_STEP"})
+        {
+            const char *value = std::getenv(name);
+            debugEnvironment = debugEnvironment || (value && *value);
+        }
     }
 
     void run(const CompiledGraph &compiled, const Debug::Callback &debugCallback = nullptr)
     {
+        if (!debugCallback && !debugEnvironment)
+        {
+            PreparedGraph &pg = prepare(compiled);
+            if (pg.hostOnly)
+            {
+                for (const PreparedConstant &c : pg.constants)
+                    std::memcpy(c.dst, c.data->data(), c.data->size());
+                if (profilePath)
+                {
+                    for (PreparedInstruction &pi : pg.instructions)
+                    {
+                        const auto start = std::chrono::steady_clock::now();
+                        pi.run(pi.ctx);
+                        pi.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                        ++pi.calls;
+                    }
+                    return;
+                }
+                for (const PreparedInstruction &pi : pg.instructions)
+                    pi.run(pi.ctx);
+                return;
+            }
+        }
         uint32_t nInst = compiled.instructions.size();
         bool disableTimer = false;
 #ifdef TG_DEBUG
@@ -122,6 +284,26 @@ class Executor
             const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             outBufObj->setupOutput(ctx, outView, logical_id);
 
+            if (!kernel.is_view && !kernel.requiresContiguous.empty())
+            {
+                for (size_t c_idx = 0; c_idx < inst.children.size(); ++c_idx)
+                {
+                    size_t rule_idx = std::min(c_idx, kernel.requiresContiguous.size() - 1);
+                    if (kernel.requiresContiguous[rule_idx])
+                    {
+                        const TensorView &in_view = compiled.nodeViews.at(inst.children[c_idx]);
+                        if (!isContiguous(in_view))
+                        {
+                            std::stringstream ss;
+                            ss << "[Executor] Instruction " << idx << " (" << kernel_name << ") input #" << c_idx
+                               << " (eclass " << inst.children[c_idx].value << ") is non-contiguous, but kernel requires contiguous input."
+                               << " Shape=" << toString(in_view.getShape()) << " Strides=" << toString(in_view.strides);
+                            Error::throw_err(ss.str());
+                        }
+                    }
+                }
+            }
+
             bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
@@ -146,6 +328,8 @@ class Executor
 
             sync.markExecuted(inst, inst_engines, issued_work);
 
+
+
             if (check_nan_env && *check_nan_env && issued_work && outView.dtype == DType::FLOAT32 && nan_report_count < 10)
             {
                 sync.syncEngines(inst_engines);
@@ -169,32 +353,44 @@ class Executor
                 {
                     const float *fvals = static_cast<const float *>(nan_check_ptr);
                     uint64_t n_elems = countElements(outView);
-                    bool has_nan = false;
+                    bool has_bad = false;
                     for (uint64_t k = 0; k < n_elems; ++k)
                     {
-                        if (std::isnan(fvals[k]))
+                        if (std::isnan(fvals[k]) || std::isinf(fvals[k]))
                         {
-                            has_nan = true;
+                            has_bad = true;
                             nan_report_count++;
-                            std::cerr << "[NAN DETECTED] inst=" << idx << "/" << nInst
-                                      << " kernel=" << kernel_name << " eclass=" << inst.eclass_id.value
+                            std::cerr << "[BAD_VAL DETECTED] inst=" << idx << "/" << nInst
+                                      << " kernel=" << kernel_name << " (id=0x" << std::hex << inst.kernel_id.value << std::dec << ")"
+                                      << " reqContig=" << (kernel.requiresContiguous.empty() ? -1 : (int)kernel.requiresContiguous[0])
+                                      << " eclass=" << inst.eclass_id.value
                                       << " logical=" << inst.logical_id.value
                                       << " origin=" << inst.debugOrigin
-                                      << " first_nan_idx=" << k << "/" << n_elems
+                                      << " first_bad_idx=" << k << "/" << n_elems
+                                      << " val=" << fvals[k]
                                       << " out_offset=" << inst.outBuffer.offset
                                       << " out_size=" << inst.outBuffer.size << std::endl;
                             break;
                         }
                     }
-                    if (has_nan)
+                    if (has_bad)
                     {
+                        uint64_t target_k = 0;
+                        for (uint64_t k = 0; k < n_elems; ++k) {
+                            if (std::isnan(fvals[k]) || std::isinf(fvals[k])) { target_k = k; break; }
+                        }
                         for (size_t c = 0; c < inst.children.size(); ++c)
                         {
                             const TensorView &cView = compiled.nodeViews.at(inst.children[c]);
                             std::cerr << "  child[" << c << "] eclass=" << inst.children[c].value
                                       << " buf_offset=" << inst.inBuffers[c].offset
                                       << " buf_size=" << inst.inBuffers[c].size
-                                      << " dtype=" << static_cast<int>(cView.dtype);
+                                      << " dtype=" << static_cast<int>(cView.dtype)
+                                      << " shape=[";
+                            for (auto d : cView.getShape()) std::cerr << d << ",";
+                            std::cerr << "] strides=[";
+                            for (auto s : cView.strides) std::cerr << s << ",";
+                            std::cerr << "]";
                             if (cView.dtype == DType::FLOAT32 && ctx.inputs[c])
                             {
                                 const float *in_f = nullptr;
@@ -216,16 +412,14 @@ class Executor
                                 if (in_f)
                                 {
                                     uint64_t in_n = countElements(cView);
-                                    bool in_has_nan = false;
+                                    uint64_t nan_cnt = 0, inf_cnt = 0;
                                     for (uint64_t ik = 0; ik < in_n; ++ik)
                                     {
-                                        if (std::isnan(in_f[ik]))
-                                        {
-                                            in_has_nan = true;
-                                            break;
-                                        }
+                                        if (std::isnan(in_f[ik])) nan_cnt++;
+                                        if (std::isinf(in_f[ik])) inf_cnt++;
                                     }
-                                    std::cerr << " has_nan=" << (in_has_nan ? "YES" : "NO")
+                                    std::cerr << " nan_cnt=" << nan_cnt << " inf_cnt=" << inf_cnt
+                                              << " val_at_k=" << (target_k < in_n ? in_f[target_k] : -999999.0f)
                                               << " sample[0]=" << in_f[0];
                                 }
                             }

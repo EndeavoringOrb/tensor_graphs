@@ -1,0 +1,13 @@
+{
+  "name": "persistent source prefix preserves independent engine ordering",
+  "description": "An input and its view may occupy a reserved prefix, while both orders of the two real engine operations remain available.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["cpu", "gpu"], "cost": 1, "engines": [0]}]},
+    "cpu": {"alternatives": [{"children": ["view"], "cost": 4, "engines": [0]}]},
+    "gpu": {"alternatives": [{"children": ["input"], "cost": 6, "engines": [1]}]},
+    "view": {"alternatives": [{"children": ["input"], "view": true, "cost": 0}], "offset": [4]},
+    "input": {"alternatives": [{"op": "input"}]}
+  },
+  "expected_optimum": 7
+}

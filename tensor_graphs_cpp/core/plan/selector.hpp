@@ -22,7 +22,29 @@ class Selector
     virtual void clear() = 0;
     virtual void setIncumbent(float cost) {}
     virtual bool hasIncumbent() const { return false; }
+    // Switch to largest-box-first node selection (see SearchNodeCompare).
+    virtual void setLargestBoxFirst() {}
+    virtual void appendRemainingBoxBits(float incumbent_cost, std::vector<double> &box_bits) const
+    {
+        Error::throw_err("Selector does not support search volume evaluation");
+    }
+    // Smallest stored lower bound among open nodes below the incumbent;
+    // INF when there is none.
+    virtual float minOpenLowerBound(float incumbent_cost) const
+    {
+        Error::throw_err("Selector does not support search gap evaluation");
+        return TGConstants::INF;
+    }
 };
+
+inline float minNodeLowerBound(const std::vector<std::shared_ptr<SearchNode>> &nodes, float incumbent_cost)
+{
+    float bound = TGConstants::INF;
+    for (const auto &node : nodes)
+        if (node && node->lower_bound < incumbent_cost)
+            bound = std::min(bound, node->lower_bound);
+    return bound;
+}
 
 class PriorityQueueSelector : public Selector
 {
@@ -32,6 +54,18 @@ class PriorityQueueSelector : public Selector
     float incumbent_cost = TGConstants::INF;
 
   public:
+    void appendRemainingBoxBits(float cost, std::vector<double> &box_bits) const override
+    {
+        for (const auto &node : queue)
+            if (node && node->lower_bound < cost)
+                box_bits.push_back(node->log2_volume);
+    }
+
+    float minOpenLowerBound(float cost) const override
+    {
+        return minNodeLowerBound(queue, cost);
+    }
+
     void setIncumbent(float cost) override
     {
         incumbent_cost = cost;
@@ -50,6 +84,12 @@ class PriorityQueueSelector : public Selector
     bool hasIncumbent() const override
     {
         return comp.has_incumbent;
+    }
+
+    void setLargestBoxFirst() override
+    {
+        comp.largest_box_first = true;
+        std::make_heap(queue.begin(), queue.end(), comp);
     }
 
     void push(const std::shared_ptr<SearchNode> &node) override
@@ -97,6 +137,18 @@ class LIFOSelector : public Selector
     std::vector<std::shared_ptr<SearchNode>> stack;
 
   public:
+    void appendRemainingBoxBits(float cost, std::vector<double> &box_bits) const override
+    {
+        for (const auto &node : stack)
+            if (node && node->lower_bound < cost)
+                box_bits.push_back(node->log2_volume);
+    }
+
+    float minOpenLowerBound(float cost) const override
+    {
+        return minNodeLowerBound(stack, cost);
+    }
+
     void push(const std::shared_ptr<SearchNode> &node) override
     {
         stack.push_back(node);

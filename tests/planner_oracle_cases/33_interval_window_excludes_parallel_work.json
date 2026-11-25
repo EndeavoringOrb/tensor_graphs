@@ -1,0 +1,13 @@
+{
+  "name": "interval bound only counts work that depends on the window's opening link",
+  "description": "h1 -> h2 run on the CPU (2 each) while s (3, GPU) runs in parallel from the input; out (1) waits for both, so the optimum is 5. s does not depend on h1, so it must not be charged to the window [t(h1), t(h2)]: doing so would claim 2 + 3 + 1 = 6.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["h2", "s"], "cost": 1, "engines": [0]}]},
+    "h2": {"alternatives": [{"children": ["h1"], "cost": 2, "engines": [0]}]},
+    "s": {"alternatives": [{"children": ["inp"], "cost": 3, "engines": [1]}]},
+    "h1": {"alternatives": [{"children": ["inp"], "cost": 2, "engines": [0]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 5
+}

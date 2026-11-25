@@ -127,6 +127,114 @@ inline Region unravelFlatBounds(uint64_t flat_start, uint64_t flat_stop, const s
     return region;
 }
 
+// Exact boxes of `shape` covering the row-major flat range [flat_start,
+// flat_stop) of the sub-block that starts at dimension `dim`, with the
+// coordinates of the dimensions before `dim` fixed by `prefix`.
+inline void unravelFlatRangeExact(uint64_t flat_start, uint64_t flat_stop, const std::vector<uint32_t> &shape,
+                                  size_t dim, Region &prefix, std::vector<Region> &out)
+{
+    if (flat_start >= flat_stop)
+        return;
+    uint64_t unit = 1;
+    for (size_t d = dim + 1; d < shape.size(); ++d)
+        unit *= shape[d];
+    auto fullTail = [&](Region &box) {
+        for (size_t d = dim + 1; d < shape.size(); ++d)
+            box.region.push_back({0, shape[d]});
+    };
+    const uint64_t first = flat_start / unit, first_rem = flat_start % unit;
+    const uint64_t last = flat_stop / unit, last_rem = flat_stop % unit;
+    if (dim + 1 == shape.size())
+    {
+        Region box = prefix;
+        box.region.push_back({static_cast<uint32_t>(flat_start), static_cast<uint32_t>(flat_stop)});
+        out.push_back(std::move(box));
+        return;
+    }
+    auto recurse = [&](uint64_t coord, uint64_t start, uint64_t stop) {
+        prefix.region.push_back({static_cast<uint32_t>(coord), static_cast<uint32_t>(coord + 1)});
+        unravelFlatRangeExact(start, stop, shape, dim + 1, prefix, out);
+        prefix.region.pop_back();
+    };
+    if (first == last)
+    {
+        recurse(first, first_rem, last_rem);
+        return;
+    }
+    uint64_t whole_start = first;
+    if (first_rem != 0)
+    {
+        recurse(first, first_rem, unit);
+        ++whole_start;
+    }
+    if (whole_start < last)
+    {
+        Region box = prefix;
+        box.region.push_back({static_cast<uint32_t>(whole_start), static_cast<uint32_t>(last)});
+        fullTail(box);
+        out.push_back(std::move(box));
+    }
+    if (last_rem != 0)
+        recurse(last, 0, last_rem);
+}
+
+// Exact image of `box` (a box of `from`) in `to`, where both shapes view the
+// same row-major element order (a reshape). The box is split into its
+// flat-contiguous runs and each run is unravelled exactly, so the result is
+// the same set of elements, never a superset.
+inline std::vector<Region> reshapeRegionExact(const Region &box, const std::vector<uint32_t> &from,
+                                              const std::vector<uint32_t> &to)
+{
+    if (box.region.size() != from.size())
+        Error::throw_err("[reshapeRegionExact] box rank does not match the source shape");
+    for (size_t d = 0; d < from.size(); ++d)
+        if (box.region[d].start >= box.region[d].stop || box.region[d].stop > from[d])
+            Error::throw_err("[reshapeRegionExact] box outside its shape");
+    // Dimensions after `split` are covered fully by the box: each choice of
+    // the coordinates before `split` gives one flat-contiguous run.
+    size_t split = from.size();
+    while (split > 0 && box.region[split - 1].start == 0 && box.region[split - 1].stop == from[split - 1])
+        --split;
+    std::vector<uint64_t> strides(from.size(), 1);
+    for (int i = static_cast<int>(from.size()) - 2; i >= 0; --i)
+        strides[i] = strides[i + 1] * from[i + 1];
+    std::vector<Region> out;
+    Region prefix;
+    if (split == 0)
+    {
+        uint64_t total = 1;
+        for (uint32_t d : from)
+            total *= d;
+        unravelFlatRangeExact(0, total, to, 0, prefix, out);
+        return out;
+    }
+    const size_t run_dim = split - 1;
+    const uint64_t run_length = static_cast<uint64_t>(box.region[run_dim].stop - box.region[run_dim].start) *
+                                strides[run_dim];
+    std::vector<uint32_t> coords(run_dim);
+    for (size_t d = 0; d < run_dim; ++d)
+        coords[d] = box.region[d].start;
+    while (true)
+    {
+        uint64_t run_start = static_cast<uint64_t>(box.region[run_dim].start) * strides[run_dim];
+        for (size_t d = 0; d < run_dim; ++d)
+            run_start += static_cast<uint64_t>(coords[d]) * strides[d];
+        unravelFlatRangeExact(run_start, run_start + run_length, to, 0, prefix, out);
+        size_t d = run_dim;
+        while (d > 0)
+        {
+            --d;
+            if (++coords[d] < box.region[d].stop)
+                break;
+            coords[d] = box.region[d].start;
+            if (d == 0)
+                return out;
+        }
+        if (run_dim == 0)
+            return out;
+    }
+}
+
 inline int32_t normalizeAxisIndex(int32_t axis, uint32_t rank)
 {
     if (axis < 0)

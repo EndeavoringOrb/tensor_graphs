@@ -1,0 +1,12 @@
+{
+  "name": "global split on a class hidden below a later region",
+  "description": "g is necessary for out, so it closes the first bound region {g, x}: g either reads x (free, x costs 4) or the input (3); the region is worth min(4, 3) = 3. out either reads g and x (1) or g alone (10). Later regions see x as already counted, so the plain bound is 3 + 1 = 4. Every plan that uses x pays 4 in the first region (max(3, 4), not 3 + 4: x and g's own route share the region); avoiding x costs 3 + 10. The optimum is 5 (out reads g and x, g reads x). A split adding L(x) to the region's value would claim 8.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["g", "x"], "cost": 1, "engines": [0]}, {"children": ["g"], "cost": 10, "engines": [0]}]},
+    "g": {"alternatives": [{"children": ["x"], "cost": 0, "engines": [0]}, {"children": ["inp"], "cost": 3, "engines": [0]}]},
+    "x": {"alternatives": [{"children": ["inp"], "cost": 4, "engines": [0]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 5
+}

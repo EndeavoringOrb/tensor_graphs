@@ -3,11 +3,8 @@
 #include "core/kernels.hpp"
 #include "core/common/constants.hpp"
 
-inline LogicalId refFactoryGeluTanhFill(const std::vector<LogicalId> &inputs, Graph &g)
+inline LogicalId refFactoryGeluTanhFillEx(LogicalId x, const std::vector<uint32_t> &shape, Graph &g)
 {
-    LogicalId x = inputs[0];
-    auto shape = g.getNode(x).getShape();
-
     LogicalId x_sq = g.mul(x, x);
     LogicalId x_cube = g.mul(x_sq, x);
     LogicalId c1 = g.fill(0.044715f, shape);
@@ -27,4 +24,10 @@ inline LogicalId refFactoryGeluTanhFill(const std::vector<LogicalId> &inputs, Gr
     LogicalId one_plus_tanh = g.add(one, tanh_val);
     LogicalId half_x = g.mul(x, g.fill(0.5f, shape));
     return g.mul(half_x, one_plus_tanh);
+}
+
+inline LogicalId refFactoryGeluTanhFill(const std::vector<LogicalId> &inputs, Graph &g)
+{
+    LogicalId x = inputs[0];
+    return refFactoryGeluTanhFillEx(x, g.getNode(x).getShape(), g);
 }

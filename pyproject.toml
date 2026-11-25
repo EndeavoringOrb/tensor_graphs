@@ -34,9 +34,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ortools = [
-    "ortools>=9.15.6755",
-]
 ml = [
     "torch==2.7.1+cu118 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision==0.22.1+cu118 ; sys_platform == 'linux' and platform_machine == 'x86_64'",

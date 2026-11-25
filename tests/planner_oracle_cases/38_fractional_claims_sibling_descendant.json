@@ -1,0 +1,12 @@
+{
+  "name": "fractional claims: a child already claimed through its sibling",
+  "description": "out (1) reads a and b, and a (1) reads b (3). Every plan runs all three once, so the optimum is 5. Packing out's children, anchor a claims all of b's weight through its own claims, so b has no capacity left: neither as an anchor nor through the unclaimed fraction of its own weight may b add anything. Crediting b's own weight again (or exceeding a claim of 1 on b) would claim 8.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["a", "b"], "cost": 1, "engines": [0]}]},
+    "a": {"alternatives": [{"children": ["b"], "cost": 1, "engines": [0]}]},
+    "b": {"alternatives": [{"children": ["inp"], "cost": 3, "engines": [0]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 5
+}

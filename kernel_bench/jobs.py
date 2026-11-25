@@ -343,7 +343,7 @@ def evaluateJob(store, job, workspace):
         result = runCmd(lint_command, workspace, TIMEOUTS["build"], env=build_env)
         if result["exit_code"] == 0 and mode != "lint":
             store.addEvent(job["id"], "build", "Candidate lint passed; compiling native bindings")
-            result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0", "--no-lint"],
+            result = runCmd([getPythonExe(), "build.py", "--targets", "kernel_bench_bindings", "--opencl", "0"],
                             workspace, TIMEOUTS["build"], env=build_env)
         build_result = result
         store.addEvent(job["id"], "lint" if "kernel_linter.py" in result["command"] else "build", result["output"])

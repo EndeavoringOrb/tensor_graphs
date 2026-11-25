@@ -1,0 +1,10 @@
+{
+  "name": "persistent source ordering defers on sparse start ranks",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["work"], "cost": 1}], "start": [4]},
+    "work": {"alternatives": [{"children": ["input"], "cost": 2}], "start": [3]},
+    "input": {"alternatives": [{"op": "input"}], "start": [2]}
+  },
+  "expected_optimum": 3
+}

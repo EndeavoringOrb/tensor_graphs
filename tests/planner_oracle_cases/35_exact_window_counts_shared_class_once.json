@@ -1,0 +1,13 @@
+{
+  "name": "exact window value counts a shared class once",
+  "description": "s (3, CPU) feeds x (1, CPU) and y (1, GPU), which run in parallel; out (1, CPU) needs both. The optimum is 3 + 1 + 1 = 5. Charging s once per consumer in the exact window enumeration would put 8 on the CPU.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["x", "y"], "cost": 1, "engines": [0]}]},
+    "x": {"alternatives": [{"children": ["s"], "cost": 1, "engines": [0]}]},
+    "y": {"alternatives": [{"children": ["s"], "cost": 1, "engines": [1]}]},
+    "s": {"alternatives": [{"children": ["inp"], "cost": 3, "engines": [0]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 5
+}

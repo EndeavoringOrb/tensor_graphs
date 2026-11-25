@@ -11,6 +11,9 @@
 #include "tests/input_hashcons.hpp"
 #include "tests/incremental_propagators.hpp"
 #include "tests/planner_structure.hpp"
+#include "tests/prune_egraph_regression.hpp"
+#include "tests/attention_kernels.hpp"
+#include "tests/bucket_independence.hpp"
 #include "tests/reference.hpp"
 #include "tests/region_merge.hpp"
 #include "tests/selection_reachability.hpp"
@@ -20,12 +23,25 @@
 #include "tests/start_run_makespan.hpp"
 #include "tests/start_bounds.hpp"
 #include "tests/write_after_read_cache.hpp"
+#include "tests/private_layout_regression.hpp"
+#include "tests/start_rank_window_regression.hpp"
+#include "tests/relaxation_bound.hpp"
+#include "tests/scatter_rows.hpp"
+#include "tests/scatter_canonical_keys.hpp"
+#include "tests/triu_mask_predicate.hpp"
+#include "tests/bf16_transposed_wstream.hpp"
+#include "tests/reduce_last_axis.hpp"
 
 int main(int argc, char *argv[])
 {
     ArgParser parser("test", "Run tests.");
-    parser.add_flag({"--no-records"}, "Disable record-based testing.");
+    parser.add_flag({"--bucket-independence"}, "Run independent bucket and masked update regressions.");
+    parser.add_flag({"--private-layout"}, "Run private-layout storage-span regression tests.");
+    parser.add_flag({"--start-rank-window"}, "Run start rank window group regression tests.");
+    parser.add_flag({"--relaxation-bound"}, "Run randomized relaxation lower-bound tests against brute force.");
+    parser.add_flag({"--all-records"}, "Enable record-based testing.");
     parser.add_option({"--cache"}, "Path to cache file.", "");
+    parser.add_option({"--eval-relaxation-bucket"}, "Evaluate RelaxationBoundComputer on a RelaxationBucket checkpoint file.", "");
     parser.add_flag({"--skip-fused"}, "Skip fused kernel testing.");
     parser.add_flag({"--cuda-sync"}, "Run only CUDA synchronization regression tests.");
     parser.add_flag({"--view-reg"}, "Run only view and bufferize regression tests.");
@@ -35,8 +51,12 @@ int main(int argc, char *argv[])
     parser.add_flag({"--write-after-read-cache"}, "Run write-after-read reader cache regression tests.");
     parser.add_flag({"--start-bounds"}, "Run start bounds and precedence regression tests.");
     parser.add_flag({"--start-run-makespan"}, "Run only start-run makespan propagator tests.");
+    parser.add_flag({"--prune-egraph"}, "Run only e-graph pruning regression tests.");
+    parser.add_flag({"--attention-kernels"}, "Run masked / causal attention kernel tests.");
     parser.add_flag({"--planner-structure"}, "Run only planner structure regression tests.");
     parser.add_flag({"--fusion-regression"}, "Run only fusion rule sweep regression tests.");
+    parser.add_flag({"--scatter-canonical"}, "Run scatter canonical keys regression tests.");
+    parser.add_flag({"--triu-mask"}, "Run triu mask predicate regression tests.");
     parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
     std::vector<std::string> remaining_args;
@@ -49,9 +69,125 @@ int main(int argc, char *argv[])
     settings.load(remaining_args);
 
     std::string targetKernel = parser.get_positional("targetKernel");
-    bool useRecords = !parser.get_flag("--no-records");
+    bool useRecords = parser.get_flag("--all-records");
     std::string cachePath = parser.get_option("--cache");
     bool skipFused = parser.get_flag("--skip-fused");
+    if (parser.get_flag("--bucket-independence"))
+    {
+        try { BucketIndependence::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    if (parser.get_flag("--private-layout"))
+    {
+        try { PrivateLayoutRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    if (parser.get_flag("--start-rank-window"))
+    {
+        try { StartRankWindowRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    if (parser.get_flag("--relaxation-bound"))
+    {
+        try { RelaxationBoundRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    std::string eval_rb_path = parser.get_option("--eval-relaxation-bucket");
+    if (!eval_rb_path.empty())
+    {
+        try
+        {
+            plan::RelaxationBucket rb;
+            auto t0 = std::chrono::high_resolution_clock::now();
+            if (!plan::loadRelaxationBucket(eval_rb_path, rb))
+            {
+                std::cerr << "Failed to load relaxation bucket from: " << eval_rb_path << "\n";
+                return 1;
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            plan::RelaxationBoundComputer rbc(rb);
+            std::vector<double> best_lambda;
+            double max_bnd = plan::maximizeRelaxationBound(rbc, rb.engines.size(), &best_lambda);
+            {
+                auto env_or = [](const char *name, int fallback) {
+                    const char *v = std::getenv(name);
+                    return v ? std::atoi(v) : fallback;
+                };
+                const auto p0 = std::chrono::high_resolution_clock::now();
+                const double probed = rbc.evaluateProbed(best_lambda, env_or("TG_PROBE_DEPTH", 2),
+                                                         static_cast<size_t>(env_or("TG_PROBE_CANDIDATES", 8)),
+                                                         static_cast<size_t>(env_or("TG_PROBE_MIN_NODES", 64)),
+                                                         static_cast<size_t>(env_or("TG_PROBE_WITH", 4)));
+                const auto p1 = std::chrono::high_resolution_clock::now();
+                std::cout << "  Probed load bound at the best lambda: " << probed << " ("
+                          << std::chrono::duration<double, std::milli>(p1 - p0).count() << " ms)\n";
+                if (const char *global = std::getenv("TG_GLOBAL_SPLIT"))
+                {
+                    const auto g0 = std::chrono::high_resolution_clock::now();
+                    const double split = rbc.evaluateGlobalSplit(best_lambda, static_cast<size_t>(std::atol(global)));
+                    const auto g1 = std::chrono::high_resolution_clock::now();
+                    std::cout << "  Global split load bound at the best lambda: " << split << " ("
+                              << std::chrono::duration<double, std::milli>(g1 - g0).count() << " ms)\n";
+                }
+                if (const char *grid = std::getenv("TG_PROBE_LAMBDAS"))
+                {
+                    std::stringstream list(grid);
+                    std::string item;
+                    while (std::getline(list, item, ','))
+                    {
+                        const double l0 = std::stod(item);
+                        std::vector<double> lambda(rb.engines.size(), (1.0 - l0) / std::max<size_t>(1, rb.engines.size() - 1));
+                        lambda[0] = l0;
+                        std::cout << "  lambda0=" << l0 << " plain=" << rbc.evaluate(lambda) << " probed="
+                                  << rbc.evaluateProbed(lambda, env_or("TG_PROBE_DEPTH", 2),
+                                                        static_cast<size_t>(env_or("TG_PROBE_CANDIDATES", 8)),
+                                                        static_cast<size_t>(env_or("TG_PROBE_MIN_NODES", 64)),
+                                                        static_cast<size_t>(env_or("TG_PROBE_WITH", 4)))
+                                  << "\n";
+                    }
+                }
+            }
+            if (std::getenv("TG_NO_STAGE"))
+                rbc.setExactWindowStage(false);
+            if (const char *nodes = std::getenv("TG_EXACT_NODES"))
+                rbc.setExactWindowNodes(static_cast<uint64_t>(std::atoll(nodes)));
+            if (const char *flex = std::getenv("TG_FLEX_WINDOWS"))
+            {
+                const auto f0 = std::chrono::high_resolution_clock::now();
+                const size_t long_len = std::getenv("TG_FLEX_LONG") ? static_cast<size_t>(std::atol(std::getenv("TG_FLEX_LONG"))) : 0;
+                const double v = rbc.flexibleIntervalBound(static_cast<size_t>(std::atol(flex)), std::chrono::steady_clock::time_point::max(), long_len);
+                const auto f1 = std::chrono::high_resolution_clock::now();
+                std::cout << "  Flexible interval bound (max_len " << flex << "): " << v << " ("
+                          << std::chrono::duration<double, std::milli>(f1 - f0).count() << " ms)\n";
+            }
+            double best_ib = 0.0;
+            for (uint32_t stride : {1u, 2u, 4u, 8u, 16u})
+            {
+                double ib = rbc.intervalBound(stride);
+                if (ib > best_ib)
+                    best_ib = ib;
+            }
+            auto t2 = std::chrono::high_resolution_clock::now();
+            double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            double eval_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            std::cout << "[EvalRelaxationBucket] Loaded: " << eval_rb_path << "\n"
+                      << "  Classes: " << rb.classes.size() << ", Groups: " << rb.group_members.size() << "\n"
+                      << "  Load time: " << load_ms << " ms\n"
+                      << "  Relaxation bound: " << max_bnd << "\n"
+                      << "  Interval bound: " << best_ib << "\n"
+                      << "  Eval time: " << eval_ms << " ms\n";
+            return 0;
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << error.what() << std::endl;
+            return 1;
+        }
+    }
     if (parser.get_flag("--write-after-read-cache"))
     {
         runWriteAfterReadCacheTests();
@@ -62,6 +198,18 @@ int main(int argc, char *argv[])
         runStartBoundsTests();
         return 0;
     }
+    if (parser.get_flag("--attention-kernels"))
+    {
+        try { AttentionKernelTests::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
+    if (parser.get_flag("--prune-egraph"))
+    {
+        try { PruneEGraphRegression::run(); }
+        catch (const std::exception &error) { std::cerr << error.what() << std::endl; return 1; }
+        return 0;
+    }
     if (parser.get_flag("--planner-structure"))
     {
         runPlannerStructureTests();
@@ -70,6 +218,16 @@ int main(int argc, char *argv[])
     if (parser.get_flag("--fusion-regression"))
     {
         FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
+        return 0;
+    }
+    if (parser.get_flag("--scatter-canonical"))
+    {
+        runScatterCanonicalKeysTests();
+        return 0;
+    }
+    if (parser.get_flag("--triu-mask"))
+    {
+        runTriuMaskTests();
         return 0;
     }
     if (parser.get_flag("--incremental-propagators"))
@@ -109,6 +267,13 @@ int main(int argc, char *argv[])
     {
         // Structural & Operator Correctness Tests
         runRegionMergeTests();
+        runScatterRowsTests();
+        runScatterCanonicalKeysTests();
+        runTriuMaskTests();
+        runBF16TransposedWStreamTests();
+        runReduceLastAxisTests();
+        PruneEGraphRegression::run();
+        AttentionKernelTests::run();
         runPlannerStructureTests();
         FusionRuleSweepRegression::runFusionRuleSweepRegressionTests();
         runSelectionReachabilityTests();

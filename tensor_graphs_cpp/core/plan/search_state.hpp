@@ -2,9 +2,13 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <functional>
 #include <cassert>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -13,11 +17,13 @@
 #include <vector>
 
 #include "core/common/constants.hpp"
+#include "core/common/thread_pool.hpp"
 #include "core/egraph.hpp"
 #include "core/graph.hpp"
 #include "core/logging.hpp"
 #include "core/plan/domain.hpp"
 #include "core/plan/enode_info.hpp"
+#include "core/plan/search_volume.hpp"
 #include "core/types.hpp"
 
 struct CacheCandidate
@@ -34,6 +40,43 @@ namespace plan
 
 using ::CacheCandidate;
 using ::ENodeInfo;
+
+// Search treats reduced bucket e-graphs as immutable. Buckets that share a
+// reduced representative keep a shared owner instead of copying the large
+// graph into every search slot.
+class BucketEGraphSet
+{
+    std::vector<std::shared_ptr<EGraph>> graphs_;
+
+  public:
+    size_t size() const { return graphs_.size(); }
+    EGraph &operator[](size_t index) { return *graphs_.at(index); }
+    const EGraph &operator[](size_t index) const { return *graphs_.at(index); }
+    EGraph &at(size_t index) { return *graphs_.at(index); }
+    const EGraph &at(size_t index) const { return *graphs_.at(index); }
+    EGraph &back() { return *graphs_.back(); }
+    const EGraph &back() const { return *graphs_.back(); }
+
+    void emplace_back() { graphs_.push_back(std::make_shared<EGraph>()); }
+    void push_back(EGraph &&graph) { graphs_.push_back(std::make_shared<EGraph>(std::move(graph))); }
+    void push_back(const EGraph &graph) { graphs_.push_back(std::make_shared<EGraph>(graph)); }
+    std::shared_ptr<EGraph> shared(size_t index) const { return graphs_.at(index); }
+    void pushShared(std::shared_ptr<EGraph> graph)
+    {
+        if (!graph)
+            Error::throw_err("[BucketEGraphSet] cannot add a null e-graph owner");
+        graphs_.push_back(std::move(graph));
+    }
+
+    BucketEGraphSet &operator=(std::initializer_list<EGraph> graphs)
+    {
+        graphs_.clear();
+        graphs_.reserve(graphs.size());
+        for (const EGraph &graph : graphs)
+            push_back(graph);
+        return *this;
+    }
+};
 
 using VarId = uint32_t;
 constexpr VarId kInvalidVarId = UINT32_MAX;
@@ -73,7 +116,6 @@ struct VarInfo
 {
     VarId id = kInvalidVarId;
     VarType type = VarType::SELECTED;
-    std::string name;
     uint32_t bucket_idx = 0;
     EClassId eclass_id;
     VarId selection_var = kInvalidVarId;
@@ -81,6 +123,25 @@ struct VarInfo
     MemSpace mem_space;
     uint64_t size_bytes = 0;
     uint32_t size_pages = 0;
+
+    // Diagnostic name (cached_<base>, selected_/start_/offset_<bucket>_<class>),
+    // formatted on demand: storing one per variable cost millions of strings.
+    std::string name() const
+    {
+        switch (type)
+        {
+        case VarType::CACHED:
+            return "cached_" + std::to_string(base_eclass_id.value);
+        case VarType::SELECTED:
+            return "selected_" + std::to_string(bucket_idx) + "_" + std::to_string(eclass_id.value);
+        case VarType::START:
+            return "start_" + std::to_string(bucket_idx) + "_" + std::to_string(eclass_id.value);
+        case VarType::OFFSET:
+            return "offset_" + std::to_string(bucket_idx) + "_" + std::to_string(eclass_id.value);
+        }
+        Error::throw_err("[VarInfo] unknown variable type");
+        return {};
+    }
 };
 
 // A directed Even-Shiloach tree for one bucket. Each enode contributes separate
@@ -398,15 +459,36 @@ struct SelectionReachability
                 continue;
             const uint32_t prev_level = node.level;
             const uint32_t prev_incoming = node.next_incoming;
-            while (node.level < infinity)
+            while (node.next_incoming < node.incoming.size() &&
+                   !supportsLevel(node.incoming[node.next_incoming], node.level))
+                ++node.next_incoming;
+            if (node.next_incoming == node.incoming.size())
             {
-                while (node.next_incoming < node.incoming.size() &&
-                       !supportsLevel(node.incoming[node.next_incoming], node.level))
-                    ++node.next_incoming;
-                if (node.next_incoming < node.incoming.size())
-                    break;
-                ++node.level;
+                // No support left at this level: the next supported level is
+                // the smallest parent level + 1 above it (raising the level
+                // one step at a time and rescanning finds the same level,
+                // but costs O(levels * incoming) for an unreachable node).
+                uint32_t next_level = infinity;
+                for (uint32_t edge_id : node.incoming)
+                {
+                    const Edge &edge = edges[edge_id];
+                    // A self-edge never supports a level (level + 1 != level).
+                    if (!edge.active || edge.from == idx || nodes[edge.from].level >= infinity)
+                        continue;
+                    const uint32_t candidate = nodes[edge.from].level + 1;
+                    if (candidate > node.level)
+                        next_level = std::min(next_level, candidate);
+                }
+                node.level = next_level;
                 node.next_incoming = 0;
+                if (node.level < infinity)
+                {
+                    while (node.next_incoming < node.incoming.size() &&
+                           !supportsLevel(node.incoming[node.next_incoming], node.level))
+                        ++node.next_incoming;
+                    if (node.next_incoming == node.incoming.size())
+                        Error::throw_err("SelectionReachability::update: no support at the computed level");
+                }
             }
             if (node.level == prev_level && node.next_incoming == prev_incoming)
                 continue;
@@ -746,10 +828,15 @@ class SearchState
     std::unordered_set<VarId> empty_domains;
 
     uint64_t domain_revision = 0;
+    DomainVolumeTracker domain_volume_tracker;
 
     VarId last_domain_change_var = kInvalidVarId;
     Domain last_domain_change_before;
     Domain last_domain_change_after;
+
+    // Whether a variable's domain was ever set after addVar (never cleared,
+    // also not by backtracking).
+    std::vector<uint8_t> domain_ever_changed;
 
     // Domain changes are consumed by SearchEngine's propagator worklist.
     std::vector<VarId> dirty_domains;
@@ -764,14 +851,19 @@ class SearchState
     // only when the selected graph or start times change.
     uint64_t selection_revision = 0;
     uint64_t schedule_revision = 0;
+    uint64_t allocation_revision = 0;
     std::vector<std::set<std::pair<int32_t, VarId>>> fixed_offset_vars;
 
     void updateDomainIndexes(VarId var_id, const Domain &old_domain, const Domain &new_domain)
     {
+        if (domain_volume_tracker.initialized())
+            domain_volume_tracker.setDomain(var_id, new_domain);
         if (var_id >= var_infos.size())
             return;
 
         const VarInfo &info = var_infos[var_id];
+        if (info.type != VarType::START)
+            ++allocation_revision;
         if (info.type == VarType::SELECTED)
         {
             ++selection_revision;
@@ -892,7 +984,10 @@ class SearchState
     std::vector<std::unordered_map<Engine, float>> selected_engine_work;
     bool engine_work_initialized = false;
     std::vector<float> bucket_start_run_lower_bounds;
-    std::vector<EGraph> bucket_egraphs;
+    // Root selection-relaxation bounds (RelaxationBoundPropagator). Computed
+    // over the root domains, so they hold in every node below the root.
+    std::vector<float> bucket_relaxation_lower_bounds;
+    BucketEGraphSet bucket_egraphs;
     std::vector<EClassId> bucket_root_ids;
     std::vector<std::vector<ENodeInfo>> bucket_enode_infos;
     std::vector<std::vector<EClassId>> reachable_cids;
@@ -901,6 +996,30 @@ class SearchState
     std::unordered_map<MemSpace, uint64_t> mem_caps;
     std::unordered_map<MemSpace, uint32_t> page_alignments;
     std::unordered_map<MemSpace, uint32_t> preallocated_pages;
+    // Set while the root primal heuristic completes a plan: every offset is
+    // fixed explicitly and checked once fixed, so propagators may skip
+    // forward pruning of unfixed offsets.
+    bool completing_plan = false;
+    // Spaces whose root offsets StaticPrivateLayoutPropagator fixed to
+    // pairwise-disjoint private ranges: distinct non-alias allocations there
+    // can never overlap, so memory reuse checks are vacuous for the search.
+    std::unordered_set<MemSpace> private_layout_spaces;
+    // Per bucket, whether every start domain was downward closed from 0 at
+    // solve entry (before root propagation). Rank compression stays inside
+    // such domains.
+    std::vector<char> start_domains_downward_closed_at_entry;
+
+    void recordStartDomainShapeAtEntry()
+    {
+        start_domains_downward_closed_at_entry.assign(buckets.size(), 1);
+        for (uint32_t b = 0; b < buckets.size() && b < start_vars.size(); ++b)
+            for (const auto &[cid, st_v] : start_vars[b])
+            {
+                const Domain &dom = domains[st_v];
+                if (dom.isEmpty() || dom.getMin() != 0 || dom.size() != dom.getMax() + 1)
+                    start_domains_downward_closed_at_entry[b] = 0;
+            }
+    }
     std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
     std::unordered_map<MemSpace, uint64_t> fixed_cache_bytes;
     std::unordered_set<VarId> fixed_cached_vars;
@@ -940,9 +1059,12 @@ class SearchState
             bucket_engine_work_lower_bounds.resize(buckets.size(), 0.0f);
         if (bucket_start_run_lower_bounds.size() < buckets.size())
             bucket_start_run_lower_bounds.resize(buckets.size(), 0.0f);
+        if (bucket_relaxation_lower_bounds.size() < buckets.size())
+            bucket_relaxation_lower_bounds.resize(buckets.size(), 0.0f);
         bucket_lower_bounds[bucket_idx] = std::max({bucket_critical_path_lower_bounds[bucket_idx],
                                                     bucket_engine_work_lower_bounds[bucket_idx],
-                                                    bucket_start_run_lower_bounds[bucket_idx]});
+                                                    bucket_start_run_lower_bounds[bucket_idx],
+                                                    bucket_relaxation_lower_bounds[bucket_idx]});
         lower_bound = 0.0f;
         for (size_t b = 0; b < bucket_lower_bounds.size(); ++b)
         {
@@ -964,6 +1086,11 @@ class SearchState
         return schedule_revision;
     }
 
+    uint64_t getAllocationRevision() const
+    {
+        return allocation_revision;
+    }
+
     const std::set<std::pair<int32_t, VarId>> &getFixedOffsetVars(uint32_t bucket_idx) const
     {
         static const std::set<std::pair<int32_t, VarId>> empty;
@@ -972,11 +1099,14 @@ class SearchState
 
     VarId addVar(VarInfo info, const Domain &initial_domain)
     {
+        if (domain_volume_tracker.initialized())
+            Error::throw_err("Cannot add variables after initializing search volume");
         assert(!propagation.initialized);
         VarId id = static_cast<VarId>(var_infos.size());
         info.id = id;
         var_infos.push_back(std::move(info));
         domains.push_back(initial_domain);
+        domain_ever_changed.push_back(0);
         updateDomainIndexes(id, Domain{}, initial_domain);
         if (initial_domain.isEmpty())
             empty_domains.insert(id);
@@ -984,34 +1114,229 @@ class SearchState
         return id;
     }
 
+    void initializeDomainVolume()
+    {
+        domain_volume_tracker.initialize(domains);
+    }
+
+    double domainLog2Volume() const
+    {
+        return domain_volume_tracker.log2Volume();
+    }
+
     // Call once per bucket, after CACHE insertion and enode pruning are complete.
     // Preserve eclass/enode IDs for extraction; allocate dense VarIds only for
     // canonical classes reachable through at least one surviving alternative.
-    void addBucketVariables(uint32_t b)
+    void addBucketVariables(uint32_t b, const std::vector<EClassId> *shared_reachable = nullptr)
+    {
+        resizeBucketVariableMaps();
+        setBucketReachable(b, shared_reachable);
+        BucketVariables pending;
+        buildBucketVariables(b, pending);
+        commitBucketVariables(b, pending);
+        indexBucketVariables(b, pending);
+    }
+
+    // Adds every bucket's variables with the ids sequential addBucketVariables
+    // calls in bucket order would give. Reachable classes and variable
+    // descriptions are built per bucket in parallel (buckets whose
+    // shared_reachable_from[b] is an earlier bucket copy its classes);
+    // variables are then added in bucket order and the per-bucket maps filled
+    // in parallel.
+    void addAllBucketVariables(const std::vector<uint32_t> &shared_reachable_from)
+    {
+        const uint32_t nb = static_cast<uint32_t>(buckets.size());
+        if (shared_reachable_from.size() != nb)
+            Error::throw_err("[SearchState] addAllBucketVariables needs one reachable source per bucket");
+        resizeBucketVariableMaps();
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) {
+            if (shared_reachable_from[b] >= b)
+                setBucketReachable(b, nullptr);
+        });
+        std::vector<BucketVariables> pending(nb);
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) {
+            const uint32_t from = shared_reachable_from[b];
+            if (from < b)
+                setBucketReachable(b, &reachable_cids[from]);
+            buildBucketVariables(b, pending[b]);
+        });
+        commitAllBucketVariables(pending);
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) { indexBucketVariables(b, pending[b]); });
+    }
+
+    // A state over the same buckets, e-graphs and cache candidates (cache
+    // variables keep their current domains) whose bucket b has variables only
+    // for `classes[b]` (each list contains the bucket root; the order is the
+    // classes' start order source, as reachable_cids). The planner's root
+    // heuristic validates a complete plan in it: propagation then touches
+    // only the plan's classes instead of every reachable class.
+    SearchState restrictedTo(const std::vector<std::vector<EClassId>> &classes) const
+    {
+        const uint32_t nb = static_cast<uint32_t>(buckets.size());
+        if (classes.size() != nb)
+            Error::throw_err("[SearchState] restrictedTo needs one class list per bucket");
+        SearchState restricted;
+        restricted.buckets = buckets;
+        restricted.bucket_weights = bucket_weights;
+        restricted.candidates = candidates;
+        restricted.mem_caps = mem_caps;
+        restricted.page_alignments = page_alignments;
+        restricted.preallocated_buffers = preallocated_buffers;
+        restricted.preallocated_pages = preallocated_pages;
+        restricted.bucket_root_ids = bucket_root_ids;
+        restricted.bucket_enode_infos = bucket_enode_infos;
+        for (uint32_t b = 0; b < nb; ++b)
+            restricted.bucket_egraphs.pushShared(bucket_egraphs.shared(b));
+        for (const CacheCandidate &candidate : candidates)
+        {
+            const VarId var = cached_vars.at(candidate.base_eclass_id);
+            const VarId added = restricted.addVar(var_infos[var], domains[var]);
+            restricted.cached_vars[candidate.base_eclass_id] = added;
+        }
+        restricted.resizeBucketVariableMaps();
+        std::vector<BucketVariables> pending(nb);
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) {
+            restricted.setBucketReachable(b, &classes[b]);
+            const EClassId root = restricted.bucket_root_ids[b];
+            if (std::find(classes[b].begin(), classes[b].end(), root) == classes[b].end())
+                Error::throw_err("[SearchState] restrictedTo: bucket " + std::to_string(b) + " omits its root");
+            restricted.buildBucketVariables(b, pending[b]);
+        });
+        restricted.commitAllBucketVariables(pending);
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) { restricted.indexBucketVariables(b, pending[b]); });
+        return restricted;
+    }
+
+  private:
+    struct BucketVariables
+    {
+        std::vector<VarInfo> infos; // START infos hold their selection's index in this list
+        std::vector<Domain> domains;
+        VarId first_id = kInvalidVarId;
+    };
+
+    // commitBucketVariables for every bucket in order, in parallel: the same
+    // ids (bucket b's variables are contiguous from its first id), domains,
+    // dirty order, empty-domain and fixed-offset indexes as one addVar per
+    // variable; each variable writes only its own slots and its bucket's
+    // fixed-offset set, and the revision counters advance as addVar's would.
+    void commitAllBucketVariables(std::vector<BucketVariables> &pending)
+    {
+        if (domain_volume_tracker.initialized())
+            Error::throw_err("Cannot add variables after initializing search volume");
+        assert(!propagation.initialized);
+        const uint32_t nb = static_cast<uint32_t>(pending.size());
+        const size_t base = var_infos.size();
+        size_t total = base;
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            pending[b].first_id = static_cast<VarId>(total);
+            LOG(INFO) << "[SearchState start horizon] bucket=" << b << " initial=[0.." << reachable_cids[b].size() - 1
+                      << "] source=structurally-reachable-classes count=" << reachable_cids[b].size();
+            total += pending[b].infos.size();
+        }
+        var_infos.resize(total);
+        domains.resize(total);
+        domain_ever_changed.resize(total, 0);
+        if (var_dirty_epoch.size() < total)
+            var_dirty_epoch.resize(total, 0);
+        if (fixed_offset_vars.size() < buckets.size())
+            fixed_offset_vars.resize(buckets.size());
+        std::vector<std::vector<VarId>> empty(nb);
+        std::vector<std::array<uint64_t, 3>> counts(nb, {0, 0, 0}); // selected, start, other
+        ThreadPool::get().parallel_for(nb, [&](uint32_t b) {
+            BucketVariables &bucket = pending[b];
+            for (size_t k = 0; k < bucket.infos.size(); ++k)
+            {
+                const VarId id = static_cast<VarId>(bucket.first_id + k);
+                VarInfo &info = bucket.infos[k];
+                if (info.type == VarType::CACHED || info.bucket_idx != b)
+                    Error::throw_err("[SearchState] bucket variables must belong to their bucket");
+                if (info.type == VarType::START)
+                    info.selection_var += bucket.first_id;
+                info.id = id;
+                const Domain &domain = bucket.domains[k];
+                if (info.type == VarType::SELECTED)
+                    ++counts[b][0];
+                else if (info.type == VarType::START)
+                    ++counts[b][1];
+                else
+                {
+                    ++counts[b][2];
+                    if (info.type == VarType::OFFSET && domain.isFixed())
+                        fixed_offset_vars[b].insert({domain.fixedValue(), id});
+                }
+                if (domain.isEmpty())
+                    empty[b].push_back(id);
+                var_infos[id] = std::move(info);
+                domains[id] = domain;
+                var_dirty_epoch[id] = current_dirty_epoch;
+            }
+        });
+        dirty_domains.reserve(dirty_domains.size() + (total - base));
+        for (size_t id = base; id < total; ++id)
+            dirty_domains.push_back(static_cast<VarId>(id));
+        for (uint32_t b = 0; b < nb; ++b)
+        {
+            empty_domains.insert(empty[b].begin(), empty[b].end());
+            selection_revision += counts[b][0];
+            schedule_revision += counts[b][1];
+            allocation_revision += counts[b][0] + counts[b][2];
+        }
+    }
+
+    void resizeBucketVariableMaps()
     {
         selected_vars.resize(buckets.size());
         start_vars.resize(buckets.size());
         offset_vars.resize(buckets.size());
         reachable_cids.resize(buckets.size());
-        assert(selected_vars[b].empty() && start_vars[b].empty() && offset_vars[b].empty());
+    }
 
+    void setBucketReachable(uint32_t b, const std::vector<EClassId> *shared_reachable)
+    {
+        assert(selected_vars[b].empty() && start_vars[b].empty() && offset_vars[b].empty());
         const EGraph &egraph = bucket_egraphs[b];
         const EClassId root_cid = egraph.findConst(bucket_root_ids[b]);
         bucket_root_ids[b] = root_cid;
-        reachable_cids[b] = collectReachableCids(egraph, root_cid);
+        if (shared_reachable != nullptr)
+            reachable_cids[b] = *shared_reachable;
+        else
+            reachable_cids[b] = collectReachableCids(egraph, root_cid);
         if (reachable_cids[b].empty() || reachable_cids[b].size() > static_cast<size_t>(INT32_MAX))
             Error::throw_err("Bucket start horizon requires between 1 and INT32_MAX reachable classes");
+    }
+
+    void buildBucketVariables(uint32_t b, BucketVariables &out) const
+    {
+        const EGraph &egraph = bucket_egraphs[b];
+        const EClassId root_cid = bucket_root_ids[b];
         const uint32_t max_start = static_cast<uint32_t>(reachable_cids[b].size() - 1);
-        LOG(INFO) << "[SearchState start horizon] bucket=" << b << " initial=[0.." << max_start
-                  << "] source=structurally-reachable-classes count=" << reachable_cids[b].size();
+        out.infos.reserve(reachable_cids[b].size() * 3);
+        out.domains.reserve(reachable_cids[b].size() * 3);
+        auto add = [&](VarInfo info, const Domain &domain) {
+            out.infos.push_back(std::move(info));
+            out.domains.push_back(domain);
+            return static_cast<VarId>(out.infos.size() - 1);
+        };
         for (EClassId cid : reachable_cids[b])
         {
             const EClass &cls = egraph.getEClass(cid);
             uint32_t n_enodes = static_cast<uint32_t>(cls.enodes.size());
-            if (n_enodes > 31)
+            if (n_enodes > 63)
             {
-                Error::throw_err("EClass " + std::to_string(cid.value) + " has " + std::to_string(n_enodes) +
-                                 " enodes, exceeding domain bitmask capacity (max 31).");
+                std::stringstream error;
+                error << "EClass " << cid.value << " has " << n_enodes
+                      << " enodes, exceeding domain bitmask capacity (max 63).\n"
+                      << toString(cls) << "\nEnode details:\n";
+                for (size_t enode_idx = 0; enode_idx < cls.enodes.size(); ++enode_idx)
+                {
+                    const ENodeId enode_id = cls.enodes[enode_idx];
+                    const ENode &enode = egraph.getENode(enode_id);
+                    error << "  [" << enode_idx << "] ENode " << enode_id.value << ":\n"
+                          << toString(enode) << "\n";
+                }
+                Error::throw_err(error.str());
             }
 
             // selected_<bucket_id>_<eclass_id> in {0, 1, ..., n_enodes}
@@ -1019,16 +1344,14 @@ class SearchState
             sel_info.type = VarType::SELECTED;
             sel_info.bucket_idx = b;
             sel_info.eclass_id = cid;
-            sel_info.name = "selected_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
-            uint32_t mask = UINT32_MAX >> (31 - n_enodes);
+            uint64_t mask = UINT64_MAX >> (63 - n_enodes);
             if (cid == root_cid)
             {
-                mask &= ~1u; // Root must be selected
+                mask &= ~uint64_t{1}; // Root must be selected
             }
 
-            VarId sel_vid = addVar(sel_info, Domain::makeMask(mask));
-            selected_vars[b][cid] = sel_vid;
+            const VarId sel_vid = add(std::move(sel_info), Domain::makeMask(mask));
 
             // One dispatch start is shared by every alternative in the e-class.
             VarInfo st_info;
@@ -1036,10 +1359,8 @@ class SearchState
             st_info.bucket_idx = b;
             st_info.eclass_id = cid;
             st_info.selection_var = sel_vid;
-            st_info.name = "start_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
-            VarId st_vid = addVar(st_info, Domain::makeRange(0, max_start));
-            start_vars[b][cid] = st_vid;
+            add(std::move(st_info), Domain::makeRange(0, max_start));
 
             // Views may alias the preallocated region; preallocated eclasses
             // must use their physical buffer offsets.
@@ -1052,7 +1373,6 @@ class SearchState
                 off_info.mem_space = cls.mem_space;
                 off_info.size_bytes = getStorageSpanBytes(cls.shape, cls.strides, cls.dtype);
                 off_info.size_pages = bytesToPages(off_info.size_bytes, cls.mem_space);
-                off_info.name = "offset_" + std::to_string(b) + "_" + std::to_string(cid.value);
 
                 uint32_t align = getPageAlignment(cls.mem_space);
                 uint64_t cap = getMemoryCap(cls.mem_space);
@@ -1070,12 +1390,46 @@ class SearchState
                     offset_domain = Domain::makeFixed(static_cast<int32_t>(buffer.offset / align));
                 }
 
-                VarId off_vid = addVar(off_info, offset_domain);
-                offset_vars[b][cid] = off_vid;
+                add(std::move(off_info), offset_domain);
             }
         }
     }
 
+
+    void commitBucketVariables(uint32_t b, BucketVariables &pending)
+    {
+        pending.first_id = static_cast<VarId>(var_infos.size());
+        LOG(INFO) << "[SearchState start horizon] bucket=" << b << " initial=[0.." << reachable_cids[b].size() - 1
+                  << "] source=structurally-reachable-classes count=" << reachable_cids[b].size();
+        for (size_t k = 0; k < pending.infos.size(); ++k)
+        {
+            VarInfo &info = pending.infos[k];
+            if (info.type == VarType::START)
+                info.selection_var += pending.first_id;
+            if (addVar(std::move(info), pending.domains[k]) != pending.first_id + k)
+                Error::throw_err("[SearchState] bucket variables were not added contiguously");
+        }
+    }
+
+    void indexBucketVariables(uint32_t b, const BucketVariables &pending)
+    {
+        selected_vars[b].reserve(reachable_cids[b].size());
+        start_vars[b].reserve(reachable_cids[b].size());
+        offset_vars[b].reserve(reachable_cids[b].size());
+        for (size_t k = 0; k < pending.infos.size(); ++k)
+        {
+            const VarInfo &info = pending.infos[k];
+            const VarId id = pending.first_id + static_cast<VarId>(k);
+            if (info.type == VarType::SELECTED)
+                selected_vars[b][info.eclass_id] = id;
+            else if (info.type == VarType::START)
+                start_vars[b][info.eclass_id] = id;
+            else
+                offset_vars[b][info.eclass_id] = id;
+        }
+    }
+
+  public:
     size_t numVars() const
     {
         return var_infos.size();
@@ -1172,6 +1526,7 @@ class SearchState
 #endif
             updatePropagationContribution(var_id, false);
             const bool was_empty = domains[var_id].isEmpty();
+            domain_ever_changed[var_id] = 1;
             trail.push_back(DomainTrailEntry{var_id, domains[var_id]});
             updateDomainIndexes(var_id, domains[var_id], new_domain);
             domains[var_id] = new_domain;
@@ -1191,6 +1546,11 @@ class SearchState
     const SelectionReachability &selectionReachability(uint32_t bucket_idx) const
     {
         return selection_reachability.at(bucket_idx);
+    }
+
+    bool selectionReachabilityInitialized(uint32_t bucket_idx) const
+    {
+        return bucket_idx < selection_reachability.size() && selection_reachability[bucket_idx].initialized;
     }
 
     // Called only for the changed SELECTED variable. The first call builds a
@@ -1218,6 +1578,33 @@ class SearchState
             return;
         trail.push_back(ReachabilityTrailEntry{bucket_idx, changed, reachability.undo.size(), true});
         reachability.update(node_idx, domains[changed], unreachable, &domains, forced_parents);
+    }
+
+    // Builds every uninitialized bucket's tree at once. A bucket's tree reads
+    // only its own graph and selection domains, so the trees are built in
+    // parallel; trail entries are pushed in bucket order afterwards, exactly
+    // as sequential first calls would. unreachable[b] receives bucket b's
+    // unreachable selections; the caller applies them.
+    void initializeSelectionReachability(const std::vector<VarId> &root_vars, bool is_dag,
+                                         std::vector<std::vector<VarId>> &unreachable)
+    {
+        if (root_vars.size() != buckets.size())
+            Error::throw_err("[SearchState] initializeSelectionReachability needs one root var per bucket");
+        if (selection_reachability.size() < buckets.size())
+            selection_reachability.resize(buckets.size());
+        unreachable.assign(buckets.size(), {});
+        std::vector<uint8_t> built(buckets.size(), 0);
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+            built[b] = root_vars[b] != kInvalidVarId && !selection_reachability[b].initialized;
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(buckets.size()), [&](uint32_t b) {
+            if (!built[b])
+                return;
+            selection_reachability[b].initialize(bucket_egraphs[b], bucket_root_ids[b], selected_vars[b], domains,
+                                                 unreachable[b], is_dag);
+        });
+        for (uint32_t b = 0; b < buckets.size(); ++b)
+            if (built[b])
+                trail.push_back(ReachabilityTrailEntry{b, root_vars[b], 0, false});
     }
 
     template <typename F>
@@ -1252,6 +1639,14 @@ class SearchState
     void schedulePropagation(VarId var_id)
     {
         markDomainDirty(var_id);
+    }
+
+    // False while the variable still has the domain addVar gave it: every
+    // variable is dirty from addVar, so propagators reading it have seen
+    // (or will see) only this domain.
+    bool domainEverChanged(VarId var_id) const
+    {
+        return domain_ever_changed.at(var_id) != 0;
     }
 
     static uint32_t getDefaultPageAlignment(const MemSpace &ms)

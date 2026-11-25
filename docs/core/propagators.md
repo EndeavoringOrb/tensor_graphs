@@ -228,7 +228,35 @@ flowchart LR
 
 ### `UnselectedStartOffsetPropagator`
 
-When an e-class is fixed to `{0}` (unselected), fix all its start & offset variables to `0`. These values are irrelevant for an unselected e-class.
+When an e-class is fixed to `{0}` (unselected), fix all its start & offset variables to `0` (a start whose domain excludes 0 takes its minimum). These values are irrelevant for an unselected e-class. An offset that is already fixed (for example by `StaticPrivateLayoutPropagator`) is left unchanged; any fixed value represents the irrelevant coordinate.
+
+### `StaticPrivateLayoutPropagator`
+
+Runs once during root propagation. Offsets never enter the objective, so when a memory space can give every allocation its own page range at once, the offsets can be fixed to that layout without losing any cost. Per memory space:
+
+1. Keep the preallocated region `[0, prealloc)`.
+2. Give each cacheable base one slot after it, shared by every bucket (base-id order).
+3. Give every other non-view e-class of a bucket one slot after the cache slots. Buckets reuse this range because allocation pairs are only compared within one bucket.
+4. Fix those offsets, and fix each view-only e-class whose alternatives all resolve to one address.
+
+The space is skipped (logged) unless the whole layout fits the capacity, every slot is inside its variable's current domain, every candidate base address is inside each view's domain, no cacheable e-class has a view alternative, and no e-class mixes view and non-view alternatives. Candidate addresses are collected recursively through all alternatives of nested views, including views with multiple ultimate bases. Unknown or cyclic aliases prevent certification of the layout.
+
+**Exclusivity-shared layout.** When private slots exceed the capacity, the space may still be certified with a shared layout (no view alternatives in the space, one class per cache base per bucket, acyclic buckets). For every reachable class of a bucket, the propagator derives necessary selection conditions: sorted `(class, allowed alternative mask)` pairs that must hold whenever the class is active. The root's conditions are itself; any other class takes the intersection over its supports `(parent P, alternative a)` of `cond(P) ∪ {P: a}` (common classes only, masks unioned), plus itself. A class without an active support cannot be active. Two classes are exclusive in a bucket when some class appears in both condition sets with disjoint masks: reachability then makes it impossible for both to be selected. Cacheable bases are placed first (largest first, first fit), sharing pages only with bases that are exclusive in every common bucket (at least one is required). A cached base is selected in every bucket, so two overlapping bases can never both be cached. Each bucket's other allocations are then placed first fit, avoiding every non-exclusive base (absent bases conservatively) and every non-exclusive allocation of the same bucket. If the layout fits and every slot lies in its variable's domain, the offsets are fixed. Soundness is the same as for private slots: in any feasible plan, two allocations active in one bucket are not exclusive, so their slots are disjoint and every memory constraint holds vacuously, with selections, starts and cost unchanged. On Gemma decode the OPENCL layout needs about 468k of 524k pages, while a fully private layout would need 1.63M.
+
+A certified space is recorded in `SearchState::private_layout_spaces`. Distinct non-alias allocations there never overlap while both are active, so `MemoryNoOverlapPropagator` ignores START/OFFSET events of its allocations and leaves them out of its fixed-offset index and global rescans (allocation pairs are only compared within one space).
+
+Soundness: take any feasible plan and move each allocation to its slot (a selected view takes its base's slot; cached copies take the base slot). Distinct allocations no longer overlap, so no-overlap, persistence, reuse-after-reader and write-after-read constraints hold; selections and starts are unchanged, so the cost is unchanged. An optimal plan therefore survives. On Gemma decode this fixes every CPP offset; OPENCL is skipped because its cacheable buffers alone exceed its capacity.
+
+### `StartRankWindowPropagator`
+
+Runs once during root propagation. For each class `c` of a bucket with `N` reachable classes:
+
+- `ND(c)`: classes that precede `c` in every plan selecting `c` — the intersection over remaining alternatives of the union of each child and its `ND`.
+- `NA(c)`: classes that follow `c` in every plan selecting `c` — the intersection over possible parents `p` of `{p} ∪ NA(p)` (a selected non-root class needs a selected parent).
+
+Active starts are distinct and producers precede consumers, so `start(c) >= min_start + |ND(c)|` holds for every feasible plan. The objective and every constraint depend only on the relative order of active starts, so the ranks of any plan can be compressed to `0..k-1` (`k <= N`) without changing feasibility or cost; this stays inside the domains when every start domain of the bucket is downward closed from 0, and then `start(c) <= N-1-|NA(c)|`. Otherwise only the lower bound is applied.
+
+With downward-closed domains the canonical form also puts persistent sources first: possibly selected classes whose remaining alternatives are childless `INPUT`/`CACHE` or non-writing views (not `FILL`/`SCATTER`) of sources. They have zero runtime (the simulator gives them finish time 0, or the maximum of their source children), persistent storage, and no non-source dependency, so moving them before every other operation changes neither cost nor any non-persistent lifetime ordering. Sources take fixed ranks `0..S-1` in children-first order (unselected sources leave holes); every other class gets `start(c) >= S + |ND(c) \ Src|`. Classes without parent support or with an empty window are left to the selection propagators. An unselected class keeps an irrelevant start, so `UnselectedStartOffsetPropagator` fixes it to 0 when possible and otherwise to its domain minimum.
 
 ### `CacheExclusionPropagator`
 
@@ -269,7 +297,7 @@ forward and backward propagation reach closure without waiting for assignment.
 
 ### `StartUniquePropagator`
 
-When a selected e-class's start is fixed, remove that start value from the start domains of other e-classes whose start is not fixed to {0}. This prevents two active operations from occupying the same execution step. Because we cannot represent holes in the start domain when it is a range, only remove if value is equal to min/max (maybe keep a hashmap for fast lookup of values based on min/max). But also, I want domains to be able to switch between mask and range so for example if we manage to narrow down start to a range < 32 we can swap it to a mask and then we can remove in the middle.
+When a selected e-class's start is fixed, remove that start value from the start domains of the other mandatory e-classes of its bucket (the per-bucket active list is rebuilt only for that bucket after a selection change). This prevents two active operations from occupying the same execution step. Because we cannot represent holes in the start domain when it is a range, only remove if value is equal to min/max (maybe keep a hashmap for fast lookup of values based on min/max). But also, I want domains to be able to switch between mask and range so for example if we manage to narrow down start to a range < 32 we can swap it to a mask and then we can remove in the middle.
 
 ### `StartBoundsPropagator`
 

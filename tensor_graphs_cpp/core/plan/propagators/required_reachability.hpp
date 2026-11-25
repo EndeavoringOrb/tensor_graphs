@@ -26,16 +26,16 @@ class RequiredReachabilityPropagator : public Propagator
         reachable_from_root_enode_.resize(num_buckets);
         root_vars_.resize(num_buckets, kInvalidVarId);
 
-        for (uint32_t b = 0; b < num_buckets; ++b)
-        {
+        // Buckets are independent: each fills only its own slots.
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(num_buckets), [&](uint32_t b) {
             if (b >= state.bucket_root_ids.size() || b >= state.selected_vars.size())
-                continue;
+                return;
 
             const EGraph &egraph = state.bucket_egraphs[b];
             EClassId root_cid = egraph.findConst(state.bucket_root_ids[b]);
             auto root_it = state.selected_vars[b].find(root_cid);
             if (root_it == state.selected_vars[b].end())
-                continue;
+                return;
 
             root_vars_[b] = root_it->second;
             const size_t num_classes = egraph.classes.size();
@@ -79,7 +79,7 @@ class RequiredReachabilityPropagator : public Propagator
                     }
                 }
             }
-        }
+        });
         initialized_ = true;
     }
 
@@ -88,6 +88,7 @@ class RequiredReachabilityPropagator : public Propagator
     {
         return varTypeMask(VarType::SELECTED);
     }
+    void prepare(const SearchState &state) override { ensureIndex(state); }
 
     std::string name() const override
     {
@@ -96,6 +97,11 @@ class RequiredReachabilityPropagator : public Propagator
 
     bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) override
     {
+        // It only narrows a bucket root's selection, and while a complete
+        // plan is validated every selection (the root's too) was fixed before
+        // propagation: nothing to do, and no index to build.
+        if (state.completing_plan)
+            return true;
         ensureIndex(state);
 
         if (changed != kInvalidVarId)

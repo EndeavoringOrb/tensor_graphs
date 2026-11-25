@@ -1,0 +1,9 @@
+{
+  "name": "equal-cost implementations preserve at least one optimum",
+  "description": "Both alternatives and several root addresses are optimal. Removing individual optima is permitted.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"cost": 2}, {"cost": 2}], "offset": [0, 1, 2]}
+  },
+  "expected_optimum": 2
+}

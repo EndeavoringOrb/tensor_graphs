@@ -1,6 +1,8 @@
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <chrono>
+#include <future>
 
 #if defined(_WIN32) || defined(_WIN64)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -20,6 +22,7 @@
 // clang-format on
 
 #pragma comment(lib, "dbghelp.lib")
+#include "core/common/windows_symbols.hpp"
 
 inline const char *get_exception_code_name(DWORD code)
 {
@@ -50,6 +53,8 @@ inline const char *get_exception_code_name(DWORD code)
 
 inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
 {
+    fprintf(stderr, "  frame %d: 0x%llx\n", frame_idx, addr);
+    fflush(stderr);
     // 1. Resolve module name and relative base offset
     char mod_name[MAX_PATH] = "<unknown>";
     DWORD64 mod_base = SymGetModuleBase64(process, addr);
@@ -116,69 +121,41 @@ inline void print_frame_info(HANDLE process, DWORD64 addr, int frame_idx)
     std::cerr << "\n";
 }
 
-inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+// Keep SEH in a function without C++ objects requiring stack unwinding.
+inline void reportCrashStack(EXCEPTION_POINTERS *ep)
 {
-    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
-    {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    DWORD code = ep->ExceptionRecord->ExceptionCode;
-
-    // Filter strictly for fatal hardware/memory errors
-    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
-        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
-        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
-        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
-        code != EXCEPTION_FLT_UNDERFLOW)
-    {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
-    static volatile LONG g_in_handler = 0;
-    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
-    {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
     HANDLE process = GetCurrentProcess();
     HANDLE thread = GetCurrentThread();
-
-    // Ensure DbgHelp symbol engine is initialized
-    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
-    SymInitialize(process, NULL, TRUE);
-
     DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
-
-    std::cerr << "\n========================================================\n"
-              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
-              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
-
-    // Diagnostic information for Access Violations
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
-    {
-        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
-        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
-        const char *op = (access_type == 0)   ? "read from"
-                         : (access_type == 1) ? "write to"
-                         : (access_type == 8) ? "execute at"
-                                              : "access";
-        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
-        if (fault_target < 0x1000)
-        {
-            std::cerr << " (Null / near-null pointer dereference)";
-        }
-        std::cerr << "\n";
-    }
-
-    std::cerr << "========================================================\n"
-              << "Call Stack (Crash Site):\n";
-
     // Copy the context record because StackWalk64 mutates it during unwinding
     CONTEXT ctx = *ep->ContextRecord;
     ctx.ContextFlags = CONTEXT_FULL;
 
+#if defined(_M_ARM64) || defined(__aarch64__)
+    // Use the OS ARM64 unwinder; system DbgHelp versions can fail in StackWalk64.
+    for (int frame_idx = 0; frame_idx < 64 && ctx.Pc; ++frame_idx)
+    {
+        const DWORD64 previous_pc = ctx.Pc;
+        const DWORD64 previous_sp = ctx.Sp;
+        print_frame_info(process, ctx.Pc, frame_idx);
+        DWORD64 image_base = 0;
+        PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(ctx.Pc, &image_base, nullptr);
+        if (entry)
+        {
+            PVOID handler_data = nullptr;
+            DWORD64 establisher_frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Pc, entry, &ctx,
+                             &handler_data, &establisher_frame, nullptr);
+        }
+        else
+        {
+            ctx.Pc = ctx.Lr;
+            ctx.Lr = 0;
+        }
+        if (ctx.Pc == previous_pc && ctx.Sp == previous_sp)
+            break;
+    }
+#else
     STACKFRAME64 frame;
     memset(&frame, 0, sizeof(frame));
     DWORD machineType = IMAGE_FILE_MACHINE_UNKNOWN;
@@ -209,7 +186,8 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
     frame.AddrStack.Mode = AddrModeFlat;
 #endif
 
-    int frame_idx = 0;
+    print_frame_info(process, fault_pc, 0);
+    int frame_idx = 1;
     DWORD64 prev_pc = 0;
 
     while (frame_idx < 64)
@@ -231,11 +209,130 @@ inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
         frame_idx++;
     }
 
-    // If StackWalk64 was unable to unwind even frame 0, print the fault PC directly
-    if (frame_idx == 0)
+
+#endif
+
+}
+
+inline void reportCrashStackProtected(EXCEPTION_POINTERS *ep)
+{
+    __try
     {
-        print_frame_info(process, fault_pc, 0);
+        reportCrashStack(ep);
     }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        fprintf(stderr, "Stack reporting failed: exception 0x%08lx\n", GetExceptionCode());
+        fflush(stderr);
+    }
+}
+
+inline void writeCrashDump(EXCEPTION_POINTERS *ep)
+{
+    char dump_path[MAX_PATH];
+    snprintf(dump_path, sizeof(dump_path), "tensor_graphs_crash_%lu_%llu.dmp",
+             GetCurrentProcessId(), GetTickCount64());
+    HANDLE dump_file = CreateFileA(dump_path, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (dump_file == INVALID_HANDLE_VALUE)
+    {
+        fprintf(stderr, "Cannot create crash dump: Windows error %lu\n", GetLastError());
+        return;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION exception_info = {GetCurrentThreadId(), ep, FALSE};
+    __try
+    {
+        BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), dump_file,
+            static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules),
+            &exception_info, nullptr, nullptr);
+        if (written)
+            fprintf(stderr, "Crash dump: %s\n", dump_path);
+        else
+            fprintf(stderr, "Crash dump failed: Windows error %lu\n", GetLastError());
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        fprintf(stderr, "Crash dump writer faulted: exception 0x%08lx\n", GetExceptionCode());
+    }
+    CloseHandle(dump_file);
+    fflush(stderr);
+}
+
+inline LONG WINAPI TG_CrashHandler(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // Filter strictly for fatal hardware/memory errors
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_FLT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_FLT_UNDERFLOW)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Reentrancy guard: prevent infinite recursion if symbol resolution faults
+    static volatile LONG g_in_handler = 0;
+    if (InterlockedCompareExchange(&g_in_handler, 1, 0) != 0)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE process = GetCurrentProcess();
+
+    DWORD64 fault_pc = reinterpret_cast<DWORD64>(ep->ExceptionRecord->ExceptionAddress);
+
+    // Record the original fault without touching DbgHelp or the C++ heap.
+    fprintf(stderr, "\nFatal exception 0x%08lx, thread %lu, PC 0x%llx\n",
+            code, GetCurrentThreadId(), fault_pc);
+    MEMORY_BASIC_INFORMATION fault_memory = {};
+    if (VirtualQuery(reinterpret_cast<LPCVOID>(fault_pc), &fault_memory, sizeof(fault_memory)))
+    {
+        char module_path[MAX_PATH] = {};
+        GetModuleFileNameA(static_cast<HMODULE>(fault_memory.AllocationBase), module_path, MAX_PATH);
+        fprintf(stderr, "Module: %s + 0x%llx\n", module_path,
+                fault_pc - reinterpret_cast<DWORD64>(fault_memory.AllocationBase));
+    }
+    fflush(stderr);
+    std::cerr << "\n========================================================\n"
+              << "[CRASH DETECTED] " << get_exception_code_name(code) << "\n"
+              << "  Fault Address: 0x" << std::hex << fault_pc << std::dec << "\n";
+
+    // Diagnostic information for Access Violations
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+    {
+        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR fault_target = ep->ExceptionRecord->ExceptionInformation[1];
+        const char *op = (access_type == 0)   ? "read from"
+                         : (access_type == 1) ? "write to"
+                         : (access_type == 8) ? "execute at"
+                                              : "access";
+        std::cerr << "  Details: Attempted to " << op << " invalid address 0x" << std::hex << fault_target << std::dec;
+        if (fault_target < 0x1000)
+        {
+            std::cerr << " (Null / near-null pointer dereference)";
+        }
+        std::cerr << "\n";
+    }
+
+    std::cerr << "========================================================\n"
+              << "Call Stack (Crash Site):\n";
+
+    fflush(stderr);
+    if (TryAcquireSRWLockExclusive(&tg_symbol_lock))
+    {
+        writeCrashDump(ep);
+        reportCrashStackProtected(ep);
+        ReleaseSRWLockExclusive(&tg_symbol_lock);
+    }
+    else
+        fprintf(stderr, "DbgHelp busy; skipping optional diagnostics.\n");
 
     std::cerr << "========================================================\n" << std::flush;
     fflush(stderr);
@@ -248,10 +345,8 @@ struct InstallCrashHandler
 {
     InstallCrashHandler()
     {
-        HANDLE process = GetCurrentProcess();
-        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
-        SymInitialize(process, NULL, TRUE);
-        AddVectoredExceptionHandler(1, TG_CrashHandler);
+        ensureWindowsSymbols();
+        SetUnhandledExceptionFilter(TG_CrashHandler);
     }
 } static _install_crash_handler;
 #endif
@@ -263,11 +358,29 @@ struct InstallCrashHandler
 #include "core/session.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "bindings/kernel_bench.hpp"
+#include "bindings/planner_oracle.hpp"
 #include "models/deepseek-v4-flash.hpp"
 #include "models/krea-2-turbo.hpp"
 #include "models/qwen-image-vae.hpp"
 #include "models/qwen3-vl.hpp"
 #include "models/run_models.hpp"
+#include "tests/saturation.hpp"
+
+// Inference steps are short bursts separated by Python work: opt this
+// process out of Windows execution-speed throttling (EcoQoS) so the cores are
+// not clocked down between steps. Fails loud if the OS rejects it.
+inline void optOutOfPowerThrottling()
+{
+#ifdef _WIN32
+    PROCESS_POWER_THROTTLING_STATE state{};
+    state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    state.StateMask = 0;
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state)))
+        throw std::runtime_error("SetProcessInformation(ProcessPowerThrottling) failed: " +
+                                 std::to_string(GetLastError()));
+#endif
+}
 
 namespace py = pybind11;
 
@@ -312,14 +425,16 @@ class LLMSession
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
-               bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
+               const std::string &cache_file = "", bool disable_caching = false,
                uint32_t threads = 0, bool log_cost_calls = true, const std::vector<float> &bucket_weights = {},
-                uint32_t max_sequence_length = 128, bool use_ortools = false, bool use_ortools_full = false,
-               double max_time_seconds = 0.0, bool use_ortools_lns = false, bool disable_fusion = false,
+                uint32_t max_sequence_length = 128, bool disable_fusion = false,
                const std::string &write_refs = "", const std::string &compare_refs = "",
                 bool disable_compilation_caching = false, bool ref_only = false,
-               bool compile_no_weights_bucket = false, bool saturate_only = false)
+               bool compile_no_weights_bucket = false, bool saturate_only = false,
+               const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, float>> &token_buckets = {},
+               const std::string &repo_path = "", bool fold_weights = false, bool resident_weights = false)
     {
+        optOutOfPowerThrottling();
         compileNoWeightsBucket = compile_no_weights_bucket;
         referenceFile = write_refs;
         compareReferenceFile = compare_refs;
@@ -332,6 +447,15 @@ class LLMSession
 
         auto act_brancher = brancher ? brancher : std::make_shared<plan::HeuristicBrancher>();
 
+        // The session's cost model parses benchmarks/records.bin (about a
+        // second): load it while the model graph is built, recording the
+        // file's stamp from before the parse.
+        const Session::RecordsStamp cost_model_stamp = Session::recordsStamp("benchmarks/records.bin");
+        auto cost_model_load = std::async(std::launch::async, []() {
+            return std::make_unique<CostModel>(false, "benchmarks/records.bin");
+        });
+
+        Session::logTimeline("llm session start");
         mem = std::make_unique<MemoryManager>();
         g = std::make_unique<Graph>();
 
@@ -364,16 +488,20 @@ class LLMSession
             throw std::runtime_error("Unknown model: " + model_name);
         }
 
+        Session::logTimeline("model graph built");
         std::string gHash = computeGraphHash(*g, {logitsId});
-        repo = std::make_unique<TGStore>("benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len),
-                                      gHash, true);
+        // Folded tensors live next to the plan when a repo path is given, so a
+        // compile and the runs using its plan share a self-contained directory.
+        repo = std::make_unique<TGStore>(repo_path.empty()
+                                             ? "benchmarks/repo_" + model_name + "-seq" + std::to_string(max_seq_len)
+                                             : repo_path,
+                                         gHash, true);
 
         std::string actual_cache = cache_file;
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : (use_ortools ? "ortools_" : ""));
-            actual_cache = "dirty_region_caches/" + prefix + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
+            actual_cache = "dirty_region_caches/" + model_name + "-cpp-seq" + std::to_string(max_seq_len) + ".bin";
         }
         if (compile_no_weights_bucket)
             actual_cache += ".no-weights-persistent-cache-v2";
@@ -384,18 +512,26 @@ class LLMSession
         else if (!compareReferenceFile.empty())
             actual_cache += ".reference-compare";
         actual_cache += disable_caching ? ".no-dirty-cache" : ".dirty-cache";
+        actual_cache += ".padded";
 
+        Session::logTimeline("repo opened");
         session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(),
                                             disable_caching,
                                             min_compile_time, act_brancher, log_cost_calls,
-                                            "benchmarks/records.bin", disable_compilation_caching);
-        session->settings.use_ortools = use_ortools;
-        session->settings.use_ortools_full = use_ortools_full;
-        session->settings.use_ortools_lns = use_ortools_lns;
-        session->settings.max_time_seconds = max_time_seconds;
+                                            "benchmarks/records.bin", disable_compilation_caching,
+                                            cost_model_load.get());
+        session->loadedRecords = cost_model_stamp;
+        session->costModel.setLogging(log_cost_calls);
         session->settings.disable_fusion = disable_fusion;
         session->settings.saturate_only = saturate_only;
-        KernelRegistry::get().setReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
+        // Weight-only values (copies, casts, transposes) are computed while
+        // compiling and kept as constants instead of per-run work.
+        session->settings.fold_weights = fold_weights;
+        session->settings.resident_weights = resident_weights;
+        // Token ids past a request are padding (zeros) that the next longer
+        // request marks dirty.
+        session->settings.padded_inputs[inputIdsId] = 1;
+        setKernelReferenceOnly(ref_only || !referenceFile.empty() || !compareReferenceFile.empty());
 
         if ((!referenceFile.empty() || !compareReferenceFile.empty()) &&
             !referenceVerifier.init(referenceFile, compareReferenceFile))
@@ -403,19 +539,18 @@ class LLMSession
             throw std::runtime_error("Failed to initialize reference tensor verifier");
         }
 
-        if (compile_decode_buckets)
+        // Explicit token buckets: tokens [dirty_start, dirty_end) are dirty and
+        // the logits row `output_row` is needed.
+        for (const auto &[dirty_start, dirty_end, output_row, weight] : token_buckets)
         {
-            for (uint32_t i = 0; i < max_seq_len; ++i)
-            {
-                std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
-                Region inputRegion;
-                inputRegion.region = {{0, 1}, {i, i + 1}};
-                inputDirty[inputIdsId] = {inputRegion};
-
-                Region outputNeeded;
-                outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
-                session->addBucket(inputDirty, {outputNeeded});
-            }
+            if (dirty_start >= dirty_end || dirty_end > max_seq_len || output_row >= max_seq_len)
+                throw std::runtime_error("token bucket outside the sequence: [" + std::to_string(dirty_start) + ", " +
+                                         std::to_string(dirty_end) + ") output " + std::to_string(output_row));
+            Region inputRegion;
+            inputRegion.region = {{0, 1}, {dirty_start, dirty_end}};
+            Region outputNeeded;
+            outputNeeded.region = {{0, 1}, {output_row, output_row + 1}, {0, vocab_size}};
+            session->addBucket({{inputIdsId, {inputRegion}}}, {outputNeeded}, weight);
         }
 
         if (compile_no_weights_bucket)
@@ -442,16 +577,19 @@ class LLMSession
         }
 
         session->compile();
+
     }
 
     Session &nativeSession() { return *session; }
     LogicalId rootId() const { return logitsId; }
     LogicalId inputId() const { return inputIdsId; }
 
-    int32_t generate_step(const std::vector<uint32_t> &tokens)
+    // Runs the model on `tokens` (only positions that differ from the previous
+    // call are marked dirty) and returns the logits row of the last position.
+    std::vector<float> step_logits(const std::vector<uint32_t> &tokens)
     {
-        if (tokens.empty() || tokens.size() >= max_seq_len)
-            return -1;
+        if (tokens.empty() || tokens.size() > max_seq_len)
+            throw std::runtime_error("step_logits: token count must be in [1, max_sequence_length]");
 
         std::vector<Region> dirty_regions;
         uint32_t i = 0;
@@ -523,7 +661,62 @@ class LLMSession
         {
             host_output.assign(device_output + tokIdx * vocab_size, device_output + tokIdx * vocab_size + vocab_size);
         }
+        prev_tokens = tokens;
+        return host_output;
+    }
 
+    // Forget the previous tokens so the next step marks every position dirty.
+    void reset()
+    {
+        prev_tokens.clear();
+        has_run = false;
+        session->invalidateCaches();
+    }
+
+    // Per compiled graph: dirty token range [start, end) and needed logits
+    // rows [row_start, row_end), in the order of runGraphLogits indices.
+    std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> graphTokenRanges() const
+    {
+        std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> ranges;
+        for (const CompiledGraph &cg : session->getCachedGraphs())
+        {
+            const auto dirty = cg.bucket.inputDirtyRegions.find(inputIdsId);
+            if (dirty == cg.bucket.inputDirtyRegions.end() || dirty->second.size() != 1 ||
+                dirty->second[0].region.size() != 2 || cg.bucket.outputNeededRegion.size() != 1 ||
+                cg.bucket.outputNeededRegion[0].region.size() != 3)
+                throw std::runtime_error("graphTokenRanges: compiled graph is not a single token range bucket");
+            const Region &in = dirty->second[0];
+            const Region &out = cg.bucket.outputNeededRegion[0];
+            ranges.emplace_back(in.region[1].start, in.region[1].stop, out.region[1].start, out.region[1].stop);
+        }
+        return ranges;
+    }
+
+    // Writes `tokens` (zero padded) and runs compiled graph `graph_idx`
+    // directly, bypassing bucket selection. Returns every logits row.
+    std::vector<float> runGraphLogits(uint32_t graph_idx, const std::vector<uint32_t> &tokens)
+    {
+        if (tokens.size() > max_seq_len)
+            throw std::runtime_error("runGraphLogits: more tokens than max_sequence_length");
+        std::vector<int32_t> input_data(max_seq_len, 0);
+        for (size_t k = 0; k < tokens.size(); ++k)
+            input_data[k] = tokens[k];
+        session->writeInput(inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
+        const float *device_output = static_cast<const float *>(session->runGraph(graph_idx));
+        has_run = true;
+        prev_tokens = tokens;
+        return std::vector<float>(device_output, device_output + static_cast<size_t>(max_seq_len) * vocab_size);
+    }
+
+    uint32_t maxSequenceLength() const { return max_seq_len; }
+    uint32_t vocabSize() const { return vocab_size; }
+
+    int32_t generate_step(const std::vector<uint32_t> &tokens)
+    {
+        if (tokens.empty() || tokens.size() >= max_seq_len)
+            return -1;
+        const uint32_t tokIdx = static_cast<uint32_t>(tokens.size() - 1);
+        const std::vector<float> host_output = step_logits(tokens);
         float max_val = -1e9f;
         int32_t argmax_idx = 0;
         for (uint32_t k = 0; k < vocab_size; ++k)
@@ -535,11 +728,6 @@ class LLMSession
             }
         }
 
-        std::cout << "[DEBUG_LOGITS] max_val=" << max_val << " argmax_idx=" << argmax_idx
-                  << " host_output[0]=" << host_output[0] << " host_output[1]=" << host_output[1]
-                  << " host_output[563]=" << (563 < host_output.size() ? host_output[563] : -999.0f)
-                  << " tokIdx=" << tokIdx << std::endl;
-        prev_tokens = tokens;
         return argmax_idx;
     }
 };
@@ -570,8 +758,7 @@ class Krea2Session
                  uint32_t text_seq_len = 128, uint32_t steps = 8, float mu = 1.15f,
                  std::shared_ptr<plan::Brancher> brancher = nullptr, float min_compile_time = 0.0f,
                   const std::string &cache_file = "", bool disable_caching = false, uint32_t threads = 0,
-                 bool log_cost_calls = true, bool use_ortools_full = false, double max_time_seconds = 0.0,
-                  bool use_ortools_lns = false, bool disable_compilation_caching = false)
+                 bool log_cost_calls = true, bool disable_compilation_caching = false)
         : cfg(height, width, text_seq_len), vae_cfg(height, width), te_cfg(), num_steps(steps), mu_val(mu)
     {
         if (threads > 0)
@@ -639,17 +826,13 @@ class Krea2Session
         if (actual_cache.empty())
         {
             std::filesystem::create_directories("dirty_region_caches");
-            std::string prefix = use_ortools_lns ? "ortools_lns_" : (use_ortools_full ? "ortools_full_" : "");
-            actual_cache = "dirty_region_caches/" + prefix + "krea-2-turbo-pipeline-" + std::to_string(width) + "x" +
+            actual_cache = "dirty_region_caches/krea-2-turbo-pipeline-" + std::to_string(width) + "x" +
                            std::to_string(height) + "-s" + std::to_string(steps) + ".bin";
         }
 
         session = std::make_unique<Session>(*g, *mem, imageOutputId, actual_cache, 0, repo.get(), disable_caching,
                                             min_compile_time, act_brancher, log_cost_calls,
                                             "benchmarks/records.bin", disable_compilation_caching);
-        session->settings.use_ortools_full = use_ortools_full;
-        session->settings.use_ortools_lns = use_ortools_lns;
-        session->settings.max_time_seconds = max_time_seconds;
 
         // These buckets cover the input combinations used when regenerating
         // an image.  The prompt and latent tensors are fixed-size, so changing
@@ -742,6 +925,11 @@ class Krea2Session
 
 PYBIND11_MODULE(tensor_graphs, m)
 {
+    m.def("_run_planner_oracle_case", &planner_oracle::runCase,
+          py::arg("problem_json"), py::arg("mode"), py::arg("cutoff") = TGConstants::INF,
+          "Diagnostic adapter for independent exhaustive planner correctness cases.");
+    m.def("_cycle_strip_pass_names", &planner_oracle::cycleStripPassNames,
+          "Names of the planner's cycle strip passes, in pipeline order.");
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
     KernelBench::registerBindings(m);
 
@@ -1029,9 +1217,6 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<Settings>(m, "Settings")
         .def(py::init<>(&Settings::get_default))
-        .def_readwrite("use_ortools", &Settings::use_ortools)
-        .def_readwrite("use_ortools_full", &Settings::use_ortools_full)
-        .def_readwrite("use_ortools_lns", &Settings::use_ortools_lns)
         .def_readwrite("cpu_only", &Settings::cpu_only)
         .def_readwrite("disable_node_caching", &Settings::disable_caching)
         .def_readwrite("disable_compilation_caching", &Settings::disable_compilation_caching)
@@ -1045,12 +1230,8 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<Session>(m, "Session")
         .def(py::init([](Graph &g, MemoryManager &mem, LogicalId root_id, const std::string &cache_file,
-                          bool disable_node_caching, bool use_ortools, bool use_ortools_full, bool use_ortools_lns,
-                          bool disable_compilation_caching, float min_compile_seconds) {
+                          bool disable_node_caching, bool disable_compilation_caching, float min_compile_seconds) {
             Settings settings = Settings::get_default();
-            settings.use_ortools = use_ortools;
-            settings.use_ortools_full = use_ortools_full;
-            settings.use_ortools_lns = use_ortools_lns;
             settings.disable_caching = disable_node_caching;
             settings.disable_compilation_caching = disable_compilation_caching;
             settings.min_compile_seconds = min_compile_seconds;
@@ -1058,18 +1239,15 @@ PYBIND11_MODULE(tensor_graphs, m)
                 settings.cache_file = cache_file;
             return std::make_unique<Session>(g, mem, root_id, settings);
         }), py::arg("graph"), py::arg("mem"), py::arg("root_id"), py::arg("cache_file") = "",
-            py::arg("disable_node_caching") = false, py::arg("use_ortools") = false,
-            py::arg("use_ortools_full") = false, py::arg("use_ortools_lns") = false,
+            py::arg("disable_node_caching") = false,
             py::arg("disable_compilation_caching") = false, py::arg("min_compile_seconds") = 0.0f)
         .def("add_bucket", [](Session &s, const std::unordered_map<LogicalId, std::vector<Region>> &inDirty,
                               const std::vector<Region> &outNeeded, float weight) {
             s.addBucket(inDirty, outNeeded, weight);
         }, py::arg("input_dirty_regions"), py::arg("output_needed_region"), py::arg("weight") = 1.0f)
-        .def("plan", &Session::plan, py::arg("do_saturate") = true)
+        .def("plan", [](Session &s, bool do_saturate) { s.plan(do_saturate); }, py::arg("do_saturate") = true)
         .def("compile", &Session::compile, py::arg("do_saturate") = true)
         .def("ensure_full_bucket", &Session::ensureFullBucket)
-        .def("export_ortools_problem", &Session::exportOrtoolsProblem, py::arg("do_saturate") = true)
-        .def("ensure_cache_coverage_ortools", &Session::ensureCacheCoverageOrtools, py::arg("do_saturate") = true)
         .def("benchmark_buckets", [](Session &s, uint32_t warmup, uint32_t iterations) {
             if (!s.isCompiled || iterations == 0 || iterations > 1000 || warmup > 100)
                 Error::throw_err("benchmark_buckets requires a compiled session and bounded iteration counts");
@@ -1285,38 +1463,75 @@ PYBIND11_MODULE(tensor_graphs, m)
     m.def("make_full_regions", [](const std::vector<uint32_t> &shape) { return makeFull(shape); });
 
     py::class_<LLMSession>(m, "LLMSession")
-        .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float, bool,
-                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t, bool, bool, double, bool,
-                      bool, const std::string &, const std::string &, bool, bool, bool, bool>(),
+        .def(py::init<const std::string &, const std::string &, std::shared_ptr<plan::Brancher>, float,
+                      const std::string &, bool, uint32_t, bool, const std::vector<float> &, uint32_t,
+                      bool, const std::string &, const std::string &, bool, bool, bool, bool,
+                      const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, float>> &,
+                      const std::string &, bool, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("brancher") = nullptr,
-             py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
+             py::arg("min_compile_time") = 0.0f, py::arg("cache_file") = "",
              py::arg("disable_node_caching") = false, py::arg("threads") = 0, py::arg("log_cost_calls") = true,
              py::arg("bucket_weights") = std::vector<float>{}, py::arg("max_sequence_length") = 128,
-             py::arg("use_ortools") = false, py::arg("use_ortools_full") = false,
-             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
              py::arg("disable_fusion") = false, py::arg("write_refs") = "", py::arg("compare_refs") = "",
              py::arg("disable_compilation_caching") = false, py::arg("ref_only") = false,
-             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false)
+             py::arg("compile_no_weights_bucket") = false, py::arg("saturate_only") = false,
+             py::arg("token_buckets") = std::vector<std::tuple<uint32_t, uint32_t, uint32_t, float>>{},
+             py::arg("repo_path") = "", py::arg("fold_weights") = false, py::arg("resident_weights") = false)
         .def_property_readonly("native_session", &LLMSession::nativeSession, py::return_value_policy::reference_internal)
         .def_property_readonly("root_id", &LLMSession::rootId)
         .def_property_readonly("input_id", &LLMSession::inputId)
-        .def("generate_step", &LLMSession::generate_step);
+        .def("generate_step", &LLMSession::generate_step)
+        .def("step_logits", [](LLMSession &s, const std::vector<uint32_t> &tokens) {
+            std::vector<float> row = s.step_logits(tokens);
+            return py::array_t<float>(static_cast<py::ssize_t>(row.size()), row.data());
+        }, py::arg("tokens"), "Run on tokens (dirty positions only) and return the last position's logits")
+        .def("graph_token_ranges", &LLMSession::graphTokenRanges,
+             "Per compiled graph: (dirty_start, dirty_end, row_start, row_end) token ranges")
+        .def("run_graph_logits", [](LLMSession &s, uint32_t graph_idx, const std::vector<uint32_t> &tokens) {
+            std::vector<float> rows = s.runGraphLogits(graph_idx, tokens);
+            py::array_t<float> out({static_cast<py::ssize_t>(s.maxSequenceLength()),
+                                    static_cast<py::ssize_t>(s.vocabSize())});
+            std::copy(rows.begin(), rows.end(), out.mutable_data());
+            return out;
+        }, py::arg("graph_idx"), py::arg("tokens"),
+           "Write tokens (zero padded), run one compiled graph and return all logits rows")
+        .def("reset", &LLMSession::reset, "Forget previous tokens so the next step recomputes every position")
+        .def_property_readonly("max_sequence_length", &LLMSession::maxSequenceLength)
+        .def_property_readonly("vocab_size", &LLMSession::vocabSize);
 
     py::class_<Krea2Session>(m, "Krea2Session")
         .def(py::init<const std::string &, const std::string &, const std::string &, uint32_t, uint32_t, uint32_t,
                       uint32_t, float, std::shared_ptr<plan::Brancher>, float, const std::string &, bool, uint32_t,
-                      bool, bool, double, bool, bool>(),
+                      bool, bool>(),
              py::arg("model_path"), py::arg("text_encoder_path") = "", py::arg("vae_path") = "",
              py::arg("height") = 1024, py::arg("width") = 1024, py::arg("text_seq_len") = 128, py::arg("steps") = 8,
              py::arg("mu") = 1.15f, py::arg("brancher") = nullptr, py::arg("min_compile_time") = 0.0f,
              py::arg("cache_file") = "", py::arg("disable_node_caching") = false, py::arg("threads") = 0,
-             py::arg("log_cost_calls") = true, py::arg("use_ortools_full") = false,
-             py::arg("max_time_seconds") = 0.0, py::arg("use_ortools_lns") = false,
-             py::arg("disable_compilation_caching") = false)
+             py::arg("log_cost_calls") = true, py::arg("disable_compilation_caching") = false)
         .def("generate_image", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
              py::arg("latent_data"))
         .def("generate", &Krea2Session::generate_image, py::arg("token_ids"), py::arg("attention_mask"),
              py::arg("latent_data"));
 
     m.attr("EmbeddingGemma2") = py::module_::import("embeddinggemma2").attr("EmbeddingGemma2");
+
+    py::class_<SaturationBenchmarkResult>(m, "SaturationBenchmarkResult")
+        .def_readonly("full_ms", &SaturationBenchmarkResult::full_ms)
+        .def_readonly("partial_ms", &SaturationBenchmarkResult::partial_ms)
+        .def_readonly("total_ms", &SaturationBenchmarkResult::total_ms)
+        .def_readonly("full_enodes", &SaturationBenchmarkResult::full_enodes)
+        .def_readonly("full_classes", &SaturationBenchmarkResult::full_classes)
+        .def("__repr__", [](const SaturationBenchmarkResult &r) {
+            std::ostringstream ss;
+            ss << "<SaturationBenchmarkResult total_ms=" << r.total_ms
+               << " full_ms=" << r.full_ms
+               << " partial_ms=" << r.partial_ms
+               << " enodes=" << r.full_enodes
+               << " classes=" << r.full_classes << ">";
+            return ss.str();
+        });
+
+    m.def("run_saturation_benchmark", &runSaturationBenchmark,
+          py::arg("seq_len") = 4, py::arg("dump_prefix") = "",
+          "Run full and seeded partial bucket saturation benchmark and optionally dump e-graphs");
 }

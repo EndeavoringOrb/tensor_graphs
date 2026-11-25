@@ -1,0 +1,8 @@
+{
+  "name": "zero-weight bucket still needs a feasible plan",
+  "buckets": [
+    {"root": "out", "weight": 0, "nodes": {"out": {"alternatives": [{"cost": 100}, {"cost": 200}]}}},
+    {"root": "out", "weight": 0.5, "nodes": {"out": {"alternatives": [{"cost": 4}, {"cost": 2}]}}}
+  ],
+  "expected_optimum": 1
+}

@@ -1,7 +1,6 @@
 use Eigen or LAPACK for cost model stuff
 use xxHash or something for hashing
 use egg/MLIR for egraph & saturation?
-use Google OR-Tools for extraction?
 transpile models from torch fx or something
 use CMake + Ninja + clang-tidy instead of build.py
 use gRPC, ZeroMQ, Ray, torch.distributed in train/

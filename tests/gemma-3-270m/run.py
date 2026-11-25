@@ -47,7 +47,7 @@ def main():
     if cache_base.endswith(".dirty-cache"):
         cache_base = cache_base[:-len(".dirty-cache")]
     owner = tensor_graphs.LLMSession("gemma-3-270m", str(args.model_path),
-        cache_file=cache_base, compile_decode_buckets=True, max_sequence_length=16,
+        cache_file=cache_base, token_buckets=[(i, i + 1, i, 1.0) for i in range(16)], max_sequence_length=16,
         bucket_weights=[1 / 16] * 16 + [0], min_compile_time=args.min_compile_time,
         log_cost_calls=False)
     actual_cache = Path(cache_base + ".dirty-cache")

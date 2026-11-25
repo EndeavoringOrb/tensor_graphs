@@ -1,12 +1,16 @@
 #pragma once
 #include <algorithm>
+#include <chrono>
+#include <iomanip>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -20,7 +24,6 @@
 #include "core/loaders/tg_store.hpp"
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
-#include "core/plan/ortools_export.hpp"
 #include "core/shape_propagator.hpp"
 #include "core/types.hpp"
 
@@ -56,15 +59,19 @@ static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector
 
 struct Session
 {
-    static constexpr uint32_t kCacheFileVersion = 7;
+    static constexpr uint32_t kCacheFileVersion = 8;
 
     Graph &graph;
     MemoryManager &memManager;
-    CostModel costModel;
+    // Owned through a pointer so a caller can load it while it builds the
+    // graph (parsing the records takes about a second).
+    std::unique_ptr<CostModel> costModelOwner;
+    CostModel &costModel;
     std::unique_ptr<Executor> executor;
     LogicalId rootId;
     bool isPlanned;
     bool isCompiled;
+    bool persistent_initialized = false;
     uint32_t nBucketSizes = 0;
     std::vector<Bucket> manualBuckets;
 
@@ -73,9 +80,39 @@ struct Session
     std::unordered_set<BaseEClassId> selectedCachedNodes;
     std::vector<float> cachedBucketWeights;
 
+    std::vector<const void *> rootPtrs;
+    mutable std::vector<float> graphCosts;
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
     std::string recordsPath = "benchmarks/records.bin";
+    // The records file as of the cost model's last load (size and write
+    // time); plan() reloads only if it changed since (e.g. calibration ran).
+    struct RecordsStamp
+    {
+        bool valid = false;
+        std::string path;
+        uintmax_t size = 0;
+        std::filesystem::file_time_type write_time{};
+        bool operator==(const RecordsStamp &other) const
+        {
+            return valid && other.valid && path == other.path && size == other.size &&
+                   write_time == other.write_time;
+        }
+    };
+    RecordsStamp loadedRecords;
+
+    static RecordsStamp recordsStamp(const std::string &path)
+    {
+        RecordsStamp stamp;
+        stamp.path = path;
+        std::error_code error;
+        stamp.size = std::filesystem::file_size(path, error);
+        if (error)
+            return stamp;
+        stamp.write_time = std::filesystem::last_write_time(path, error);
+        stamp.valid = !error;
+        return stamp;
+    }
 
     uint32_t fullBucketIdx = UINT32_MAX;
     TGStore *repo;
@@ -190,6 +227,22 @@ struct Session
             return;
 
         BinaryWriter bw(file);
+        {
+            uint64_t graph_bytes = 0, unique_bytes = 0, global_bytes = 0;
+            std::unordered_set<const void *> seen;
+            for (const CompiledGraph &g : cachedGraphs)
+                for (const auto &pair : g.constantStaging)
+                    if (pair.second)
+                    {
+                        graph_bytes += pair.second->size();
+                        if (seen.insert(pair.second.get()).second)
+                            unique_bytes += pair.second->size();
+                    }
+            for (const auto &pair : graph.constantStaging)
+                global_bytes += pair.second->size();
+            LOG(INFO) << "[Session.persistCache] graph-constant bytes=" << graph_bytes << " unique=" << unique_bytes
+                      << " (" << seen.size() << " buffers) global-constant bytes=" << global_bytes;
+        }
 
         bw.write<uint8_t>(0); // Metadata block type
         bw.write<uint32_t>(kCacheFileVersion);
@@ -197,11 +250,19 @@ struct Session
         bw.write(selectedCachedNodes);
         bw.write(normalizedBucketWeights(manualBuckets));
 
-        for (const CompiledGraph &g : cachedGraphs)
-        {
-            bw.write<uint8_t>(1); // Bucket block type
-            bw.write(g);
-        }
+        // Graphs serialize independently: into per-graph buffers in
+        // parallel, then into the file in order (the same bytes).
+        std::vector<std::string> graph_blocks(cachedGraphs.size());
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(cachedGraphs.size()), [&](uint32_t i) {
+            std::ostringstream block(std::ios::binary);
+            BinaryWriter block_writer(block);
+            block_writer.write<uint8_t>(1); // Bucket block type
+            block_writer.write(cachedGraphs[i]);
+            graph_blocks[i] = std::move(block).str();
+        });
+        file.flush();
+        for (const std::string &block : graph_blocks)
+            file.write(block.data(), static_cast<std::streamsize>(block.size()));
 
         bw.write<uint8_t>(2); // Constants block type
         std::unordered_set<LogicalId> neededConstants;
@@ -259,8 +320,13 @@ struct Session
           disableCompilationCaching(_settings.disable_compilation_caching),
           minCompileSeconds(_settings.min_compile_seconds),
           brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()),
-          logCostCalls(_settings.log_cost_calls), costModel(_settings.log_cost_calls, _settings.records_path)
+          logCostCalls(_settings.log_cost_calls),
+          costModelOwner(std::make_unique<CostModel>(_settings.log_cost_calls, _settings.records_path)),
+          costModel(*costModelOwner)
     {
+        // plan() reloads the cost model from recordsPath if it changed.
+        recordsPath = _settings.records_path;
+        loadedRecords = recordsStamp(recordsPath);
         initRepo(_repo);
         ensureOutputDirectories();
         loadCache();
@@ -269,14 +335,18 @@ struct Session
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             TGStore *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
             std::shared_ptr<plan::Brancher> _brancher = nullptr, bool _logCostCalls = true,
-            const std::string &_recordsPath = "benchmarks/records.bin", bool _disableCompilationCaching = false)
+            const std::string &_recordsPath = "benchmarks/records.bin", bool _disableCompilationCaching = false,
+            std::unique_ptr<CostModel> _loadedCostModel = nullptr)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
           disableCompilationCaching(_disableCompilationCaching),
           minCompileSeconds(_minCompileSeconds),
           brancher(_brancher ? _brancher : std::make_shared<plan::HeuristicBrancher>()), logCostCalls(_logCostCalls),
-          costModel(_logCostCalls, _recordsPath)
+          costModelOwner(_loadedCostModel ? std::move(_loadedCostModel)
+                                           : std::make_unique<CostModel>(_logCostCalls, _recordsPath)),
+          costModel(*costModelOwner)
     {
+        loadedRecords = recordsStamp(_recordsPath);
         settings = Settings::get_default();
         settings.cache_file = cacheFile;
         settings.disable_caching = _disableCaching;
@@ -326,11 +396,21 @@ struct Session
         updateFullBucketWeight();
     }
 
-    void plan(bool doSaturate = true)
+    // With `persisted` given, the plan file is written on another thread and
+    // `persisted` waits for it (compile overlaps it with arena setup, which
+    // only reads the plan); otherwise it is written before plan returns.
+    void plan(bool doSaturate = true, std::future<void> *persisted = nullptr)
     {
+        logTimeline("plan start");
         ensureOutputDirectories();
         costModel.setLogging(logCostCalls);
-        costModel.load(recordsPath);
+        // The constructor loaded the same file; reload only if it changed.
+        const RecordsStamp current = recordsStamp(recordsPath);
+        if (!(current == loadedRecords))
+        {
+            costModel.load(recordsPath);
+            loadedRecords = current;
+        }
 
         ensureFullBucket();
         if (!settings.bucket_weights.empty())
@@ -362,27 +442,56 @@ struct Session
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
             foldCleanTensors();
+            logTimeline("clean tensors folded");
             ensureCacheCoverage(doSaturate);
             if (settings.saturate_only)
             {
                 return;
             }
-            persistCache();
+            if (persisted)
+                *persisted = std::async(std::launch::async, [this]() { persistCache(); });
+            else
+                persistCache();
             isPlanned = true;
         }
     }
 
+    static void logTimeline(const char *event)
+    {
+        LOG(INFO) << "[Session timeline] " << event << " epoch=" << std::fixed << std::setprecision(3)
+                  << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+                  << std::defaultfloat;
+    }
+
     void compile(bool doSaturate = true)
     {
-        plan(doSaturate);
+        std::future<void> persisted;
+        plan(doSaturate, &persisted);
+        logTimeline("planned");
 
         // Compute exact peak allocation size required per MemSpace across all compiled graphs
         std::unordered_map<MemSpace, uint64_t> peakSizes;
         LOG(INFO) << "Bucket execution times:";
         for (const CompiledGraph &g : cachedGraphs)
         {
-            LOG(INFO) << g.bucket << ": ";
             g.cost(true);
+            if (std::getenv("TG_PRINT_INSTRUCTIONS"))
+            {
+                std::unordered_map<std::string, std::pair<uint32_t, float>> k_summary;
+                for (const auto &inst : g.instructions)
+                {
+                    float c = g.nodeCosts.count(inst.eclass_id) ? g.nodeCosts.at(inst.eclass_id) : 0.0f;
+                    std::string kname = inst.debugOrigin.empty() ? ("kernel_" + std::to_string(inst.kernel_id.value)) : inst.debugOrigin;
+                    k_summary[kname].first++;
+                    k_summary[kname].second += c;
+                }
+                std::vector<std::pair<std::string, std::pair<uint32_t, float>>> sorted_k(k_summary.begin(), k_summary.end());
+                std::sort(sorted_k.begin(), sorted_k.end(), [](const auto &a, const auto &b) { return a.second.second > b.second.second; });
+                for (const auto &entry : sorted_k)
+                {
+                    LOG(INFO) << "  [inst summary] " << entry.first << ": count=" << entry.second.first << " total=" << entry.second.second << " ms";
+                }
+            }
             for (const auto &inst : g.instructions)
             {
                 if (inst.outBuffer.mem_space.type != HandleType::STORAGE && inst.outBuffer.offset >= 0)
@@ -415,6 +524,7 @@ struct Session
         }
 
         memManager.init(peakSizes);
+        logTimeline("arenas materialized");
 
         // Write all constants directly to their allocated offsets in memory
         // TODO: currently redundant with constant writing in Executor::run? we should try only write constants here
@@ -453,11 +563,50 @@ struct Session
             }
             total_written += written.size();
         }
+        logTimeline("constants written");
         std::cout << "Wrote " << total_written << " constants to memory across " << cachedGraphs.size()
                   << " graph(s). Graph has " << graph.constantStaging.size() << " constants." << std::endl;
 
+        if (settings.resident_weights)
+        {
+            // Resident weights: write each weight at the offsets of the
+            // classes holding it that no instruction computes (the
+            // preallocated resident input; a bucket may instead read a
+            // cached copy, which gets the same data).
+            std::unordered_map<LogicalId, std::unordered_set<uint64_t>> weight_offsets;
+            uint64_t weight_bytes = 0;
+            for (const CompiledGraph &g : cachedGraphs)
+            {
+                std::unordered_set<EClassId> computed;
+                for (const OpInstruction &inst : g.instructions)
+                    computed.insert(inst.eclass_id);
+                for (const auto &[eclass_id, logical_id] : g.eclass_to_logical)
+                {
+                    if (!Planner::isResidentWeightCopy(graph, logical_id) || !g.nodeViews.count(eclass_id) ||
+                        computed.count(eclass_id))
+                        continue;
+                    const uint64_t offset = g.nodeViews.at(eclass_id).offset;
+                    if (!weight_offsets[logical_id].insert(offset).second)
+                        continue;
+                    const std::vector<uint8_t> data =
+                        TensorResolver::get().readNode(graph.getNode(logical_id).child_ids[0]);
+                    if (data.size() != graph.getNode(logical_id).getLogicalSizeBytes())
+                        Error::throw_err("[Session] resident weight size mismatch");
+                    memManager.write(MemSpace{1, HandleType::CPP}, offset, data.data(), data.size());
+                    weight_bytes += data.size();
+                }
+            }
+            std::cout << "Wrote " << weight_offsets.size() << " resident weights (" << weight_bytes / (1024.0 * 1024.0)
+                      << " MB)." << std::endl;
+        }
+
+        persistent_initialized = false;
         executor = std::make_unique<Executor>(memManager);
+        if (persisted.valid())
+            persisted.get();
+        logTimeline("persisted");
         isCompiled = true;
+        logTimeline("compiled");
     }
 
     void writeInput(LogicalId logicalId, const void *data, uint64_t size)
@@ -535,405 +684,69 @@ struct Session
         }
 
         const uint32_t graphIdx = getBestGraphIdx(bucket);
-        const CompiledGraph &cg = cachedGraphs[graphIdx];
-        executor->run(cg, debugCallback);
+        return runGraph(graphIdx, debugCallback);
+    }
 
-        // Find the root node in CPU RAM or GPU RAM
+    // Runs compiled graph `graphIdx` (compile() must have run) and returns the
+    // host pointer of its root tensor.
+    const void *runGraph(uint32_t graphIdx, Debug::Callback debugCallback = {})
+    {
+        if (!isCompiled || graphIdx >= cachedGraphs.size())
+            Error::throw_err("[Session.runGraph] invalid graph index " + std::to_string(graphIdx));
+        if (!persistent_initialized && !selectedCachedNodes.empty() && graphIdx != fullBucketIdx)
+        {
+            if (fullBucketIdx >= cachedGraphs.size())
+                Error::throw_err("[Session.runGraph] persistent state has no initialization graph");
+            executor->run(cachedGraphs[fullBucketIdx], debugCallback);
+            persistent_initialized = true;
+        }
+        executor->run(cachedGraphs[graphIdx], debugCallback);
+        if (graphIdx == fullBucketIdx)
+            persistent_initialized = true;
+        return rootOutputPtr(graphIdx);
+    }
+
+    void invalidateCaches() { persistent_initialized = false; }
+
+    // Host pointer of the root tensor written by compiled graph `graphIdx`.
+    // Resolved once per graph; the arenas do not move after compile().
+    const void *rootOutputPtr(uint32_t graphIdx)
+    {
+        if (rootPtrs.size() != cachedGraphs.size())
+            rootPtrs.assign(cachedGraphs.size(), nullptr);
+        if (rootPtrs[graphIdx])
+            return rootPtrs[graphIdx];
+        const CompiledGraph &cg = cachedGraphs[graphIdx];
         for (const auto &pair : cg.eclass_to_logical)
         {
-            if (pair.second == rootId)
+            if (pair.second != rootId)
+                continue;
+            EClassId eclass_id = pair.first;
+            for (const auto &inst : cg.instructions)
             {
-                EClassId eclass_id = pair.first;
-                for (const auto &inst : cg.instructions)
+                if (inst.eclass_id == eclass_id || inst.logical_id == rootId)
                 {
-                    if (inst.eclass_id == eclass_id || inst.logical_id == rootId)
-                    {
-                        DeviceBuffer *buf = memManager.getBuffer(inst.outBuffer.mem_space);
-                        if (buf && buf->getBasePtr())
-                        {
-                            std::cout << "[DEBUG_RUN] found root in instruction eclass=" << eclass_id.value
-                                      << " mem_space=" << inst.outBuffer.mem_space.idx
-                                      << " type=" << static_cast<int>(inst.outBuffer.mem_space.type)
-                                      << " offset=" << inst.outBuffer.offset << std::endl;
-                            return buf->getBasePtr() + inst.outBuffer.offset;
-                        }
-                    }
-                }
-                if (cg.nodeViews.count(eclass_id))
-                {
-                    const TensorView &rootView = cg.nodeViews.at(eclass_id);
-                    DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+                    DeviceBuffer *buf = memManager.getBuffer(inst.outBuffer.mem_space);
                     if (buf && buf->getBasePtr())
-                    {
-                        std::cout << "[DEBUG_RUN] fallback to nodeView MemSpace{1, CPP} offset=" << rootView.offset << std::endl;
-                        return buf->getBasePtr() + rootView.offset;
-                    }
+                        return rootPtrs[graphIdx] = buf->getBasePtr() + inst.outBuffer.offset;
                 }
             }
+            if (cg.nodeViews.count(eclass_id))
+            {
+                const TensorView &rootView = cg.nodeViews.at(eclass_id);
+                DeviceBuffer *buf = memManager.getBuffer(MemSpace{1, HandleType::CPP});
+                if (buf && buf->getBasePtr())
+                    return rootPtrs[graphIdx] = buf->getBasePtr() + rootView.offset;
+            }
         }
-
         if (!cg.instructions.empty())
         {
             const OpInstruction &lastInst = cg.instructions.back();
             DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
             if (buf && buf->getBasePtr())
-            {
-                std::cout << "[DEBUG_RUN] fallback to lastInst mem_space=" << lastInst.outBuffer.mem_space.idx
-                          << " type=" << static_cast<int>(lastInst.outBuffer.mem_space.type)
-                          << " offset=" << lastInst.outBuffer.offset << std::endl;
-                return buf->getBasePtr() + lastInst.outBuffer.offset;
-            }
+                return rootPtrs[graphIdx] = buf->getBasePtr() + lastInst.outBuffer.offset;
         }
-
         Error::throw_err("Failed to retrieve valid host output pointer for root node during Session::run");
-    }
-
-    struct OrtoolsPreparedState
-    {
-        Planner planner;
-        std::vector<Bucket> buckets;
-        EGraph full_state;
-        std::vector<EGraph> bucket_states;
-        std::vector<EGraph> bucket_egraphs;
-        std::vector<EClassId> bucket_root_eclass_ids;
-        std::vector<std::vector<ENodeInfo>> bucket_enode_infos;
-        std::vector<ExtractionResult> cpu_hint_extractions;
-        std::vector<CacheCandidate> candidates;
-        std::vector<std::vector<uint32_t>> candidate_clean_buckets;
-        std::unordered_map<BaseEClassId, ParallelBuffer> preallocated_buffers;
-
-        OrtoolsPreparedState(CostModel &costModel, const Settings &settings)
-            : planner(costModel, settings)
-        {
-        }
-    };
-
-    std::unique_ptr<OrtoolsPreparedState> prepareOrtoolsState(bool doSaturate)
-    {
-        auto state = std::make_unique<OrtoolsPreparedState>(costModel, settings);
-        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
-        state->buckets = manualBuckets;
-
-        Planner &planner = state->planner;
-        Graph temp_graph = graph;
-        planner.initBaseEGraph(rootId, temp_graph, topo, repo, false);
-        state->full_state = planner.saturateBucket(rootId, graph, manualBuckets[fullBucketIdx], doSaturate, repo);
-
-        state->bucket_states.resize(manualBuckets.size());
-        state->bucket_states[fullBucketIdx] = state->full_state;
-        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t bucket_idx) {
-            if (bucket_idx == fullBucketIdx)
-                return;
-            Planner bucket_planner(costModel, settings);
-            state->bucket_states[bucket_idx] = bucket_planner.saturateBucket(
-                rootId, graph, manualBuckets[bucket_idx], false, repo, &state->full_state);
-        });
-
-        // Candidate cleanliness is derived from the same eclass DP used by the
-        // normal cache search.
-        if (!disableCaching)
-        {
-            for (const EClass &cls : state->full_state.getClasses())
-            {
-                if (state->full_state.findConst(cls.id) != cls.id || cls.base_eclass_id == BaseEClassId{} ||
-                    cls.mem_space.type == HandleType::STORAGE || getStorageSpanBytes(cls.shape, cls.strides, cls.dtype) == 0)
-                    continue;
-
-                if (cls.logical_id != LogicalId{} && graph.hasNode(cls.logical_id) &&
-                    graph.getNode(cls.logical_id).opType == OpType::INPUT)
-                    continue;
-
-                bool is_input_class = false;
-                for (ENodeId eid : cls.enodes)
-                {
-                    if (state->full_state.getENode(eid).getOpType() == OpType::INPUT)
-                    {
-                        is_input_class = true;
-                        break;
-                    }
-                }
-                if (is_input_class)
-                    continue;
-
-                const bool clean_in_any_bucket = std::any_of(
-                    state->bucket_states.begin(), state->bucket_states.end(), [&](const EGraph &bucket_state) {
-                        const EClassId eclass_id = bucket_state.findEClassByBaseId(cls.base_eclass_id);
-                        return eclass_id != EClassId{} && bucket_state.getEClass(eclass_id).is_clean;
-                    });
-                if (!clean_in_any_bucket)
-                    continue;
-
-                state->candidates.push_back({cls.base_eclass_id, getStorageSpanBytes(cls.shape, cls.strides, cls.dtype), cls.dtype,
-                                             cls.mem_space, 0});
-                std::vector<uint32_t> clean_buckets;
-                for (uint32_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
-                {
-                    auto eclass_it = state->bucket_states[bucket_idx].findEClassByBaseId(cls.base_eclass_id);
-                    if (eclass_it != EClassId{} &&
-                        state->bucket_states[bucket_idx].getEClass(eclass_it).is_clean)
-                        clean_buckets.push_back(bucket_idx);
-                }
-                state->candidate_clean_buckets.push_back(std::move(clean_buckets));
-            }
-        }
-
-        // The solver needs input reservations before it chooses a cache set.
-        // Resolve those through eclass ids, matching the normal path.
-        planner.preallocate(graph, state->full_state,
-                            state->preallocated_buffers);
-
-        Engine cpu = Engine{0, EngineType::CPU};
-        state->bucket_egraphs.reserve(state->bucket_states.size());
-        state->bucket_root_eclass_ids.reserve(state->bucket_states.size());
-        state->bucket_enode_infos.reserve(state->bucket_states.size());
-        for (size_t bucket_idx = 0; bucket_idx < state->bucket_states.size(); ++bucket_idx)
-        {
-            EGraph bucket_state = std::move(state->bucket_states[bucket_idx]);
-            for (const CacheCandidate &candidate : state->candidates)
-            {
-                EClassId eclass_id = bucket_state.findEClassByBaseId(candidate.base_eclass_id);
-                if (eclass_id == EClassId{} || !bucket_state.getEClass(eclass_id).is_clean)
-                    continue;
-
-                const EClass &cls = bucket_state.getEClass(eclass_id);
-                bool has_cache = false;
-                for (ENodeId enode_id : cls.enodes)
-                {
-                    const ENode &enode = bucket_state.getENode(enode_id);
-                    if (enode.getOpType() == OpType::CACHE)
-                    {
-                        has_cache = true;
-                        break;
-                    }
-                }
-                if (!has_cache)
-                    bucket_state.addENode(
-                        eclass_id, ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
-                                          cls.mem_space, {cpu}, std::to_string(candidate.base_eclass_id.value)));
-            }
-
-            bucket_state.rebuild(true);
-
-            auto enode_infos = planner.computeENodeInfos(bucket_state);
-            planner.pruneEGraph(bucket_state, enode_infos);
-            state->bucket_root_eclass_ids.push_back(bucket_state.findEClassByLogicalId(rootId));
-            state->bucket_egraphs.push_back(std::move(bucket_state));
-            state->bucket_enode_infos.push_back(std::move(enode_infos));
-        }
-
-        if (!settings.use_ortools_full && !settings.use_ortools_lns)
-            return state;
-
-        // Build one native witness per bucket.  The full solver receives the
-        // complete native extraction, dispatch, and allocation as its initial
-        // assignment, while remaining free to search for an improvement.
-        // Reusing the already saturated e-graphs avoids a second saturation.
-        Settings hint_settings = settings;
-        hint_settings.cpu_only = true;
-        Planner native_planner(costModel, hint_settings);
-        std::unordered_set<EClassId> no_cached_eclasses;
-        state->cpu_hint_extractions.reserve(state->bucket_egraphs.size());
-        for (size_t bucket_idx = 0; bucket_idx < state->bucket_egraphs.size(); ++bucket_idx)
-        {
-            // Keep the CP problem's complete hardware e-graph intact.  The
-            // native witness can use a CPU-pruned copy, which avoids walking
-            // OpenCL alternatives during dispatch and bufferization search.
-            EGraph hint_egraph = state->bucket_egraphs[bucket_idx];
-            auto native_infos = native_planner.computeENodeInfos(
-                hint_egraph);
-            native_planner.pruneEGraph(hint_egraph, native_infos);
-            ExtractionResult hint = native_planner.extractBest(
-                rootId, graph, hint_egraph,
-                hint_settings.min_compile_seconds == 0.0f, false, hint_settings.min_compile_seconds, brancher,
-                native_infos, &no_cached_eclasses);
-
-            // Pruning changes each eclass's local enode index.  CP-SAT uses
-            // the indices from the original, unpruned problem, so restore
-            // those indices by matching stable ENodeIds.
-            const EGraph &full_egraph = state->bucket_egraphs[bucket_idx];
-            for (auto &[eclass_id, enode_idx] : hint.selection_map)
-            {
-                const EClass &hint_class = hint_egraph.getEClass(eclass_id);
-                const ENodeId selected_enode = hint_class.enodes.at(enode_idx);
-                const EClass &full_class = full_egraph.getEClass(eclass_id);
-                auto full_index = std::find(full_class.enodes.begin(), full_class.enodes.end(), selected_enode);
-                if (full_index == full_class.enodes.end())
-                    Error::throw_err("[Session.prepareOrtoolsState] CPU hint enode missing from CP e-graph.");
-                enode_idx = static_cast<uint32_t>(std::distance(full_class.enodes.begin(), full_index));
-            }
-            state->cpu_hint_extractions.push_back(std::move(hint));
-        }
-
-        return state;
-    }
-
-    std::string exportOrtoolsProblem(bool doSaturate = true)
-    {
-        auto state = prepareOrtoolsState(doSaturate);
-        nlohmann::json prob = ortools_export::serializeProblem(
-            state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
-            state->bucket_enode_infos, state->candidates,
-            state->candidate_clean_buckets, graph, state->preallocated_buffers, settings);
-        prob["full_bucket_idx"] = fullBucketIdx;
-        prob["cpu_hints"] = nlohmann::json::array();
-        for (const auto &extraction : state->cpu_hint_extractions)
-            prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
-        return prob.dump();
-    }
-
-    void applyOrtoolsSolution(const std::string &solution_json_str, OrtoolsPreparedState &state)
-    {
-        nlohmann::json sol = nlohmann::json::parse(solution_json_str);
-        std::unordered_set<BaseEClassId> selected_cached;
-        std::vector<ExtractionResult> extractions;
-        if (!ortools_export::deserializeSolution(sol, selected_cached, extractions))
-        {
-            Error::throw_err("[Session.applyOrtoolsSolution] Failed to deserialize solution JSON.");
-        }
-
-        if (extractions.size() != manualBuckets.size())
-        {
-            Error::throw_err("[Session.applyOrtoolsSolution] Solution has " + std::to_string(extractions.size()) +
-                             " buckets, expected " + std::to_string(manualBuckets.size()));
-        }
-
-        if (settings.use_ortools_full || settings.use_ortools_lns)
-        {
-            if (sol.value("solver", "") != "ortools_full")
-                Error::throw_err("[Session.applyOrtoolsSolution] Expected a full joint OR-Tools solution.");
-            // The joint solver owns extraction, dispatch, aliases and offsets.
-            // Do not prune or re-extract here: enode indices refer to the export.
-            std::vector<CompiledGraph> compiled_graphs;
-            for (size_t b = 0; b < manualBuckets.size(); ++b)
-            {
-                const auto &extraction = extractions[b];
-                if (extraction.order.size() != extraction.selection_map.size() ||
-                    !extraction.selection_map.count(state.bucket_root_eclass_ids[b]))
-                    Error::throw_err("[Session.applyOrtoolsSolution] Incomplete joint extraction.");
-                std::unordered_set<EClassId> visited;
-                std::unordered_map<BufferId, ParallelBuffer> buffers;
-                for (const auto &buf : extraction.buffers)
-                {
-                    if (!buffers.emplace(buf.id, buf).second || buf.offset < 0)
-                        Error::throw_err("[Session.applyOrtoolsSolution] Invalid joint buffer.");
-                    auto cap = settings.mem_caps.find(buf.mem_space);
-                    if (buf.mem_space.type != HandleType::STORAGE && cap != settings.mem_caps.end() &&
-                        (buf.size > cap->second || static_cast<uint64_t>(buf.offset) > cap->second - buf.size))
-                        Error::throw_err("[Session.applyOrtoolsSolution] Joint allocation exceeds memory cap.");
-                }
-                for (EClassId cid : extraction.order)
-                {
-                    const auto &cls = state.bucket_egraphs[b].getEClass(cid);
-                    auto selected = extraction.selection_map.find(cid);
-                    auto buffer = extraction.eclass_to_buf.find(cid);
-                    if (selected == extraction.selection_map.end() || selected->second >= cls.enodes.size() ||
-                        buffer == extraction.eclass_to_buf.end() || !buffers.count(buffer->second) || visited.count(cid))
-                        Error::throw_err("[Session.applyOrtoolsSolution] Invalid joint selection or buffer mapping.");
-                    const auto &enode = state.bucket_egraphs[b].getENode(cls.enodes[selected->second]);
-                    for (EClassId child : enode.getChildren())
-                        if (!visited.count(state.bucket_egraphs[b].findConst(child)))
-                            Error::throw_err("[Session.applyOrtoolsSolution] Joint dispatch is not topological.");
-                    visited.insert(cid);
-                }
-                CompiledGraph cg = state.planner.buildCompiledGraph(
-                    rootId, graph, state.bucket_egraphs[b],
-                    extraction, state.bucket_enode_infos[b]);
-                cg.bucket = manualBuckets[b];
-                compiled_graphs.push_back(std::move(cg));
-            }
-            cachedGraphs = std::move(compiled_graphs);
-            selectedCachedNodes = std::move(selected_cached);
-            cachedBucketWeights = normalizedBucketWeights(manualBuckets);
-            persistCache();
-            return;
-        }
-
-        // OR-Tools selects the global cache set and supplies a feasible
-        // extraction witness.  Rebuild the executable graphs through the
-        // native planner so cache buffers, view aliases, and lifetimes use
-        // the same implementation as the normal path.  In particular,
-        // intermediate cached nodes must receive persistent buffers; using
-        // the solver's local bufferization here would make a cache look valid
-        // while allowing its storage to overlap a later intermediate.
-        cachedGraphs.clear();
-        for (size_t b = 0; b < manualBuckets.size(); ++b)
-        {
-            Planner thread_planner(costModel, settings);
-            thread_planner.baseState = state.planner.baseState;
-            thread_planner.baseStateInitialized = true;
-
-            auto &bucket_egraph = state.bucket_egraphs[b];
-
-            auto enode_infos = thread_planner.computeENodeInfos(
-                bucket_egraph);
-            thread_planner.pruneEGraph(bucket_egraph, enode_infos);
-
-            std::unordered_set<EClassId> cached_eclasses;
-            for (const EClass &cls : bucket_egraph.getClasses())
-            {
-                if (bucket_egraph.findConst(cls.id) == cls.id && selected_cached.count(cls.base_eclass_id))
-                    cached_eclasses.insert(cls.id);
-            }
-
-            ExtractionResult extraction = thread_planner.extractBest(
-                rootId, graph, bucket_egraph,
-                minCompileSeconds == 0.0f, false, minCompileSeconds,
-                nullptr, enode_infos, &cached_eclasses);
-            CompiledGraph cg = thread_planner.buildCompiledGraph(
-                rootId, graph, bucket_egraph, extraction, enode_infos);
-            cg.bucket = manualBuckets[b];
-            cachedGraphs.push_back(std::move(cg));
-        }
-
-        selectedCachedNodes = std::move(selected_cached);
-        cachedBucketWeights = normalizedBucketWeights(manualBuckets);
-        persistCache();
-    }
-
-    void ensureCacheCoverageOrtools(bool doSaturate)
-    {
-        std::cout << "[Session.ensureCacheCoverageOrtools] Saturating E-Graph and preparing OR-Tools CP-SAT problem..."
-                  << std::endl;
-        auto state = prepareOrtoolsState(doSaturate);
-        nlohmann::json prob = ortools_export::serializeProblem(
-            state->buckets, state->bucket_egraphs, state->bucket_root_eclass_ids,
-            state->bucket_enode_infos, state->candidates,
-            state->candidate_clean_buckets, graph, state->preallocated_buffers, settings);
-        prob["full_bucket_idx"] = fullBucketIdx;
-        prob["cpu_hints"] = nlohmann::json::array();
-        for (const auto &extraction : state->cpu_hint_extractions)
-            prob["cpu_hints"].push_back(ortools_export::serializeExtractionHint(extraction));
-
-        std::filesystem::create_directories("benchmarks");
-        std::string prefix = settings.use_ortools_lns ? "benchmarks/ortools_lns_" : (settings.use_ortools_full ? "benchmarks/ortools_full_" : "benchmarks/ortools_");
-        std::string prob_path = prefix + "problem.json";
-        std::string sol_path = prefix + "solution.json";
-
-        {
-            std::ofstream f(prob_path);
-            f << prob.dump(2);
-        }
-        if (std::filesystem::exists(sol_path))
-        {
-            std::filesystem::remove(sol_path);
-        }
-
-        bool ok = ortools_export::runOrtoolsSolverProcess(prob_path, sol_path);
-        if (!ok)
-        {
-            Error::throw_err("[Session.ensureCacheCoverageOrtools] Solver process failed to produce solution.");
-        }
-
-        std::string sol_str;
-        {
-            std::ifstream f(sol_path);
-            std::stringstream ss;
-            ss << f.rdbuf();
-            sol_str = ss.str();
-        }
-
-        applyOrtoolsSolution(sol_str, *state);
-        std::cout << "[Session.ensureCacheCoverageOrtools] Successfully applied OR-Tools solution." << std::endl;
     }
 
     const std::vector<CompiledGraph> &getCachedGraphs() const { return cachedGraphs; }
@@ -949,11 +762,6 @@ struct Session
 
     void ensureCacheCoverage(bool doSaturate)
     {
-        if (settings.use_ortools || settings.use_ortools_full || settings.use_ortools_lns)
-        {
-            ensureCacheCoverageOrtools(doSaturate);
-            return;
-        }
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
@@ -963,6 +771,7 @@ struct Session
         Planner planner(costModel, settings);
         auto [graphs, cached_nodes] = planner.planAll(
             rootId, graph, manualBuckets, bucket_weights, doSaturate, repo, minCompileSeconds, brancher);
+        logTimeline("planAll returned");
 
         cachedGraphs = std::move(graphs);
         selectedCachedNodes = std::move(cached_nodes);
@@ -979,7 +788,7 @@ struct Session
                              " buckets, but expected " + std::to_string(manualBuckets.size()) + ".");
         }
 
-        persistCache();
+        // Session::plan persists the cache once planning returns.
     }
 
     const uint32_t getBestGraphIdx(const Bucket &bucket) const
@@ -1024,7 +833,13 @@ struct Session
             }
             if (!valid)
                 continue;
-            const float gCost = g.cost();
+            if (graphCosts.size() != cachedGraphs.size())
+            {
+                graphCosts.clear();
+                for (const CompiledGraph &cached : cachedGraphs)
+                    graphCosts.push_back(cached.cost());
+            }
+            const float gCost = graphCosts[i];
             if (gCost < bestCost)
             {
                 bestIdx = i;

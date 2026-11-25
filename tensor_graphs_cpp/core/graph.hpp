@@ -51,7 +51,7 @@ struct Graph
         return input_data_types.at(id);
     }
 
-    inline std::vector<int32_t> getConstantInt32(LogicalId id) const
+    inline std::vector<int32_t> getConstantInt32(LogicalId id, SourceLocation loc = SourceLocation::current()) const
     {
         if (constantStaging.count(id))
         {
@@ -71,7 +71,7 @@ struct Graph
         ss << "Expected constant for shape inference but not found in staging. "
               "Node ID: "
            << id;
-        Error::throw_err(ss.str());
+        Error::throw_err(ss.str(), loc);
     }
 
     TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids,

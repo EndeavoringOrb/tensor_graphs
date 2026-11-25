@@ -1,0 +1,15 @@
+{
+  "name": "exact window value over discrete engine choices",
+  "description": "out either runs whole on the CPU (4) or merges (0.5, CPU) two GPU halves of 6 each that share the GPU, for 12.5. The optimum is 4. An engine-weighted relaxation proves about 1 (it mixes the two choices); the exact window value proves 4. Treating the GPU halves as parallel would claim the split takes 6.5, still above 4, so the optimum must stay 4.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [
+      {"children": ["inp"], "cost": 4, "engines": [0]},
+      {"children": ["p", "q"], "cost": 0.5, "engines": [0]}
+    ]},
+    "p": {"alternatives": [{"children": ["inp"], "cost": 6, "engines": [1]}]},
+    "q": {"alternatives": [{"children": ["inp"], "cost": 6, "engines": [1]}]},
+    "inp": {"alternatives": [{"op": "input", "cost": 0}]}
+  },
+  "expected_optimum": 4
+}

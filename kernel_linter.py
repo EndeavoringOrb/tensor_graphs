@@ -4,7 +4,6 @@ import os
 import re
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from rich.console import Console
 from rich.panel import Panel
 from tqdm import tqdm
@@ -426,16 +425,24 @@ class KernelLinter:
                         )
                         sys.exit(1)
 
-    def lint(self, config):
-        if config.no_lint:
-            return
-
+    def lint(self):
         self.validateFusedRefLayout()
 
         validators = [
             (ROOT_DIR / "kernels", self.validateKernelFile),
             (ROOT_DIR / "core", self.validateRewriteFile),
         ]
+
+        lint_cache_file = ROOT_DIR / "generated" / ".lint_cache.json"
+        lint_cache = {}
+        if lint_cache_file.exists():
+            try:
+                import json
+                lint_cache = json.loads(lint_cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                lint_cache = {}
+
+        new_lint_cache = {}
 
         for val_idx, (dir_path, func) in enumerate(validators):
             if not dir_path.exists():
@@ -448,7 +455,23 @@ class KernelLinter:
             ) as pbar:
                 for path in pbar:
                     pbar.set_postfix_str(path.as_posix())
+                    p_str = str(path)
+                    try:
+                        mtime = path.stat().st_mtime
+                    except Exception:
+                        mtime = 0
+                    if lint_cache.get(p_str) == mtime:
+                        new_lint_cache[p_str] = mtime
+                        continue
                     func(path)
+                    new_lint_cache[p_str] = mtime
+
+        try:
+            import json
+            lint_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            lint_cache_file.write_text(json.dumps(new_lint_cache), encoding="utf-8")
+        except Exception:
+            pass
 
 
 
@@ -467,7 +490,7 @@ def main():
     if args.repository == bool(args.candidate):
         parser.error("Provide a candidate path or --repository")
     if args.repository:
-        KernelLinter().lint(SimpleNamespace(no_lint=False))
+        KernelLinter().lint()
     else:
         lintCandidate(args.candidate)
     print("Lint passed")

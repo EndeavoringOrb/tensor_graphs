@@ -1,5 +1,6 @@
 // tensor_graphs_cpp/core/debug.hpp
 #pragma once
+#include <mutex>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -526,10 +527,15 @@ class BaseRefVerifier
     uint32_t mismatchCount = 0;
     uint32_t matchCount = 0;
 
-    void registerBase(EClassId eid, BaseEClassId bid)
+    // Compiled graphs are built in parallel and all register here, one
+    // locked batch per graph.
+    std::mutex register_mutex;
+    void registerBases(const std::vector<std::pair<EClassId, BaseEClassId>> &bases)
     {
-        if (bid != BaseEClassId{})
-            eclass_to_base[eid] = bid;
+        std::lock_guard<std::mutex> lock(register_mutex);
+        for (const auto &[eid, bid] : bases)
+            if (bid != BaseEClassId{})
+                eclass_to_base[eid] = bid;
     }
 
     BaseEClassId getBase(EClassId eid) const

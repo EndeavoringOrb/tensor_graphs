@@ -51,9 +51,9 @@ class ConsumerStartPrecedencePropagator : public Propagator
                 if (cannot_start)
                 {
                     // Retain the actual edge, rather than only the triggering variable.
-                    conflict_reason_ = "source=" + state.var_infos[state.start_vars[b].at(cid)].name +
+                    conflict_reason_ = "source=" + state.var_infos[state.start_vars[b].at(cid)].name() +
                         state.domains[state.start_vars[b].at(cid)].toString() +
-                        " via=" + std::to_string(current.value) + " consumer=" + state.var_infos[p_st_v].name +
+                        " via=" + std::to_string(current.value) + " consumer=" + state.var_infos[p_st_v].name() +
                         start_dom.toString() + " selection=" + p_sel_dom.toString() +
                         " required-min=" + std::to_string(required_consumer_start);
                     Domain updated_selection = p_sel_dom;
@@ -179,6 +179,14 @@ class ConsumerStartPrecedencePropagator : public Propagator
     }
 
     std::string conflictReason() const override { return conflict_reason_; }
+    // While a complete plan is validated, one pass over the bucket's
+    // non-optional classes per flush replaces the per-event passes (each
+    // class's pass reads its own start minimum and its consumers' domains,
+    // so passing every class reaches the same fixpoint).
+    PropagationBatch propagationBatch(const SearchState &state, VarId) const override
+    {
+        return state.completing_plan ? PropagationBatch::BUCKET : PropagationBatch::NONE;
+    }
 
     std::string name() const override
     {
@@ -191,6 +199,19 @@ class ConsumerStartPrecedencePropagator : public Propagator
         state.ensurePropagationState();
         if (changed != kInvalidVarId)
         {
+            if (state.completing_plan)
+            {
+                const uint32_t bucket = state.var_infos[changed].bucket_idx;
+                for (const auto &[cid, sel_v] : state.selected_vars[bucket])
+                {
+                    if (state.domains[sel_v].contains(0))
+                        continue;
+                    const VarId st_v = state.start_vars[bucket].at(cid);
+                    if (!propagateStart(state, bucket, cid, state.domains[st_v].getMin()))
+                        return false;
+                }
+                return true;
+            }
             if (state.var_infos[changed].type == VarType::SELECTED)
                 changed = state.start_vars[state.var_infos[changed].bucket_idx].at(state.var_infos[changed].eclass_id);
             if (state.var_infos[changed].type != VarType::START)

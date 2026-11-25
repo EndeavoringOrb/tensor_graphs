@@ -1,0 +1,177 @@
+#pragma once
+
+#include <algorithm>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "core/plan/planner.hpp"
+
+namespace PruneEGraphRegression
+{
+inline void checkCascade(Planner &planner, bool shared_state)
+{
+    EGraph source;
+    const MemSpace ram{1, HandleType::CPP};
+    auto makeClass = [&]() { return source.addEClass({1}, {1}, DType::FLOAT32, ram); };
+    auto addNode = [&](EClassId owner, const std::string &name, std::vector<EClassId> children) {
+        const ENodeId node_id{static_cast<uint32_t>(source.getNumENodes())};
+        source.addENode(owner, ENode(KernelId{0}, OpType::FUSED, name, std::move(children),
+                                    {1}, {1}, DType::FLOAT32, ram, {}));
+        return node_id;
+    };
+    const EClassId healthy = makeClass();
+    const EClassId dead_leaf = makeClass();
+    const EClassId first = makeClass();
+    const EClassId second = makeClass();
+    const EClassId mixed = makeClass();
+    const EClassId root = makeClass();
+    const EClassId initially_empty = makeClass();
+    addNode(healthy, "healthy", {});
+    const ENodeId rejected = addNode(dead_leaf, "rejected", {});
+    // Repeated children must invalidate an expression only once.
+    addNode(first, "first", {dead_leaf, dead_leaf});
+    addNode(second, "second", {first});
+    addNode(mixed, "dead alternative", {second});
+    addNode(mixed, "empty alternative", {initially_empty});
+    const ENodeId surviving = addNode(mixed, "live alternative", {healthy});
+    addNode(root, "root", {mixed});
+
+    if (shared_state)
+    {
+        source.freezeClasses();
+        source.freezeENodes();
+        source.freezeHashcons();
+    }
+    EGraph graph = source;
+    std::vector<ENodeInfo> costs(graph.getNumENodes());
+    for (auto &info : costs)
+        info.cost = 1.0f;
+    costs[rejected.value].cost = TGConstants::INF;
+
+    planner.pruneEGraph(graph, costs);
+    auto checkPruned = [&]() {
+        for (EClassId id : {dead_leaf, first, second, initially_empty})
+            if (!graph.getEClass(id).enodes.empty())
+                Error::throw_err("[PruneEGraphRegression] dead class retained expressions");
+        if (graph.getEClass(mixed).enodes != std::vector<ENodeId>{surviving})
+            Error::throw_err("[PruneEGraphRegression] live alternative was lost or dead alternatives survived");
+        if (graph.getEClass(healthy).enodes.size() != 1 || graph.getEClass(root).enodes.size() != 1)
+            Error::throw_err("[PruneEGraphRegression] cascade removed a live branch");
+    };
+    checkPruned();
+    planner.pruneEGraph(graph, costs);
+    checkPruned();
+    if (source.getEClass(dead_leaf).enodes.size() != 1 || source.getEClass(mixed).enodes.size() != 3)
+        Error::throw_err("[PruneEGraphRegression] pruning mutated the source snapshot");
+
+    graph.rebuild(true);
+    if (graph.getNumENodes() != 3)
+        Error::throw_err("[PruneEGraphRegression] compaction retained dead expressions");
+    for (const auto &node : graph.getENodes())
+        for (EClassId child : node.getChildren())
+            if (graph.getEClass(graph.findConst(child)).enodes.empty())
+                Error::throw_err("[PruneEGraphRegression] surviving expression references an empty class");
+}
+
+// A pruned e-node stays in the e-node store and still takes part in the
+// rebuild's congruence closure. When it is the representative of a
+// congruence class, compaction must keep a listed congruent e-node in its
+// place instead of dropping both.
+inline void checkPrunedRepresentative()
+{
+    EGraph graph;
+    const MemSpace ram{1, HandleType::CPP};
+    auto makeClass = [&]() { return graph.addEClass({1}, {1}, DType::FLOAT32, ram); };
+    auto addNode = [&](EClassId owner, const std::string &name, std::vector<EClassId> children) {
+        const ENodeId node_id{static_cast<uint32_t>(graph.getNumENodes())};
+        graph.addENode(owner, ENode(KernelId{0}, OpType::FUSED, name, std::move(children),
+                                   {1}, {1}, DType::FLOAT32, ram, {}));
+        return node_id;
+    };
+    const EClassId leaf_a = makeClass();
+    const EClassId leaf_b = makeClass();
+    const EClassId pruned_owner = makeClass();
+    const EClassId live_owner = makeClass();
+    const EClassId root = makeClass();
+    // E-node 0 comes first in every rebuild shard, so it is the hashcons
+    // representative of its congruence class.
+    const ENodeId pruned = addNode(pruned_owner, "same", {leaf_a});
+    addNode(live_owner, "same", {leaf_b});
+    addNode(leaf_a, "leaf a", {});
+    addNode(leaf_b, "leaf b", {});
+    addNode(root, "root", {live_owner});
+    auto &pruned_enodes = graph.getEClass(pruned_owner).enodes;
+    pruned_enodes.erase(std::find(pruned_enodes.begin(), pruned_enodes.end(), pruned));
+    graph.merge(leaf_a, leaf_b);
+
+    graph.rebuild(true);
+    for (const auto &node : graph.getENodes())
+        for (EClassId child : node.getChildren())
+            if (graph.getEClass(graph.findConst(child)).enodes.empty())
+                Error::throw_err("[PruneEGraphRegression] compaction emptied a class whose congruent "
+                                 "representative was pruned");
+    if (graph.getNumENodes() != 4)
+        Error::throw_err("[PruneEGraphRegression] compaction kept " + std::to_string(graph.getNumENodes()) +
+                         " e-nodes, expected 4 (root, both leaves, same)");
+}
+
+inline void run()
+{
+    {
+        EGraph graph;
+        const MemSpace ram{1, HandleType::CPP};
+        auto makeClass = [&]() { return graph.addEClass({1}, {1}, DType::FLOAT32, ram); };
+        const EClassId a = makeClass(), b = makeClass(), c = makeClass(), d = makeClass();
+        const EClassId first = makeClass(), second = makeClass();
+        for (const auto &[owner, child] : std::vector<std::pair<EClassId, EClassId>>{{first, a}, {second, b}})
+            graph.addENode(owner, ENode(KernelId{0}, OpType::FUSED, "same", {child},
+                                       {1}, {1}, DType::FLOAT32, ram, {}));
+        graph.merge(a, b);
+        graph.rebuild();
+        graph.merge(c, d);
+        graph.merge(c, a);
+        graph.rebuild();
+        for (uint32_t n = 0; n < graph.getNumENodes(); ++n)
+            for (EClassId child : graph.getENode(ENodeId{n}).getChildren())
+                if (child != graph.findConst(child))
+                    Error::throw_err("[PruneEGraphRegression] repeated merges left a stale parent");
+        graph.rebuild(true);
+        if (graph.getNumENodes() != 1)
+            Error::throw_err("[PruneEGraphRegression] repeated merges lost congruence");
+    }
+    {
+        EGraph graph;
+        const MemSpace ram{1, HandleType::CPP};
+        const EClassId a = graph.addEClass({1}, {1}, DType::FLOAT32, ram);
+        const EClassId b = graph.addEClass({1}, {1}, DType::FLOAT32, ram);
+        const EClassId parent = graph.addEClass({1}, {1}, DType::FLOAT32, ram);
+        auto addNode = [&](EClassId owner, const std::string &name, std::vector<EClassId> children) {
+            graph.addENode(owner, ENode(KernelId{0}, OpType::FUSED, name, std::move(children),
+                                       {1}, {1}, DType::FLOAT32, ram, {}));
+        };
+        addNode(a, "a", {});
+        addNode(b, "b", {});
+        addNode(parent, "parent", {b});
+        graph.freezeHashcons();
+        graph.freezeENodes();
+        EGraph snapshot = graph;
+        addNode(parent, "alternative", {a});
+        graph.getENodes(); // Materialize shared nodes alongside the new alternative.
+        if (graph.shared_hashcons || !snapshot.shared_hashcons)
+            Error::throw_err("[PruneEGraphRegression] materialization did not detach the signature index");
+        graph.merge(a, b);
+        graph.rebuild();
+        graph.rebuild(true);
+        if (graph.getNumENodes() != 4 || snapshot.getENode(ENodeId{2}).getChildren() != std::vector<EClassId>{b})
+            Error::throw_err("[PruneEGraphRegression] materialization lost nodes or mutated the snapshot");
+    }
+    CostModel cost_model(false, "");
+    Settings settings;
+    Planner planner(cost_model, settings);
+    checkCascade(planner, false);
+    checkCascade(planner, true);
+    checkPrunedRepresentative();
+    std::cout << "pruneEGraph regression tests passed" << std::endl;
+}
+} // namespace PruneEGraphRegression

@@ -86,6 +86,11 @@ class Propagator
     // Domain-changing batches run before bound-only batches at quiescence.
     virtual PropagationBatch propagationBatch(const SearchState &, VarId) const { return PropagationBatch::NONE; }
     virtual bool changesDomains() const { return true; }
+    // Builds indexes that depend only on the search state's structure (never
+    // its domains), which propagation would otherwise build lazily.
+    // SearchEngine::solve runs every propagator's prepare concurrently before
+    // root propagation; an implementation writes only its own members.
+    virtual void prepare(const SearchState &) {}
     // Shrinks variable domains in state. Returns false on contradiction.
     virtual bool propagate(SearchState &state, VarId changed, std::vector<VarId> &worklist) = 0;
 };
@@ -106,17 +111,28 @@ inline bool isOpCacheOrScatter(const ENode &enode)
             return true;
         if (entry.opType == OpType::FUSED && entry.refFactory)
         {
+            // Depends only on the kernel's reference graph: build it once.
+            thread_local std::unordered_map<KernelId, bool> memo;
+            auto it = memo.find(kid);
+            if (it != memo.end())
+                return it->second;
             Graph kGraph;
             std::vector<LogicalId> kInputs;
             for (uint64_t i = 0; i < entry.min_num_inputs; ++i)
                 kInputs.push_back(kGraph.input(entry.dummyShapes.size() > i ? entry.dummyShapes[i] : std::vector<uint32_t>{1},
                                                entry.dtypes.size() > i ? entry.dtypes[i] : DType::FLOAT32));
             entry.refFactory(kInputs, kGraph);
+            bool found = false;
             for (const auto &pair : kGraph.nodes)
             {
                 if (pair.second.opType == OpType::CACHE || pair.second.opType == OpType::SCATTER)
-                    return true;
+                {
+                    found = true;
+                    break;
+                }
             }
+            memo.emplace(kid, found);
+            return found;
         }
     }
     return false;
@@ -134,14 +150,20 @@ inline bool isOpRootScatterOrCache(const ENode &enode)
             return true;
         if (entry.opType == OpType::FUSED && entry.refFactory)
         {
+            // Depends only on the kernel's reference graph: build it once.
+            thread_local std::unordered_map<KernelId, bool> memo;
+            auto it = memo.find(kid);
+            if (it != memo.end())
+                return it->second;
             Graph kGraph;
             std::vector<LogicalId> kInputs;
             for (uint64_t i = 0; i < entry.min_num_inputs; ++i)
                 kInputs.push_back(kGraph.input(entry.dummyShapes.size() > i ? entry.dummyShapes[i] : std::vector<uint32_t>{1},
                                                entry.dtypes.size() > i ? entry.dtypes[i] : DType::FLOAT32));
             LogicalId rootId = entry.refFactory(kInputs, kGraph);
-            if (kGraph.getNode(rootId).opType == OpType::SCATTER)
-                return true;
+            const bool root_scatter = kGraph.getNode(rootId).opType == OpType::SCATTER;
+            memo.emplace(kid, root_scatter);
+            return root_scatter;
         }
     }
     return false;

@@ -28,7 +28,7 @@ def client_worker_process(
     rank: int,
     config: TrainConfig,
     weights_path_str: str,
-    weights_event: mp.Event,
+    weights_version: mp.Value,
     traj_queue: mp.Queue,
 ):
     """In-process search worker performing its own RNN inference."""
@@ -104,7 +104,7 @@ def client_worker_process(
         delegate.epsilon = config.epsilon * (random.random() ** 2)
 
         # Check and reload latest weights from disk
-        if weights_event.is_set() or current_version == -1:
+        if current_version == -1 or current_version < weights_version.value:
             if weights_path.exists():
                 try:
                     loaded = torch.load(
@@ -120,9 +120,6 @@ def client_worker_process(
                     logger.info(
                         f"{LOG_PREFIX} [Worker {rank}] Weight reload error: {e}"
                     )
-            if rank == 0:
-                weights_event.clear()
-
         try:
             egraph_context = graph_provider.get_context(config, episode=episode)
         except Exception as e:
@@ -243,7 +240,7 @@ def main():
     run_dir = Path(config.run_dir) if config.run_dir else Path("runs/0")
     run_dir.mkdir(parents=True, exist_ok=True)
     weights_path = run_dir / "client_weights.pt"
-    weights_event = mp.Event()
+    weights_version = mp.Value("q", -1)
 
     def weight_sync_thread():
         current_version = -1
@@ -265,15 +262,18 @@ def main():
                             and w_resp.get("type") == "weights"
                             and w_resp.get("data")
                         ):
+                            temp_weights_path = weights_path.with_suffix(".tmp")
                             torch.save(
                                 {
                                     "version": s_ver,
                                     "state_dict": w_resp["data"],
                                 },
-                                weights_path,
+                                temp_weights_path,
                             )
+                            os.replace(temp_weights_path, weights_path)
                             current_version = s_ver
-                            weights_event.set()
+                            with weights_version.get_lock():
+                                weights_version.value = current_version
                             print(
                                 f"[Client] Synced updated model weights (version {current_version})."
                             )
@@ -300,7 +300,7 @@ def main():
                 rank,
                 config,
                 str(weights_path),
-                weights_event,
+                weights_version,
                 traj_queue,
             ),
         )

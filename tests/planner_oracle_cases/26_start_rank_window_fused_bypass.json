@@ -1,0 +1,12 @@
+{
+  "name": "start rank windows intersect descendants across fused bypass alternatives",
+  "description": "out can consume b (which needs a) or fuse directly over a; b is only necessary under the first alternative, so ND(out) = {a}. Two engines make the order of the optional siblings matter.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["b", "c"], "cost": 1}, {"children": ["a", "c"], "cost": 4}]},
+    "b": {"alternatives": [{"children": ["a"], "cost": 1, "engines": [0]}]},
+    "c": {"alternatives": [{"children": ["a"], "cost": 2, "engines": [1]}, {"cost": 3, "engines": [0]}]},
+    "a": {"alternatives": [{"op": "input"}]}
+  },
+  "expected_optimum": 3
+}

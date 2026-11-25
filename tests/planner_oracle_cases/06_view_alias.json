@@ -1,0 +1,10 @@
+{
+  "name": "view shares storage and has zero duration",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["view"], "cost": 1}], "offset": [0]},
+    "view": {"alternatives": [{"children": ["base"], "view": true, "cost": 100}], "offset": [2]},
+    "base": {"alternatives": [{"cost": 3}], "offset": [2]}
+  },
+  "expected_optimum": 4
+}

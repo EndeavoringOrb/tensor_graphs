@@ -1,0 +1,11 @@
+{
+  "name": "optional expensive child contributes when its parent is chosen",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["expensive"], "cost": 1}, {"children": ["cheap"], "cost": 3}]},
+    "expensive": {"alternatives": [{"cost": 20}]},
+    "cheap": {"alternatives": [{"cost": 2}]}
+  },
+  "expected_optimum": 5,
+  "probes": [{"name": "force expensive path", "fixes": [{"bucket": 0, "node": "out", "field": "selected", "domain": [1]}]}]
+}

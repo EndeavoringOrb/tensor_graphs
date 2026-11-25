@@ -1,0 +1,17 @@
+{
+  "name": "static private layout shares cache slots across buckets",
+  "description": "Ample capacity activates the static private layout; the cached base needs one address in both buckets and the cached alternative must remain usable.",
+  "caches": {"value": {"domain": [0, 1]}},
+  "capacity_pages": 4,
+  "buckets": [
+    {"root": "out", "weight": 1, "nodes": {
+      "out": {"alternatives": [{"children": ["value"], "cost": 1}], "offset": [0, 1, 2, 3]},
+      "value": {"alternatives": [{"cost": 5}], "offset": [0, 1, 2, 3]}
+    }},
+    {"root": "out", "weight": 1, "nodes": {
+      "out": {"alternatives": [{"children": ["value"], "cost": 1}], "offset": [0, 1, 2, 3]},
+      "value": {"alternatives": [{"cost": 5}, {"op": "cache", "cost": 0}], "offset": [0, 1, 2, 3]}
+    }}
+  ],
+  "expected_optimum": 7
+}

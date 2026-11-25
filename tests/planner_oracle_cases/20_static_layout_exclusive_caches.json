@@ -1,0 +1,13 @@
+{
+  "name": "static layout shares slots for mutually exclusive cacheable allocations",
+  "description": "Two size-two cacheable buffers cannot both be reachable. Their shared private slot plus the root fits three pages; separate slots would not fit.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["p"], "cost": 1}, {"children": ["q"], "cost": 1}], "offset": [0, 1, 2]},
+    "p": {"alternatives": [{"cost": 5}, {"op": "cache"}], "size_pages": 2, "offset": [0, 1]},
+    "q": {"alternatives": [{"cost": 3}, {"op": "cache"}], "size_pages": 2, "offset": [0, 1]}
+  },
+  "caches": {"p": {"domain": [0, 1], "size_pages": 2}, "q": {"domain": [0, 1], "size_pages": 2}},
+  "capacity_pages": 3,
+  "expected_optimum": 1
+}

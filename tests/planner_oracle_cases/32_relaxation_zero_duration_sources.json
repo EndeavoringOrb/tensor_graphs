@@ -1,0 +1,11 @@
+{
+  "name": "relaxation bound uses simulated durations of inputs and views",
+  "description": "INPUT and views take no time whatever their declared cost. Charging declared costs would claim 4 instead of the optimum 1.",
+  "root": "out",
+  "nodes": {
+    "out": {"alternatives": [{"children": ["v"], "cost": 1}, {"cost": 4}], "offset": [0]},
+    "v": {"alternatives": [{"children": ["inp"], "view": true, "cost": 6}], "offset": [2]},
+    "inp": {"alternatives": [{"op": "input", "cost": 9}], "offset": [2]}
+  },
+  "expected_optimum": 1
+}

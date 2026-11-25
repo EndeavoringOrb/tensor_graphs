@@ -1,0 +1,14 @@
+{
+  "name": "relaxation bound ignores the cost of a zero-weight bucket",
+  "description": "The zero-weight bucket is expensive but contributes nothing to the objective; a bound that weights it would exceed the optimum.",
+  "buckets": [
+    {"root": "out", "weight": 0, "nodes": {
+      "out": {"alternatives": [{"children": ["work"], "cost": 10}]},
+      "work": {"alternatives": [{"cost": 40}]}
+    }},
+    {"root": "out", "weight": 1, "nodes": {
+      "out": {"alternatives": [{"cost": 2}]}
+    }}
+  ],
+  "expected_optimum": 2
+}

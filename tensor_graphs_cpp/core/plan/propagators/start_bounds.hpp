@@ -102,7 +102,7 @@ class StartBoundsPropagator : public Propagator
                     if (bound > entry.hi)
                     {
                         conflict_reason_ = "bucket=" + std::to_string(bucket) + " Hall reservations cover " +
-                            state.var_infos[entry.var].name + state.domains[entry.var].toString() +
+                            state.var_infos[entry.var].name() + state.domains[entry.var].toString() +
                             " required-" + (mirrored ? std::string("max=") : std::string("min=")) +
                             std::to_string(mirrored ? -bound : bound);
                         return false;
@@ -129,7 +129,7 @@ class StartBoundsPropagator : public Propagator
                     if (entry.lo >= lower && entry.hi <= upper)
                     {
                         ++count;
-                        if (count <= 8) witnesses += " " + state.var_infos[entry.var].name + state.domains[entry.var].toString();
+                        if (count <= 8) witnesses += " " + state.var_infos[entry.var].name() + state.domains[entry.var].toString();
                     }
                 conflict_reason_ = "bucket=" + std::to_string(bucket) + " available-rank-interval=[" +
                     std::to_string(mirrored ? -upper : lower) + ".." + std::to_string(mirrored ? -lower : upper) +
@@ -156,7 +156,7 @@ class StartBoundsPropagator : public Propagator
             if (state.domains[pair.second].contains(0)) continue;
             const VarId var = state.start_vars[bucket].at(pair.first);
             const Domain &domain = state.domains[var];
-            if (domain.isEmpty()) { conflict_reason_ = "empty mandatory start: " + state.var_infos[var].name; return false; }
+            if (domain.isEmpty()) { conflict_reason_ = "empty mandatory start: " + state.var_infos[var].name(); return false; }
             if (domain.isFixed()) occupied.emplace_back(domain.fixedValue(), var);
             else entries.push_back({var, domain.getMin(), domain.getMax()});
         }
@@ -168,8 +168,8 @@ class StartBoundsPropagator : public Propagator
             if (i && occupied[i].first == occupied[i - 1].first)
             {
                 conflict_reason_ = "bucket=" + std::to_string(bucket) + " fixed collision at " +
-                    std::to_string(occupied[i].first) + " witnesses=" + state.var_infos[occupied[i - 1].second].name +
-                    "/" + state.var_infos[occupied[i].second].name;
+                    std::to_string(occupied[i].first) + " witnesses=" + state.var_infos[occupied[i - 1].second].name() +
+                    "/" + state.var_infos[occupied[i].second].name();
                 return false;
             }
             fixed_values.push_back(occupied[i].first);
@@ -198,7 +198,7 @@ class StartBoundsPropagator : public Propagator
                 if (entry.lo > entry.hi)
                 {
                     conflict_reason_ = "bucket=" + std::to_string(bucket) + " fixed starts cover " +
-                        state.var_infos[entry.var].name + domain.toString();
+                        state.var_infos[entry.var].name() + domain.toString();
                     return false;
                 }
                 const bool changed_lower = domain.setMin(static_cast<int32_t>(raw_rank(entry.lo)));
@@ -206,7 +206,7 @@ class StartBoundsPropagator : public Propagator
                 if (domain.isEmpty())
                 {
                     conflict_reason_ = "bucket=" + std::to_string(bucket) + " fixed starts cover masked domain " +
-                        state.var_infos[entry.var].name + state.domains[entry.var].toString();
+                        state.var_infos[entry.var].name() + state.domains[entry.var].toString();
                     return false;
                 }
                 if (!changed_lower && !changed_upper) break;
