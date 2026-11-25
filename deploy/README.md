@@ -37,7 +37,7 @@ Verify port 8080 is free, then install the new user units:
 ```bash
 cd ~/services/kernel_bench
 mkdir -p ~/.config/systemd/user ~/.local/lib/kernelbench
-cp kernelbench.service ~/.config/systemd/user/
+cp deploy/kernelbench.service ~/.config/systemd/user/
 cp deploy/kernelbench-update.service deploy/kernelbench-update.timer ~/.config/systemd/user/
 cp deploy/kernelbench-update.sh ~/.local/lib/kernelbench/update.sh
 systemctl --user daemon-reload

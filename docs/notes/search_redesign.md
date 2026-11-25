@@ -1,3 +1,7 @@
+# Search redesign notes
+
+Working notes from September 2026, written while redesigning the planner. The design sketched at the end (hyperboxes of variable domains, propagators, a Brancher and a Selector over a priority queue of search nodes) is what became `tensor_graphs_cpp/core/plan/search_engine.hpp`.
+
 Right now the compiler code is very messy. In my head it should be:
 1. saturate
 2. search

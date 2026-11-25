@@ -787,6 +787,18 @@ struct EGraph
                 const_cast<EGraph *>(this)->enodes = std::move(combined);
             }
             const_cast<EGraph *>(this)->shared_enodes.reset();
+            // Materialized nodes can change signatures, so their index must be local too.
+            auto *self = const_cast<EGraph *>(this);
+            if (self->shared_hashcons)
+            {
+                for (const auto &[signature, ids] : *self->shared_hashcons)
+                {
+                    auto &bucket = self->hashcons[signature];
+                    bucket.insert(bucket.end(), ids.begin(), ids.end());
+                }
+                self->shared_hashcons.reset();
+            }
+            self->hashcons_tracks_owned = false;
             // Owned positions shift: the parent index refers to the old ones.
             const_cast<EGraph *>(this)->owned_parents = OwnedParentIndex{};
         }
@@ -1224,8 +1236,17 @@ struct EGraph
             });
             for (uint32_t i = 0; i < num_owned; ++i)
                 if (stale[i])
+                {
+                    visited[i] = visit_epoch;
                     stale_ids.push_back(i);
+                }
             addEdges(0, num_owned);
+            // The first index includes children merged before it existed.
+            // Move their lists to current roots so subsequent merges can
+            // still discover every parent, including deduplicated nodes.
+            for (uint32_t c = 0; c < index.head.size(); ++c)
+                foldMergedAway(c);
+            std::sort(stale_ids.begin(), stale_ids.end());
             index.indexed = num_owned;
             index.valid = true;
         }

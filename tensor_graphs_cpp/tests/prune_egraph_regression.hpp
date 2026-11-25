@@ -118,6 +118,54 @@ inline void checkPrunedRepresentative()
 
 inline void run()
 {
+    {
+        EGraph graph;
+        const MemSpace ram{1, HandleType::CPP};
+        auto makeClass = [&]() { return graph.addEClass({1}, {1}, DType::FLOAT32, ram); };
+        const EClassId a = makeClass(), b = makeClass(), c = makeClass(), d = makeClass();
+        const EClassId first = makeClass(), second = makeClass();
+        for (const auto &[owner, child] : std::vector<std::pair<EClassId, EClassId>>{{first, a}, {second, b}})
+            graph.addENode(owner, ENode(KernelId{0}, OpType::FUSED, "same", {child},
+                                       {1}, {1}, DType::FLOAT32, ram, {}));
+        graph.merge(a, b);
+        graph.rebuild();
+        graph.merge(c, d);
+        graph.merge(c, a);
+        graph.rebuild();
+        for (uint32_t n = 0; n < graph.getNumENodes(); ++n)
+            for (EClassId child : graph.getENode(ENodeId{n}).getChildren())
+                if (child != graph.findConst(child))
+                    Error::throw_err("[PruneEGraphRegression] repeated merges left a stale parent");
+        graph.rebuild(true);
+        if (graph.getNumENodes() != 1)
+            Error::throw_err("[PruneEGraphRegression] repeated merges lost congruence");
+    }
+    {
+        EGraph graph;
+        const MemSpace ram{1, HandleType::CPP};
+        const EClassId a = graph.addEClass({1}, {1}, DType::FLOAT32, ram);
+        const EClassId b = graph.addEClass({1}, {1}, DType::FLOAT32, ram);
+        const EClassId parent = graph.addEClass({1}, {1}, DType::FLOAT32, ram);
+        auto addNode = [&](EClassId owner, const std::string &name, std::vector<EClassId> children) {
+            graph.addENode(owner, ENode(KernelId{0}, OpType::FUSED, name, std::move(children),
+                                       {1}, {1}, DType::FLOAT32, ram, {}));
+        };
+        addNode(a, "a", {});
+        addNode(b, "b", {});
+        addNode(parent, "parent", {b});
+        graph.freezeHashcons();
+        graph.freezeENodes();
+        EGraph snapshot = graph;
+        addNode(parent, "alternative", {a});
+        graph.getENodes(); // Materialize shared nodes alongside the new alternative.
+        if (graph.shared_hashcons || !snapshot.shared_hashcons)
+            Error::throw_err("[PruneEGraphRegression] materialization did not detach the signature index");
+        graph.merge(a, b);
+        graph.rebuild();
+        graph.rebuild(true);
+        if (graph.getNumENodes() != 4 || snapshot.getENode(ENodeId{2}).getChildren() != std::vector<EClassId>{b})
+            Error::throw_err("[PruneEGraphRegression] materialization lost nodes or mutated the snapshot");
+    }
     CostModel cost_model(false, "");
     Settings settings;
     Planner planner(cost_model, settings);

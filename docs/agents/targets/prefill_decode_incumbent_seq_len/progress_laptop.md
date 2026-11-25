@@ -32,3 +32,9 @@ Accepted implementation: <run id>. N\* = <N>; first incumbent at N\* = <s>.
 ## Runs
 
 <!-- tests/search_experiment.py appends one entry per run below; add a short note after each. -->
+
+### 0
+- In progress: 2026-10-22T15:50:06.584161-04:00
+- Metadata `logs/targets/prefill_decode_incumbent_seq_len/0.json`; log `logs/targets/prefill_decode_incumbent_seq_len/0.log`; patch `logs/targets/prefill_decode_incumbent_seq_len/0.patch`
+- Command: `C:\Users\aaron\CODING\tensor_graphs\.venv\Scripts\python.exe -m tests.test_gemma_output --config prefill+decode --optimal --seq-len 30 --ignore-checkpoints --run-dir logs/gemma_output_runs/0`
+- Completed: 2026-10-22T15:50:21.069999-04:00; exit 1; runner elapsed 14.312 s.

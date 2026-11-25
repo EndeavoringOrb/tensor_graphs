@@ -81,8 +81,10 @@ class KernelBenchClient:
         except requests.HTTPError as error:
             raise requests.HTTPError(f"{error}: {response.text}", response=response, request=response.request) from error
 
-    def get(self, path, **params):
-        response = self.session.get(self.base_url + path, params={key: value for key, value in params.items() if value is not None and value != ""}, timeout=30)
+    def get(self, path, /, params=None, **query):
+        combined_params = dict(params or {})
+        combined_params.update(query)
+        response = self.session.get(self.base_url + path, params={key: value for key, value in combined_params.items() if value is not None and value != ""}, timeout=30)
         self.checkResponse(response)
         return response.json()
 
